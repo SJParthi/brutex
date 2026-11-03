@@ -4021,3 +4021,419 @@ fn the_walk_reads_everything_under_crates_and_names_each_link() {
         ]
     );
 }
+
+// ------------------------------- the model's own edges (BASE-COV-LIBS-LS3) --
+//
+// The gate's planted cases reach every spelling the header claims; these reach
+// the edges of the readers under them that no planted file had taken: each
+// helper is handed the input that takes its other side, and its answer is
+// stated exactly.
+
+/// The tokens of a planted text that lexes.
+fn toks(src: &str) -> Vec<Token> {
+    lex(src).expect("the planted text lexes")
+}
+
+/// The kinds of `src`'s tokens, without their lines.
+fn kinds(src: &str) -> Vec<Tok> {
+    toks(src).into_iter().map(|token| token.tok).collect()
+}
+
+/// One planted `crates/x/src/lib.rs`, read by a single pass.
+fn scanned(src: &str) -> FileScan {
+    let mut out = FileScan::default();
+    pass(
+        &toks(src),
+        false,
+        &[],
+        &place_of("crates/x/src/lib.rs"),
+        &mut out,
+    );
+    out
+}
+
+/// What a scan found outside test code, as `(line, function, what)`.
+fn found(scan: &FileScan) -> Vec<(usize, Option<&str>, &str)> {
+    scan.found
+        .iter()
+        .map(|one| (one.line, one.function.as_deref(), one.what))
+        .collect()
+}
+
+/// **THE LEXER READS THE RARER SPELLINGS AS `rustc` DOES.** A shebang line
+/// ends at a doc comment, outer or inner, line or block, and runs on past a
+/// plain one, `////` and `/***` among them; `r##x` and `r#1` are the
+/// identifier `r`; an escape `rustc` refuses is kept as written; and a line
+/// continuation over a blank line counts both lines.
+#[test]
+fn the_lexer_reads_the_rarer_spellings_as_rustc_does() {
+    let end = |src: &str| shebang_end(&src.chars().collect::<Vec<_>>());
+    assert_eq!(end("#!//! doc\nfn"), 9);
+    assert_eq!(end("#!/// doc\n["), 9);
+    assert_eq!(end("#!//// plain\n[a]"), 0);
+    assert_eq!(end("#!// plain\n[a]"), 0);
+    assert_eq!(end("#!/*! doc */[a]"), 15);
+    assert_eq!(end("#!/** doc */[a]"), 15);
+    assert_eq!(end("#!/*** plain */[a]"), 0);
+    assert_eq!(end("#!/**/[a]"), 0);
+    assert_eq!(end("#!/* never closes"), 17);
+
+    let r = Tok::Ident {
+        name: "r".to_owned(),
+        raw: false,
+    };
+    let x = Tok::Ident {
+        name: "x".to_owned(),
+        raw: false,
+    };
+    assert_eq!(
+        kinds("r##x"),
+        [r.clone(), Tok::Punct('#'), Tok::Punct('#'), x.clone()]
+    );
+    assert_eq!(kinds("r#1"), [r, Tok::Punct('#'), Tok::Other]);
+
+    assert_eq!(kinds(r#""\xZZ""#), [Tok::Str("xZZ".to_owned())]);
+    assert_eq!(kinds(r#""\uZZ""#), [Tok::Str("uZZ".to_owned())]);
+    assert_eq!(kinds(r#""\u{110000}""#), [Tok::Str("u{110000}".to_owned())]);
+    let continued = toks("\"a\\\n\n  b\" x");
+    let lines: Vec<(Tok, usize)> = continued
+        .into_iter()
+        .map(|token| (token.tok, token.line))
+        .collect();
+    assert_eq!(lines, [(Tok::Str("ab".to_owned()), 1), (x, 3)]);
+}
+
+/// **THE `cfg` AND ATTRIBUTE READERS ANSWER AT THEIR EDGES.** A bracket that
+/// never closes has no match; a predicate that is no name, an unclosed list,
+/// an empty `any()` and a bare `cfg` exempt nothing; a `cfg_attr` without its
+/// list, or with a token where its comma belongs, may be a macro, and one of
+/// inert attributes, a trailing comma included, is not; `extern` with and
+/// without an ABI begins a function; a `]` closes an attribute only after
+/// `#` or `#!`; and a `path` with no `=` names no file.
+#[test]
+fn the_cfg_and_attribute_readers_answer_at_their_edges() {
+    assert_eq!(matching(&toks("( a"), 0), None);
+    assert_eq!(matching(&toks("( a )"), 0), Some(2));
+
+    assert_eq!(predicate(&toks("cfg()"), 2), (false, 3));
+    assert_eq!(predicate(&toks("all(test"), 0), (true, 4));
+    assert_eq!(predicate(&toks("any()"), 0), (false, 3));
+    assert_eq!(predicate(&toks("any(test)"), 0), (true, 4));
+    assert!(!attr_is_cfg_test(&toks("cfg")));
+
+    let macro_ = |src: &str| may_be_macro(&toks(src), false, false);
+    assert!(macro_("cfg_attr"));
+    assert!(macro_("cfg_attr(test x)"));
+    assert!(!macro_("cfg_attr(test, allow(x), inline)"));
+    assert!(!macro_("cfg_attr(test, allow,)"));
+
+    assert!(fn_item(&toks("extern \"C\" fn f"), 0));
+    assert!(fn_item(&toks("extern fn f"), 0));
+    assert!(!fn_item(&toks("extern crate x"), 0));
+
+    assert!(closes_attribute(&toks("#[a]"), 3));
+    assert!(closes_attribute(&toks("#![a]"), 4));
+    assert!(!closes_attribute(&toks("x[a]"), 3));
+    assert!(!closes_attribute(&toks("(a]"), 2));
+    assert!(!closes_attribute(&toks("a]"), 1));
+
+    assert_eq!(attr_paths(&toks("path , \"x\"")), (None, Vec::new()));
+    assert_eq!(
+        attr_paths(&toks("path = \"a.rs\"")),
+        (Some("a.rs".to_owned()), Vec::new())
+    );
+    assert_eq!(
+        attr_paths(&toks("cfg_attr(unix, path = \"b.rs\")")),
+        (None, vec!["b.rs".to_owned()])
+    );
+}
+
+/// **ITEMS AND MACRO INPUTS END WHERE THE MODEL SAYS.** A visibility, with a
+/// path or an unclosed one, belongs to the item after it; `union` begins an
+/// item before `<` and `where` as before `{`, and `auto` before `trait`. An
+/// item ends at its comma outside its generics, at a `|` only when it is no
+/// item, and at the end of the tokens. An attribute macro's input runs over a
+/// `const fn` body and an inline `const` block, stops at the `;` of a `type`,
+/// a `use` and an `extern crate`, and never past a bracket it is inside. A
+/// gated `pub` or `pub(crate)` `mod name;` is a test-only declaration, and a
+/// `mod name` with neither `;` nor a body is read where it stands.
+#[test]
+fn items_and_macro_inputs_end_where_the_model_says() {
+    assert!(is_item(&toks("pub fn f"), 0));
+    assert!(is_item(&toks("pub(crate) struct S;"), 0));
+    assert!(!is_item(&toks("pub(crate"), 0));
+    assert!(is_item(&toks("union U<T> {}"), 0));
+    assert!(is_item(&toks("union U where T: Copy {}"), 0));
+    assert!(!is_item(&toks("union U = 1"), 0));
+    assert!(is_item(&toks("auto trait T {}"), 0));
+
+    assert_eq!(item_end(&toks("a b"), 0, true), 2);
+    assert_eq!(item_end(&toks("struct A, struct B"), 0, true), 3);
+    assert_eq!(item_end(&toks("const X: u8 = 1 | 2;"), 0, true), 9);
+
+    assert_eq!(macro_input_end(&toks("pub fn f() {} x"), 0), 7);
+    assert_eq!(macro_input_end(&toks("pub(crate) fn f() {}"), 0), 10);
+    assert_eq!(macro_input_end(&toks("pub(crate"), 0), 3);
+    assert_eq!(macro_input_end(&toks("const fn f() {} x"), 0), 7);
+    assert_eq!(macro_input_end(&toks("const { 1 } x"), 0), 4);
+    assert_eq!(macro_input_end(&toks("type T = S<{ 1 }>; x"), 0), 10);
+    assert_eq!(macro_input_end(&toks("use a::{b, c}; x"), 0), 10);
+    assert_eq!(macro_input_end(&toks("extern crate a; x"), 0), 4);
+    assert_eq!(macro_input_end(&toks("a )"), 0), 1);
+
+    let place = place_of("crates/x/src/lib.rs");
+    let mut out = FileScan::default();
+    gated(&toks("pub(crate) mod t;"), &[], None, &place, &mut out);
+    gated(&toks("pub mod u;"), &[], None, &place, &mut out);
+    gated(&toks("mod m"), &[], None, &place, &mut out);
+    let decls: Vec<(&str, Vec<&str>, bool)> = out
+        .decls
+        .iter()
+        .map(|decl| {
+            (
+                decl.name.as_str(),
+                decl.candidates.iter().map(String::as_str).collect(),
+                decl.test,
+            )
+        })
+        .collect();
+    assert_eq!(
+        decls,
+        [
+            (
+                "t",
+                vec!["crates/x/src/t.rs", "crates/x/src/t/mod.rs"],
+                true
+            ),
+            (
+                "u",
+                vec!["crates/x/src/u.rs", "crates/x/src/u/mod.rs"],
+                true
+            ),
+        ]
+    );
+    assert!(out.found.is_empty() && out.in_tests == 0);
+}
+
+/// **THE NEEDLE'S READERS ANSWER AT THEIR EDGES.** The type as a file's first
+/// token is no join; after a lone `*` or a leading `::` it is joined to what
+/// this scan cannot read, and after a plain `x ::` or a plain name it is not.
+/// An import group through a macro variable hides the module. A path from the
+/// root folds to its parts, an `impl` header runs to the end of an unclosed
+/// file, a `#` not before `[` is no attribute, and only a one-string
+/// `include!` names its file.
+#[test]
+fn the_needles_readers_answer_at_their_edges() {
+    let joined = |src: &str, at: usize| type_after_join(&toks(src), at).map(|(_, span)| span);
+    assert_eq!(joined(TYPE, 0), None);
+    assert_eq!(joined(&format!("* {TYPE}"), 1), Some(1));
+    assert_eq!(joined(&format!("x {TYPE}"), 1), None);
+    assert_eq!(joined(&format!(":: {TYPE}"), 2), Some(1));
+    assert_eq!(joined(&format!("x :: {TYPE}"), 3), None);
+
+    assert_eq!(
+        group_hides(&toks("{ $t }")),
+        Some("imports from the process module through a macro variable")
+    );
+    assert_eq!(normal(Path::new("/a/./b/../c")), "a/c");
+    assert_eq!(impl_header(&toks("<T"), 0), "");
+    assert_eq!(
+        impl_header(&toks("Notify for Opener"), 0),
+        "Notify for Opener"
+    );
+    assert!(attribute(&toks("#!x"), 0).is_none());
+    assert!(attribute(&toks("# x"), 0).is_none());
+    assert_eq!(included(&toks("a b c \"s\""), 0), None);
+    assert_eq!(included(&toks("include!(\"a\", \"b\")"), 0), None);
+    assert_eq!(included(&toks("include!(\"a\")"), 0), Some("a"));
+}
+
+/// **A PASS RECORDS WHAT THE RARER PLACEMENTS HOLD.** A later attribute with
+/// no `#[path]` keeps the first one's file; an inner attribute's naming is
+/// shipped code, and an inner `cfg_attr` path is refused by name, as an outer
+/// one on an inline module is; a bare `#[test]` on a parameter exempts
+/// nothing; a naming inside an attribute beside `#[cfg(test)]` is test code;
+/// `#[macro_use]` on an `extern` block loads no crate, and on an `extern
+/// crate` inside a test module it is test code; and a point inside a
+/// function's signature is not directly in a module's body.
+#[test]
+fn a_pass_records_what_the_rarer_placements_hold() {
+    let named = "names the process-spawning type";
+    let declared = scanned("#[path = \"a.rs\"]\n#[allow(dead_code)]\nmod m;\n");
+    assert_eq!(declared.decls.len(), 1);
+    assert_eq!(declared.decls[0].candidates, ["crates/x/src/a.rs"]);
+    assert!(declared.decls[0].also.is_empty() && !declared.decls[0].test);
+
+    let inner = scanned(&format!("#![doc = \"x\"]\n#![m({MODULE}::{TYPE})]\n"));
+    assert_eq!(found(&inner), [(2, None, named)]);
+    let inner_path = scanned("#![cfg_attr(unix, path = \"x\")]\n");
+    let inner_path = found(&inner_path);
+    assert_eq!(inner_path.len(), 1);
+    assert_eq!((inner_path[0].0, inner_path[0].1), (1, None));
+    assert!(
+        inner_path[0]
+            .2
+            .starts_with("gives a module an inner #![path]"),
+        "{inner_path:?}"
+    );
+    let inline_path = scanned("#[cfg_attr(unix, path = \"x\")]\nmod m {}\n");
+    let inline_path = found(&inline_path);
+    assert_eq!(inline_path.len(), 1);
+    assert_eq!((inline_path[0].0, inline_path[0].1), (2, None));
+    assert!(
+        inline_path[0]
+            .2
+            .starts_with("gives an inline module a #[path]"),
+        "{inline_path:?}"
+    );
+
+    let parameter = scanned(&format!("fn f(#[test] x: {MODULE}::{TYPE}) {{}}"));
+    assert_eq!(found(&parameter), [(1, Some("f"), named)]);
+    let beside = scanned(&format!(
+        "#[cfg(test)]\n#[m({MODULE}::{TYPE})]\nfn t() {{}}\n"
+    ));
+    assert!(beside.found.is_empty());
+    assert_eq!(beside.in_tests, 1);
+    let block = scanned("#[macro_use]\nextern \"C\" {}\n");
+    assert!(block.found.is_empty() && block.in_tests == 0);
+    let crate_in_tests =
+        scanned("#[cfg(test)]\nmod tests {\n    #[macro_use]\n    extern crate x;\n}\n");
+    assert!(crate_in_tests.found.is_empty());
+    assert_eq!(crate_in_tests.in_tests, 1);
+
+    let inline: [String; 0] = [];
+    let mut at = Nesting::new(&inline);
+    assert!(at.in_module_body());
+    at.pending = Some(Scope::Fn("f".to_owned()));
+    assert!(!at.in_module_body());
+}
+
+/// **MANIFESTS ARE READ AS TOML READS THEM.** Two quotes and no third are an
+/// empty string; a multi-line string is unread whether it closes or not,
+/// through a lone quote, a pair, a newline, an escape, a line ending in a
+/// backslash and a literal one's backslash; a word may open with `_` or `-`;
+/// a one-line string that meets its line's end or the file's is unread, a
+/// literal one keeps its backslash, and a basic one decodes every escape.
+/// A `path` that is no string and a `members` that is no array name nothing,
+/// a `Cargo.toml` outside `crates/` and the root is no manifest here, and a
+/// binary's own directory with its `main.rs` is a crate root.
+#[test]
+fn manifests_are_read_as_toml_reads_them() {
+    let word = |w: &str| Toml::Word(w.to_owned());
+    let eq = Toml::Punct('=');
+    assert_eq!(
+        toml_tokens("a = \"\"\n"),
+        [
+            (1, word("a")),
+            (1, eq.clone()),
+            (1, Toml::Text(String::new())),
+            (1, Toml::Newline)
+        ]
+    );
+    assert_eq!(
+        toml_tokens("k = \"\"\"never"),
+        [(1, word("k")), (1, eq.clone()), (1, Toml::Unread)]
+    );
+    assert_eq!(
+        toml_tokens("k = \"\"\"a\"b\"\"c\n\\x\\\n\"\"\"\nj = '''p\\q'''\n"),
+        [
+            (1, word("k")),
+            (1, eq.clone()),
+            (1, Toml::Unread),
+            (3, Toml::Newline),
+            (4, word("j")),
+            (4, eq.clone()),
+            (4, Toml::Unread),
+            (4, Toml::Newline),
+        ]
+    );
+    assert_eq!(
+        toml_tokens("_x = -1"),
+        [(1, word("_x")), (1, eq.clone()), (1, word("-1"))]
+    );
+    assert_eq!(
+        toml_tokens("a = \"open"),
+        [(1, word("a")), (1, eq.clone()), (1, Toml::Unread)]
+    );
+    assert_eq!(
+        toml_tokens("a = \"open\nb"),
+        [
+            (1, word("a")),
+            (1, eq.clone()),
+            (1, Toml::Unread),
+            (1, Toml::Newline),
+            (2, word("b"))
+        ]
+    );
+    assert_eq!(
+        toml_tokens("a = 'p\\q'"),
+        [
+            (1, word("a")),
+            (1, eq.clone()),
+            (1, Toml::Text("p\\q".to_owned()))
+        ]
+    );
+    assert_eq!(
+        toml_tokens(r#"a = "\b\t\n\f\r\e\U0001F600\\\"\q""#),
+        [
+            (1, word("a")),
+            (1, eq),
+            (
+                1,
+                Toml::Text("\u{8}\t\n\u{c}\r\u{1b}\u{1f600}\\\"q".to_owned())
+            )
+        ]
+    );
+
+    let named = manifest_paths(
+        "crates/x/Cargo.toml",
+        "[workspace]\nmembers = \"x\"\n[lib]\npath = 1\n",
+    );
+    assert!(named.targets.is_empty() && named.every.is_empty() && named.unread.is_empty());
+    assert!(is_manifest("Cargo.toml") && is_manifest("crates/x/Cargo.toml"));
+    assert!(!is_manifest("web/Cargo.toml") && !is_manifest("crates/x/a.toml"));
+    assert!(shipped_root("crates/x/src/bin/tool/main.rs"));
+    assert!(!shipped_root("crates/x/src/bin/tool/helper.rs"));
+}
+
+/// **THE VERDICT IS SILENT WHERE THE MODEL HAS NOTHING TO REFUSE.** A
+/// manifest value naming another manifest is no target; a file an `include!`
+/// pastes that is test code whole holds no bare `#[test]` to refuse; a file
+/// named like a test under `tests/` is one; and a test-only module whose file
+/// is no `.rs` is test code this scan lists and does not read.
+#[test]
+fn the_verdict_is_silent_where_the_model_has_nothing_to_refuse() {
+    let silent = |files: &[(&str, &str)]| judge(&tree(files), &[]);
+    assert_eq!(
+        silent(&[
+            (
+                "crates/x/Cargo.toml",
+                "[dependencies]\ny = { path = \"../y/Cargo.toml\" }\n"
+            ),
+            ("crates/x/src/lib.rs", ""),
+            ("crates/y/Cargo.toml", "[package]\nname = \"y\"\n"),
+        ]),
+        (Vec::new(), 0)
+    );
+    assert_eq!(
+        silent(&[
+            ("crates/x/src/lib.rs", "include!(\"h.rs\");\n"),
+            ("crates/x/src/h.rs", "#![cfg(test)]\n#[test]\nfn t() {}\n"),
+        ]),
+        (Vec::new(), 0)
+    );
+    assert_eq!(
+        silent(&[("crates/x/tests/a_tests.rs", "fn main() {}\n")]),
+        (Vec::new(), 0)
+    );
+    assert_eq!(
+        silent(&[
+            (
+                "crates/x/src/lib.rs",
+                "#[cfg(test)]\n#[path = \"data.txt\"]\nmod data;\n"
+            ),
+            ("crates/x/src/data.txt", ""),
+        ]),
+        (Vec::new(), 0)
+    );
+}
