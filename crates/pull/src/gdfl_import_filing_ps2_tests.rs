@@ -395,3 +395,221 @@ fn a_back_fill_pass_with_no_begin_line_refuses_its_file_at_the_journal() {
         assert_eq!(filed.committed, 0, "nothing filed");
     });
 }
+
+// ═══ The rows once called "G1's harness": a Filing and a DayFiler by hand ═══
+
+/// The day's filing as `file_jobs` makes it, with no session, origin, source,
+/// batch or store identity.
+fn filing_of<'a>(filer: &DayFiler<'a>) -> Filing<'a> {
+    Filing {
+        run: filer.ctx.run,
+        day: filer.day,
+        request: filer.request,
+        session: None,
+        origin: None,
+        source: None,
+        confirm: None,
+        id: filer.ctx.id,
+        repair_reason: None,
+        retries: std::sync::atomic::AtomicUsize::new(0),
+        store_id: None,
+    }
+}
+
+/// One invented file of one traded second at 09:15 IST.
+fn invented_handed() -> super::super::Handed {
+    super::super::Handed {
+        file: crate::gdfl_import::TickFile {
+            symbol: "INVENTED".to_owned(),
+            contract: None,
+            name: "INVENTED.csv".to_owned(),
+            ticks: vec![crate::gdfl_import::Tick {
+                sod: 33_300,
+                ltp: 500_000,
+                ltq: 1,
+                oi: None,
+            }],
+        },
+        facts: super::super::FileFacts::default(),
+    }
+}
+
+/// The records `sink` holds from this module's target.
+fn said(home: &std::path::Path, sink: &telemetry::Sink) -> Vec<telemetry::Record> {
+    telemetry::tail(
+        home,
+        sink.keep_files(),
+        &telemetry::Query::last(telemetry::MAX_LIMIT).from_target(TARGET),
+    )
+    .records
+}
+
+/// A DAY WHOSE POOL THE HOST STARTS NO WORKER FOR files on one thread and
+/// says so at `warn`, with the day and the host's words; every job is still
+/// answered, in listing order. Run in a child, which installs its own sink.
+#[test]
+fn a_day_whose_pool_starts_no_worker_files_on_one_thread_and_says_so() {
+    crate::support::where_permission_binds(
+        "gdfl_import::filing::ps2_tests::a_day_whose_pool_starts_no_worker_files_on_one_thread_and_says_so",
+        one_thread_day,
+    );
+}
+
+fn one_thread_day() {
+    let home = scratch("ONE-THREAD-SINK");
+    let sink =
+        telemetry::install(&telemetry::Config::new(&home).with_min_level(telemetry::Level::Trace))
+            .unwrap();
+    with_filer(false, |filer| {
+        filer.workers = 2;
+        inject::refuse_spawn(0);
+        let (kind, day) = (filer.ctx.run.kind, filer.day);
+        let jobs = [&1_u8, &2_u8];
+        let read = move |_: &u8| -> ReadJob { Err(not_taken(kind, day, 1)) };
+        let answered = filer.file_jobs(&jobs, &read);
+        assert_eq!(answered.len(), 2, "every job answered");
+        assert!(
+            answered
+                .iter()
+                .all(|one| matches!(one, JobRead::Refused(_)))
+        );
+    });
+    let records = said(&home, sink);
+    let line = records
+        .iter()
+        .find(|record| {
+            record.message == "no worker thread started; the day's files run on one thread"
+        })
+        .expect("the fallback is said");
+    assert_eq!(line.level, telemetry::Level::Warn);
+    assert_eq!(
+        line.field("why"),
+        Some(&telemetry::OwnedValue::Str(
+            "invented: the host refused worker 0 a thread".to_owned()
+        ))
+    );
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+/// A FILE THE STORE REFUSES AS NOT WRITABLE ends the day's taking: the door's
+/// kind, never its words, is read (IA-16), the day keeps what failed and the
+/// fix, and the next file is not taken, by that reason.
+#[test]
+fn a_file_the_store_refuses_not_writable_ends_the_days_taking() {
+    with_filer(false, |filer| {
+        filer.workers = 1;
+        let root = filer.ctx.run.store_root.to_path_buf();
+        inject::plant(
+            &root,
+            "INVENTED.csv",
+            crate::ingest::FailKind::Io {
+                kind: std::io::ErrorKind::PermissionDenied,
+                publication_may_be_visible: false,
+            },
+            false,
+        );
+        let jobs = [&0_u8, &1_u8];
+        let read = |_: &u8| -> ReadJob { Ok((invented_handed(), None)) };
+        let answered = filer.file_jobs(&jobs, &read);
+        let [JobRead::Read(None), JobRead::Refused(second)] = answered.as_slice() else {
+            panic!("the first read, the second not taken");
+        };
+        assert!(
+            second.failure.why.contains("store_not_writable"),
+            "{}",
+            second.failure.why
+        );
+        let kept = filer.not_writable.as_deref().unwrap();
+        assert!(kept.contains("planted by the test"), "{kept}");
+    });
+}
+
+/// A FILE WHOSE `begin` IS REFUSED AFTER THE STORE'S ROOT WENT AWAY names
+/// both, the refused begin and the loss probe's words, so the run ends by the
+/// lost store; nothing reaches a door.
+#[test]
+fn a_refused_begin_with_the_root_gone_names_the_lost_store() {
+    with_filer(false, |filer| {
+        let filing = filing_of(filer);
+        let root = filer.ctx.run.store_root.to_path_buf();
+        let aside = root.with_extension("aside");
+        let begin = || -> Result<u64, ImportRefusal> {
+            std::fs::rename(&root, &aside).unwrap();
+            Err(ImportRefusal::Journal {
+                why: "invented: the begin line was refused".to_owned(),
+            })
+        };
+        let (filed, back_fill) = filing.file(&invented_handed(), &begin, Door::Append);
+        std::fs::rename(&aside, &root).unwrap();
+        assert!(!back_fill, "never handed to the back-fill door");
+        let lost = filed.store_lost.as_deref().unwrap();
+        assert!(
+            lost.contains("invented: the begin line was refused"),
+            "{lost}"
+        );
+        assert!(lost.contains("went away"), "{lost}");
+        assert_eq!(filed.committed, 0);
+    });
+}
+
+/// A NEW GENERATION OF A FILE WHOSE SOURCE NAMED NO MEMBER is said at `info`,
+/// not `warn`: a run naming its origin and source misses a `.prv` record only
+/// for a file that names its member. Run in a child, which installs its own
+/// sink.
+#[test]
+fn a_new_generation_of_a_file_with_no_member_is_said_at_info() {
+    crate::support::where_permission_binds(
+        "gdfl_import::filing::ps2_tests::a_new_generation_of_a_file_with_no_member_is_said_at_info",
+        no_member_generation,
+    );
+}
+
+fn no_member_generation() {
+    let home = scratch("NO-MEMBER-SINK");
+    let sink =
+        telemetry::install(&telemetry::Config::new(&home).with_min_level(telemetry::Level::Trace))
+            .unwrap();
+    with_filer(false, |filer| {
+        let origin = super::super::Origin {
+            source: super::super::SourceKind::Zip,
+            path: std::path::PathBuf::from("invented.zip"),
+            archive_bytes: 0,
+            digest: None,
+            commit: None,
+            started: 0,
+            fault: None,
+        };
+        let source: Result<DaySource, String> = Err("invented: no day source".to_owned());
+        let filing = Filing {
+            origin: Some(&origin),
+            source: Some(&source),
+            ..filing_of(filer)
+        };
+        let month = filer.day.year_month().unwrap();
+        let held = crate::manifest::Held::unknown(crate::manifest::Entry {
+            key: crate::manifest::EntryKey {
+                contract: None,
+                exchange: brutex_core::instrument::Exchange::Nse,
+                segment: brutex_core::instrument::Segment::Fno,
+                symbol: brutex_core::symbol::Symbol::new("INVENTED").unwrap(),
+                timeframe: store::path::Timeframe::SECOND_1,
+                month,
+            },
+            rows: 5,
+            first_ts_micros: 0,
+            last_ts_micros: 0,
+        });
+        filing.repaired(&invented_handed(), &held, 3);
+    });
+    let records = said(&home, sink);
+    let line = records
+        .iter()
+        .find(|record| record.message == "day back-filled as a new generation of its month")
+        .expect("the new generation is said");
+    assert_eq!(line.level, telemetry::Level::Info);
+    assert_eq!(
+        line.field("file"),
+        Some(&telemetry::OwnedValue::Str("INVENTED.csv".to_owned()))
+    );
+    std::fs::remove_dir_all(&home).unwrap();
+}
