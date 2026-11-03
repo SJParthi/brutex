@@ -87718,7 +87718,7 @@ under it exactly as under `Off::Neither`.
 **Cost.** Tests and documents only: no production code, fixture or report byte
 changes. This entry takes D-7412; D-7413 to D-7419 stay unused.
 
-### D-7413 — BASE-STACK-1028 repair 3: the proof cell of STACK1028-03 names its tests, the one rewrite of this part's rows at the data parts' cut point, allowed by the main session; a `Cursor` is about 12 KiB
+### D-7413 — BASE-STACK-1028 repair 3: the proof cell of STACK1028-03 names its tests, the one rewrite of this part's rows at the data parts' cut point, allowed by the main session; a `Cursor` is about 12 KiB — 2026-11-02
 
 **Context.** The second agent's check of `862ddd7aa8b8`
 (`state/fix/round2/verify-BASE-STACK-1028-r3.json`) found gate 10 refusing
@@ -87768,3 +87768,72 @@ rest on that word.
 **Cost.** One ledger cell, one test file and one comment: no production code,
 fixture or report byte changes. This entry takes D-7413; D-7414 to D-7419 stay
 unused.
+
+### D-7414 — BASE-STACK-1028 repair 4: the kept-rows test takes the repository's history rule, it skips only with no `git` or no `.git`, and a clone without the cut commit compares with `main`'s copy — 2026-11-03
+
+**Context.** The second agent's check of repair 3's tip
+(`state/fix/round2/verify-BASE-STACK-1028-r4.json`) found the kept-rows test
+passing with every row unread. `crates/cli/tests/stack_rows_kept.rs` turned any
+failed `git show` into "nothing lost", so a `GIT_DIR` naming nothing, a `.git`
+file pointing nowhere and a shallow clone each passed with a row at the cut point
+rewritten, and the line saying so went to a passing test's captured stdout, so a
+plain run printed nothing. This repository has closed that skip twice: D-0693
+item 8 in `store/tests/cited_commits.rs` and P1-14-04 in
+`core/tests/findings.rs`. CLAUDE.md section 4 bans a fallback that hides a
+failure. Repair 2 wrote this one and pinned it with a test.
+
+**Decision.** The test takes the rule of those two files. It skips only where
+`git` cannot be run and where the tree holds no `.git`, read by
+`symlink_metadata`. Where the tree holds a `.git` and `git rev-parse --git-dir`
+fails there it fails with git's own words, fenced by `GIT_CEILING_DIRECTORIES`, and
+it refuses a shallow clone by name. A commit the clone holds that cannot show the
+ledger, because the object is gone or the ledger was never there, fails with
+git's own words too. What a compare has to say now goes to this process's stderr,
+which the harness does not capture, so a plain run prints a skip, and a plain run
+of a whole tree prints nothing. STACK1028-13 is the row. STACK1028-10 stays as
+written and that row narrows it. `a_commit_that_cannot_be_shown_compares_nothing`
+keeps its name, because STACK1028-10 names it, and now pins only the tree with no
+`.git`; the wider skip it pinned is gone.
+
+**Why a full clone without the cut commit does not fail.** The check gave a
+choice: fail by name, as `cited_commits` does for a clone without `main`, or say
+why not here. `main` takes this work as a squash merge and keeps no commit of the
+branch (`store/tests/cited_commits.rs`, its head; `docs/07-plan.md`), so every
+clone of `main` after that merge is a full clone without this commit, and a failure
+there would turn `main` red for good on the day this lands. Passing there unread
+would be the same skip again. So that clone compares with `main`'s copy: the
+group's own number of lines from its first, since `main`'s copy goes on past them,
+and it says so. `cited_commits` rests on `main`'s copy the same way for a squashed
+commit. A clone with neither fails by name: where `main` does not resolve, with the
+fetch that fixes it, and where `main` does not hold the rows, because nothing in
+such a clone can say what they were. Until then the landing keeps this history,
+because this tree cites the commit by its hash (the launcher's step 2c), so every
+clone of `feat/db-fix` and every data part holds it. L-STACK1028-12 names what the
+test still cannot compare.
+
+**Also corrected.**
+
+- The comment on the batch size test said 2 * 13 KiB; repair 3 corrected only the
+  comment on `Batch`. A `Cursor` is about 12 KiB (L-STACK1028-11).
+- `on_bounded_stack` said "Never raises a budget" and a 64 MiB stack passed
+  through it. It now refuses a size at or over the harness's 2 MiB default before
+  any thread starts (STACK1028-15). The check runs on the caller's thread, not on
+  the bounded one, so no peak of L-STACK1028-07 or -08 moves.
+- `the_ledger_holds_the_agreed_row_once_and_its_tests_exist` read a name planted in
+  a comment as a declaration. It now reads `#[test]` and then the test's `fn`
+  (STACK1028-16).
+- STACK1028-06 says nine completion fields. The test has ten completion cases,
+  eight fields, a missing grammar body and a missing prior batch, and 22 cases in
+  all. The row is at the cut point and stays; STACK1028-14 is the new row.
+- D-7412 says no `crates/cli` source changes after repair 1's tip. Repair 3 changed
+  one comment on `Batch`, and this repair changes the comment above and adds the
+  `#[cfg(test)]` check above. Neither is a frame of the measured paths, so what
+  D-7412 draws from that sentence stands.
+- D-7413's heading had no date, and has one now. It said D-7414 to D-7419 stay
+  unused; this entry takes D-7414.
+
+**Cost.** One test file, one `#[cfg(test)]` helper and its test, one comment and
+ledger rows: no production byte, fixture or report changes. The results are in this
+repair's report, `state/fix/round2/fix-BASE-STACK-1028.json`, and
+`state/fix/round2/logs-STACK1028/repair4/`, not here: an entry cannot state a
+result taken on the commit that holds it. D-7415 to D-7419 stay unused.

@@ -375,7 +375,7 @@ fn a_batch_holds_its_cursors_off_the_stack_whatever_the_grammar_capacity() {
     let cursor = std::mem::size_of_val(&start);
     let batch = Batch::prepare(start, 0, 0, budget(3, 1000)).unwrap();
     let inline = std::mem::size_of_val(&batch);
-    // Two inline cursors were 2 * 13 KiB; boxed, a batch is a few words.
+    // Two inline cursors were 2 * 12 KiB; boxed, a batch is a few words.
     assert!(cursor > 8 * 1024, "the cursor itself is {cursor} bytes");
     assert!(inline <= 256, "Batch is {inline} bytes inline");
     assert!(inline < cursor / 32);
@@ -525,4 +525,26 @@ fn a_bounded_stack_body_keeps_its_panic_and_its_value() {
     let message = panicked.err().unwrap();
     assert_eq!(message.downcast_ref::<&str>(), Some(&"generated refusal"));
     assert_eq!(on_bounded_stack("batch-ok", BATCH_STACK, || 7).unwrap(), 7);
+}
+
+#[test]
+fn a_bounded_stack_refuses_the_default_or_more_before_any_thread_starts() {
+    // A raise through this helper would pass and prove nothing, so it is refused,
+    // and the body never runs. One byte under the default is still a bound.
+    let ran = std::sync::atomic::AtomicBool::new(false);
+    for bytes in [HARNESS_STACK, HARNESS_STACK + 1, 64 << 20, usize::MAX] {
+        let refused = std::panic::catch_unwind(|| {
+            on_bounded_stack("batch-raise", bytes, || {
+                ran.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        })
+        .expect_err("a raise must fail, not run");
+        let said = refused.downcast_ref::<String>().map_or("", String::as_str);
+        assert!(said.contains("this only ever lowers a stack"), "{said}");
+    }
+    assert!(!ran.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(
+        on_bounded_stack("batch-just-under", HARNESS_STACK - 1, || 7).unwrap(),
+        7
+    );
 }

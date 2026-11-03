@@ -44,12 +44,18 @@ pub(crate) fn decode_boxed(bytes: &[u8; CURSOR_BYTES]) -> Result<Box<Cursor>, St
     Cursor::decode(bytes).map(Box::new).map_err(debug)
 }
 
+/// The stack the test harness gives a thread by default, which
+/// [`on_bounded_stack`] must stay under.
+#[cfg(test)]
+const HARNESS_STACK: usize = 2 << 20;
+
 /// Runs `body` on its own thread whose stack is exactly `bytes`, SMALLER than
 /// the harness's 2 MiB default, so a test proves the code fits with margin in
 /// every build (instrumented opt-level 0 included) instead of hoping the
 /// default suffices (D-7410). A panic in `body` is re-raised unchanged. A
 /// stack overflow is not a panic: it aborts the whole test process, which is
-/// the loud failure this bound exists to produce. Never raises a budget.
+/// the loud failure this bound exists to produce. Never raises a budget: a size
+/// at or over [`HARNESS_STACK`] is refused before any thread starts (D-7414).
 ///
 /// # Errors
 /// The OS would not start the thread.
@@ -59,6 +65,10 @@ pub(crate) fn on_bounded_stack<T: Send>(
     bytes: usize,
     body: impl FnOnce() -> T + Send,
 ) -> Result<T, String> {
+    assert!(
+        bytes < HARNESS_STACK,
+        "bounded-stack thread {name} asked for {bytes} bytes: this only ever lowers a stack"
+    );
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name(name.to_owned())
