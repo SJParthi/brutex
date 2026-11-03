@@ -48,7 +48,7 @@ const ENXIO: i32 = 6;
 
 /// How long a test waits for a thread it parked. Far beyond any healthy
 /// open; a failure here names a hang, it never passes.
-const PARKED: Duration = Duration::from_secs(60);
+const PARKED: Duration = Duration::from_mins(1);
 
 /// A new real directory, links resolved: `/var` is itself a link on macOS and
 /// its expansion would count against the path limit these tests measure.
@@ -267,14 +267,16 @@ fn open_while_the_directory_goes_away(name: &str, bytes: &[u8]) -> (Parked, Path
             .open(&fifo)
         {
             Ok(parked) => break parked,
-            Err(e) if e.raw_os_error() == Some(ENXIO) => {
+            // Only "no reader yet" means wait; any other answer is the host
+            // refusing the FIFO, and it fails here by name.
+            Err(e) => {
+                assert_eq!(e.raw_os_error(), Some(ENXIO), "{}: {e}", fifo.display());
                 assert!(
                     Instant::now() < deadline,
                     "the writer never reached the read"
                 );
                 std::thread::sleep(Duration::from_millis(1));
             }
-            Err(e) => panic!("{}: {e}", fifo.display()),
         }
     };
     let moved = root.join("moved");
@@ -330,7 +332,7 @@ fn a_directory_at_the_coverage_name_is_named_and_the_stream_opens() {
     let (audit, said, opened) = Audit::open_in(&dir, true);
     let said = said.expect("the refusal is said");
     assert!(said.contains("cannot read the index coverage"), "{said}");
-    assert!(opened != Opened::Failed);
+    assert_ne!(opened, Opened::Failed);
     assert!(audit.file.is_some());
     assert_eq!(audit.health.last_error.as_deref(), Some(said.as_str()));
 }
@@ -418,10 +420,13 @@ fn a_full_code_table_replaces_its_least_entry() {
     assert_eq!(counters.codes_replaced, 1);
     let held = counters.codes.iter().find(|(code, _)| code == "newcomer");
     assert_eq!(held.map(|(_, count)| *count), Some(2));
-    assert!(
+    assert_eq!(
         counters
             .codes
             .iter()
-            .any(|(code, count)| code == "code-0" && *count == 2)
+            .find(|(code, _)| code == "code-0")
+            .map(|(_, count)| *count),
+        Some(2),
+        "code-0, counted twice, is kept"
     );
 }
