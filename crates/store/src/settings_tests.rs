@@ -483,9 +483,19 @@ fn a_reader_sees_another_writers_generation_on_its_next_refresh() {
 /// **A DISK THAT REFUSES THE WRITE IS AN `Io` REFUSAL WITH NOTHING VISIBLE.**
 /// A read-only directory stands in for a full disk: both fail the first
 /// write, which is the step that matters.
+/// Root writes into a mode-0555 directory, so the body runs where the mode bits
+/// bind: re-run as `nobody` when this process is root (D-0995).
 #[cfg(unix)]
 #[test]
 fn a_disk_that_refuses_the_write_is_refused_with_nothing_visible() {
+    crate::support::where_permission_binds(
+        "settings::tests::a_disk_that_refuses_the_write_is_refused_with_nothing_visible",
+        a_disk_that_refuses_the_write_is_refused_with_nothing_visible_body,
+    );
+}
+
+#[cfg(unix)]
+fn a_disk_that_refuses_the_write_is_refused_with_nothing_visible_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = root("readonly");
     std::fs::create_dir_all(dir(&root)).unwrap();
@@ -596,9 +606,20 @@ fn a_value_its_check_refuses_is_a_fault_even_under_a_good_checksum() {
 /// a name it cannot stat, so a reader whose directory became unreadable
 /// returned `Ok` with no word, and a generation saved meanwhile was simply
 /// not served.
+///
+/// Re-run as `nobody` when this process is root, so the 000 directory binds
+/// on every host rather than failing the premise below (D-0995).
 #[cfg(unix)]
 #[test]
 fn a_directory_that_stops_being_readable_is_a_fault_not_nothing_new() {
+    crate::support::where_permission_binds(
+        "settings::tests::a_directory_that_stops_being_readable_is_a_fault_not_nothing_new",
+        a_directory_that_stops_being_readable_is_a_fault_not_nothing_new_body,
+    );
+}
+
+#[cfg(unix)]
+fn a_directory_that_stops_being_readable_is_a_fault_not_nothing_new_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = root("unreadable");
     let mut reader = Reader::new(&root);
@@ -1080,9 +1101,19 @@ fn a_landed_save_whose_read_back_faults_is_saved_with_the_fault_said() {
 }
 
 /// **A LANDED SAVE WHOSE READ-BACK CANNOT LOOK IS SAVED, AND WHY IS SAID.**
+/// Root reads a 000 directory, so the body runs where the mode bits bind:
+/// re-run as `nobody` when this process is root (D-0995).
 #[cfg(unix)]
 #[test]
 fn a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason() {
+    crate::support::where_permission_binds(
+        "settings::tests::a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason",
+        a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason_body,
+    );
+}
+
+#[cfg(unix)]
+fn a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = root("readback-blind");
     let mut reader = Reader::new(&root);

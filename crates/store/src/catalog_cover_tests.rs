@@ -29,8 +29,17 @@ fn scratch(name: &str) -> Scratch {
     Scratch(root)
 }
 
+/// Root lists a mode-0300 directory, so the refusal under test runs only where
+/// the mode bits bind: re-run as `nobody` when this process is root (D-0995).
 #[test]
 fn a_bars_root_that_cannot_be_listed_is_refused_not_empty() {
+    crate::support::where_permission_binds(
+        "catalog::cover_tests::a_bars_root_that_cannot_be_listed_is_refused_not_empty",
+        a_bars_root_that_cannot_be_listed_is_refused_not_empty_body,
+    );
+}
+
+fn a_bars_root_that_cannot_be_listed_is_refused_not_empty_body() {
     let root = scratch("locked");
     let bars = root.0.join("bars");
     std::fs::create_dir_all(bars.join("zerodha")).unwrap();
