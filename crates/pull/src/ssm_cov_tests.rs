@@ -45,14 +45,60 @@ fn a_refusal_says_its_detail_and_keeps_its_kind() {
     assert!(matches!(refusal.into_secret(), SecretError::Unreachable));
 }
 
-/// This process's environment answers as the lookup behind it does: the
-/// identity is there exactly when both of its variables are.
+/// This process's environment answers as the lookup behind it does: the door
+/// and the rule over the same variables give the same identity or the same
+/// refusal (the `Debug` redacts the secret). No side of this test depends on
+/// which variables the process holds; the rule's present and absent sides
+/// are driven by `a_lookup_with_one_half_of_the_pair_names_the_missing_one`.
 #[test]
 fn the_environment_door_is_the_lookup_over_this_process() {
-    let set = |name: &str| std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
     assert_eq!(
-        AwsIdentity::from_env().is_ok(),
-        set("AWS_ACCESS_KEY_ID") && set("AWS_SECRET_ACCESS_KEY")
+        format!("{:?}", AwsIdentity::from_env()),
+        format!(
+            "{:?}",
+            AwsIdentity::from_lookup(|name| std::env::var(name).ok())
+        )
+    );
+}
+
+/// The rule over an invented lookup, with each variable of the pair present
+/// and absent: the identity is built exactly when both are there and not
+/// blank, and a refusal names the one that is missing.
+#[test]
+fn a_lookup_with_one_half_of_the_pair_names_the_missing_one() {
+    let lookup = |held: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            held.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    };
+    let both = AwsIdentity::from_lookup(lookup(&[
+        ("AWS_ACCESS_KEY_ID", "ZQKEY"),
+        ("AWS_SECRET_ACCESS_KEY", "ZQSECRET"),
+    ]))
+    .unwrap();
+    assert_eq!(
+        (both.key_id.as_str(), both.secret.as_str()),
+        ("ZQKEY", "ZQSECRET")
+    );
+    assert_eq!(both.session_token, None);
+    let no_secret = AwsIdentity::from_lookup(lookup(&[("AWS_ACCESS_KEY_ID", "ZQKEY")]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        no_secret.contains("AWS_SECRET_ACCESS_KEY is unset"),
+        "{no_secret}"
+    );
+    let blank_key = AwsIdentity::from_lookup(lookup(&[
+        ("AWS_ACCESS_KEY_ID", "  "),
+        ("AWS_SECRET_ACCESS_KEY", "ZQSECRET"),
+    ]))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        blank_key.contains("AWS_ACCESS_KEY_ID is unset"),
+        "{blank_key}"
     );
 }
 

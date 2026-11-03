@@ -1047,3 +1047,218 @@ fn a_refresh_refuses_a_foreign_tail_and_a_folder_gone() {
     assert!(third.refresh().is_err(), "ENOTDIR is no empty journal");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ───── BASE-COV-PULL repair 2 (D-7334): the causes' last arms ─────
+
+/// A writer that takes `room` bytes and refuses the first write past them,
+/// keeping what it took.
+struct Refuses {
+    room: usize,
+    held: String,
+}
+
+impl core::fmt::Write for Refuses {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        self.room = self.room.checked_sub(text.len()).ok_or(core::fmt::Error)?;
+        self.held.push_str(text);
+        Ok(())
+    }
+}
+
+/// Every stop that ends a run part way carries the report of what the run
+/// did, and sealing it keeps that report: a store gone, a source gone and a
+/// free-space meter that could not answer, each with three days imported (a
+/// combination: two kinds, one report each, sealed before it is read).
+#[test]
+fn a_lost_store_a_lost_source_and_an_unmeasured_disk_report_what_they_did() {
+    let done = || {
+        Box::new(Report {
+            days_imported: 3,
+            ..Report::default()
+        })
+    };
+    let on = day(2024, 3, 1);
+    let why = || "an invented probe answer".to_owned();
+    let mut ends = [
+        ImportRefusal::StoreLost {
+            kind: ImportKind::Indices,
+            day: on,
+            why: why(),
+            done: done(),
+        },
+        ImportRefusal::FreeSpaceUnknown {
+            kind: ImportKind::Stocks,
+            day: on,
+            why: why(),
+            done: done(),
+        },
+        ImportRefusal::SourceLost {
+            kind: ImportKind::Options,
+            day: on,
+            why: why(),
+            done: done(),
+        },
+    ];
+    let mut imported = Vec::new();
+    for end in &mut ends {
+        end.seal();
+        imported.push(end.report().map(|done| done.days_imported));
+    }
+    assert_eq!(imported, [Some(3); 3]);
+    assert_eq!(
+        ends.map(|end| end.code()),
+        ["store_lost", "free_space_unknown", "source_lost"]
+    );
+}
+
+/// A day whose calendar windows land no bar and a refused auction sidecar are
+/// open causes: another calendar or another sidecar can change them, so
+/// neither closes a day (D-3319, D-3320).
+#[test]
+fn a_calendar_window_not_landed_and_a_refused_sidecar_never_close_a_day() {
+    use crate::calendar::{DayKind, Session};
+    use crate::gdfl_cm::CmRefusal as C;
+    let window = cm_cause(&C::CalendarWindowNotLanded {
+        kind: DayKind::Open(Session::full()),
+    });
+    assert_eq!(
+        (window.stage, window.code, window.closes),
+        (Stage::Calendar, "calendar_window_not_landed", false)
+    );
+    let sidecar = cm_cause(&C::AuctionSidecar {
+        why: "an invented sidecar".to_owned(),
+    });
+    assert_eq!(
+        (sidecar.stage, sidecar.code, sidecar.closes),
+        (Stage::File, "auction_sidecar", false)
+    );
+}
+
+/// A refusal whose sentence cannot be written stops at its first refused
+/// write and says so, on every arm that writes in more than one step: a
+/// split's list, a census refusal with its room and without it, and a swept
+/// index absent from its listing (a writer with no room at all). With room
+/// for everything, the same writer holds exactly what `to_string` says; with
+/// room for all but the last byte, the last write is the one refused.
+#[test]
+fn a_refusal_that_cannot_be_written_stops_at_its_first_write() {
+    use core::fmt::Write as _;
+    let done = || Box::new(Report::default());
+    let on = day(2024, 3, 1);
+    let room = CensusRoom {
+        n_valid: 9,
+        limit: 10,
+        batch: 3,
+        new: 2,
+    };
+    let refusals = [
+        ImportRefusal::UnderlyingSplit {
+            held: vec![("ZQOLD".to_owned(), "ZQNEW".to_owned())],
+        },
+        ImportRefusal::CensusRefused {
+            kind: ImportKind::Indices,
+            day: on,
+            room: Ok(room),
+            why: "an invented refusal".to_owned(),
+            done: done(),
+        },
+        ImportRefusal::CensusRefused {
+            kind: ImportKind::Stocks,
+            day: on,
+            room: Err("an invented unread room".to_owned()),
+            why: "an invented refusal".to_owned(),
+            done: done(),
+        },
+        ImportRefusal::AbsentFromListing {
+            instrument: "NSE-NIFTY".to_owned(),
+            unknown: vec!["ZQ 5O".to_owned()],
+            unknown_total: 1,
+        },
+    ];
+    for refusal in &refusals {
+        let said = refusal.to_string();
+        let mut none = Refuses {
+            room: 0,
+            held: String::new(),
+        };
+        assert_eq!(write!(none, "{refusal}"), Err(core::fmt::Error), "{said}");
+        assert_eq!(none.held, "", "nothing is taken past a refused write");
+        let mut short = Refuses {
+            room: said.len() - 1,
+            held: String::new(),
+        };
+        assert_eq!(write!(short, "{refusal}"), Err(core::fmt::Error), "{said}");
+        assert!(said.starts_with(&short.held), "{said}");
+        assert!(short.held.len() < said.len(), "{said}");
+        let mut whole = Refuses {
+            room: usize::MAX,
+            held: String::new(),
+        };
+        assert_eq!(write!(whole, "{refusal}"), Ok(()));
+        assert_eq!(whole.held, said);
+    }
+}
+
+/// The warm-up's `begin` is never handed a run id: were a worker of a
+/// warm-up to ask for one, it is refused as a journal line no warm-up
+/// writes.
+#[test]
+fn a_warm_up_begins_no_journal_line() {
+    let refused = warm_up_begin().unwrap_err();
+    assert_eq!(refused.code(), "journal");
+    assert_eq!(
+        refused.to_string(),
+        ImportRefusal::Journal {
+            why: "a lineage warm-up writes no journal line".to_owned()
+        }
+        .to_string()
+    );
+}
+
+/// **A RESCANNED DAY WHOSE NEW LINES THE DAY LEDGER WILL NOT TAKE IS A NAMED
+/// FAILURE OF THAT DAY** (repair 2, D-7334): the ledger reads (empty), its
+/// append is refused (read-only, run where the permission bits bind), so the
+/// day's lines are counted nowhere, the failure is at stage `journal` with
+/// the ledger's path, and the ledger is left exactly as it was.
+#[test]
+fn a_rescanned_day_the_day_ledger_will_not_take_is_a_named_failure() {
+    crate::support::where_permission_binds(
+        "gdfl_import::cov_tests::a_rescanned_day_the_day_ledger_will_not_take_is_a_named_failure",
+        a_rescanned_day_the_day_ledger_will_not_take_is_a_named_failure_body,
+    );
+}
+
+fn a_rescanned_day_the_day_ledger_will_not_take_is_a_named_failure_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = scratch("cov-rescan-ledger");
+    let store = root.join("S");
+    let held = day(2019, 5, 31);
+    put(
+        &store,
+        "imports/gdfl.journal",
+        format!("done indices {held} *\n").as_bytes(),
+    );
+    let ledger = put(&store, "imports/gdfl.dayflags", b"");
+    std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let done = rescan_core(ImportKind::Indices, (held, held), &store, |_, _, sink| {
+        sink(handed("late.csv", vec![tick(86_399)]));
+        (
+            DayRead {
+                held: true,
+                ..DayRead::default()
+            },
+            DayExtras::default(),
+        )
+    })
+    .unwrap();
+    assert_eq!((done.days_read, done.files, done.flags_lines), (1, 1, 0));
+    let named: Vec<(String, String)> = done
+        .failures
+        .iter()
+        .map(|f| (f.instrument.clone(), f.why.clone()))
+        .collect();
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert_eq!(named[0].0, format!("{held} day ledger"));
+    assert!(named[0].1.contains("gdfl.dayflags"), "{named:?}");
+    assert_eq!(std::fs::read(&ledger).unwrap(), b"", "left as it was");
+}

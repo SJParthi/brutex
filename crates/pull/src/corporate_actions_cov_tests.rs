@@ -386,6 +386,31 @@ fn a_product_above_the_step_differs_and_a_row_of_ratio_one_is_never_a_finding() 
     assert_eq!(found[0].word(), "factor_differs");
 }
 
+/// The other side of the step's interval (repair 2, D-7334): a row whose
+/// product lies BELOW the step's low bound differs too, and the finding
+/// carries the product the rows make, never the step's own factor.
+#[test]
+fn a_product_below_the_step_differs_and_names_its_product() {
+    let store = scratch("cor-cov-below");
+    let mut days = weekdays(day(2023, 6, 1), day(2023, 6, 30), "1/2");
+    days.extend(weekdays(day(2023, 7, 3), day(2023, 7, 31), "1"));
+    let runs = fold_runs("SPLITCO", days).unwrap();
+    write(&store, &runs_draft(&runs)).unwrap();
+    let basis = load_one(&store, Table::BasisRuns, BasisRuns::build);
+    let rows = [nse("SPLITCO", day(2023, 7, 3), Kind::Split, "3/2")];
+    write(&store, &actions_draft(Standing::Sourced, &rows)).unwrap();
+    let found = check(
+        basis.table().unwrap(),
+        load_actions(&store).table().unwrap(),
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let Finding::FactorDiffers { step, product } = &found[0] else {
+        panic!("{found:#?}");
+    };
+    assert_eq!(*product, r("3/2"));
+    assert!(*product < step.low, "{step:?}");
+}
+
 /// Every weekday of `from..=to` at `ratio`.
 fn weekdays(from: Day, to: Day, ratio: &str) -> Vec<BasisDay> {
     let mut days = Vec::new();

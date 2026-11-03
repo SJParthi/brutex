@@ -39,12 +39,12 @@ fn header_lines(table: Table) -> Vec<String> {
     ]
 }
 
-/// The file made from `lines`, each with its line break.
+/// The file made from `lines`, each with its line break. Every caller passes
+/// a header, so the body is never empty; the empty file is `sealed("")`,
+/// read by `a_header_is_refused_at_its_own_line`.
 fn file(lines: &[String]) -> Vec<u8> {
     let mut body = lines.join("\n");
-    if !body.is_empty() {
-        body.push('\n');
-    }
+    body.push('\n');
     sealed(&body)
 }
 

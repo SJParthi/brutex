@@ -2545,20 +2545,23 @@ fn cm_jobs<'a, L>(
         }
         // What the listing's scope files the stem under this day (D-3333):
         // the swept surface under the default scope, as `resolve` answers.
-        let filed = stem.map(|stem| listing.filing(stem));
+        // The stem rides with its filing, so the arm that keeps it never
+        // asks again whether there is one (repair 2, D-7334: a second
+        // `if let Some(stem)` there held an arm no entry reaches).
+        let filed = stem.map(|stem| (stem, listing.filing(stem)));
         let key = match filed {
-            Some(Ok(Some(key))) => key,
+            Some((_, Ok(Some(key)))) => key,
             // A stem refused for its symbol is refused only where the run
             // wants the series it would have been filed under.
-            Some(Err(why)) if why.filed_as().is_none_or(|symbol| run.wants(symbol)) => {
+            Some((_, Err(why))) if why.filed_as().is_none_or(|symbol| run.wants(symbol)) => {
                 listed.refused.push((index, Refused::cm(file.name(), &why)));
                 continue;
             }
-            Some(Ok(None)) => {
+            Some((stem, Ok(None))) => {
                 // THE WRITTEN SERIES RULE (G3, R4-22, D-7310): a share's day
                 // file of a series the store does not file is refused by
                 // name where the run wants the share, never skipped unnamed.
-                if let Some(why) = stem.and_then(|stem| listing.series_refusal(stem))
+                if let Some(why) = listing.series_refusal(stem)
                     && why.filed_as().is_none_or(|symbol| run.wants(symbol))
                 {
                     listed.refused.push((index, Refused::cm(file.name(), &why)));
@@ -2567,19 +2570,17 @@ fn cm_jobs<'a, L>(
                 // A stem of the day's own folder no scope files: kept, the
                 // few closest to each swept symbol by name, for
                 // `absent_from_listing` (D21; IA-16 repair 2).
-                if let Some(stem) = stem {
-                    listed.unknown_total += 1;
-                    for ((_, swept), nearest) in brutex_core::instrument::InstrumentKey::SWEPT
-                        .into_iter()
-                        .zip(listed.unknown.iter_mut())
-                    {
-                        keep_nearest(nearest, closeness(stem, swept), stem);
-                    }
+                listed.unknown_total += 1;
+                for ((_, swept), nearest) in brutex_core::instrument::InstrumentKey::SWEPT
+                    .into_iter()
+                    .zip(listed.unknown.iter_mut())
+                {
+                    keep_nearest(nearest, closeness(stem, swept), stem);
                 }
                 listed.skipped += 1;
                 continue;
             }
-            Some(Err(_)) | None => {
+            Some((_, Err(_))) | None => {
                 listed.skipped += 1;
                 continue;
             }
@@ -3218,6 +3219,16 @@ fn warm_files<S: NfoSource>(
         .collect()
 }
 
+/// The warm-up's `begin`: a warm-up reads and files nothing, so none of its
+/// workers asks the gate to begin a journal line; one that asked would be
+/// refused by name, never handed a run id (repair 2, D-7334: a closure
+/// inline in [`warm_files_on`] no test could call).
+fn warm_up_begin() -> Result<u64, ImportRefusal> {
+    Err(ImportRefusal::Journal {
+        why: "a lineage warm-up writes no journal line".to_owned(),
+    })
+}
+
 /// The warm-up's files read on `workers` (WP-16), answered in listing order,
 /// exactly what [`warm_files`] answers. A run that cannot start a worker
 /// reads them here, saying so at `warn`.
@@ -3240,11 +3251,7 @@ where
         workers,
         wanted,
         &gate,
-        &mut || {
-            Err(ImportRefusal::Journal {
-                why: "a lineage warm-up writes no journal line".to_owned(),
-            })
-        },
+        &mut warm_up_begin,
         &|&(index, file): &(usize, &crate::gdfl_cm::ListedFile<S::Locator>)| {
             read_file(source, listing, file)
                 .ok()

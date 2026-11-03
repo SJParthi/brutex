@@ -1561,3 +1561,90 @@ fn a_futures_pull_on_a_multi_thread_runtime_lands_the_same_bars() {
         [1_005, 1_006, 1_007, 1_008, 1_009]
     );
 }
+
+// ───── BASE-COV-PULL repair 2 (D-7334): the plan's warnings, read back ─────
+
+/// **THE PLAN'S TWO WARNINGS REACH A SINK WITH THEIR FIELDS** (repair 2): a
+/// plan read from a rebuilt index says so at `Error`, naming the underlying
+/// and the rebuild's own words, and every contract it refused is one `Warn`
+/// naming the underlying and the refusal, in the plan's order. Run in a
+/// process of its own, the one place this binary installs a sink for it: the
+/// events are built only when a sink would write them (`emit_if!`), so a
+/// process without one never evaluates their fields.
+#[test]
+fn the_plans_warnings_reach_a_sink_with_their_fields() {
+    crate::support::where_permission_binds(
+        "fnowork::futures_tests::the_plans_warnings_reach_a_sink_with_their_fields",
+        the_plans_warnings_reach_a_sink_with_their_fields_body,
+    );
+}
+
+fn the_plans_warnings_reach_a_sink_with_their_fields_body() {
+    let home = scratch("futures-sink");
+    let sink =
+        telemetry::install(&telemetry::Config::new(&home).with_min_level(telemetry::Level::Trace))
+            .expect("the only install in this process");
+    let rebuilt = plan_after_damage(
+        "futures-sink-gone",
+        |file| std::fs::remove_file(file).unwrap(),
+        &[],
+    );
+    let masters = scratch("futures-sink-two-tokens");
+    snapshot_on(
+        &masters,
+        day(2026, 1, 5),
+        &[
+            fut(8_000_031, "ZQIDX26JANFUT", "2026-01-27"),
+            fut(8_000_032, "ZQIDX26JANFUT", "2026-01-27"),
+        ],
+    );
+    let refused = futures_plan(
+        &Book::open(&masters).unwrap(),
+        route(),
+        "ZQIDX",
+        window(day(2026, 1, 1), day(2026, 1, 9)),
+        day(2026, 1, 12),
+        day(2026, 1, 9),
+    )
+    .unwrap();
+    let records = telemetry::tail(
+        &home,
+        sink.keep_files(),
+        &telemetry::Query::last(telemetry::MAX_LIMIT).from_target(FUTURES_EVENT),
+    )
+    .records;
+    let text = |record: &telemetry::Record, key: &str| {
+        record
+            .field(key)
+            .and_then(telemetry::OwnedValue::as_str)
+            .map(str::to_owned)
+    };
+    let said_rebuilt: Vec<(Option<String>, Option<String>)> = records
+        .iter()
+        .filter(|record| {
+            record
+                .message
+                .starts_with("the futures first-listed index did not match")
+        })
+        .map(|record| (text(record, "underlying"), text(record, "why")))
+        .collect();
+    assert_eq!(
+        said_rebuilt,
+        [(Some("ZQIDX".to_owned()), rebuilt.plan.rebuilt.clone())]
+    );
+    let said_refused: Vec<String> = records
+        .iter()
+        .filter(|record| record.message == "a futures contract or series was not asked for")
+        .map(|record| text(record, "why").unwrap_or_default())
+        .collect();
+    assert_eq!(said_refused.len(), 2, "{said_refused:?}");
+    assert_eq!(said_refused, refused.refused);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.message == "a futures contract or series was not asked for")
+            .map(|record| text(record, "underlying"))
+            .collect::<Vec<_>>(),
+        [Some("ZQIDX".to_owned()), Some("ZQIDX".to_owned())]
+    );
+}

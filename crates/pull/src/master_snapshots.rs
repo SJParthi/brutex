@@ -1664,16 +1664,16 @@ impl Book {
     /// checked in one pass and never made.
     pub fn of(snapshots: Vec<Snapshot>) -> Result<Self, String> {
         let stamps: Vec<Stamp> = snapshots.iter().map(Snapshot::stamp).collect();
-        for pair in stamps.windows(2) {
-            if let [older, newer] = pair {
-                if older == newer {
-                    return Err(format!("two snapshots carry one stamp, {older}"));
-                }
-                if older > newer {
-                    return Err(format!(
-                        "the snapshots are not oldest first: {older} is given before {newer}"
-                    ));
-                }
+        // Each stamp beside the next (repair 2, D-7334: `windows(2)` matched
+        // against `[older, newer]` held an arm no window reaches).
+        for (older, newer) in stamps.iter().zip(stamps.iter().skip(1)) {
+            if older == newer {
+                return Err(format!("two snapshots carry one stamp, {older}"));
+            }
+            if older > newer {
+                return Err(format!(
+                    "the snapshots are not oldest first: {older} is given before {newer}"
+                ));
             }
         }
         let loaded = snapshots

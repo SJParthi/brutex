@@ -6047,3 +6047,47 @@ fn two_runs_into_one_store_at_once_leave_what_one_run_leaves() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// **A FILE THE READER REFUSES IS THAT FILE'S REFUSAL, AND THE DAY'S OTHER
+/// FILES ARE STILL READ** (BASE-COV-PULL repair 2, D-7334): the one-thread
+/// door the rescan shares (`cm_day_with`). A clean day hands on every swept
+/// file; the same day with one file's bytes replaced by a line that is no
+/// tick row hands on one fewer and names that file once, by its entry.
+#[test]
+fn a_file_the_reader_refuses_is_named_and_the_days_other_files_are_read() {
+    let on = d1();
+    let read_day = |tag: &str, entries: Vec<(String, Vec<u8>)>| {
+        let root = scratch(tag);
+        world_of(&root, &[(on, Tree::Indices, entries)]);
+        let store = root.join("S");
+        let source = TickStore::new(&root.join("ts"));
+        let run = Run {
+            kind: ImportKind::Indices,
+            from: on,
+            to: on,
+            only: &[],
+            store_root: &store,
+        };
+        let mut names = Vec::new();
+        let day = cm_day(&source, &run, CmKind::Indices, on, &mut |file| {
+            names.push(file.name);
+        });
+        std::fs::remove_dir_all(root).unwrap();
+        (names, day)
+    };
+    let (clean, whole) = read_day("cm-day-clean", cm_entries(CmKind::Indices, on));
+    assert!(whole.refused.is_empty(), "{whole:?}");
+    let mut entries = cm_entries(CmKind::Indices, on);
+    let bank = entries
+        .iter_mut()
+        .find(|(name, _)| name.ends_with("NIFTY BANK.NSE_IDX.csv"))
+        .unwrap();
+    bank.1 = b"an invented line that is no tick row\n".to_vec();
+    let (names, day) = read_day("cm-day-refused", entries);
+    assert_eq!(names.len() + 1, clean.len(), "{names:?} {clean:?}");
+    assert_eq!(day.refused.len(), 1, "{day:?}");
+    assert!(
+        day.refused[0].failure.instrument.contains("NIFTY BANK"),
+        "{day:?}"
+    );
+}

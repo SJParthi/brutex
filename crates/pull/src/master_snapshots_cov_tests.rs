@@ -516,3 +516,301 @@ fn every_outcome_of_a_hook_can_be_said() {
         ..sample()
     });
 }
+
+// ───── BASE-COV-PULL repair 2 (D-7334) ─────
+
+/// The text of field `key` of `record`, or `None`.
+fn text(record: &telemetry::Record, key: &str) -> Option<String> {
+    record
+        .field(key)
+        .and_then(telemetry::OwnedValue::as_str)
+        .map(str::to_owned)
+}
+
+/// The count of field `key` of `record`, or `None`.
+fn count(record: &telemetry::Record, key: &str) -> Option<u64> {
+    record.field(key).and_then(telemetry::OwnedValue::as_u64)
+}
+
+/// **EVERY EVENT OF A HOOK CALL REACHES A SINK WITH ITS FIELDS** (repair 2):
+/// a listing that failed is one `Error` naming why; incomplete entries past
+/// the bound are named newest first, at most [`INCOMPLETE_NAMED`], and one
+/// more event counts the rest; the outcome names its kind, day, stamp,
+/// outcome word, previous snapshot, counts, diff file, detail and how many
+/// entries are incomplete; and a diff naming more changes than one refresh
+/// names says how many it did not, then names each of the first
+/// [`DIFF_NAMED`]. A refused write says `refused` with no day. Run in a
+/// process of its own, the one install there: these events are built only
+/// when a sink would write them (`emit_if!`). Extremes at once: one past each
+/// bound, a stamp past every incomplete entry's ordinal, and a refusal with
+/// no day.
+#[test]
+fn every_event_of_a_hook_call_reaches_a_sink_with_its_fields() {
+    crate::support::where_permission_binds(
+        "master_snapshots::cov_tests::every_event_of_a_hook_call_reaches_a_sink_with_its_fields",
+        every_event_of_a_hook_call_reaches_a_sink_with_its_fields_body,
+    );
+}
+
+fn every_event_of_a_hook_call_reaches_a_sink_with_its_fields_body() {
+    let home = scratch("cov-hook-sink");
+    let sink =
+        telemetry::install(&telemetry::Config::new(&home).with_min_level(telemetry::Level::Trace))
+            .expect("the only install in this process");
+    let on = day(2026, 3, 2);
+    let held = u32::try_from(INCOMPLETE_NAMED).unwrap() + 1;
+    let incomplete: Vec<Incomplete> = (1..=held)
+        .map(|ordinal| Incomplete {
+            kind: Kind::Kite,
+            stamp: stamp(on, ordinal),
+            file: format!("invented-{ordinal}.partial"),
+            why: "an invented cut",
+        })
+        .collect();
+    let changes = u64::try_from(DIFF_NAMED).unwrap() + 1;
+    let summary = DiffSummary {
+        previous: stamp(day(2026, 2, 27), 1),
+        current: stamp(on, held + 1),
+        file: "invented.diff".to_owned(),
+        counts: [changes, 0, 0, 0, 0, 0, 0, 0],
+        isin_unknown_total: 0,
+        named: (0..changes)
+            .map(|token| Item {
+                change: Change::Listing,
+                exchange: "NFO".to_owned(),
+                token: 9_100_000 + token,
+                key: format!("ZQIDX{token}"),
+                old: String::new(),
+                new: format!("ZQIDX{token}"),
+            })
+            .collect(),
+    };
+    let counts_line = summary.counts_line();
+    note_incomplete(Kind::Kite, &Err("an invented listing fault".to_owned()));
+    note(&Snapshotted {
+        kind: Kind::Kite,
+        day: Some(on),
+        wrote: Ok(Wrote::New(stamp(on, held + 1))),
+        diff: Some(Ok(Some(summary))),
+        incomplete: Ok(incomplete),
+    });
+    note(&Snapshotted {
+        kind: Kind::NseTotalMarket,
+        day: None,
+        wrote: Err("an invented refusal".to_owned()),
+        diff: None,
+        incomplete: Ok(Vec::new()),
+    });
+    let records = telemetry::tail(
+        &home,
+        sink.keep_files(),
+        &telemetry::Query::last(telemetry::MAX_LIMIT).from_target(EVENT_TARGET),
+    )
+    .records;
+    let of = |message: &str| -> Vec<&telemetry::Record> {
+        records
+            .iter()
+            .filter(|record| record.message == message)
+            .collect()
+    };
+    let unlisted =
+        of("the snapshots directory could not be listed, so its incomplete entries are not named");
+    assert_eq!(unlisted.len(), 1);
+    assert_eq!(
+        (text(unlisted[0], "kind"), text(unlisted[0], "why")),
+        (
+            Some("instruments".to_owned()),
+            Some("an invented listing fault".to_owned())
+        )
+    );
+    let named = of(INCOMPLETE_MESSAGE);
+    assert_eq!(named.len(), INCOMPLETE_NAMED);
+    assert_eq!(
+        (
+            text(named[0], "entry"),
+            text(named[0], "stamp"),
+            text(named[0], "day"),
+            text(named[0], "why"),
+            count(named[0], "held"),
+        ),
+        (
+            Some(format!("invented-{held}.partial")),
+            Some(stamp(on, held).to_string()),
+            Some(on.to_string()),
+            Some("an invented cut".to_owned()),
+            Some(u64::from(held)),
+        ),
+        "newest first"
+    );
+    let more = of("more incomplete master snapshot entries are held than one refresh names");
+    assert_eq!(more.len(), 1);
+    assert_eq!(
+        (count(more[0], "unnamed"), count(more[0], "held")),
+        (Some(1), Some(u64::from(held)))
+    );
+    let wrote = of("a dated master snapshot was written");
+    assert_eq!(wrote.len(), 1);
+    let fields: Vec<Option<String>> = [
+        "kind", "day", "stamp", "outcome", "previous", "counts", "diff",
+    ]
+    .iter()
+    .map(|key| text(wrote[0], key))
+    .collect();
+    assert_eq!(
+        fields,
+        [
+            Some("instruments".to_owned()),
+            Some(on.to_string()),
+            Some(stamp(on, held + 1).to_string()),
+            Some("new".to_owned()),
+            Some(stamp(day(2026, 2, 27), 1).to_string()),
+            Some(counts_line),
+            Some("invented.diff".to_owned()),
+        ]
+    );
+    assert!(
+        text(wrote[0], "detail")
+            .unwrap_or_default()
+            .contains(&format!(
+                "{} entries of the day's earlier ordinals",
+                INCOMPLETE_NAMED + 1
+            )),
+        "{:?}",
+        wrote[0]
+    );
+    assert_eq!(count(wrote[0], "incomplete"), Some(u64::from(held)));
+    let bounded = of(
+        "more master changes than one refresh names; the rest are counted here and every one is in the .diff file",
+    );
+    assert_eq!(bounded.len(), 1);
+    assert_eq!(
+        (
+            count(bounded[0], "named"),
+            count(bounded[0], "unnamed"),
+            text(bounded[0], "diff"),
+            text(bounded[0], "day"),
+        ),
+        (
+            Some(u64::try_from(DIFF_NAMED).unwrap()),
+            Some(1),
+            Some("invented.diff".to_owned()),
+            Some(on.to_string()),
+        )
+    );
+    let each = of("a master change between two snapshots");
+    assert_eq!(each.len(), DIFF_NAMED);
+    assert_eq!(
+        ["change", "exchange", "token", "symbol", "old", "new", "day",]
+            .iter()
+            .map(|key| text(each[0], key))
+            .collect::<Vec<_>>(),
+        [
+            Some("listing".to_owned()),
+            Some("NFO".to_owned()),
+            Some("9100000".to_owned()),
+            Some("ZQIDX0".to_owned()),
+            Some(String::new()),
+            Some("ZQIDX0".to_owned()),
+            Some(on.to_string()),
+        ]
+    );
+    let refused = of("no master snapshot was written");
+    assert_eq!(refused.len(), 1);
+    assert_eq!(
+        (
+            text(refused[0], "kind"),
+            text(refused[0], "outcome"),
+            text(refused[0], "day"),
+            text(refused[0], "detail"),
+        ),
+        (
+            Some("nse_total_market".to_owned()),
+            Some("refused".to_owned()),
+            Some(String::new()),
+            Some("an invented refusal".to_owned()),
+        )
+    );
+}
+
+/// A diff record of values in four-byte letters: each fits its field by
+/// bytes, and padded by letters the record runs past its length, so it is
+/// refused by name and never cut (an input the Kite dump can carry: a name
+/// or symbol that is not ASCII). One such letter in every field is exactly
+/// the record length with no room for its line break, refused too; one
+/// ASCII byte in every field is a whole record.
+#[test]
+fn a_record_of_wide_letters_past_the_record_length_is_refused() {
+    let wide = |letters: usize| "\u{1D538}".repeat(letters);
+    let (a, b, c, d, e, f) = (wide(3), wide(2), wide(5), wide(12), wide(10), wide(10));
+    let refused = Err("a record is wider than the record length".to_owned());
+    assert_eq!(
+        fixed([
+            a.as_str(),
+            b.as_str(),
+            c.as_str(),
+            d.as_str(),
+            e.as_str(),
+            f.as_str()
+        ]),
+        refused
+    );
+    let one = wide(1);
+    assert_eq!(fixed([one.as_str(); 6]), refused);
+    let line = fixed(["a"; 6]).unwrap();
+    assert_eq!(line.len(), RECORD_LEN);
+    assert!(line.ends_with('\n'), "{line:?}");
+}
+
+/// A link at the diff's name that leads nowhere is read as no diff before the
+/// lock and found as an entry under it: the diff is refused by name and the
+/// link is left exactly as it was, never written over.
+#[test]
+fn a_dangling_link_at_the_diff_name_is_never_written_over() {
+    let root = scratch("cov-diff-link");
+    let (first, second) = (day(2026, 3, 2), day(2026, 3, 9));
+    let row = fut(9_000_011, "ZQIDX26MARFUT", "2026-03-31", 75);
+    snapshot(
+        &root,
+        Kind::Kite,
+        first,
+        URL,
+        dump(std::slice::from_ref(&row)).as_bytes(),
+    )
+    .unwrap();
+    let link = root.join(diff_name(stamp(second, 1)));
+    std::os::unix::fs::symlink(root.join("nowhere"), &link).unwrap();
+    snapshot(
+        &root,
+        Kind::Kite,
+        second,
+        URL,
+        dump(std::slice::from_ref(&row)).as_bytes(),
+    )
+    .unwrap();
+    let why = diff_for(&root, stamp(second, 1)).unwrap_err();
+    assert!(
+        why.contains("is a name with nothing readable behind it"),
+        "{why}"
+    );
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        root.join("nowhere"),
+        "left as it was"
+    );
+}
+
+/// An index the day table holds past the book's stamps answers that no
+/// snapshot governs the day, never a panic (a book whose table and stamps
+/// disagree, made by hand: no listing makes one).
+#[test]
+fn a_table_index_past_the_stamps_answers_no_snapshot() {
+    let empty = |on: Day| Snapshot::parse(stamp(on, 1), &format!("{HEAD_TEXT}\n")).unwrap();
+    let mut book = Book::of(vec![empty(day(2026, 1, 1))]).unwrap();
+    for at in &mut book.table {
+        *at = 7;
+    }
+    assert!(matches!(
+        book.token_on(day(2026, 1, 1), "NFO", 9_000_001),
+        TokenOn::NoSnapshot
+    ));
+}
