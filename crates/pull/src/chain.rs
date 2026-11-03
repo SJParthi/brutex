@@ -587,11 +587,10 @@ mod tests {
         impl Discovery for Recording {
             async fn get(&self, url: &str) -> Result<String, Refusal> {
                 self.seen.borrow_mut().push(url.to_owned());
-                let mut left = self.answers.borrow_mut();
-                if left.is_empty() {
-                    return Err(Refusal::transport("no answer left".to_owned()));
-                }
-                Ok(left.remove(0))
+                // A CALL PAST THE ANSWERS IS A DEFECT OF THE WALK: `remove`
+                // panics and fails this test (BASE-COV-PULL-PS2: the arm that
+                // refused it instead was never reached).
+                Ok(self.answers.borrow_mut().remove(0))
             }
         }
 
@@ -801,11 +800,10 @@ mod tests {
         impl Discovery for Counting {
             async fn get(&self, url: &str) -> Result<String, Refusal> {
                 self.asked.borrow_mut().push(url.to_owned());
-                let mut left = self.answers.borrow_mut();
-                if left.is_empty() {
-                    return Err(Refusal::transport("no answer left".to_owned()));
-                }
-                Ok(left.remove(0))
+                // A CALL PAST THE ANSWERS IS A DEFECT OF THE WALK: `remove`
+                // panics and fails this test (BASE-COV-PULL-PS2: the arm that
+                // refused it instead was never reached).
+                Ok(self.answers.borrow_mut().remove(0))
             }
         }
         let from = Counting {
@@ -864,3 +862,9 @@ mod tests {
         }
     }
 }
+
+// BASE-COV-PULL-PS2 (3 Nov 2026): the arms Route B found unreached on START,
+// each driven by input or a direct call and asserted.
+#[cfg(test)]
+#[path = "chain_ps2_tests.rs"]
+mod ps2_tests;
