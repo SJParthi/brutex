@@ -1871,3 +1871,68 @@ fn a_zero_rung_environment_refuses_the_legacy_walk_by_name() {
         String::from_utf8_lossy(&child.stdout)
     );
 }
+
+/// BASE-COV-LIBS-LS2: A SIGNAL TIMEFRAME WITH NO POSITIVE DURATION IS REFUSED
+/// BEFORE ANY FOLD, by name: its exact close cannot be mapped onto the
+/// one-minute execution path, for a zero, a negative and the most negative
+/// length alike.
+#[test]
+fn a_signal_timeframe_without_positive_duration_is_refused_before_any_fold() {
+    let bars = crate::synthetic::sessions(2);
+    for signal_length_micros in [0, -60_000_000, i64::MIN] {
+        let refused = super::walk_forward_projected_with_rungs(
+            &bars,
+            super::ExecutionSeries {
+                bars: &bars,
+                signal_length_micros,
+            },
+            super::tests::h(15),
+            3,
+            Direction::Long,
+            &super::tests::sweeper(),
+            &mut super::tests::evaluator,
+            super::Shape::Anchored,
+            super::FoldRungs::Fixed(0),
+            &|_| {},
+        );
+        assert!(refused.folds.is_empty(), "{signal_length_micros}");
+        assert_eq!(
+            refused.refused.as_deref(),
+            Some(
+                "the signal timeframe has no positive duration, so its exact close cannot be mapped"
+            ),
+            "{signal_length_micros}"
+        );
+    }
+}
+
+/// BASE-COV-LIBS-LS2: A FOLD WHOSE TEST WINDOW THE HORIZON PUSHES PAST THE
+/// SERIES IS SKIPPED, never judged on bars that do not exist. Over 750 bars
+/// in three blocks of 250, a 300-bar horizon leaves the first fold a test
+/// window of 550..750 and puts the second fold's start at the series end:
+/// the walk is attempted (no refusal) and reports the first fold alone.
+#[test]
+fn a_fold_whose_test_window_starts_past_the_series_is_skipped() {
+    let bars = crate::synthetic::sessions(2);
+    assert_eq!(bars.len(), 750);
+    let horizon = super::tests::h(300);
+    let windows = super::Shape::Anchored.folds(bars.len(), horizon, 2);
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].test, 550..750);
+    assert!(windows[1].test.is_empty() && windows[1].test.start == bars.len());
+    let walked = super::walk_forward_shaped_with_rungs(
+        &bars,
+        horizon,
+        2,
+        Direction::Long,
+        &super::tests::sweeper(),
+        &mut super::tests::evaluator,
+        super::Shape::Anchored,
+        super::TradesOnTheseBars::Yes,
+        0,
+    );
+    assert_eq!(walked.refused, None);
+    assert_eq!(walked.folds.len(), 1);
+    assert_eq!(walked.folds[0].index, 0);
+    assert_eq!(walked.folds[0].test_bars, 200);
+}
