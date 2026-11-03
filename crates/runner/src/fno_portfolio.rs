@@ -1642,7 +1642,9 @@ mod tests {
         }
         assert_eq!(account.exposure(), value);
         assert_eq!(account.margin_in_use().micro_paisa(), margin);
-        assert!(marked || account.exposure() <= i128::from(EXPOSURE_CAP_PAISA));
+        if !marked {
+            assert!(account.exposure() <= i128::from(EXPOSURE_CAP_PAISA));
+        }
     }
 
     #[test]
@@ -2124,6 +2126,23 @@ mod tests {
             .schedule_second(5, &mut batch, &mut out)
             .expect("a valid batch");
         assert_eq!(out, [Outcome::Exit(Dispatch::Sent); 2]);
+    }
+
+    #[test]
+    fn an_exit_arriving_ahead_of_an_entry_stays_ahead() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        let exit = Intent::Exit(ExitIntent { slot, start: 5 });
+        let later = Intent::Entry(entry(1, 5));
+        let mut batch = [exit, later];
+        let mut out = Vec::new();
+        account
+            .schedule_second(5, &mut batch, &mut out)
+            .expect("a valid batch");
+        assert_eq!(batch, [exit, later]);
+        assert_eq!(out[0], Outcome::Exit(Dispatch::Sent));
+        assert_eq!(admitted_in(out[0]), None, "an exit admits nothing");
+        assert!(admitted_in(out[1]).is_some());
     }
 
     #[test]
@@ -2942,23 +2961,28 @@ mod tests {
                     note_dispatch(dispatch, at, &mut sends);
                 }
                 6 if !held.is_empty() => {
+                    // A burst on one order, so the 26th change replaces it and
+                    // replacements fill the second's ring.
                     let roles = [OrderRole::Stop, OrderRole::TrailingStop, OrderRole::Target];
                     let role = roles[usize::try_from((state >> 16) % 3).expect("small")];
-                    let done = account.modify(at, held[which], role).expect("held");
-                    if done == Modify::Replaced {
-                        sends.push(at);
-                    }
-                    if let Modify::Queued(next) = done {
-                        assert!(next > at);
+                    for _ in 0..(state >> 24) % 320 {
+                        match account.modify(at, held[which], role).expect("held") {
+                            Modify::Modified { count } => assert!(count <= MODIFICATIONS_PER_ORDER),
+                            Modify::Replaced => note_send(at, &mut sends),
+                            Modify::Queued(next) => assert!(next > at),
+                        }
                     }
                 }
                 7 => {
-                    let mut batch: Vec<Intent> = (0..(state >> 16) % 4)
-                        .map(|k| Intent::Entry(random_entry(mix(state ^ k), at)))
+                    // Exits first in the batch, entries after: the sort must
+                    // put them right whichever way round they arrive.
+                    let mut batch: Vec<Intent> = held
+                        .iter()
+                        .take(2)
+                        .map(|&slot| Intent::Exit(ExitIntent { slot, start: at }))
                         .chain(
-                            held.iter()
-                                .take(2)
-                                .map(|&slot| Intent::Exit(ExitIntent { slot, start: at })),
+                            (0..(state >> 16) % 4)
+                                .map(|k| Intent::Entry(random_entry(mix(state ^ k), at))),
                         )
                         .collect();
                     let mut out = Vec::new();
@@ -3019,8 +3043,9 @@ mod tests {
             held.push(slot);
             note_send(at, sends);
             assert!(account.exposure() <= i128::from(EXPOSURE_CAP_PAISA));
-            let checked = account.capital != Capital::Unchecked;
-            assert!(!checked || account.margin_in_use().micro_paisa() <= account.capital() * MICRO);
+            if account.capital != Capital::Unchecked {
+                assert!(account.margin_in_use().micro_paisa() <= account.capital() * MICRO);
+            }
         }
         if let Admission::Queued(next) = admission {
             assert!(next > at);
