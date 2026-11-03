@@ -91,9 +91,13 @@ runner --locked --lib -- fno_band`, `llvm-profdata merge`, `llvm-cov report`:
 `crates/runner/src/fno_band.rs` at `46def571`: **lines 1,069 of 1,069
 (100.00%), branches 48 of 48 (100.00%)**, regions 1,806 of 1,806, functions 97
 of 97, no zero-count marker. The bench wrapper, run once under the same
-instrumentation: `report-FNO-BAND.md` section 8; its self-check failure arms
-(lines 52-53 and 88 of `crates/runner/benches/ratio/fno_band.rs`) are excused
-by name. `lib.rs`'s slot line has no region; the ledgers hold none. The D3
+instrumentation (`cargo +nightly-2026-08-08 bench -p runner --bench ratio`):
+`crates/runner/benches/ratio/fno_band.rs` lines 57 of 60, branches 2 of 4,
+functions 6 of 6; the unexecuted lines and branches are its self-check failure
+arms, excused by name: lines 52-53 with the two true arms of line 51's
+condition (a day refused, or timed no flex) and line 89 (a day
+`measure_checks` refused). `ratio.rs`'s row call (line 605) ran; its `mod` line
+and `lib.rs`'s slot line have no region; the ledgers hold none. The D3
 recipe file is on the Mac and was not read: this followed `CLOUD.md`'s
 statement of Route B, and the Mac re-measures.
 
@@ -102,16 +106,25 @@ statement of Route B, and the Mac re-measures.
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy -p runner --all-targets --locked -- -D warnings`: clean.
 - `cargo test -p runner --locked --no-fail-fast`: green (lib 770, every
-  integration binary, doc-tests 6).
-- Readers of the edited ledgers: `core` and `vocab` whole, green; the rest in
-  `report-FNO-BAND.md` sections 4.1 and 8.
+  integration binary, doc-tests 6); the module's 25 again green on stable at
+  the final code.
+- Readers of the edited ledgers: `core` (261) and `vocab` (174) whole, green at
+  the final tip; `pull --test derive` 37, green; `store`'s `docs`, `libm_key`,
+  `bisect_cost`, `sealed_codec_alloc`, `tail_proof`, green; `store`'s
+  `cited_commits` red with the base's own refusal (`1a98b1e13` in
+  `docs/06-limits.md` line 22132 at the base); ten `cli` readers
+  (`pool_and_escape_docs`, `limits_doc_drift` and the rest), green. The `cli`
+  and `api` unit-test readers were not built; each reads only rows or sections
+  it names (`report-FNO-BAND.md` section 4.1).
 - Gates 27 and 14: OK. Gates 27b, 10 and 12: red on the base and here with
   the same refusals, none of them this part's. Gate 10's later stages check
   26 more named tests here than at the base, all resolving. As the main
   session's §7.5 (c) says, gate 10's crate-first half is re-run after
   BASE-REDS-1023 lands.
-- Bench C-FNO-BAND-01 (advisory here): flat, check p99 73 to 85 ns, look-back
-  p99 50 to 53 ns, inside the 100 ns budget under both flex readings.
+- Bench C-FNO-BAND-01 (advisory here), two runs of the tip's binary: flat
+  (ratios 0.567x to 1.100x), check p99 42 to 85 ns, look-back p99 35 to 53 ns,
+  inside the 100 ns budget under both flex readings; the second run exited 0
+  with every runner row ok.
 - Mutation tests: deferred by the operator. `cargo deny check`: not installed
   here; no dependency, manifest or lock line changed.
 
@@ -122,10 +135,12 @@ D-8210, D-8211, D-8212. D-8213 to D-8219 unused.
 ### problems
 
 - Not this part's, reproduced on the base: gate 27b (D-6247 twice), gate 10
-  (R427-11, STACK1028-03; HA-02 and AG05-13), gate 12's refusal list.
+  (R427-11, STACK1028-03; HA-02 and AG05-13), gate 12's refusal list, and
+  `store`'s `cited_commits` (the base's `1a98b1e13`).
 - C-R-04, a runner bench row this part does not touch, breached once on this
-  host (5,700 floors against 5,000) with its numerator unchanged and its
-  one-shot floor faster; `report-FNO-BAND.md` sections 6 and 8.
+  host (5,700 floors against 5,000, its one-shot floor reading fast) and passed
+  three times (4,113 and 4,845 on the base's code, 3,343 on the tip);
+  `report-FNO-BAND.md` section 6.
 - A bench run in a base worktree sharing this checkout's `target/` left a stale
   binary that the next tip bench ran; that output is counted as a base sample
   only (`report-FNO-BAND.md` section 9 item 6).

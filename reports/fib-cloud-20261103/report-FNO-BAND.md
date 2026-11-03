@@ -23,8 +23,10 @@ not a backtest result.
   kit commit `fa9022ba`): `a5542839` (the module), `f8f77d49` (its tests),
   `aff0594a` (the bench row and every ledger row), `ab3393f8` (rustfmt's layout
   of one assertion), `46def571` (two cost sentences corrected, the bench
-  verdict label), and the commit that adds this report and `part-FNO-BAND.md`.
-  Each message ends with the `Co-Authored-By` line.
+  verdict label), `35f6929c` (this report and `part-FNO-BAND.md`, first pushed
+  while runs were going), and the commit that completes them and updates
+  C-FNO-BAND-01's measured figures. Each message ends with the
+  `Co-Authored-By` line. No code changed after `46def571`.
 - **D2 set** (`git diff --name-only 1ad6e24ef8e0..HEAD -- crates/`):
   `crates/runner/src/fno_band.rs` (new), `crates/runner/benches/ratio/fno_band.rs`
   (new), `crates/runner/src/lib.rs` (one line under its slot),
@@ -157,11 +159,11 @@ with `rustup toolchain install nightly-2026-08-08 --profile minimal
 |---|---|---|
 | fmt | `cargo fmt --all -- --check` | clean (exit 0) |
 | clippy | `cargo clippy -p runner --all-targets --locked -- -D warnings` | clean, the lib, the tests and the bench target |
-| the touched crate's tests | `cargo test -p runner --locked --no-fail-fast` | green: lib 770 of 770 (this part's 25 among them), every integration binary (`end_to_end` 4, `d_0694_record` 3, which reads the ledgers, and the other nine), doc-tests 6 |
+| the touched crate's tests | `cargo test -p runner --locked --no-fail-fast` | green at `ab3393f8`: lib 770 of 770 (this part's 25 among them), every integration binary (`end_to_end` 4, `d_0694_record` 3, which reads the ledgers, and the other nine), doc-tests 6. At the final code (`46def571`, unchanged since), `cargo +1.97.1 test -p runner --locked --lib -- fno_band`: 25 of 25 |
 | the part's tests under Route B | section 5's command | 25 of 25 |
-| `core`, which reads the ledgers | `cargo test -p core --locked --no-fail-fast` | green: unit 205, `decision_citations` 4 (D-8210 to D-8212 head entries), `cost_invariants` 5 (C-FNO-BAND-01 is printed by the bench and declared as a row), `graph` 15, `findings` 14, every other binary |
-| `vocab`, which reads every tracked file and the ledgers | `cargo test -p vocab --locked --no-fail-fast` | green: `no_py_language` 9, `no_float` 3, `workspace_is_rust` 18, `stale_claims` 10, every other binary |
-| other readers of the four ledgers | section 4.1 | see there |
+| `core`, which reads the ledgers | `cargo test -p core --locked --no-fail-fast` | green at the final tip, 261 tests: unit 205, `decision_citations` 4 (D-8210 to D-8212 head entries), `cost_invariants` 5 (C-FNO-BAND-01 is printed by the bench and declared as a row), `graph` 15, `findings` 14, every other binary |
+| `vocab`, which reads every tracked file and the ledgers | `cargo test -p vocab --locked --no-fail-fast` | green at the final tip, 174 tests: `no_py_language` 9, `no_float` 3, `workspace_is_rust` 18, `stale_claims` 10, every other binary |
+| other readers of the four ledgers | section 4.1 | green but for one base red, see there |
 | gate 27, invariant ids | `.github/gates_ledger.rs invariant-ids` | OK: 3,487 ids, all unique (base 3,479: these eight rows) |
 | gate 27b, decision numbers | `.github/gates_ledger.rs decision-numbers` | rc 1 on the base and here, the same one refusal: D-6247 heads two entries (lines 81917 and 82161, not this part's); 1,781 headings here against 1,778, these three |
 | gate 10 | the workflow's commands | rc 1 on the base and here at the first stage, the same two rows (R427-11, STACK1028-03). Its later stages, run here anyway: 4,070 named tests checked against 4,044 at the base, so all 26 of this part's citations resolve; the same 2 missing at both (HA-02, AG05-13) |
@@ -181,7 +183,13 @@ Run: `runner`'s `d_0694_record` and `core`'s and `vocab`'s readers (above);
 `sealed_codec_alloc`, `tail_proof`, `cited_commits`; `cli`'s
 `pool_and_escape_docs`, `ledger_scan_costs`, `c4_cli_02_limits`,
 `limits_o1cli_2` to `_6`, `limits_doc_drift`, `ledger_append_lookup_costs`.
-Results: section 8 (written when the runs end).
+
+| Reader | Result |
+|---|---|
+| `cargo test -p pull --locked --test derive` | green, 37 of 37 |
+| `store`: `docs` 10, `libm_key` 10, `bisect_cost` 5, `sealed_codec_alloc` 6, `tail_proof` 3 | green, at the final tip |
+| `store`: `cited_commits` | **red, the base's red, 5 of 6**: `every_commit_the_store_records_cite_is_on_main_or_says_why_not` refuses `1a98b1e13` "cited in docs/06-limits.md", the nightly's commit in the L-STACK1028 section, which the base already holds (`git show 1ad6e24ef8e0:docs/06-limits.md`, line 22132) and this part's diff does not touch (`git diff 1ad6e24ef8e0..HEAD -- docs/` holds no `1a98b1e13`). FNO-LAW's report records the same red |
+| `cli`: `pool_and_escape_docs` 11, `limits_doc_drift` 5, `ledger_append_lookup_costs` 6, `ledger_scan_costs` 4, `c4_cli_02_limits` 3, `limits_o1cli_2` to `_6` 1 each | green |
 
 Not built here: the `cli` and `api` **unit-test** binaries holding eleven more
 readers (`selection_v6_source.rs`, `boolean_statistics_tests.rs`, and in `api`
@@ -223,13 +231,24 @@ unrun regions and no unrun line or branch: the dead `_ => false` arms of two
 same coverage instrumentation and merge its profile"): `cargo +nightly-2026-08-08
 bench -p runner --bench ratio --locked` with the same `RUSTFLAGS` and its own
 profile directory, then `llvm-cov report <the bench binary>` over the wrapper
-and `ratio.rs`. Figures: section 8. The wrapper's self-check failure arms, which
-no correct fixture reaches, are excused by name: `crates/runner/benches/ratio/fno_band.rs`
-lines 52-53 (a day refused or timed no flex) and 88 (`measure_checks` refused a
-day). In `ratio.rs` this part's two code lines run; its other unexecuted lines
-are the base's own failure arms, and its closing "ok" lines, which an
-instrumented run skips because instrumentation slows a band check past the
-100 ns budget (244 ns measured so), failing the row as it should.
+and `ratio.rs`:
+
+| File (tip `46def571`, one instrumented bench run) | Regions | Functions | Lines | Branches |
+|---|---|---|---|---|
+| `crates/runner/benches/ratio/fno_band.rs` | 118 of 123 | 6 of 6 | 57 of 60 | 2 of 4 |
+
+The wrapper's unexecuted lines and branches are its self-check failure arms,
+which no correct fixture reaches, and are excused by name:
+`crates/runner/benches/ratio/fno_band.rs` lines 52-53 and the two true arms of
+line 51's condition (a day refused, or timed no flex), and line 89 (a day
+`measure_checks` refused). The first instrumented run also left the passing
+arm of the budget's "ok" label unrun, because instrumentation slows a check
+past 100 ns (244 ns measured so); `46def571` makes that label a lookup, so no
+passing path depends on how fast a run is. In `ratio.rs` this part's code line
+(605, the row call) ran once and its `mod` line has no region; the file's other
+unexecuted lines are the base's own failure arms, and its closing "ok" lines,
+which the instrumented run skips because the budget fails there, as it
+should.
 
 Not measured by the D3 recipe file itself, which is on the Mac
 (`decisions-20261027/d3-recipe.txt`): this follows `CLOUD.md`'s statement of
@@ -239,23 +258,38 @@ Route B. The Mac's Route B re-measures.
 
 `cargo bench -p runner --bench ratio --locked` on this container (4 vCPU Intel
 Xeon at 2.10 GHz, x86_64 Linux), release bench profile, each sample holding two
-clock reads (C-FNO-BAND-01's row in `docs/04-invariants.md` carries these):
+clock reads. Two runs of the tip's binary (C-FNO-BAND-01's row in
+`docs/04-invariants.md` carries both):
 
-| Reading | Kind | p99 1x | p99 10x | p99 100x | ratio 10x / 100x | worst p99 vs 100 ns |
-|---|---|---|---|---|---|---|
-| SPEC's 5% a step | check | 85 ns | 73 ns | 74 ns | 0.858x / 0.870x | ok |
-| SPEC's 5% a step | look-back | 51 ns | 52 ns | 50 ns | 1.019x / 0.980x | ok |
-| design's 5, 3, 2 | check | 85 ns | 74 ns | 77 ns | 0.870x / 0.905x | ok |
-| design's 5, 3, 2 | look-back | 51 ns | 51 ns | 53 ns | 1.000x / 1.039x | ok |
+| Run | Reading | Kind | p99 1x | p99 10x | p99 100x | ratio 10x / 100x | worst p99 vs 100 ns |
+|---|---|---|---|---|---|---|---|
+| 1 (`aff0594a`'s code) | SPEC's 5% a step | check | 85 ns | 73 ns | 74 ns | 0.858x / 0.870x | ok |
+| 1 | SPEC's 5% a step | look-back | 51 ns | 52 ns | 50 ns | 1.019x / 0.980x | ok |
+| 1 | design's 5, 3, 2 | check | 85 ns | 74 ns | 77 ns | 0.870x / 0.905x | ok |
+| 1 | design's 5, 3, 2 | look-back | 51 ns | 51 ns | 53 ns | 1.000x / 1.039x | ok |
+| 2 (`46def571`, rebuilt) | SPEC's 5% a step | check | 63 ns | 46 ns | 60 ns | 0.730x / 0.952x | ok |
+| 2 | SPEC's 5% a step | look-back | 40 ns | 38 ns | 44 ns | 0.950x / 1.100x | ok |
+| 2 | design's 5, 3, 2 | check | 74 ns | 61 ns | 42 ns | 0.824x / 0.567x | ok |
+| 2 | design's 5, 3, 2 | look-back | 53 ns | 46 ns | 35 ns | 0.867x / 0.660x | ok |
 
-p50s were 35 to 53 ns. Maxima ranged from 183 ns to 67 µs: single interrupted
-samples, printed, and not a quantile the row judges.
+p50s were 29 to 53 ns. Maxima ranged from 183 ns to 67 µs: single interrupted
+samples, printed, and not a quantile the row judges. Run 2 exited 0 with every
+row of the crate ok.
 
-**C-R-04, a row this part does not touch,** breached on that first run here:
-5,700 floors against its budget of 5,000. Its numerator, the column build, read
-3.11 µs a bar, the same as on the base's run; its denominator, a five-pass floor
-timed once, read 546 ps against the base run's 757 ps. That is the instability
-D-0680 and D-0690 record for that floor. Section 8 holds the further runs.
+**C-R-04, a row this part does not touch,** breached on run 1: 5,700 floors
+against its budget of 5,000. Its numerator, the column build, read 3.11 µs a
+bar; its denominator, a five-pass floor timed once, read 546 ps. The same row
+read 4,113 floors on the base's code (floor 757 ps, numerator 3.11 µs), 4,845
+on a second base run, and 3,343 on the tip's run 2. That is the instability
+D-0680 and D-0690 record for that one-shot floor, not this part's code, which
+the column build never calls.
+
+**The run between 1 and 2 is not counted for the tip.** A base worktree had
+benched into this checkout's `target/` and written the same artifact name, and
+cargo reported the next tip bench fresh in 0.06 s and ran the base's binary:
+its output has no C-FNO-BAND-01 line. It is the "second base run" above. Run 2
+touched the part's sources first, and its log shows `Compiling runner` and all
+24 C-FNO-BAND-01 lines.
 
 ## 7. Decisions drafted (own block only)
 
@@ -269,9 +303,12 @@ D-0680 and D-0690 record for that floor. Section 8 holds the further runs.
 - **D-8212** — what the band refuses, the integers it keeps, the stated limits.
 - D-8213 to D-8219 unused.
 
-## 8. Results of the runs still going when this was first written
+## 8. Runs that ended after this report was first pushed
 
-(Filled in as each run ends.)
+All of them are folded into the sections above: the ledger readers (4.1), the
+re-runs of `core` and `vocab` at the final tip (4), the bench wrapper under
+instrumentation (5), and the tip's second bench run (6). Nothing is still
+running, and no figure above is an extrapolation.
 
 ## 9. Problems and findings
 
@@ -307,7 +344,9 @@ D-0680 and D-0690 record for that floor. Section 8 holds the further runs.
    output holds the C-FNO-BAND-01 lines.
 7. **Base reds, not this part's**, each reproduced on the base worktree with
    the same output: gate 27b (D-6247 twice), gate 10 (R427-11, STACK1028-03;
-   HA-02 and AG05-13 at its later stage), gate 12 (the same refusal list).
+   HA-02 and AG05-13 at its later stage), gate 12 (the same refusal list); and
+   `store`'s `cited_commits`, refusing the base's own `1a98b1e13` in
+   `docs/06-limits.md` (section 4.1).
 
 ## 10. Not done here, and why
 
