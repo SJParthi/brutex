@@ -6290,3 +6290,10 @@ mod cloud_mutant_tests {
         );
     }
 }
+
+// BASE-COV-PULL-PS2: the header variant's own line, the row-width rules at
+// their edges, a stored scope over rows no source applies, and a series stem
+// past its bound.
+#[cfg(test)]
+#[path = "gdfl_cm_ps2_tests.rs"]
+mod ps2_tests;

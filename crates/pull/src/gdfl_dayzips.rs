@@ -495,3 +495,9 @@ impl NfoSource for DayZips {
 #[cfg(test)]
 #[path = "gdfl_dayzips_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL-PS2: the census names at most its bound of each kind, and a
+// hidden folder under the root is never walked.
+#[cfg(test)]
+#[path = "gdfl_dayzips_ps2_tests.rs"]
+mod ps2_tests;

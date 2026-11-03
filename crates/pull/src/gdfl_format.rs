@@ -97,3 +97,8 @@ fn note_shape(tree: &str, day: Day, member: &str, shape: &HeaderShape, code: &st
     );
     true
 }
+
+// BASE-COV-PULL-PS2: a poisoned memory says every change, never loses one.
+#[cfg(test)]
+#[path = "gdfl_format_ps2_tests.rs"]
+mod ps2_tests;
