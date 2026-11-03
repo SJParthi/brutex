@@ -322,3 +322,251 @@ fn source_terms_foreign_resolutions_and_incomplete_populations_refuse() -> Resul
     assert!(long.validate_expression_evaluation(&reordered).is_err());
     Ok(())
 }
+
+/// An evaluation, the coordinate offsets its validation computed, and the
+/// validation digest.
+type EvaluatedFixture = (EvaluatedExpressionGridV1, Vec<Option<usize>>, [u8; 32]);
+
+/// BASE-COV-LIBS-LS2: the fixture's long resolution, its attestation over the
+/// fixture column, and an evaluation of `30 & 44` with its validation offsets.
+fn evaluated_fixture(
+    bars: &[Candle],
+    column: &Column,
+    key: &InstrumentKey,
+) -> Result<EvaluatedFixture, String> {
+    let program = expression("30 & 44")?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(key, bars)?)
+        .map_err(display)?;
+    let attested = resolved
+        .attest_training(
+            series(key, bars)?,
+            column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let run = ExpressionExecutionRunV1::new(
+        &run(key, bars, &program, Direction::Long),
+        &program,
+        bars,
+        None,
+    )?;
+    let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
+    let validated = resolved.validate_expression_evaluation(&evaluated)?;
+    let (offsets, digest) = (validated.offsets.clone(), validated.digest);
+    Ok((evaluated, offsets, digest))
+}
+
+/// THE DAILY-REFERENCE AND HOISTED-DIGEST RUN DOORS SEAL THE SAME PROGRAM
+/// IDENTITY as the plain door when their data term is the plain one, refuse a
+/// run whose data term is not theirs, and every read face of an evaluation,
+/// its validation, a disposition and a selected exit answers what it bound.
+#[test]
+fn every_run_door_and_read_face_answers_what_it_bound() -> Result<(), String> {
+    let (bars, column) = fixture()?;
+    let key = key()?;
+    let program = expression("30 & 44")?;
+    let plain = run(&key, &bars, &program, Direction::Long);
+    let sealed = ExpressionExecutionRunV1::new(&plain, &program, &bars, None)?;
+    let digests = crate::exit_grid_policy::ExecutionDigestsV1::of(&bars, None);
+    let hoisted = ExpressionExecutionRunV1::with_digests(&plain, &program, &digests)?;
+    assert_eq!(hoisted.run_id(), sealed.run_id());
+    assert_eq!(hoisted.execution_digest(), sealed.execution_digest());
+    assert_eq!(
+        sealed.execution_digest(),
+        crate::identity::data_digest(&bars)
+    );
+    let reference = DailyReferenceBinding {
+        daily_bars: &[],
+        eligibility: &[],
+        schema: 1,
+        eligibility_policy: 1,
+        gap_overlay_policy: 1,
+        excluded_ist_days: &[],
+        daily_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+        minute_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+        swept_series_calendar_policy: 1,
+    };
+    let referenced = Run {
+        data_digest: crate::identity::data_digest_with_daily_reference(&bars, &bars, reference)
+            .map_err(|why| format!("{why:?}"))?,
+        ..run(&key, &bars, &program, Direction::Long)
+    };
+    let daily = ExpressionExecutionRunV1::new_with_daily_reference(
+        &referenced,
+        &program,
+        &bars,
+        &bars,
+        &bars,
+        reference,
+    )?;
+    assert_eq!(daily.program(), &program);
+    assert_ne!(
+        daily.run_id(),
+        sealed.run_id(),
+        "the reference is in the data term"
+    );
+    assert!(
+        ExpressionExecutionRunV1::new_with_daily_reference(
+            &plain, &program, &bars, &bars, &bars, reference
+        )
+        .is_err(),
+        "the plain data term is not the referenced one"
+    );
+
+    let (evaluated, offsets, digest) = evaluated_fixture(&bars, &column, &key)?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    assert_eq!(evaluated.resolution_digest(), resolved.digest());
+    assert_eq!(evaluated.horizon(), Horizon::bars(5).ok_or("horizon")?);
+    assert_eq!(evaluated.side(), crate::excursion::Side::Long);
+    assert_eq!(
+        evaluated.column_digest(),
+        crate::exit_grid_policy::column_digest_v1(&column)
+    );
+    let validated = ValidatedExpressionGridV1 {
+        evaluated: &evaluated,
+        digest,
+        offsets: offsets.clone(),
+    };
+    assert!(core::ptr::eq(
+        validated.evaluation(),
+        core::ptr::from_ref(&evaluated)
+    ));
+    let selected = evaluated
+        .grid()
+        .cells
+        .iter()
+        .find_map(|cell| {
+            resolved
+                .classify_expression_coordinate(&validated, Chosen::from_cell(cell))
+                .ok()?
+                .selected()
+                .cloned()
+        })
+        .ok_or("the fixture admits a coordinate")?;
+    let disposition = resolved.classify_expression_coordinate(&validated, selected.coordinate())?;
+    assert_eq!(disposition.coordinate(), selected.coordinate());
+    assert_eq!(disposition.digest(), selected.digest());
+    assert_eq!(
+        Chosen::from_cell(selected.training_cell()),
+        selected.coordinate()
+    );
+    Ok(())
+}
+
+/// EVERY EXPRESSION DOOR REFUSES AN EVALUATION THAT IS NOT ITS OWN: one of the
+/// other side, of another resolution, with its cells out of canonical order,
+/// or replayed under another attestation's horizon, column or evaluator.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one refusal per door and per moved input, read as one list"
+)]
+fn every_expression_door_refuses_an_evaluation_that_is_not_its_own() -> Result<(), String> {
+    let (bars, column) = fixture()?;
+    let key = key()?;
+    let (evaluated, offsets, digest) = evaluated_fixture(&bars, &column, &key)?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let mut other_side = evaluated.clone();
+    other_side.side = crate::excursion::Side::Short;
+    assert!(
+        resolved
+            .validate_expression_evaluation(&other_side)
+            .is_err()
+    );
+    let around = |moved: &EvaluatedExpressionGridV1| -> Result<Vec<TradeRow>, String> {
+        let validated = ValidatedExpressionGridV1 {
+            evaluated: moved,
+            digest,
+            offsets: offsets.clone(),
+        };
+        resolved.materialize_expression_coordinate(&attested, &validated, 0)
+    };
+    assert!(around(&evaluated).is_ok());
+    let first = Chosen::from_cell(evaluated.grid().cells.first().ok_or("cells")?);
+    let mut foreign = evaluated.clone();
+    foreign.resolution[0] ^= 1;
+    let foreign_validated = ValidatedExpressionGridV1 {
+        evaluated: &foreign,
+        digest,
+        offsets: offsets.clone(),
+    };
+    assert!(
+        resolved
+            .classify_expression_coordinate(&foreign_validated, first)
+            .is_err()
+    );
+    let mut reordered = evaluated.clone();
+    reordered.grid.cells.swap(0, 1);
+    let reordered_validated = ValidatedExpressionGridV1 {
+        evaluated: &reordered,
+        digest,
+        offsets: offsets.clone(),
+    };
+    assert_eq!(
+        resolved
+            .classify_expression_coordinate(&reordered_validated, first)
+            .map(|_| ()),
+        Err("expression coordinate ordinal changed".to_owned())
+    );
+    let mut horizon = evaluated.clone();
+    horizon.horizon = Horizon::bars(6).ok_or("horizon")?;
+    let mut column_digest = evaluated.clone();
+    column_digest.column_digest[0] ^= 1;
+    let mut evaluator = Evaluator::with_calendar(
+        Widths::pinned().map_err(display)?,
+        indicators::vwap::Availability::Present,
+        indicators::pattern::Thresholds::CLASSICAL,
+        Calendar::all_regular(),
+    );
+    let present = Column::build(&bars, &mut evaluator);
+    let mut spec = evaluated.clone();
+    spec.evaluation_spec = present
+        .evaluation_spec_token()
+        .ok_or("a built column has a spec")?;
+    // An attestation of the other side's resolution, with this evaluation.
+    let short = policy(crate::excursion::Side::Short)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let short_attested = short
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let own = ValidatedExpressionGridV1 {
+        evaluated: &evaluated,
+        digest,
+        offsets: offsets.clone(),
+    };
+    assert_eq!(
+        resolved.materialize_expression_coordinate(&short_attested, &own, 0),
+        Err("expression replay does not match authenticated training inputs".to_owned()),
+        "another resolution's attestation"
+    );
+    for (what, moved) in [
+        ("another resolution", &foreign),
+        ("another horizon", &horizon),
+        ("another column", &column_digest),
+        ("another evaluator", &spec),
+    ] {
+        assert_eq!(
+            around(moved),
+            Err("expression replay does not match authenticated training inputs".to_owned()),
+            "{what}"
+        );
+    }
+    Ok(())
+}
