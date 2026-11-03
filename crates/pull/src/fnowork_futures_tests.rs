@@ -151,13 +151,19 @@ fn january_reply(url: &str) -> Result<String, Refusal> {
 }
 
 /// February, after the token was reused for April.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a reply double has the transport's own type; every token it is asked for answers"
+)]
 fn february_reply(url: &str) -> Result<String, Refusal> {
     let (token, continuous) = token_of(url);
     let base = match (token, continuous) {
         (8_000_001, false) => 4_000,
         (8_000_002, false) => 5_000,
         (8_000_002, true) => 6_000,
-        _ => return Err(Refusal::answered(400, "InputException".to_owned())),
+        // Asked only for the two February tokens: any other is the test's own
+        // failure (BASE-COV-PULL-PS2).
+        _ => unreachable!("february_reply asked for {url}"),
     };
     let candles: Vec<String> = (2..=6)
         .map(|d| candle(day(2026, 2, d), 130, base + u64::from(d)))

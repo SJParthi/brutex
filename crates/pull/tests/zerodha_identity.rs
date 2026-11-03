@@ -2076,3 +2076,21 @@ fn with_no_master_that_checks_every_share_is_labelled_so_and_a_warn_says_the_rul
     assert_eq!(passed.len(), 1, "{said:?}");
     assert!(passed[0].contains("\"in_use\":\"none\""), "{}", passed[0]);
 }
+
+/// PS2-ZI-01: the fixture's sessions are the days the calendar of record opens:
+/// a weekend holds none; and a month never written reads as no bars, never as
+/// a refusal.
+#[test]
+fn the_fixture_reads_a_weekend_and_an_unwritten_month_as_empty() {
+    let saturday = Day::new(2024, 4, 20).unwrap();
+    let sunday = Day::new(2024, 4, 21).unwrap();
+    assert!(sessions(saturday, sunday).is_empty());
+    assert_eq!(
+        sessions(sunday, Day::new(2024, 4, 22).unwrap()).len(),
+        1,
+        "Monday"
+    );
+    let root = std::env::temp_dir().join(format!("brutex-ps2-identity-{}", std::process::id()));
+    assert!(cash_month(&root, "ZZSHARE", Timeframe::MINUTE_1, (2024, 4)).is_empty());
+    assert!(!root.exists(), "a reader makes nothing");
+}

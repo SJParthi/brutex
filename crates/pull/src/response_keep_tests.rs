@@ -2826,6 +2826,7 @@ fn refused_rows_whose_file_is_gone_are_damage() {
         Ok(Vec::new())
     );
     assert!(!dir.exists(), "a reader makes nothing");
+    assert!(files_under(&dir).is_empty());
 }
 
 /// PS2-RK-08: a directory at the pack lock's name refuses the append by name
