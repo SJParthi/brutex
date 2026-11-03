@@ -98,3 +98,116 @@ NEXT: cheap tests for the open rows the #1 figures show; stable gates; the final
 - **The code is frozen at `2b998e4b`. The final Route B started at 21:10:33 IST** on it (worktree /home/user/deep-ls2 moved to it, new empty profile folder /home/user/ls2-prof/2b998e4b5f6e-1-B; build rc 0 in under a minute, 33 artifacts, 10 reused, 17 test objects; set file `deep-BASE-COV-LIBS-LS2-2b998e4b5f6e-set.txt.md` in this folder: 74 coverage files whole and 713 mutants lines of this shard's own diff, for the deferred mutants pass).
 
 NEXT: the final Route B's figures; the final lists from them; this report's final section and the fix json.
+
+### 2026-11-03 22:55 IST the final Route B at `2b998e4b` done
+`ROUTE-B DONE 2026-11-03 22:40:40 IST WITH NOT PROVED lines above`, exit 3. NOT PROVED is only `crates/runner/benches/ratio.rs`, as in every run. The figures and the lists are in the final summary below. Reading the final rows gave one more (U) proof: validate.rs 2863, the OOS execution series of a V4 fold, which has the same shape as 2600. The final `gaps-LS2.txt.md` and `fu-LS2.txt.md` replace the interim ones.
+
+NEXT: none in this session. The open rows, the operator's rulings and the Mac items are listed below.
+
+## Final summary (2026-11-03 22:55 IST)
+
+**Outcome.** Shard LS2 (crate `runner`) is not at the bar. By Route B on the pinned nightly, runner went from lines 46145/47136 and branches 3349/4218 at START (`4f49dbf43e79`, 991 uncovered lines and 869 uncovered branch sides) to lines 50775/51110 and branches 3711/4170 at code tip `2b998e4b5f6e` (335 and 459 uncovered). Of the 540 uncovered rows that are not (F): 224 are (U) with a proof from the code, 36 need an allocator refusal or an address-space-sized input, 5 need a blake3 collision, 24 are believed unreachable without a proof claimed, and **251 are open** (68 in production code, 183 in test code or read by hand). Every gate is green on stable. Line 1 is `STATUS: IN PROGRESS` because reachable rows remain; the operator items are listed under NEEDS THE MAC and in the decision drafts.
+
+### What I did
+- Step 1: made attempt 4's lib tests compile (one call to a method that does not exist) and ran them green.
+- Measured runner whole by Route B at START, classified every uncovered row ((F) by rule; the rest by hand), and closed rows file by file with tests that drive each input and assert its behaviour: 99 new tests and a handful of strengthened existing ones, every new test shown red under a hand change of the rule it pins (corrections recorded above).
+- Wrote a (U) proof from the code for each row I could prove unreachable on aarch64-apple-darwin (none depends on the target), and listed the rest for the operator with the reason.
+- Replaced test-fixture fallbacks that never ran (each an uncovered test-code region) with `expect` where the module already allows it.
+- Measured the final code tip by Route B and wrote the lists from those figures.
+
+### Files (all under `crates/runner/`; production lines untouched)
+Changed: `src/admission.rs`, `src/audit.rs`, `src/bootstrap.rs`, `src/bootstrap_zero_v2_tests.rs`, `src/excursion.rs`, `src/exit_grid_policy.rs`, `src/expression.rs`, `src/expression_execution_tests.rs`, `src/expression_oos_tests.rs`, `src/expression_validation_tests.rs`, `src/grid.rs`, `src/grid_cover_tests.rs`, `src/outcome.rs`, `src/pbo.rs`, `src/rank.rs`, `src/report.rs`, `src/report_cover_tests.rs`, `src/resample.rs`, `src/research_admission_projection.rs`, `src/research_exit_grid_tests.rs`, `src/signal_candle_stop_tests.rs`, `src/significance_cover_tests.rs`, `src/topn.rs`, `src/trade.rs`, `src/validate.rs`, `tests/expression_pricing.rs`, `tests/foreign_slice_deadline_readiness.rs`, `tests/research_family_readiness.rs`. Added: `src/validate_cover_tests.rs` (declared in validate.rs), `tests/checkpointed_rank_refusals.rs`, `tests/population_door_halt.rs`, `tests/auto_probe_reporter_refusal.rs`. In production files only test modules, `#[cfg(test)]` helpers and test-module declarations changed: validate.rs's test fixtures `evaluator()`, `exact_grid_policy_v4()`, `sweeper()`, `h()`, `anchored_*_fixture_*` and `admission_*_v2` became `pub(super)`/`pub(crate)` for the cover module, and exit_grid_policy.rs gained the `#[cfg(test)] pub(crate) mod resolution_tamper`. Nothing outside `crates/runner/` and `reports/base-cloud-20261103/` changed; `crates/runner/src/lib.rs` (LSA's) is untouched: its public paths are tested from `tests/`, and three red checks edited it locally and restored it byte for byte (`cmp`), never committed.
+
+### Tests added, by name (99)
+- `crates/runner/src/admission.rs` (2): `an_evidence_record_names_each_malformed_probability_field`, `an_evidence_record_whose_authority_slot_is_not_its_projection_is_refused`
+- `crates/runner/src/audit.rs` (8): `the_integer_renderers_sign_negatives_and_group_lakhs_and_crores`, `a_trail_only_cell_is_named_by_its_trail_and_not_as_the_baseline`, `a_grid_with_refused_paths_prints_the_count_and_why`, `a_refused_walk_forward_prints_its_reason_and_no_fold`, `an_empty_exit_grid_renders_no_strategy_report`, `the_marked_rows_below_the_cut_keep_key_order_when_best_comes_first`, `an_overnight_from_a_close_at_or_below_zero_is_not_measured`, `an_upward_traded_overnight_is_signed_with_a_plus`
+- `crates/runner/src/bootstrap.rs` (3): `a_draw_below_zero_answers_zero_without_advancing_the_stream`, `an_empty_series_summarises_to_nothing`, `zero_draws_reject_nothing_at_the_legacy_door`
+- `crates/runner/src/excursion.rs` (3): `a_stepped_ladder_refuses_a_step_or_count_it_cannot_use`, `a_ladder_of_zero_rungs_is_refused_from_any_sample`, `a_torn_pair_of_running_extremes_reads_as_nothing_walked`
+- `crates/runner/src/exit_grid_policy.rs` (20): `a_training_series_of_another_length_cannot_be_attested`, `a_coordinate_visit_stops_where_its_visitor_refuses`, `every_replay_door_refusal_names_its_cause`, `every_tear_of_a_replayed_universe_fails_its_integrity_gate`, `an_evaluation_and_its_validation_read_back_what_they_bind`, `every_input_validator_refuses_by_name`, `a_replay_run_of_another_feed_is_refused`, `every_selector_picks_a_policy_admitted_coordinate`, `a_resolution_past_its_axis_limit_is_refused_by_name`, `a_grid_view_refuses_what_is_not_its_population`, `a_percentile_over_zero_or_above_one_is_refused_by_name`, `an_index_segment_key_of_a_non_index_kind_is_refused`, `a_resolution_resealed_over_a_foreign_policy_digest_is_torn`, `an_evaluation_of_the_other_side_is_refused_by_selection_and_validation`, `floor_and_ceiling_resolution_round_a_fractional_ppm_apart`, `the_column_codec_tags_an_absent_spec_and_acceptance_with_zero`, `a_short_resolution_mints_a_short_witness_whose_direction_is_sealed`, `a_missing_minute_inside_an_oos_hold_refuses_the_one_cell_replay`, `the_one_cell_replay_refuses_a_stream_past_either_quality_ceiling`, `under_a_required_forced_stop_the_replay_door_admits_only_that_stop`
+- `crates/runner/src/expression_execution_tests.rs` (2): `every_run_door_and_read_face_answers_what_it_bound`, `every_expression_door_refuses_an_evaluation_that_is_not_its_own`
+- `crates/runner/src/expression_validation_tests.rs` (3): `every_fixed_training_authority_refusal_names_its_cause`, `a_later_day_whose_every_bar_is_refused_is_not_an_actual_session`, `a_projection_whose_folds_break_the_count_hierarchy_is_refused`
+- `crates/runner/src/grid_cover_tests.rs` (7): `a_target_ladder_past_the_cell_budget_is_thinned_by_even_stride`, `the_convenience_doors_give_the_hoisted_doors_answers`, `a_replayed_price_and_candidate_read_back_their_fields`, `every_replay_reconciliation_a_candidate_can_break_is_refused`, `a_cell_naming_no_trades_never_clears_even_the_lowest_thresholds`, `an_empty_grid_materializes_no_rows`, `a_stepped_grid_steps_its_own_stops_and_merges_the_forced_level`
+- `crates/runner/src/outcome.rs` (4): `same_day_answers_for_two_existing_bars`, `worst_reward_risk_answers_zero_for_a_ratio_it_cannot_state`, `payoff_names_each_ratio_it_cannot_divide`, `path_ratio_answers_zero_with_no_hits_and_saturates_past_its_bound`
+- `crates/runner/src/pbo.rs` (1): `a_rank_past_the_last_place_has_no_relative_placement`
+- `crates/runner/src/report_cover_tests.rs` (2): `an_unmeasured_exclusion_says_not_measured_and_names_its_reason`, `a_plain_run_halted_by_its_workers_names_them`
+- `crates/runner/src/research_admission_projection.rs` (1): `a_search_ceiling_caps_each_family_probability_and_nothing_else`
+- `crates/runner/src/signal_candle_stop_tests.rs` (8): `a_stop_exit_record_that_breaks_one_rule_is_refused`, `a_forced_close_record_that_breaks_one_rule_is_refused`, `an_event_record_that_breaks_one_disposition_rule_is_refused`, `a_period_record_that_breaks_one_count_rule_is_refused`, `a_metrics_record_that_breaks_one_accounting_rule_is_refused`, `an_undirected_run_id_and_an_unknown_timeframe_are_refused_by_scope`, `a_signal_side_that_is_empty_unsorted_or_unlike_its_rows_is_refused`, `an_execution_side_that_is_empty_unsorted_or_not_its_context_is_refused`
+- `crates/runner/src/significance_cover_tests.rs` (1): `a_fraction_that_never_converges_answers_nan_rather_than_a_number`
+- `crates/runner/src/trade.rs` (7): `an_accepted_exit_below_one_tick_holds_the_window_unpriced`, `an_entry_open_below_one_tick_is_not_held_when_its_exit_cannot_fill`, `a_blocked_entry_with_no_square_off_is_counted_while_open_and_recorded_nowhere`, `a_signal_whose_next_minute_is_the_next_day_is_not_entered`, `with_no_measured_cadence_no_signal_is_entered`, `a_range_or_entry_outside_the_slice_facts_is_answered_no`, `an_accepted_bar_off_the_whole_minute_is_not_accepted_by_the_slice_facts`
+- `crates/runner/src/validate_cover_tests.rs` (24): `a_v2_refusal_converts_to_the_same_v3_refusal`, `the_v4_walk_reads_back_its_folds_and_grid_identity`, `every_v2_seal_and_provenance_crosswire_is_refused_by_name`, `every_v3_seal_and_provenance_crosswire_is_refused_by_name`, `every_v4_seal_fold_candidate_and_choice_crosswire_is_refused_by_name`, `an_undecided_v4_fold_is_refused_for_each_visible_trace_of_a_choice`, `a_captured_fold_refuses_every_family_and_provenance_crosswire`, `a_choice_that_is_not_its_candidates_or_not_the_best_does_not_match`, `a_refused_fold_is_retained_and_answered_by_finish`, `a_trailing_take_profit_reads_its_two_rungs_and_refuses_one_past_the_ladder`, `each_signal_length_names_its_label_and_no_other_length_does`, `a_signal_column_that_does_not_cover_its_series_is_refused_by_shape`, `a_prepared_prefix_that_is_not_the_full_columns_prefix_is_refused`, `a_fold_that_cannot_be_projected_is_refused_by_name`, `the_search_doors_refuse_zero_rungs_and_a_coarse_execution_path`, `a_grid_pair_of_two_sources_or_the_wrong_side_is_refused_by_name`, `a_torn_or_resealed_grid_pair_is_refused_by_name`, `the_v4_walk_refuses_no_fold_a_halted_search_and_an_empty_training_execution`, `a_fold_whose_horizon_spans_the_rest_of_the_series_is_refused`, `a_zero_rung_environment_refuses_the_legacy_walk_by_name`, `a_signal_timeframe_without_positive_duration_is_refused_before_any_fold`, `a_fold_whose_test_window_starts_past_the_series_is_skipped`, `a_builder_column_of_other_bars_is_refused_at_the_fold_projection`, `a_builder_refusing_the_out_of_sample_prefix_ends_the_walk_with_its_reason`
+- `crates/runner/tests/auto_probe_reporter_refusal.rs` (1): `a_reporter_that_refuses_a_level_ends_the_auto_search_with_its_reason`
+- `crates/runner/tests/checkpointed_rank_refusals.rs` (1): `a_restored_sweep_out_of_sequence_or_over_a_projected_column_is_refused`
+- `crates/runner/tests/population_door_halt.rs` (1): `a_halted_population_streams_unknown_closures_and_is_not_complete`
+
+### Gates (stable `rustc 1.97.1 (8bab26f4f 2026-07-14)` unless named)
+At code tip `2b998e4b` (CARGO_TARGET_DIR=/home/user/tgt-ls2, TMPDIR=/dev/shm/ls2-tmp, log `stable-test-2b998e4b.log` in the scratchpad):
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy -p runner --all-targets --locked -- -D warnings`: exit 0.
+- `cargo test -p runner --locked --no-fail-fast`: exit 0 in 5 min; 18 result lines, 956 passed, 0 failed, 0 ignored; lib `test result: ok. 896 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 125.40s`.
+- `cargo test -p vocab --locked --test no_py_language` (the forbidden-language scan of every tracked file, run with these reports staged): `test result: ok. 9 passed; 0 failed`.
+- Every line the shard's diff adds, changes or deletes in the 16 production files under `crates/runner/src/` lies inside test code (a `#[cfg(test)]` item or a `#[test]` fn) at the tip and at START, except seven blank separator lines; checked by a scratch lexer over `git diff -U0 bd04fb299d23 2b998e4b`. `crates/runner/src/lib.rs` is unchanged.
+- Not run: `cargo deny check` (this shard changes no `Cargo.toml`, `Cargo.lock` or dependency), the workspace-wide clippy and test (only `runner` changed), and mutants (deferred, operator 30 Oct).
+- Each new test was shown red under a hand change of the rule it pins (the progress entries above give the change and the count per batch); the file was restored and compared byte for byte (`cmp`) each time.
+
+### Coverage (Route B)
+- **START**, `4f49dbf43e79` (START `bd04fb299d23` plus the one-line compile fix): lines 46145/47136 (991 uncovered), branches 3349/4218 (869 uncovered).
+- **Interim**, Route B #1 at `e81f0aa6`: lines 49901/50358 (457 uncovered), branches 3709/4232 (523 uncovered).
+- **Final, at code tip `2b998e4b`: lines 50775/51110 (335 uncovered), branches 3711/4170 (459 uncovered)**, 73 of 74 set files read. NOT PROVED: only `crates/runner/benches/ratio.rs`, as at START (its `[[bench]]` target is `test = false`, so no test object reads it; operator item L-BCL-1). Log: `ROUTE-B DONE 2026-11-03 22:40:40 IST WITH NOT PROVED lines above`, exit 3; build rc 0 (33 artifacts, 10 reused, 17 test objects); `== test runner rc=0 END 2026-11-03 22:40:04 IST (89 min); tests passed 956 failed 0 ignored 0`; 18 profraw files merged.
+- Against START: 656 fewer uncovered lines and 410 fewer uncovered branch sides. The line total grew (51110 against 47136) because the new tests are measured too. The branch total fell (4170 against 4218), mostly because test-fixture fallbacks that never ran (`if let Some(..)`, `let .. else`) became `expect`.
+- **Rows:** 794 uncovered lines and sides. 254 are (F): the failing arm of an assertion in test code. The other 540 are 224 [U] (a proof from the code, in `fu-LS2.txt.md`), 36 [FAULT], 5 [HASH], 24 [UNPROVEN] and 251 [open] (68 production, 183 test code or read by hand).
+- Open production rows by file: validate.rs 34, grid.rs 33, lib.rs 1. exit_grid_policy.rs, trade.rs and every other production file have none.
+- Per-file figures: the PER FILE table at the head of `gaps-LS2.txt.md`. Every row is listed there with its tag; the (F) rows and the (U) proofs are in `fu-LS2.txt.md`.
+
+### Benches
+None run, and none owed by this shard: every change is test code or a test-only declaration, so no route or operation gained work, and no p50/p99 is claimed. (`crates/runner/benches/ratio.rs` is not built by `cargo test` at all: its `[[bench]]` target is `test = false`, operator item L-BCL-1.)
+
+### Extreme cases
+The operator's rule asks for at least 8 extreme cases per tested file, 2 of them combined and 1 out of the box. I did not audit that count per file in this session. What I can state: each new test drives refusal or boundary inputs (out-of-slice indices, empty and reversed ranges, sub-tick and non-positive prices, NaN and overflowing statistics, torn and resealed records, a horizon spanning the series, a midnight-crossing minute, zero draws and zero splits), several combine two at once (a blocked entry with no square-off; a resealed side over a foreign training span), and the counts per file are the tests listed above (one test usually holds several cases).
+
+### Decision drafts (my ids only; LSA writes the docs entries)
+- **D-8562 (draft).** BASE-COV-LIBS shard LS2, crate `runner`, whole-crate coverage (operator decision D2, part A) measured by Route B (`d3-route-b-cloud.sh`: pinned nightly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)` with its own `llvm-profdata` and `llvm-cov`, LLVM 23.1.0-rust-1.99.0-nightly, `-C instrument-coverage -Z coverage-options=branch`, opt-level 0) on a Linux x86_64 cloud host. Before, at `4f49dbf43e79` (START `bd04fb299d23` plus a one-line compile fix): lines 46145/47136, branches 3349/4218. After, at `2b998e4b5f6e`: lines 50775/51110, branches 3711/4170. Lists: `reports/base-cloud-20261103/gaps-LS2.txt.md` (every remaining row, tagged) and `fu-LS2.txt.md` ((F) rows and (U) proofs). The bar is not met (251 open rows), so D-7250's narrow reading does not end for runner on these figures. Mutants deferred (operator 30 Oct); the set file with this shard's D2 mutants lines is `deep-BASE-COV-LIBS-LS2-2b998e4b5f6e-set.txt.md`.
+- **D-8563 (draft, needs the operator).** Rows no test can reach without a failing allocator, an address-space-sized input or a hash collision: the `try_reserve_exact` refusal closures and the 2^32-rung overflow `?`s ([FAULT] in gaps-LS2), signal_candle_stop.rs:939, and validate.rs:3070 ([HASH]: a Long and a Short resolution with equal digests). Proposal: either a `#[cfg(test)]` allocation-refusal seam at each site, as engine did under D-7329 (limit row L-BCL-4), so the closures run in a test, or an operator ruling that these rows count as unreachable with the stated reasons; and for [HASH], a ruling that a collision-only row counts as unreachable. Also for a ruling: the [UNPROVEN] rows (believed unreachable, proof not completed here).
+
+### NEEDS THE MAC
+- Route B on the Mac's pin for runner (these figures are from the same pinned nightly on x86_64 Linux); runner has no `cfg(target_os)`, `cfg(unix)` or pointer-width code, so no macOS-only line is expected, but none is claimed.
+- The non-root 14-core run of the runner tests (this host is root with 4 cores; all 956 stable tests and all 956 instrumented tests passed here, so no host red is claimed).
+- Ignored real-data tests (L-BCL-3): runner has none (`#[ignore]` appears nowhere in crates/runner; 0 ignored in every run).
+- The D1 landing, and the deferred mutants pass over the set file (append its line to `d3-mutants-deferred.txt` on the Mac).
+
+### Not done
+- **The bar is not met: 251 rows are open.** They are reachable, or not yet classified.
+  - Production, 68 rows.
+    - validate.rs, 34 rows:
+      - the V4 walk's fold with no selection (2795, 2839; tried with zero quality ceilings, but the premise failed);
+      - an incomplete training sweep that did not halt (2621);
+      - a refused OOS replay and a candidate with no OOS outcome (2904, 2910);
+      - the family reconciliation of the candidates (2949-2952);
+      - an execution window past the series (3529);
+      - the legacy walk's non-monotonic execution cursors (4633-4636, 4996-5002);
+      - a candidate whose cell has no trades (4850-4851);
+      - a chosen candidate without its side (4971-4976);
+      - the OOS projection refusal (5016-5018);
+      - the empty mask's walk start (5091-5092);
+      - an admission capture that refuses a fold (5202-5204).
+    - grid.rs, 33 rows:
+      - the money-envelope refusal (2383-2384);
+      - the cell-count mismatch (2702-2708);
+      - the expression walk's `?`s (2095, 3088);
+      - one replay's impossible quality counts (3620);
+      - out-of-slice fill offsets (4915-4924, 5002-5006);
+      - a trail crossing with no anchor (4990, 5145);
+      - the tie order of two trailing orders (5266);
+      - an exit level with no stop or target (5316, 5323);
+      - a resting level outside its bar (5483-5486);
+      - a win that is not positive under the worst reading (4748).
+    - lib.rs, 1 row: the auto probe's found-level branch (1105:24 False). A flat-bars attempt did not reach it.
+  - Test code, 183 rows: mostly fixture fallbacks and helper arms that never run, listed by line in `gaps-LS2.txt.md`. Many have the pattern this shard already made loud elsewhere.
+- **Rows for the operator's ruling** (D-8563): 36 [FAULT], 5 [HASH], 24 [UNPROVEN].
+- **Mutants:** deferred (operator 30 Oct). The set file `deep-BASE-COV-LIBS-LS2-2b998e4b5f6e-set.txt.md` carries this shard's 713 D2 mutants lines.
+- **Extreme cases:** the per-file count was not audited.
+- **Not run:** `cargo deny check`, and the workspace-wide clippy and test. This shard changes no dependency, and only `runner` changed.
+
+### Host notes
+- Linux x86_64, 4 cores, root; no disk pressure (27 to 29 GiB free throughout).
+- My manual `cargo check`/`fmt` commands used the default target dir `/home/user/brutex/target` (36 MB) besides the one CARGO_TARGET_DIR `/home/user/tgt-ls2` the gates and Route B used; I removed it at 21:21 IST; it was created at 16:55 IST by those commands, is gitignored and held build output only.
+- Worktrees I created: `/home/user/deep-ls2` (Route B) and `/home/user/dev-ls2` (the stopped unofficial run). Profile folders left unused: `/home/user/ls2-prof/4cf93ce8b49e-1-B` (Route B #2, stopped) and `/home/user/ls2-prof/dev-1515` (the stopped instrumented lib run).

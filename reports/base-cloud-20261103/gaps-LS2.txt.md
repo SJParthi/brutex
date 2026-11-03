@@ -1,14 +1,14 @@
 # gaps-LS2.txt.md: runner coverage gaps by Route B
 
-Shard BASE-COV-LIBS-LS2 (crate runner). INTERIM: these lists are from Route B #1 at code tip e81f0aa6 (18:49-20:20 IST); code committed after it is not measured here, and the final lists replace these after the final Route B.
+Shard BASE-COV-LIBS-LS2 (crate runner). FINAL: these lists are from the final Route B at code tip 2b998e4b (21:10-22:40 IST), which measures every code commit of this shard.
 One fenced block below holds the list.
 
 `````text
-Route B (d3-route-b-cloud.sh, pinned nightly rustc 1.99.0-nightly (1a98b1e13 2026-08-07), LLVM 23.1.0-rust-1.99.0-nightly) on tip e81f0aa6f41159fc9a155c9deb249fa2798daf2e, set reading whole:runner.
-Log: /tmp/claude-0/-home-user-brutex/b3671350-4320-59ae-92c2-fdf03932a703/scratchpad/logs/e81f0aa6f411-routeb.log (ROUTE-B DONE 2026-11-03 20:20:17 IST; tests passed 931 failed 0 ignored 0)
-TOTAL runner: lines 49901/50358 (uncovered 457), branches 3709/4232 (uncovered 523), files read 70; NOT READ: crates/runner/benches/ratio.rs ([[bench]] test = false: no test object; L-BCL-1).
-Rows: 980 uncovered lines and branch sides = 241 (F) (in fu-LS2.txt.md) + 739 others below.
-Of the 739: [U] 218 (proof in fu-LS2.txt.md), [FAULT] 32 (allocator or address-space bound, operator ruling), [HASH] 5 (a blake3 collision only, operator ruling), [UNPROVEN] 8 (believed unreachable, no proof claimed), [open] 476 (171 production, 305 test code or hand-read; not closed in this session).
+Route B (d3-route-b-cloud.sh, pinned nightly rustc 1.99.0-nightly (1a98b1e13 2026-08-07), LLVM 23.1.0-rust-1.99.0-nightly) on tip 2b998e4b5f6e4cc77ab8bd32de00ba8a4d165f0b, set reading whole:runner.
+Log: /tmp/claude-0/-home-user-brutex/b3671350-4320-59ae-92c2-fdf03932a703/scratchpad/logs/2b998e4b5f6e-routeb.log (ROUTE-B DONE 2026-11-03 22:40:40 IST; tests passed 956 failed 0 ignored 0)
+TOTAL runner: lines 50775/51110 (uncovered 335), branches 3711/4170 (uncovered 459), files read 73; NOT READ: crates/runner/benches/ratio.rs ([[bench]] test = false: no test object; L-BCL-1).
+Rows: 794 uncovered lines and branch sides = 254 (F) (in fu-LS2.txt.md) + 540 others below.
+Of the 540: [U] 224 (proof in fu-LS2.txt.md), [FAULT] 36 (allocator or address-space bound, operator ruling), [HASH] 5 (a blake3 collision only, operator ruling), [UNPROVEN] 24 (believed unreachable, no proof claimed), [open] 251 (68 production, 183 test code or hand-read; not closed in this session).
 
 PER FILE (lines a/b, branches c/d)
   crates/runner/src/admission_reader_cover_tests.rs lines 445/445 branches 6/8  GAPS
@@ -20,38 +20,38 @@ PER FILE (lines a/b, branches c/d)
   crates/runner/src/bootstrap_family_pass.rs lines 269/269 branches 35/36  GAPS
   crates/runner/src/bootstrap_zero_v2_tests.rs lines 426/426 branches 20/20
   crates/runner/src/bootstrap_zero_v2.rs lines 323/324 branches 48/50  GAPS
-  crates/runner/src/bootstrap.rs lines 1787/1811 branches 161/188  GAPS
+  crates/runner/src/bootstrap.rs lines 1790/1814 branches 160/186  GAPS
   crates/runner/src/bound.rs lines 228/228 branches 14/14
   crates/runner/src/closed.rs lines 146/146 branches 10/10
   crates/runner/src/excursion_clock_tests.rs lines 89/89 branches 8/8
   crates/runner/src/excursion.rs lines 1130/1138 branches 110/120  GAPS
   crates/runner/src/exit_grid_policy_cover_tests.rs lines 90/90 branches 0/0
-  crates/runner/src/exit_grid_policy.rs lines 5406/5488 branches 345/430  GAPS
-  crates/runner/src/expression_execution_tests.rs lines 461/468 branches 1/2  GAPS
+  crates/runner/src/exit_grid_policy.rs lines 5738/5777 branches 323/366  GAPS
+  crates/runner/src/expression_execution_tests.rs lines 465/468 branches 1/2  GAPS
   crates/runner/src/expression_execution.rs lines 333/335 branches 29/30  GAPS
-  crates/runner/src/expression_oos_tests.rs lines 394/403 branches 6/6  GAPS
+  crates/runner/src/expression_oos_tests.rs lines 400/400 branches 6/6
   crates/runner/src/expression_oos.rs lines 250/252 branches 19/20  GAPS
   crates/runner/src/expression_validation_codec.rs lines 194/194 branches 24/24
-  crates/runner/src/expression_validation_tests.rs lines 656/673 branches 9/12  GAPS
+  crates/runner/src/expression_validation_tests.rs lines 672/677 branches 9/12  GAPS
   crates/runner/src/expression_validation.rs lines 401/404 branches 81/90  GAPS
   crates/runner/src/expression.rs lines 212/212 branches 6/6
   crates/runner/src/family_allocation_v1_tests.rs lines 71/71 branches 0/0
   crates/runner/src/family_allocation_v1.rs lines 112/112 branches 16/16
-  crates/runner/src/grid_cover_tests.rs lines 383/383 branches 2/4  GAPS
-  crates/runner/src/grid.rs lines 5087/5177 branches 341/382  GAPS
+  crates/runner/src/grid_cover_tests.rs lines 442/442 branches 2/4  GAPS
+  crates/runner/src/grid.rs lines 5091/5177 branches 343/382  GAPS
   crates/runner/src/identity.rs lines 657/657 branches 21/22  GAPS
-  crates/runner/src/lib.rs lines 952/957 branches 56/66  GAPS
-  crates/runner/src/outcome.rs lines 2302/2316 branches 277/326  GAPS
+  crates/runner/src/lib.rs lines 956/957 branches 64/66  GAPS
+  crates/runner/src/outcome.rs lines 2320/2334 branches 271/314  GAPS
   crates/runner/src/pbo.rs lines 265/265 branches 34/34
   crates/runner/src/portfolio.rs lines 750/750 branches 61/64  GAPS
   crates/runner/src/rank.rs lines 707/709 branches 14/14  GAPS
   crates/runner/src/replay_mask.rs lines 136/136 branches 14/14
   crates/runner/src/report_cover_tests.rs lines 194/194 branches 8/12  GAPS
   crates/runner/src/report.rs lines 996/996 branches 62/66  GAPS
-  crates/runner/src/resample.rs lines 405/405 branches 26/34  GAPS
+  crates/runner/src/resample.rs lines 414/414 branches 23/28  GAPS
   crates/runner/src/research_admission_projection_codec.rs lines 27/27 branches 6/6
   crates/runner/src/research_admission_projection.rs lines 139/139 branches 2/2
-  crates/runner/src/research_exit_grid_tests.rs lines 43/44 branches 0/0  GAPS
+  crates/runner/src/research_exit_grid_tests.rs lines 44/44 branches 0/0
   crates/runner/src/research_exit_grid.rs lines 149/149 branches 6/6
   crates/runner/src/research_family.rs lines 163/163 branches 14/14
   crates/runner/src/resolved_grid_view.rs lines 337/352 branches 74/74  GAPS
@@ -65,21 +65,24 @@ PER FILE (lines a/b, branches c/d)
   crates/runner/src/synthetic.rs lines 149/149 branches 9/16  GAPS
   crates/runner/src/topn.rs lines 820/820 branches 69/74  GAPS
   crates/runner/src/trade_clock_tests.rs lines 137/137 branches 2/4  GAPS
-  crates/runner/src/trade.rs lines 1697/1724 branches 187/236  GAPS
-  crates/runner/src/validate_cover_tests.rs lines 1078/1081 branches 4/4  GAPS
-  crates/runner/src/validate.rs lines 4239/4329 branches 510/592  GAPS
+  crates/runner/src/trade.rs lines 1808/1829 branches 195/244  GAPS
+  crates/runner/src/validate_cover_tests.rs lines 1234/1240 branches 10/12  GAPS
+  crates/runner/src/validate.rs lines 4259/4329 branches 513/592  GAPS
+  crates/runner/tests/auto_probe_reporter_refusal.rs lines 47/47 branches 8/8
   crates/runner/tests/auto_reporting.rs lines 77/77 branches 0/0
   crates/runner/tests/base_cov_admission_words.rs lines 115/115 branches 7/8  GAPS
+  crates/runner/tests/checkpointed_rank_refusals.rs lines 43/43 branches 0/0
   crates/runner/tests/d_0694_record.rs lines 143/143 branches 9/10  GAPS
   crates/runner/tests/end_to_end.rs lines 226/227 branches 4/10  GAPS
-  crates/runner/tests/expression_pricing.rs lines 149/160 branches 9/14  GAPS
+  crates/runner/tests/expression_pricing.rs lines 157/158 branches 9/14  GAPS
   crates/runner/tests/fib_rung_sweep.rs lines 119/119 branches 10/10
   crates/runner/tests/fixed_deadline_readiness.rs lines 211/211 branches 30/54  GAPS
-  crates/runner/tests/foreign_slice_deadline_readiness.rs lines 268/276 branches 13/28  GAPS
+  crates/runner/tests/foreign_slice_deadline_readiness.rs lines 264/266 branches 13/28  GAPS
   crates/runner/tests/hole_after_exit.rs lines 105/106 branches 7/8  GAPS
   crates/runner/tests/join_answer_is_unchanged.rs lines 66/67 branches 0/0  GAPS
+  crates/runner/tests/population_door_halt.rs lines 33/33 branches 0/0
   crates/runner/tests/prefix_only_cadence.rs lines 124/124 branches 4/4
-  crates/runner/tests/research_family_readiness.rs lines 441/448 branches 3/4  GAPS
+  crates/runner/tests/research_family_readiness.rs lines 445/446 branches 2/2  GAPS
   crates/runner/tests/unwired_validation_record.rs lines 97/99 branches 10/12  GAPS
 
 EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
@@ -124,8 +127,8 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP LINE   crates/runner/src/bootstrap.rs:1569  [production]  continue;
 [U] GAP LINE   crates/runner/src/bootstrap.rs:1601  [production]  break;
 [U] GAP LINE   crates/runner/src/bootstrap.rs:1622  [production]  }
-[open] GAP LINE   crates/runner/src/bootstrap.rs:3638  [test code]  {
-[open] GAP LINE   crates/runner/src/bootstrap.rs:3639  [test code]  disagreements.push((seed, shift, alpha, strategy));
+[open] GAP LINE   crates/runner/src/bootstrap.rs:3641  [test code]  {
+[open] GAP LINE   crates/runner/src/bootstrap.rs:3642  [test code]  disagreements.push((seed, shift, alpha, strategy));
 [U] GAP BRANCH crates/runner/src/bootstrap.rs:628:17 False  [production]  let Some(own) = stats.get(s) else { continue };
 [U] GAP BRANCH crates/runner/src/bootstrap.rs:727:8 True  [production]  if !observed.is_finite() || white_point_mass_would_mint_evidence(returns, observed) {
 [U] GAP BRANCH crates/runner/src/bootstrap.rs:802:8 True  [production]  if !observed.is_finite() {
@@ -141,11 +144,10 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP BRANCH crates/runner/src/bootstrap.rs:1588:16 False  [production]  if let Some(slot) = bars.get_mut(rank) {
 [U] GAP BRANCH crates/runner/src/bootstrap.rs:1599:17 False  [production]  let (Some(&statistic), Some(own)) = (observed.get(strategy), stats.get(strategy))
 [U] GAP BRANCH crates/runner/src/bootstrap.rs:1620:16 False  [production]  if let Some(this_round) = out.get_mut(first..) {
-[open] GAP BRANCH crates/runner/src/bootstrap.rs:2691:16 False  [test code branch]  if let Some(first) = series.first_mut() {
-[open] GAP? BRANCH crates/runner/src/bootstrap.rs:3398:46 True  [assert! condition branch, side True (inside a closure)]  r.round == expected_round || r.round == expected_round + 1,
-[open] GAP? BRANCH crates/runner/src/bootstrap.rs:3398:46 False  [assert! condition branch, side False (inside a closure)]  r.round == expected_round || r.round == expected_round + 1,
-[open] GAP BRANCH crates/runner/src/bootstrap.rs:3636:28 True  [test code branch]  if legacy.iter().any(|row| row.strategy == strategy) != exact
-[open] GAP BRANCH crates/runner/src/bootstrap.rs:3637:32 True  [test code branch]  || receipt.is_rejected(strategy) != Some(exact)
+[open] GAP? BRANCH crates/runner/src/bootstrap.rs:3401:46 True  [assert! condition branch, side True (inside a closure)]  r.round == expected_round || r.round == expected_round + 1,
+[open] GAP? BRANCH crates/runner/src/bootstrap.rs:3401:46 False  [assert! condition branch, side False (inside a closure)]  r.round == expected_round || r.round == expected_round + 1,
+[open] GAP BRANCH crates/runner/src/bootstrap.rs:3639:28 True  [test code branch]  if legacy.iter().any(|row| row.strategy == strategy) != exact
+[open] GAP BRANCH crates/runner/src/bootstrap.rs:3640:32 True  [test code branch]  || receipt.is_rejected(strategy) != Some(exact)
 [U] GAP BRANCH crates/runner/src/bootstrap_family_pass.rs:461:20 True  [production]  || !stat.standard_error.is_finite()
 [open] GAP? BRANCH crates/runner/src/bootstrap_family_pass_tests.rs:194:13 False  [assert! condition branch, side False (inside a closure)]  strict > 0 && strict < draws
 [U] GAP LINE   crates/runner/src/bootstrap_zero_v2.rs:192  [production]  return Err(Refusal::Numerical);
@@ -170,25 +172,13 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:1134  [production]  max: self.ratios.max_pairs(),
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:1135  [production]  });
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:1172  [test code]  )?;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2132  [production]  return false;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2398  [production]  )?;
+[U] GAP LINE   crates/runner/src/exit_grid_policy.rs:2132  [production]  return false;
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:2398  [production]  )?;
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:2457  [test code]  )?;
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:2676  [production]  return Err(ExitGridErrorV1::InvalidChosenCoordinate);
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:2701  [production]  return Err(ExitGridErrorV1::SelectionDigestMismatch);
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2769  [production]  return Err(ExitGridErrorV1::RefusedExecutionPaths {
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2770  [production]  paths: universe.pricing_refused_paths,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2771  [production]  });
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2777  [production]  return Err(ExitGridErrorV1::ReplayQualityLimitExceeded {
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2778  [production]  ambiguous_bars: value.ambiguous_bars,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2779  [production]  max_ambiguous_bars: self.policy.max_ambiguous_bars(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2780  [production]  gap_fills: value.gapped,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2781  [production]  max_gap_fills: self.policy.max_gap_fills(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2782  [production]  });
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:2876  [production]  )?;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2895  [production]  ) && selected.coordinate.stop != self.forced_stop_index
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2897  [production]  return Err(ExitGridErrorV1::InvalidChosenCoordinate);
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2924  [production]  )?;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:2982  [production]  crate::excursion::Side::Short => CostDirection::Short,
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:2924  [production]  )?;
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:3413  [production]  return true;
 [U] GAP LINE   crates/runner/src/exit_grid_policy.rs:3416  [production]  return true;
 [FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3482  [production]  ExitGridErrorV1::BufferAllocationRefused {
@@ -196,63 +186,28 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3484  [production]  elements: bars.len(),
 [FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3485  [production]  }
 [FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3486  [production]  })?;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:3546  [production]  RangeResolutionV1::PpmFloor => floor,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:3668  [production]  return Err(ExitGridErrorV1::EmptyResolvedAxis(axis));
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:3697  [production]  elements: reserve,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:3698  [production]  })?;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:3747  [production]  elements: length,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:3748  [production]  })?;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:3789  [production]  )?)
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4052  [production]  CostDirection::Short => 2,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4098  [production]  None => h.update(&[0]),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4105  [production]  None => h.update(&[0]),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4156  [production]  return Err(ExitGridErrorV1::ColumnShapeMismatch {
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4157  [production]  bits: column.bits().len(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4158  [production]  sources: column.sources().len(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4159  [production]  });
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4173  [production]  return Err(ExitGridErrorV1::ColumnSourcesNotIncreasing {
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4174  [production]  previous: previous.unwrap_or(source),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4175  [production]  current: source,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:4176  [production]  });
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:5284  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:5293  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6000  [test code]  continue;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6045  [test code]  stops: Ladder::new(vec![1]).unwrap_or_default(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6046  [test code]  targets: Ladder::new(vec![1]).unwrap_or_default(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6047  [test code]  trails: Ladder::new(vec![1]).unwrap_or_default(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6048  [test code]  });
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6079  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6085  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:6591  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7186  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7195  [test code]  )?;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7206  [test code]  )?,
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7263  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7268  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7278  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7291  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7371  [test code]  assert_eq!(
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7372  [test code]  resolved.replay_selected(oos, &execution_column, &selected, run),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7373  [test code]  Err(ExitGridErrorV1::RefusedExecutionPaths {
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7374  [test code]  paths: universe.pricing_refused_paths(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7375  [test code]  }),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7536  [test code]  stops: Ladder::new(vec![1]).unwrap_or_default(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7537  [test code]  targets: Ladder::new(vec![1]).unwrap_or_default(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7538  [test code]  trails: Ladder::new(vec![1]).unwrap_or_default(),
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7539  [test code]  });
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7586  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7599  [test code]  return;
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7614  [test code]  }
-[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7648  [test code]  return;
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:146:30 True  [production]  if numerator == 0 || denominator == 0 || numerator > denominator {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:146:50 True  [production]  if numerator == 0 || denominator == 0 || numerator > denominator {
+[U] GAP LINE   crates/runner/src/exit_grid_policy.rs:3668  [production]  return Err(ExitGridErrorV1::EmptyResolvedAxis(axis));
+[FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3697  [production]  elements: reserve,
+[FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3698  [production]  })?;
+[FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3747  [production]  elements: length,
+[FAULT] GAP LINE   crates/runner/src/exit_grid_policy.rs:3748  [production]  })?;
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:3789  [production]  )?)
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4156  [production]  return Err(ExitGridErrorV1::ColumnShapeMismatch {
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4157  [production]  bits: column.bits().len(),
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4158  [production]  sources: column.sources().len(),
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4159  [production]  });
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4173  [production]  return Err(ExitGridErrorV1::ColumnSourcesNotIncreasing {
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4174  [production]  previous: previous.unwrap_or(source),
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4175  [production]  current: source,
+[UNPROVEN] GAP LINE   crates/runner/src/exit_grid_policy.rs:4176  [production]  });
+[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7230  [test code]  )?;
+[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7241  [test code]  )?,
+[open] GAP LINE   crates/runner/src/exit_grid_policy.rs:7645  [test code]  }
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:605:12 False  [production]  && core::ptr::eq(window, evaluated_execution_1m)
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:614:9 False  [production]  let Some(end) = start.checked_add(evaluated_execution_1m.len()) else {
 [open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:676:16 False  [test code branch]  if let Some(last) = forged.last_mut() {
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:1131:12 True  [production]  if pair_count > self.ratios.max_pairs() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:1292:16 True  [production]  || instrument.kind != Kind::Index
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2131:25 False  [production]  let Some(next) = pricing_refused.checked_add(1) else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2327:9 False  [production]  self.policy_digest == self.policy.digest() && self.digest == digest_resolved(self)
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2675:12 True  [production]  if !self.chosen_is_in_bounds(coordinate) {
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2679:12 True  [production]  if selected.resolution_digest != self.digest
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2680:16 True  [production]  || selected.run_id != evaluated.run_id
@@ -264,93 +219,38 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2686:16 True  [production]  || selected.coordinate != coordinate
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2687:16 True  [production]  || selected.training_cell != *cell
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2688:16 True  [production]  || selected.selection_digest
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2768:12 True  [production]  if universe.pricing_refused_paths != 0 {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2774:17 True  [production]  && (value.ambiguous_bars > self.policy.max_ambiguous_bars()
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2775:20 True  [production]  || value.gapped > self.policy.max_gap_fills())
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2895:14 True  [production]  ) && selected.coordinate.stop != self.forced_stop_index
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:2895:14 False  [production]  ) && selected.coordinate.stop != self.forced_stop_index
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:3028:58 True  [production]  if evaluated.resolution_digest != self.digest || evaluated.side != self.side() {
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:3412:13 False  [production]  let Some(left) = pair.first() else {
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:3415:13 False  [production]  let Some(right) = pair.last() else {
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:3590:12 True  [production]  if bar.high <= 0 || bar.low <= 0 || bar.close <= 0 {
 [U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:3590:45 True  [production]  if bar.high <= 0 || bar.low <= 0 || bar.close <= 0 {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:3667:8 True  [production]  if out.is_empty() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4138:12 True  [production]  || !census.reconciles()
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4139:12 True  [production]  || census.offered != u64::try_from(bars).unwrap_or(u64::MAX)
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4140:12 True  [production]  || census.refused() != 0
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4155:8 True  [production]  if column.bits().len() != column.sources().len() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4172:12 True  [production]  if previous.is_some_and(|before| source <= before) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5240:16 False  [test code branch]  if let Some(bar) = changed.get_mut(50) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5283:13 False  [test code branch]  let Some(sealed) = sealed.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5292:13 False  [test code branch]  let Some(series) = series.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5687:16 False  [test code branch]  if let Some(level) = value.stop_levels_ppm.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5692:16 False  [test code branch]  if let Some(level) = value.target_levels_ppm.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5697:16 False  [test code branch]  if let Some(level) = value.trail_levels_ppm.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5702:16 False  [test code branch]  if let Some(pair) = value.ratio_pairs.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5707:16 False  [test code branch]  if let Some(admitted) = value.ratio_bitmap.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5800:16 False  [test code branch]  if let Some(second) = duplicate.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5808:16 False  [test code branch]  if let Some(second) = backward.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5816:16 False  [test code branch]  if let Some(second) = off_grid.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5829:16 False  [test code branch]  if let Some(bar) = gapped.get_mut(2) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5832:16 False  [test code branch]  if let Some(bar) = gapped.get_mut(3) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5882:16 False  [test code branch]  if let Some(bar) = corrupt.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5891:16 False  [test code branch]  if let Some(bar) = zero_open.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5999:25 False  [test code branch]  let Some(subsets) = subsets else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6078:13 False  [test code branch]  let Some(mut evaluated) = evaluated.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6084:13 False  [test code branch]  let Some(validated) = validated.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6169:49 False  [test code branch]  .find(|cell| cell.stop.is_none() && cell.target.is_some() && cell.ttp.is_none())
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6176:26 False  [test code branch]  .find(|cell| cell.stop.is_some() && cell.target.is_none() && cell.ttp.is_none())
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6183:28 False  [test code branch]  .filter(|cell| cell.stop.is_some() && cell.target.is_some() && cell.ttp.is_none())
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6183:51 False  [test code branch]  .filter(|cell| cell.stop.is_some() && cell.target.is_some() && cell.ttp.is_none())
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6317:51 False  [test code branch]  .filter(|cell| cell.stop.is_none() && cell.target.is_some() && cell.ttp.is_none())
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6398:24 False  [test code branch]  && cell.target.is_some()
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6590:13 False  [test code branch]  let Some(evaluated) = evaluated_result.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6601:16 False  [test code branch]  if let Some(bar) = changed.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6934:16 False  [test code branch]  if let Some(bar) = changed.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7028:16 False  [test code branch]  if let Some(bar) = changed.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7105:16 False  [test code branch]  if let Some(bar) = changed.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7185:13 False  [test code branch]  let Some(selected) = selected else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7218:16 False  [test code branch]  if let Some(bar) = off_minute.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7228:16 False  [test code branch]  if let Some(bar) = duplicate.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7237:16 False  [test code branch]  if let Some(bar) = corrupt.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7246:16 False  [test code branch]  if let Some(bar) = whole_minute_gap.get_mut(2) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7262:13 False  [test code branch]  let Some(series) = series.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7267:13 False  [test code branch]  let Some(oos) = oos.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7277:13 False  [test code branch]  let Some(run) = run.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7290:13 False  [test code branch]  let Some(changed_spec) = changed_spec else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7370:12 True  [test code branch]  if universe.pricing_refused_paths() > 0 {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7556:16 False  [test code branch]  if let Some(slot) = cells.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7561:16 False  [test code branch]  if let Some(slot) = cells.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7585:13 False  [test code branch]  let Some(mut evaluated) = evaluated.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7598:13 False  [test code branch]  let Some(validated) = validated.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7609:16 False  [test code branch]  if let Some(rejected_coordinate) = rejected_coordinate {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7630:16 False  [test code branch]  if let (Some(first), Some(second)) = (first_coordinate, duplicated.grid.cells.get_mut(1)) {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7647:13 False  [test code branch]  let Some(mut wrong_offset) = wrong_offset.ok() else {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7650:16 False  [test code branch]  if let Some(Some(offset)) = wrong_offset.coordinate_row_offsets.first_mut() {
-[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7791:13 False  [test code branch]  let crate::grid::ReplayPathV1::Priceable(price) = &mut candidate.path else {
+[U] GAP BRANCH crates/runner/src/exit_grid_policy.rs:3667:8 True  [production]  if out.is_empty() {
+[UNPROVEN] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4138:12 True  [production]  || !census.reconciles()
+[UNPROVEN] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4139:12 True  [production]  || census.offered != u64::try_from(bars).unwrap_or(u64::MAX)
+[UNPROVEN] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4140:12 True  [production]  || census.refused() != 0
+[UNPROVEN] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4155:8 True  [production]  if column.bits().len() != column.sources().len() {
+[UNPROVEN] GAP BRANCH crates/runner/src/exit_grid_policy.rs:4172:12 True  [production]  if previous.is_some_and(|before| source <= before) {
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:5863:16 False  [test code branch]  if let Some(bar) = gapped.get_mut(3) {
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6197:49 False  [test code branch]  .find(|cell| cell.stop.is_none() && cell.target.is_some() && cell.ttp.is_none())
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6204:26 False  [test code branch]  .find(|cell| cell.stop.is_some() && cell.target.is_none() && cell.ttp.is_none())
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6211:28 False  [test code branch]  .filter(|cell| cell.stop.is_some() && cell.target.is_some() && cell.ttp.is_none())
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6211:51 False  [test code branch]  .filter(|cell| cell.stop.is_some() && cell.target.is_some() && cell.ttp.is_none())
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6345:51 False  [test code branch]  .filter(|cell| cell.stop.is_none() && cell.target.is_some() && cell.ttp.is_none())
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:6426:24 False  [test code branch]  && cell.target.is_some()
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7596:16 False  [test code branch]  if let Some(slot) = cells.get_mut(1) {
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7640:16 False  [test code branch]  if let Some(rejected_coordinate) = rejected_coordinate {
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7661:16 False  [test code branch]  if let (Some(first), Some(second)) = (first_coordinate, duplicated.grid.cells.get_mut(1)) {
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7679:16 False  [test code branch]  if let Some(Some(offset)) = wrong_offset.coordinate_row_offsets.first_mut() {
+[open] GAP BRANCH crates/runner/src/exit_grid_policy.rs:7820:13 False  [test code branch]  let crate::grid::ReplayPathV1::Priceable(price) = &mut candidate.path else {
 [UNPROVEN] GAP LINE   crates/runner/src/expression_execution.rs:336  [production]  )?;
 [U] GAP LINE   crates/runner/src/expression_execution.rs:358  [production]  return Err("expression exact truth summary differs from grid signals".to_owned());
 [U] GAP BRANCH crates/runner/src/expression_execution.rs:357:12 True  [production]  if summary.hits != grid.signals {
-[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:155  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:197  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:212  [test code]  return Err("pair".to_owned());
-[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:224  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:291  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:353  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:402  [test code]  )?;
-[open] GAP BRANCH crates/runner/src/expression_execution_tests.rs:211:13 False  [test code branch]  let [left, right] = pair else {
+[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:218  [test code]  return Err("pair".to_owned());
+[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:361  [test code]  )?;
+[open] GAP LINE   crates/runner/src/expression_execution_tests.rs:410  [test code]  )?;
+[open] GAP BRANCH crates/runner/src/expression_execution_tests.rs:217:13 False  [test code branch]  let [left, right] = pair else {
 [U] GAP LINE   crates/runner/src/expression_oos.rs:299  [production]  )?;
 [U] GAP LINE   crates/runner/src/expression_oos.rs:303  [production]  return Err("later expression truth/grid signals differ".into());
 [U] GAP BRANCH crates/runner/src/expression_oos.rs:302:12 True  [production]  if summary.hits != grid.signals {
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:97  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:106  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:182  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:271  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:280  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:317  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:354  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:435  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_oos_tests.rs:445  [test code]  )?;
 [U] GAP LINE   crates/runner/src/expression_validation.rs:325  [production]  )?;
 [U] GAP LINE   crates/runner/src/expression_validation.rs:349  [production]  return Err("fixed-training fold totals disagree with exact later cell".into());
 [U] GAP LINE   crates/runner/src/expression_validation.rs:523  [production]  return Err("fixed-training trade crosses source/fold/session boundaries".into());
@@ -363,30 +263,15 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP BRANCH crates/runner/src/expression_validation.rs:519:16 True  [production]  || day(entry.ts_micros) != day(exit.ts_micros)
 [U] GAP BRANCH crates/runner/src/expression_validation.rs:520:16 True  [production]  || trade.exit_bar < trade.entry_bar
 [U] GAP BRANCH crates/runner/src/expression_validation.rs:521:16 True  [production]  || previous.is_some_and(|index| trade.entry_bar <= index)
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:117  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:125  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:136  [test code]  }
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:267  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:296  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:359  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:365  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:373  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:379  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:414  [test code]  }
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:492  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:501  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:610  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:618  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:673  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:682  [test code]  )?;
-[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:707  [test code]  }
-[open] GAP BRANCH crates/runner/src/expression_validation_tests.rs:133:16 False  [test code branch]  if let Some(selected) = disposition.selected() {
-[open] GAP BRANCH crates/runner/src/expression_validation_tests.rs:393:20 False  [test code branch]  if let Some((selected, wrong)) = disposition.selected().zip(foreign.selected()) {
-[open] GAP BRANCH crates/runner/src/expression_validation_tests.rs:704:16 False  [test code branch]  if let Some(selected) = disposition.selected() {
+[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:141  [test code]  }
+[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:425  [test code]  }
+[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:689  [test code]  )?;
+[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:698  [test code]  )?;
+[open] GAP LINE   crates/runner/src/expression_validation_tests.rs:723  [test code]  }
+[open] GAP BRANCH crates/runner/src/expression_validation_tests.rs:138:16 False  [test code branch]  if let Some(selected) = disposition.selected() {
+[open] GAP BRANCH crates/runner/src/expression_validation_tests.rs:404:20 False  [test code branch]  if let Some((selected, wrong)) = disposition.selected().zip(foreign.selected()) {
+[open] GAP BRANCH crates/runner/src/expression_validation_tests.rs:720:16 False  [test code branch]  if let Some(selected) = disposition.selected() {
 [open] GAP LINE   crates/runner/src/grid.rs:2095  [production]  )?;
-[open] GAP LINE   crates/runner/src/grid.rs:2225  [production]  Ladder::from_excursions(&mut observed.to_vec(), rungs).unwrap_or_default()
-[open] GAP LINE   crates/runner/src/grid.rs:2226  [production]  }),
-[open] GAP LINE   crates/runner/src/grid.rs:2234  [production]  Some(_) => merged(&ladder_of(&adverse), forced),
 [open] GAP LINE   crates/runner/src/grid.rs:2384  [production]  return envelope_refused(timed);
 [U] GAP LINE   crates/runner/src/grid.rs:2673  [production]  )?;
 [U] GAP LINE   crates/runner/src/grid.rs:2700  [production]  crate::exit_grid_policy::ExitGridErrorV1::ArithmeticOverflow("enumerated grid cell count")
@@ -399,7 +284,6 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [open] GAP LINE   crates/runner/src/grid.rs:2708  [production]  );
 [U] GAP LINE   crates/runner/src/grid.rs:2722  [production]  crate::exit_grid_policy::ExitGridErrorV1::ArithmeticOverflow("resolved grid allocation")
 [U] GAP LINE   crates/runner/src/grid.rs:2723  [production]  })?;
-[open] GAP LINE   crates/runner/src/grid.rs:2878  [production]  return Ok(Vec::new());
 [open] GAP LINE   crates/runner/src/grid.rs:3088  [production]  )?;
 [U] GAP LINE   crates/runner/src/grid.rs:3376  [production]  crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceRefused(
 [U] GAP LINE   crates/runner/src/grid.rs:3377  [production]  "candidate count does not fit the V1 receipt",
@@ -461,11 +345,9 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [open] GAP LINE   crates/runner/src/grid.rs:8075  [test code]  }
 [open] GAP LINE   crates/runner/src/grid.rs:10132  [test code]  }
 [open] GAP LINE   crates/runner/src/grid.rs:10686  [test code]  (Some(t), Some(ttp)) => ttp.arm < t,
-[open] GAP BRANCH crates/runner/src/grid.rs:688:9 False  [production]  self.trades > 0
-[open] GAP BRANCH crates/runner/src/grid.rs:1733:17 True  [production]  let at = if at > last { last } else { at };
+[U] GAP BRANCH crates/runner/src/grid.rs:1733:17 True  [production]  let at = if at > last { last } else { at };
 [open] GAP BRANCH crates/runner/src/grid.rs:2383:8 True  [production]  if !money_envelope_fits(bars, &timed.occupancy, facts.acceptance()) {
 [open] GAP BRANCH crates/runner/src/grid.rs:2702:8 True  [production]  if actual != resolved.cell_count() {
-[open] GAP BRANCH crates/runner/src/grid.rs:2877:9 False  [production]  let Some(selected) = grid.best() else {
 [U] GAP BRANCH crates/runner/src/grid.rs:3613:32 True  [production]  if measured.trades != 1 || one_row.len() != 1 {
 [open] GAP BRANCH crates/runner/src/grid.rs:3620:8 True  [production]  if measured.ambiguous_bars > 1 || measured.gapped > 1 {
 [open] GAP BRANCH crates/runner/src/grid.rs:3620:39 True  [production]  if measured.ambiguous_bars > 1 || measured.gapped > 1 {
@@ -493,19 +375,7 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [open] GAP? BRANCH crates/runner/src/grid.rs:10486:36 False  [assert! condition branch, side False (inside a closure)]  .all(|row| victim < row.entry_bar || victim > row.exit_bar),
 [open] GAP? BRANCH crates/runner/src/grid.rs:10907:63 False  [assert! condition branch, side False (inside a closure)]  .all(|pair| matches!(pair, [first, second] if second.entry_bar > first.exit_bar)),
 [open] GAP? BRANCH crates/runner/src/identity.rs:1462:26 False  [assert! condition branch, side False (inside a closure)]  .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
-[open] GAP LINE   crates/runner/src/lib.rs:473  [production]  closure_complete = false;
-[open] GAP LINE   crates/runner/src/lib.rs:474  [production]  (std::collections::HashSet::with_capacity(0), false)
-[open] GAP LINE   crates/runner/src/lib.rs:480  [production]  ClosureVerdict::Unknown
-[open] GAP LINE   crates/runner/src/lib.rs:1154  [production]  return Err(why);
-[open] GAP BRANCH crates/runner/src/lib.rs:470:50 False  [production]  let (redundant_here, known) = if let Some(next) = next {
-[open] GAP BRANCH crates/runner/src/lib.rs:479:34 True  [production]  let closure = if !known {
-[open] GAP BRANCH crates/runner/src/lib.rs:582:12 True  [production]  || sweep.bars != column.census().swept
-[open] GAP BRANCH crates/runner/src/lib.rs:623:9 False  [production]  u64::from(level.k) == u64::try_from(offset).unwrap_or(u64::MAX).saturating_add(1)
-[open] GAP BRANCH crates/runner/src/lib.rs:626:5 False  [production]  sequence
-[open] GAP BRANCH crates/runner/src/lib.rs:698:9 False  [production]  self.outcome.is_complete() && self.considered == self.redundant.saturating_add(self.closed)
 [open] GAP BRANCH crates/runner/src/lib.rs:1105:24 False  [production]  if found {
-[open] GAP BRANCH crates/runner/src/lib.rs:1144:16 False  [production]  if failure.borrow().is_none() {
-[open] GAP BRANCH crates/runner/src/lib.rs:1153:16 True  [production]  if let Some(why) = failure.into_inner() {
 [open] GAP? BRANCH crates/runner/src/lib.rs:2032:33 False  [assert! condition branch, side False (inside a closure)]  |&(name, text)| name == "validate.rs" && text.contains("BRUTEX_GRID_RUNGS")
 [U] GAP LINE   crates/runner/src/outcome.rs:963  [production]  lanes.absent(Unpriced::Refused);
 [U] GAP LINE   crates/runner/src/outcome.rs:964  [production]  continue;
@@ -523,23 +393,13 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP BRANCH crates/runner/src/outcome.rs:2116:16 False  [production]  if let Some(head) = self.wheel.get_mut(slot) {
 [U] GAP BRANCH crates/runner/src/outcome.rs:2274:23 True  [production]  if !paired || !forward.covers(source) {
 [open] GAP? BRANCH crates/runner/src/outcome.rs:2626:41 False  [assert! condition branch, side False (inside a closure)]  assert!((0..bars.len()).all(|i| refused.at(i).is_none() && refused.was_refused(i)));
-[open] GAP BRANCH crates/runner/src/outcome.rs:4123:16 False  [test code branch]  if let Some(b) = bars.get_mut(2_000) {
-[open] GAP BRANCH crates/runner/src/outcome.rs:4299:16 False  [test code branch]  if let Some(slot) = healthy.get_mut(2) {
-[open] GAP BRANCH crates/runner/src/outcome.rs:4348:16 False  [test code branch]  if let Some(slot) = dirty.get_mut(3) {
-[open] GAP BRANCH crates/runner/src/outcome.rs:4430:16 False  [test code branch]  if let Some(bar) = dirty.get_mut(victim) {
-[open] GAP BRANCH crates/runner/src/outcome.rs:4447:16 False  [test code branch]  if let Some(bar) = dirty.get_mut(victim) {
-[open] GAP BRANCH crates/runner/src/outcome.rs:4859:65 False  [test code branch]  .filter(|w| matches!(w, [a, b] if a.2 != b.2 && b.0 - a.0 < horizon as usize))
-[open] GAP? BRANCH crates/runner/src/outcome.rs:4903:48 False  [assert! condition branch, side False (inside a closure)]  .all(|w| matches!(w, [a, b] if a.2 == b.2)),
-[open] GAP BRANCH crates/runner/src/outcome.rs:5123:16 False  [test code branch]  if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
-[open] GAP BRANCH crates/runner/src/outcome.rs:5123:48 True  [test code branch]  if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
-[open] GAP BRANCH crates/runner/src/outcome.rs:5123:48 False  [test code branch]  if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
-[open] GAP BRANCH crates/runner/src/outcome.rs:5420:16 False  [test code branch]  if let Some(bar) = dirty.get_mut(victim) {
+[open] GAP BRANCH crates/runner/src/outcome.rs:4874:65 False  [test code branch]  .filter(|w| matches!(w, [a, b] if a.2 != b.2 && b.0 - a.0 < horizon as usize))
+[open] GAP? BRANCH crates/runner/src/outcome.rs:4918:48 False  [assert! condition branch, side False (inside a closure)]  .all(|w| matches!(w, [a, b] if a.2 == b.2)),
+[open] GAP BRANCH crates/runner/src/outcome.rs:5138:16 False  [test code branch]  if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
+[open] GAP BRANCH crates/runner/src/outcome.rs:5138:48 True  [test code branch]  if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
+[open] GAP BRANCH crates/runner/src/outcome.rs:5138:48 False  [test code branch]  if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
 [open] GAP? BRANCH crates/runner/src/portfolio.rs:785:20 False  [assert! condition branch, side False (inside a closure)]  if admitted == StrategyDigest::new([1; 32])
-[open] GAP BRANCH crates/runner/src/resample.rs:555:16 False  [test code branch]  if let Some(b) = bars.first_mut() {
-[open] GAP BRANCH crates/runner/src/resample.rs:558:16 False  [test code branch]  if let Some(b) = bars.get_mut(1) {
-[open] GAP BRANCH crates/runner/src/resample.rs:561:16 False  [test code branch]  if let Some(b) = bars.get_mut(2) {
-[open] GAP BRANCH crates/runner/src/resample.rs:573:16 False  [test code branch]  if let Some(b) = tail.get_mut(2) {
-[open] GAP LINE   crates/runner/src/research_exit_grid_tests.rs:30  [test code]  )?;
+[open] GAP BRANCH crates/runner/src/resample.rs:561:16 False  [test code branch]  if let Some(b) = bars.get_mut(1) {
 [FAULT] GAP LINE   crates/runner/src/resolved_grid_view.rs:126  [production]  ExitGridErrorV1::BufferAllocationRefused {
 [FAULT] GAP LINE   crates/runner/src/resolved_grid_view.rs:127  [production]  buffer: "exact expression ladder",
 [FAULT] GAP LINE   crates/runner/src/resolved_grid_view.rs:128  [production]  elements: values.len(),
@@ -590,13 +450,7 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP LINE   crates/runner/src/trade.rs:1050  [production]  out.too_late = out.too_late.saturating_add(1);
 [U] GAP LINE   crates/runner/src/trade.rs:1051  [production]  }
 [U] GAP LINE   crates/runner/src/trade.rs:1052  [production]  continue;
-[open] GAP LINE   crates/runner/src/trade.rs:1108  [production]  out.while_open = out.while_open.saturating_add(1);
-[U] GAP LINE   crates/runner/src/trade.rs:1159  [production]  if blocked {
 [U] GAP LINE   crates/runner/src/trade.rs:1160  [production]  out.while_open = out.while_open.saturating_add(1);
-[open] GAP LINE   crates/runner/src/trade.rs:1161  [production]  } else {
-[open] GAP LINE   crates/runner/src/trade.rs:1162  [production]  out.too_late = out.too_late.saturating_add(1);
-[open] GAP LINE   crates/runner/src/trade.rs:1163  [production]  }
-[open] GAP LINE   crates/runner/src/trade.rs:1164  [production]  continue;
 [U] GAP LINE   crates/runner/src/trade.rs:1353  [production]  return None;
 [open] GAP LINE   crates/runner/src/trade.rs:2042  [test code]  return false;
 [open] GAP LINE   crates/runner/src/trade.rs:2134  [test code]  assert_eq!(
@@ -611,11 +465,7 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP BRANCH crates/runner/src/trade.rs:1045:13 False  [production]  let Some(entry) = signal.checked_add(step) else {
 [U] GAP BRANCH crates/runner/src/trade.rs:1047:16 True  [production]  if blocked {
 [U] GAP BRANCH crates/runner/src/trade.rs:1047:16 False  [production]  if blocked {
-[open] GAP BRANCH crates/runner/src/trade.rs:1087:21 False  [production]  step_micros > 0
-[open] GAP BRANCH crates/runner/src/trade.rs:1107:16 True  [production]  if blocked {
-[open] GAP BRANCH crates/runner/src/trade.rs:1158:12 True  [production]  if !same_session {
 [U] GAP BRANCH crates/runner/src/trade.rs:1159:16 True  [production]  if blocked {
-[open] GAP BRANCH crates/runner/src/trade.rs:1159:16 False  [production]  if blocked {
 [U] GAP BRANCH crates/runner/src/trade.rs:1352:8 True  [production]  if !facts.accepts(entry_bar) || !facts.accepts(exit_bar) {
 [U] GAP BRANCH crates/runner/src/trade.rs:1352:37 True  [production]  if !facts.accepts(entry_bar) || !facts.accepts(exit_bar) {
 [open] GAP BRANCH crates/runner/src/trade.rs:1878:17 False  [test code branch]  let [previous, next] = pair else {
@@ -624,22 +474,14 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [open] GAP? BRANCH crates/runner/src/trade.rs:2205:52 True  [assert! condition branch, side True (inside a closure)]  trade.entry_bar > previous_exit || n == 0,
 [open] GAP? BRANCH crates/runner/src/trade.rs:2205:52 False  [assert! condition branch, side False (inside a closure)]  trade.entry_bar > previous_exit || n == 0,
 [open] GAP BRANCH crates/runner/src/trade.rs:2640:38 True  [test code branch]  if path.priceable || !holed {
-[open] GAP BRANCH crates/runner/src/trade.rs:2775:32 False  [test code branch]  if let Some(bar) = dirty.get_mut(victim) {
-[open] GAP BRANCH crates/runner/src/trade.rs:2781:32 False  [test code branch]  if let Some(bar) = dirty.get_mut(victim) {
-[open] GAP? BRANCH crates/runner/src/trade.rs:2813:42 False  [assert! condition branch, side False (inside a closure)]  .all(|trade| victim < trade.entry_bar || victim > trade.exit_bar),
-[open] GAP? BRANCH crates/runner/src/trade.rs:2819:33 False  [assert! condition branch, side False (inside a closure)]  !held.priceable
-[open] GAP? BRANCH crates/runner/src/trade.rs:2820:40 False  [assert! condition branch, side False (inside a closure)]  && held.entry_bar <= victim
-[open] GAP? BRANCH crates/runner/src/trade.rs:3025:17 True  [assert! condition branch, side True]  !trade.forced || forced_price_exists(&bars, trade.exit_bar),
-[open] GAP? BRANCH crates/runner/src/trade.rs:3025:34 False  [assert! condition branch, side False (inside a closure)]  !trade.forced || forced_price_exists(&bars, trade.exit_bar),
-[open] GAP LINE   crates/runner/src/validate.rs:2026  [production]  Err(why) => {
-[open] GAP LINE   crates/runner/src/validate.rs:2027  [production]  return Validated {
-[open] GAP LINE   crates/runner/src/validate.rs:2028  [production]  refused: Some(why),
-[open] GAP LINE   crates/runner/src/validate.rs:2029  [production]  ..Validated::default()
-[open] GAP LINE   crates/runner/src/validate.rs:2030  [production]  };
+[open] GAP? BRANCH crates/runner/src/trade.rs:2819:42 False  [assert! condition branch, side False (inside a closure)]  .all(|trade| victim < trade.entry_bar || victim > trade.exit_bar),
+[open] GAP? BRANCH crates/runner/src/trade.rs:2825:33 False  [assert! condition branch, side False (inside a closure)]  !held.priceable
+[open] GAP? BRANCH crates/runner/src/trade.rs:2826:40 False  [assert! condition branch, side False (inside a closure)]  && held.entry_bar <= victim
+[open] GAP? BRANCH crates/runner/src/trade.rs:3031:17 True  [assert! condition branch, side True]  !trade.forced || forced_price_exists(&bars, trade.exit_bar),
+[open] GAP? BRANCH crates/runner/src/trade.rs:3031:34 False  [assert! condition branch, side False (inside a closure)]  !trade.forced || forced_price_exists(&bars, trade.exit_bar),
 [U] GAP LINE   crates/runner/src/validate.rs:2229  [production]  )?;
 [U] GAP LINE   crates/runner/src/validate.rs:2286  [production]  )?;
 [U] GAP LINE   crates/runner/src/validate.rs:2393  [production]  return Err(AnchoredSearchValidationRefusalV4::Empty);
-[open] GAP LINE   crates/runner/src/validate.rs:2579  [production]  return Err(AnchoredSearchValidationRefusalV4::DiscontiguousTraining { fold: index });
 [U] GAP LINE   crates/runner/src/validate.rs:2600  [production]  )?;
 [U] GAP LINE   crates/runner/src/validate.rs:2746  [production]  return Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
 [U] GAP LINE   crates/runner/src/validate.rs:2747  [production]  "evaluated cell population differs from its resolution",
@@ -648,7 +490,7 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP LINE   crates/runner/src/validate.rs:2809  [production]  return Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
 [U] GAP LINE   crates/runner/src/validate.rs:2810  [production]  "mask-by-side population is incomplete",
 [U] GAP LINE   crates/runner/src/validate.rs:2811  [production]  ));
-[open] GAP LINE   crates/runner/src/validate.rs:2863  [production]  )?;
+[U] GAP LINE   crates/runner/src/validate.rs:2863  [production]  )?;
 [open] GAP LINE   crates/runner/src/validate.rs:2904  [production]  )?;
 [open] GAP LINE   crates/runner/src/validate.rs:2910  [production]  )?;
 [open] GAP LINE   crates/runner/src/validate.rs:2949  [production]  }
@@ -665,30 +507,16 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP LINE   crates/runner/src/validate.rs:3626  [production]  return Err("an OOS projection did not reconcile its exact dropped-row census".to_owned());
 [U] GAP LINE   crates/runner/src/validate.rs:3772  [production]  return Err(AnchoredAdmissionValidationRefusalV2::ProvenanceMismatch { fold });
 [U] GAP LINE   crates/runner/src/validate.rs:4124  [production]  return false;
-[open] GAP LINE   crates/runner/src/validate.rs:4485  [production]  return Validated {
-[open] GAP LINE   crates/runner/src/validate.rs:4486  [production]  folds: Vec::new(),
-[open] GAP LINE   crates/runner/src/validate.rs:4487  [production]  refused: Some(
-[open] GAP LINE   crates/runner/src/validate.rs:4488  [production]  "the signal timeframe has no positive duration, so its exact close cannot be mapped"
-[open] GAP LINE   crates/runner/src/validate.rs:4489  [production]  .to_owned(),
-[open] GAP LINE   crates/runner/src/validate.rs:4490  [production]  ),
-[open] GAP LINE   crates/runner/src/validate.rs:4491  [production]  };
-[open] GAP LINE   crates/runner/src/validate.rs:4516  [production]  continue;
-[open] GAP LINE   crates/runner/src/validate.rs:4630  [production]  continue;
+[U] GAP LINE   crates/runner/src/validate.rs:4516  [production]  continue;
 [open] GAP LINE   crates/runner/src/validate.rs:4634  [production]  out.refused =
 [open] GAP LINE   crates/runner/src/validate.rs:4635  [production]  Some("walk-forward training execution boundaries are not monotonic".to_owned());
 [open] GAP LINE   crates/runner/src/validate.rs:4636  [production]  return out;
-[open] GAP LINE   crates/runner/src/validate.rs:4650  [production]  Err(why) => {
-[open] GAP LINE   crates/runner/src/validate.rs:4651  [production]  out.refused = Some(why);
-[open] GAP LINE   crates/runner/src/validate.rs:4652  [production]  return out;
 [open] GAP LINE   crates/runner/src/validate.rs:4851  [production]  return None;
 [open] GAP LINE   crates/runner/src/validate.rs:4972  [production]  out.refused = Some(
 [open] GAP LINE   crates/runner/src/validate.rs:4973  [production]  "a walk-forward fold selected a candidate without its training side"
 [open] GAP LINE   crates/runner/src/validate.rs:4974  [production]  .to_owned(),
 [open] GAP LINE   crates/runner/src/validate.rs:4975  [production]  );
 [open] GAP LINE   crates/runner/src/validate.rs:4976  [production]  return out;
-[open] GAP LINE   crates/runner/src/validate.rs:4981  [production]  Err(why) => {
-[open] GAP LINE   crates/runner/src/validate.rs:4982  [production]  out.refused = Some(why);
-[open] GAP LINE   crates/runner/src/validate.rs:4983  [production]  return out;
 [open] GAP LINE   crates/runner/src/validate.rs:4999  [production]  out.refused = Some(
 [open] GAP LINE   crates/runner/src/validate.rs:5000  [production]  "walk-forward OOS execution boundaries are not monotonic".to_owned(),
 [open] GAP LINE   crates/runner/src/validate.rs:5001  [production]  );
@@ -733,7 +561,6 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP BRANCH crates/runner/src/validate.rs:2574:12 True  [production]  if fold.train.0.start != 0
 [U] GAP BRANCH crates/runner/src/validate.rs:2575:16 True  [production]  || !fold.train.1.is_empty()
 [U] GAP BRANCH crates/runner/src/validate.rs:2576:16 True  [production]  || fold.train.0.is_empty()
-[open] GAP BRANCH crates/runner/src/validate.rs:2577:16 True  [production]  || fold.test.is_empty()
 [open] GAP BRANCH crates/runner/src/validate.rs:2621:44 True  [production]  if swept.sweep.halted.is_some() || !swept.is_complete() {
 [U] GAP BRANCH crates/runner/src/validate.rs:2745:16 True  [production]  if evaluated_cells != resolved.cell_count() {
 [open] GAP BRANCH crates/runner/src/validate.rs:2795:24 False  [production]  if let Some(selected) = pair.selected {
@@ -752,9 +579,7 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [U] GAP BRANCH crates/runner/src/validate.rs:3625:8 True  [production]  if dropped != expected_dropped {
 [U] GAP BRANCH crates/runner/src/validate.rs:3771:13 False  [production]  let Some(outcome) = oos.get(ordinal) else {
 [U] GAP BRANCH crates/runner/src/validate.rs:4123:9 False  [production]  let Ok(ordinal) = usize::try_from(choice.ordinal) else {
-[open] GAP BRANCH crates/runner/src/validate.rs:4484:12 True  [production]  if exec.signal_length_micros <= 0 {
-[open] GAP BRANCH crates/runner/src/validate.rs:4515:13 False  [production]  let Some(train) = bars.get(fold.train.0.clone()) else {
-[open] GAP BRANCH crates/runner/src/validate.rs:4629:13 False  [production]  let Some(test_open) = bars.get(fold.test.start).map(|bar| bar.ts_micros) else {
+[U] GAP BRANCH crates/runner/src/validate.rs:4515:13 False  [production]  let Some(train) = bars.get(fold.train.0.clone()) else {
 [open] GAP BRANCH crates/runner/src/validate.rs:4633:17 False  [production]  let Some(prefix) = training_execution_cursor.before(exec.bars, test_open) else {
 [open] GAP BRANCH crates/runner/src/validate.rs:4850:20 True  [production]  if cell.trades == 0 {
 [open] GAP BRANCH crates/runner/src/validate.rs:4971:21 False  [production]  let Some(chosen_side) = chosen_side else {
@@ -776,49 +601,28 @@ EVERY UNCOVERED LINE AND BRANCH SIDE THAT IS NOT (F), TAGGED
 [open] GAP LINE   crates/runner/src/validate_cover_tests.rs:1459  [test code]  called.set(true);
 [open] GAP LINE   crates/runner/src/validate_cover_tests.rs:1460  [test code]  Ok(built(slice))
 [open] GAP LINE   crates/runner/src/validate_cover_tests.rs:1461  [test code]  };
+[open] GAP LINE   crates/runner/src/validate_cover_tests.rs:1896  [test code]  &|_| {},
+[open] GAP LINE   crates/runner/src/validate_cover_tests.rs:1962  [test code]  &|_| {},
 [open] GAP? BRANCH crates/runner/tests/base_cov_admission_words.rs:66:69 False  [assert! condition branch, side False (inside a closure)]  name.starts_with("min_") || name.starts_with("max_") || name.starts_with("require_")
 [open] GAP BRANCH crates/runner/tests/d_0694_record.rs:179:12 False  [test code branch]  if is_source
 [open] GAP LINE   crates/runner/tests/end_to_end.rs:487  [test code]  Some(halt) => format!("HALTED k={} {:?}", halt.k, halt.breach),
 [open] GAP? BRANCH crates/runner/tests/end_to_end.rs:115:39 True  [assert! condition branch, side True (inside a closure)]  exits.baseline().is_some() || exits.cells.is_empty(),
 [open] GAP? BRANCH crates/runner/tests/end_to_end.rs:115:39 False  [assert! condition branch, side False (inside a closure)]  exits.baseline().is_some() || exits.cells.is_empty(),
 [open] GAP? BRANCH crates/runner/tests/end_to_end.rs:383:13 False  [assert! condition branch, side False (inside a closure)]  !rest.starts_with("  NOT SUPPLIED") && rest.contains("variants evaluated")
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:31  [test code]  fn debug(why: impl std::fmt::Debug) -> String {
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:32  [test code]  format!("{why:?}")
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:33  [test code]  }
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:55  [test code]  )?,
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:66  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:80  [test code]  )?,
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:83  [test code]  )?
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:125  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:136  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:153  [test code]  }
-[open] GAP LINE   crates/runner/tests/expression_pricing.rs:186  [test code]  )?;
-[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:105:31 False  [test code branch]  let either = (known.get(0) && truth.get(0)) || (known.get(369) && truth.get(369));
-[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:105:65 False  [test code branch]  let either = (known.get(0) && truth.get(0)) || (known.get(369) && truth.get(369));
-[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:108:29 False  [test code branch]  "!0" => known.get(0) && !truth.get(0),
-[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:109:36 False  [test code branch]  _ => either && known.get(63) && !truth.get(63),
-[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:127:20 False  [test code branch]  if let Some(cell) = priced.best() {
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:111  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:136  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:176  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:201  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:251  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:259  [test code]  assert!(
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:260  [test code]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
-[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:336  [test code]  )?;
-[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:260:21 True  [assert! condition branch, side True]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
-[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:260:36 True  [assert! condition branch, side True (inside a closure)]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
-[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:260:36 False  [assert! condition branch, side False (inside a closure)]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
-[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:317:58 False  [assert! condition branch, side False (inside a closure)]  assert!(timed.eligible.iter().any(|item| item.entry_bar < corrupt_index && corrupt_index < item.exit_bar),
+[open] GAP LINE   crates/runner/tests/expression_pricing.rs:164  [test code]  }
+[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:108:31 False  [test code branch]  let either = (known.get(0) && truth.get(0)) || (known.get(369) && truth.get(369));
+[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:108:65 False  [test code branch]  let either = (known.get(0) && truth.get(0)) || (known.get(369) && truth.get(369));
+[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:111:29 False  [test code branch]  "!0" => known.get(0) && !truth.get(0),
+[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:112:36 False  [test code branch]  _ => either && known.get(63) && !truth.get(63),
+[open] GAP BRANCH crates/runner/tests/expression_pricing.rs:134:20 False  [test code branch]  if let Some(cell) = priced.best() {
+[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:256  [test code]  assert!(
+[open] GAP LINE   crates/runner/tests/foreign_slice_deadline_readiness.rs:257  [test code]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
+[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:257:21 True  [assert! condition branch, side True]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
+[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:257:36 True  [assert! condition branch, side True (inside a closure)]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
+[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:257:36 False  [assert! condition branch, side False (inside a closure)]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
+[open] GAP? BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:314:58 False  [assert! condition branch, side False (inside a closure)]  assert!(timed.eligible.iter().any(|item| item.entry_bar < corrupt_index && corrupt_index < item.exit_bar),
 [open] GAP BRANCH crates/runner/tests/hole_after_exit.rs:100:13 False  [test code branch]  row.entry_bar % BARS_PER_SESSION < 300
-[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:431  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:433  [test code]  matches!(
-[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:473  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:485  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:506  [test code]  indicators::vwap::Availability::Absent
-[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:525  [test code]  )?;
-[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:533  [test code]  )?;
-[open] GAP BRANCH crates/runner/tests/research_family_readiness.rs:503:27 False  [test code branch]  let availability = if family.is_cash() {
+[open] GAP LINE   crates/runner/tests/research_family_readiness.rs:438  [test code]  matches!(
 [open] GAP LINE   crates/runner/tests/unwired_validation_record.rs:48  [test code]  }
 [open] GAP BRANCH crates/runner/tests/unwired_validation_record.rs:37:16 False  [test code branch]  if path.file_name().is_some_and(|name| name != "tests") {
 [open] GAP BRANCH crates/runner/tests/unwired_validation_record.rs:40:19 False  [test code branch]  } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -832,4 +636,9 @@ GAP-HASH crates/runner/src/validate.rs:3070:8 True, 3070:57 True, 3071-3073 (`lo
 GAP-UNPROVEN crates/runner/src/grid.rs:3636 and the operands of 3637-3643 (the replayed row against its candidate in priceable_candidate_path_v1): believed unreachable (row_of copies the candidate's signal and entry and stamps entry and exit from the same bars, exit = entry + an offset bounded by the candidate's time exit), but the bound of every candidate's time_exit inside the slice was not traced to its builder in this session, so no (U) is claimed.
 GAP-FAULT crates/runner/src/resolved_grid_view.rs:222, 225, 228 (the checked_add/checked_mul `)?` of coordinate_row_offsets), 253 and 276 (the same in canonical_coordinate_ordinal): an overflow needs the stop and target ladders to hold about 2^32 rungs each, so that (S + 1)(T + 1) passes usize::MAX; each ladder is a Vec<Ppm> resolved from a rung plan of as many percentiles, i.e. tens of GiB per vector. Like the allocator rows, no test can build such an input; listed for the operator's ruling with them.
 GAP-UNPROVEN crates/runner/src/expression_execution.rs:336 (the `)?` of evaluate_resolved_expression_policy_v1 in evaluate_expression_with_attested): believed reachable only through an allocator refusal (ladders' and reserve_policy_cells_v1's try_reserve_exact), with the integrity, ladder and cell-count refusals ruled out by require_runtime_integrity two statements earlier and by the enumeration that defines cell_count; the ladder refusal (Ladder::new of an empty level list) was not traced to every resolution in this session, so no (U) is claimed.
+GAP-FAULT crates/runner/src/exit_grid_policy.rs:3697-3698, 3747-3748 (the BufferAllocationRefused closures of `out.try_reserve_exact(reserve)` in admitted_ratio_pairs and `bitmap.try_reserve_exact(length)` in ratio_bitmap): each size is at most the stop count times the target count of ladders already resolved and held in memory (the pairs reservation is also capped by the policy's max_pairs), so only an allocator refusal reaches the closure. A rung plan of tens of thousands of percentiles per axis asks for gigabytes, which one host's allocator grants and another's refuses depending on its memory and overcommit policy, so no portable test drives it; listed for the operator's ruling with the other allocator rows.
+GAP-UNPROVEN crates/runner/src/exit_grid_policy.rs:2398 (the `)?` of crate::grid::evaluate_resolved_policy_v1 in evaluate_with_attested): believed reachable only through an allocator refusal (reserve_policy_cells_v1's try_reserve_exact). Its other refusals are an invalid resolved ladder, which needs a resolution with an empty or unordered level list that resolve_levels never builds, and ReplayCellCountMismatch, which needs the coordinate enumerator to disagree with checked_policy_cell_count; the test checked_cell_count_matches_every_small_ratio_filtered_enumeration measures that agreement on small grids, but it was not proved for every grid in this session, so no (U) is claimed.
+GAP-UNPROVEN crates/runner/src/exit_grid_policy.rs:2924 (the `)?` of crate::grid::replay_universe_v1 in replay_selected_universe_with): its refusals are the replay allocator closures (grid.rs 3386-3388, 3439-3442, 3445-3448, listed as allocator rows), the priceable-path reconciliation (grid.rs 3636-3643, listed as unproven) and the consistency checks of refused_candidate_path_v1; believed unreachable after the door's own checks, not proved in this session.
+GAP-UNPROVEN crates/runner/src/exit_grid_policy.rs:3789 (the `?` of `target_setting.checked_mul(armed_trails)` in coordinate_row_width): believed unreachable on a 64-bit target: the callers pass a target setting no larger than the resolution's target count, and the resolution's cell count (checked_policy_cell_count, u128 arithmetic, refused above u64::MAX) already contains that count times the same armed-trail number; the callers' bound on the target setting was not traced in this session.
+GAP-UNPROVEN crates/runner/src/exit_grid_policy.rs:4138:12 True, 4139:12 True, 4140:12 True, 4155:8 True, 4156-4159, 4172:12 True, 4173-4176 (require_complete_acceptance's census operands, ColumnShapeMismatch and ColumnSourcesNotIncreasing in validate_column_sources): each needs an indicators::Column whose private fields break its own invariants (an acceptance census that does not reconcile with an all-true, full-length acceptance; bits and sources of different lengths; sources not strictly increasing). Column's fields are private to indicators, so no runner test can build one; the constructors read in this session (build, reproject) keep the invariants, but the others (build_withholding, reproject_checked, try_clone_exact, clear_before, replace_gapfib, replace_orb_and_gapfib) were not traced, so no (U) is claimed.
 `````
