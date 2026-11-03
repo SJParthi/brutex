@@ -96,6 +96,7 @@ pub mod validate;
 // slot FNO-NET (fno_net)
 
 // slot FNO-PORTFOLIO (fno_portfolio)
+pub mod fno_portfolio;
 
 // slot FNO-STRAT (fno_strategy)
 
