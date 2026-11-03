@@ -982,3 +982,9 @@ fn list_in(
 #[cfg(test)]
 #[path = "master_snapshots_first_listed_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL-PS1 (D-7335): the first-listed ledger's refusals and its
+// rebuild's seams no test reached.
+#[cfg(test)]
+#[path = "master_snapshots_first_listed_ps1_tests.rs"]
+mod ps1_tests;
