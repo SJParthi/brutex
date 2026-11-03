@@ -5376,11 +5376,11 @@ pub(crate) mod tests {
         )
     }
 
-    fn h(n: u32) -> Horizon {
+    pub(super) fn h(n: u32) -> Horizon {
         Horizon::bars(n).expect("a non-zero horizon")
     }
 
-    fn sweeper() -> Sweeper {
+    pub(super) fn sweeper() -> Sweeper {
         Sweeper::new(
             Ladder::with_min_hits(120)
                 .with_ceiling(20_000)
@@ -5427,7 +5427,7 @@ pub(crate) mod tests {
         .expect("the complete anchored fixture issues opaque provenance")
     }
 
-    fn anchored_admission_fixture_v2() -> AnchoredAdmissionValidationV2 {
+    pub(crate) fn anchored_admission_fixture_v2() -> AnchoredAdmissionValidationV2 {
         static FIXTURE: OnceLock<AnchoredAdmissionValidationV2> = OnceLock::new();
         FIXTURE
             .get_or_init(|| anchored_admission_run_v2(h(15), 3, DEFAULT_RUNGS))
@@ -5460,7 +5460,7 @@ pub(crate) mod tests {
         .expect("the complete V3 anchored fixture issues opaque provenance")
     }
 
-    fn anchored_search_fixture_v3() -> AnchoredSearchValidationV3 {
+    pub(crate) fn anchored_search_fixture_v3() -> AnchoredSearchValidationV3 {
         static FIXTURE: OnceLock<AnchoredSearchValidationV3> = OnceLock::new();
         FIXTURE
             .get_or_init(|| anchored_search_run_v3(h(15), 3, DEFAULT_RUNGS))
@@ -5541,7 +5541,7 @@ pub(crate) mod tests {
         FIXTURE.get_or_init(anchored_search_run_v4).clone()
     }
 
-    fn admission_capture_v2() -> super::AnchoredAdmissionCaptureV2 {
+    pub(super) fn admission_capture_v2() -> super::AnchoredAdmissionCaptureV2 {
         super::AnchoredAdmissionCaptureV2::new(
             2,
             h(1),
@@ -5554,7 +5554,7 @@ pub(crate) mod tests {
         .expect("the fixed test policy fits the stable identity domain")
     }
 
-    fn admission_candidate_v2() -> super::Scored {
+    pub(super) fn admission_candidate_v2() -> super::Scored {
         super::Scored {
             mask: ConditionMask::ZERO.with_bit(0),
             pessimistic: 7,
@@ -5568,7 +5568,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn admission_split_v2() -> crate::split::Fold {
+    pub(super) fn admission_split_v2() -> crate::split::Fold {
         crate::split::Fold {
             train: (0..1, 1..1),
             test: 1..2,
@@ -8168,3 +8168,7 @@ pub(crate) mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "validate_cover_tests.rs"]
+mod cover_tests;
