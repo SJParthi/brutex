@@ -297,14 +297,14 @@ mod tests {
             .chunks(BARS_PER_WORD)
             .map(|chunk| u64::MAX >> (BARS_PER_WORD - chunk.len()))
             .collect();
+        // One word per chunk, built from the same chunks, so the two are
+        // walked together and no word is looked up by an index that could miss.
         for position in set_positions(candidate) {
-            for (word, chunk) in rows.chunks(BARS_PER_WORD).enumerate() {
+            for (acc, chunk) in hit_words.iter_mut().zip(rows.chunks(BARS_PER_WORD)) {
                 let bitmap = chunk.iter().enumerate().fold(0_u64, |packed, (bit, row)| {
                     packed | (u64::from(row.get(position)) << bit)
                 });
-                if let Some(acc) = hit_words.get_mut(word) {
-                    *acc &= bitmap;
-                }
+                *acc &= bitmap;
             }
         }
 

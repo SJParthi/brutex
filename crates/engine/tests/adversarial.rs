@@ -70,15 +70,20 @@ fn full() -> ConditionMask {
 }
 
 /// A mask with one live position set, chosen by index into the live set.
+///
+/// The bit is set as the sweep sees it, by position. This went through
+/// `vocab::table::set_exact` with `.unwrap_or(m)`, and the first live position
+/// is a `near_*` bit that `set_exact` refuses without a tolerance, so `one(0)`
+/// answered the EMPTY mask and "eight bars, one bit each" was a second copy of
+/// "eight bars, no bits" (BASE-COV-LIBS-LS4). The live set is never empty, so
+/// an empty one is refused by name rather than answered with nothing.
 fn one(nth: usize) -> ConditionMask {
     let all = live();
-    let mut m = ConditionMask::ZERO;
-    if let Some(p) = all.get(nth % all.len().max(1))
-        && let Ok(idx) = u16::try_from(*p)
-    {
-        m = vocab::table::set_exact(m, idx).unwrap_or(m);
-    }
-    m
+    let position = all
+        .get(nth % all.len())
+        .copied()
+        .expect("the live set is never empty");
+    ConditionMask::ZERO.with_bit(position)
 }
 
 /// Every extreme column shape, named so a failure says which one broke.
@@ -355,5 +360,30 @@ fn a_position_true_on_every_bar_is_excluded_and_one_empty_bar_undoes_that() {
         one_gap.depth() >= 1,
         "and the ladder must actually climb: one empty bar is the whole \
          difference between the most trivial column and the most expensive one"
+    );
+}
+
+/// BASE-COV-LIBS-LS4: **EVERY ONE-BIT FIXTURE HOLDS EXACTLY ONE LIVE BIT**,
+/// whichever live position it names, wrapping past the end, `near_*` bits
+/// included. Through the old fallback the seventh live position (7, a `near_*`
+/// bit) gave the empty mask, so "eight bars, one bit each, all different" held
+/// one bar with no bit at all.
+#[test]
+fn every_one_bit_fixture_holds_one_live_bit() {
+    let all = live();
+    // Every live position, `near_*` ones included, and two that wrap.
+    for nth in (0..all.len()).chain([all.len(), 2 * all.len() + 3]) {
+        let mask = one(nth);
+        assert_eq!(mask.popcount(), 1, "one({nth})");
+        assert_eq!(
+            set_positions(&mask).next(),
+            all.get(nth % all.len()).copied(),
+            "one({nth})"
+        );
+    }
+    assert_ne!(
+        one(0),
+        ConditionMask::ZERO,
+        "the first live position is a real bit"
     );
 }
