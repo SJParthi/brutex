@@ -1944,8 +1944,11 @@ mod tests {
                                 price,
                             };
                             assert!(
-                                [past(BandSide::Upper, sec.high), past(BandSide::Lower, sec.low)]
-                                    .contains(&why),
+                                [
+                                    past(BandSide::Upper, sec.high),
+                                    past(BandSide::Lower, sec.low)
+                                ]
+                                .contains(&why),
                                 "seed {seed}: only a reading with a last flex breaks: {why}"
                             );
                             broke = Some(why);
