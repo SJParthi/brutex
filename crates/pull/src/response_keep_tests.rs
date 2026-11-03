@@ -2476,3 +2476,707 @@ fn every_directory_created_and_every_first_write_syncs_its_parent() {
         "July's late .rsb synced its directory"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BASE-COV-PULL-PS2 (3 Nov 2026): the arms Route B found unreached on START
+// (2e7a0b6d3b56). Each test drives one refusal or edge by input and asserts
+// what it answers; every body and price is invented.
+// ---------------------------------------------------------------------------
+
+/// A receipt that keeps its body at offset 0 of segment 0: `raw` deflated into
+/// the month's `.rsb`, the receipt claiming `digest` for it.
+fn kept_in(at: &Names, raw: &[u8], digest: [u8; 32]) -> Receipt {
+    let deflated = deflate(raw).unwrap();
+    fs::write(&at.bodies, &deflated).unwrap();
+    let mut receipt = crafted(0, 0, 0);
+    receipt.kept = Kept::Kept;
+    receipt.reason = Reason::Kept;
+    receipt.deflated_len = u32::try_from(deflated.len()).unwrap();
+    receipt.raw_len = u32::try_from(raw.len()).unwrap();
+    receipt.digest = digest;
+    receipt
+}
+
+/// `MAX_RECEIPTS` CRC-valid receipts, as a full segment's `.rsr` holds them.
+fn full_receipts() -> Vec<u8> {
+    let one = crafted(0, 0, 0).encode();
+    let mut bytes = Vec::with_capacity(MAX_RECEIPTS as usize * RECEIPT_LEN);
+    for _ in 0..MAX_RECEIPTS {
+        bytes.extend_from_slice(&one);
+    }
+    bytes
+}
+
+/// PS2-RK-01: every code byte a decoder meets. The six reasons, two doors and
+/// four window states round-trip; every other byte is refused, and a receipt
+/// carrying one, its CRC made good, is refused whole.
+#[test]
+fn a_code_byte_no_writer_writes_is_refused_by_each_decoder() {
+    let (mut reasons, mut doors, mut states) = (0, 0, 0);
+    for code in 0..=u8::MAX {
+        if let Some(reason) = Reason::from_code(code) {
+            assert_eq!(reason.code(), code);
+            reasons += 1;
+        }
+        if let Some(door) = Door::from_code(code) {
+            assert_eq!(door.code(), code);
+            doors += 1;
+        }
+        if let Some(state) = WindowState::from_code(code) {
+            assert_eq!(state.code(), code);
+            states += 1;
+        }
+    }
+    assert_eq!((reasons, doors, states), (6, 2, 4));
+    assert_eq!(Reason::from_code(6), None);
+    assert_eq!(Door::from_code(0), None);
+    assert_eq!(Door::from_code(3), None);
+    let good = crafted(0, 0, 0).encode();
+    assert!(Receipt::decode(&good).is_some());
+    for (at, byte) in [(68, 6_u8), (68, u8::MAX), (70, 0), (70, 3), (70, u8::MAX)] {
+        let mut bad = good;
+        bad[at] = byte;
+        let crc = store::crc::crc32c(&bad[..124]);
+        bad[124..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(Receipt::decode(&bad), None, "byte {byte} at offset {at}");
+    }
+}
+
+/// PS2-RK-02: a key no store path can hold (an option whose strike renders
+/// past the contract segment's 24 bytes) is refused `path_refused` by every
+/// door that names a pack, and nothing is written under the root. The widest
+/// strike that renders, ten digits, keeps like any other.
+#[test]
+fn a_key_no_store_path_can_hold_is_refused_by_every_door() {
+    let scratch = Scratch::new("ps2-path");
+    let wide = |strike: i64| {
+        let mut key = nifty();
+        key.segment = Segment::Fno;
+        key.kind = Kind::Option {
+            expiry: Expiry::new(2019, 6, 27).unwrap(),
+            strike: Paisa::from_raw(strike),
+            side: OptionSide::Put,
+        };
+        key
+    };
+    let too_wide = wide(10_000_000_000);
+    let refused = KeepError::Path(PathError::ContractPathUnsupported);
+    assert_eq!(
+        pack_dir(scratch.root(), pack(&too_wide)),
+        Err(refused.clone())
+    );
+    let appended = append(
+        scratch.root(),
+        pack(&too_wide),
+        Offered::Answer(&answered(&invented(81))),
+        &june(),
+    );
+    assert_eq!(appended, Err(refused.clone()));
+    assert_eq!(refused.word(), "path_refused");
+    assert!(
+        refused.to_string().starts_with("path_refused: "),
+        "{refused}"
+    );
+    assert_eq!(
+        receipts(scratch.root(), pack(&too_wide), june_month()).map(|r| r.len()),
+        Err(refused.clone())
+    );
+    assert_eq!(
+        unfinished(scratch.root(), pack(&too_wide)),
+        Err(refused.clone())
+    );
+    let mut claimed = crafted(0, 0, 0);
+    claimed.kept = Kept::Kept;
+    assert_eq!(
+        body(scratch.root(), pack(&too_wide), june_month(), &claimed),
+        Err(refused.clone())
+    );
+    assert_eq!(
+        refused_rows(
+            scratch.root(),
+            pack(&too_wide),
+            june_month(),
+            0,
+            &crafted(0, 0, 1)
+        ),
+        Err(refused)
+    );
+    assert!(files_under(scratch.root()).is_empty(), "nothing written");
+    let widest = wide(9_999_999_999);
+    append(
+        scratch.root(),
+        pack(&widest),
+        Offered::Answer(&answered(&invented(82))),
+        &june(),
+    )
+    .unwrap();
+    assert_eq!(held_in(scratch.root(), &widest, june_month()).len(), 1);
+}
+
+/// PS2-RK-03: a pack name the host refuses for a reason other than absence (a
+/// path through a regular file: ENOTDIR) is refused `io` with the host's own
+/// kind by the readers and by the writers' door, never taken for absent and
+/// never for a non-regular file; nothing is written through it.
+#[test]
+fn a_pack_name_the_host_refuses_keeps_the_hosts_kind() {
+    let scratch = Scratch::new("ps2-notdir");
+    let file = scratch.root().join("a-file");
+    fs::write(&file, b"invented").unwrap();
+    let at = names(&file, june_month(), 0);
+    let notdir = |path: &Path| KeepError::Io {
+        op: "open",
+        path: path.to_path_buf(),
+        kind: io::ErrorKind::NotADirectory,
+    };
+    assert_eq!(read_segment(&at), Err(notdir(&at.receipts)));
+    assert_eq!(
+        open_regular(&at.bodies, false).map(|f| f.is_some()),
+        Err(notdir(&at.bodies))
+    );
+    assert_eq!(
+        open_regular(&at.refusals, true).map(|f| f.is_some()),
+        Err(notdir(&at.refusals))
+    );
+    assert_eq!(write_synced(&at.bodies, 0, b"x"), Err(notdir(&at.bodies)));
+    let journal = file.join(WINDOWS_NAME);
+    assert_eq!(read_windows(&journal), Err(notdir(&journal)));
+    assert_eq!(
+        notdir(&at.receipts).to_string(),
+        format!("io: open {} refused (NotADirectory)", at.receipts.display())
+    );
+    // A store root that is a file: refused where the pack directory is made.
+    let refused = append(
+        &file,
+        pack(&nifty()),
+        Offered::Answer(&answered(&invented(83))),
+        &june(),
+    );
+    assert!(
+        matches!(
+            &refused,
+            Err(KeepError::Io {
+                op: "create",
+                kind: io::ErrorKind::NotADirectory,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"invented");
+}
+
+/// PS2-RK-04: a pack file to be born where the host will not create it (its
+/// directory is gone) is refused `io: create` with the host's kind, by the
+/// writer's door and by the lock's; a reader of the same name answers absent;
+/// nothing is made.
+#[test]
+fn a_pack_file_the_host_will_not_create_is_refused_by_name() {
+    let scratch = Scratch::new("ps2-create");
+    let gone = scratch.root().join("gone");
+    let path = gone.join("2019-06.rsb");
+    let refused = KeepError::Io {
+        op: "create",
+        path: path.clone(),
+        kind: io::ErrorKind::NotFound,
+    };
+    assert_eq!(
+        open_regular(&path, true).map(|f| f.is_some()),
+        Err(refused.clone())
+    );
+    assert_eq!(open_regular(&path, false).map(|f| f.is_some()), Ok(false));
+    assert_eq!(write_synced(&path, 0, b"invented"), Err(refused.clone()));
+    assert_eq!(refused.word(), "io");
+    assert_eq!(
+        refused.to_string(),
+        format!("io: create {} refused (NotFound)", path.display())
+    );
+    assert_eq!(
+        lock_within(&gone, Duration::from_millis(10)).map(|_| ()),
+        Err(KeepError::Io {
+            op: "create",
+            path: gone.join(LOCK_NAME),
+            kind: io::ErrorKind::NotFound,
+        })
+    );
+    assert!(!gone.exists(), "nothing made");
+}
+
+/// PS2-RK-05: a receipts file longer than `MAX_RECEIPTS` receipts and a torn
+/// one is damage named at the receipt past the cap, refused from one `stat`
+/// (a sparse 64 MiB file reads nothing); exactly `MAX_RECEIPTS` receipts and
+/// a torn tail of `RECEIPT_LEN - 1` bytes is the most a segment trusts. An
+/// append to that month is refused the same and writes nothing.
+#[test]
+fn a_receipts_file_past_its_cap_is_damage_named_at_the_cap() {
+    let scratch = Scratch::new("ps2-cap");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let at = names(&dir, june_month(), 0);
+    let mut bytes = full_receipts();
+    bytes.extend_from_slice(&[7_u8; RECEIPT_LEN - 1]);
+    fs::write(&at.receipts, &bytes).unwrap();
+    let read = read_segment(&at).unwrap();
+    assert_eq!(read.receipts.len(), MAX_RECEIPTS as usize);
+    assert_eq!(read.torn_receipt_bytes, RECEIPT_LEN as u64 - 1);
+    bytes.push(7);
+    fs::write(&at.receipts, &bytes).unwrap();
+    let damaged = KeepError::Damaged {
+        path: at.receipts.clone(),
+        ordinal: u64::from(MAX_RECEIPTS),
+    };
+    assert_eq!(read_segment(&at), Err(damaged.clone()));
+    OpenOptions::new()
+        .write(true)
+        .open(&at.receipts)
+        .unwrap()
+        .set_len(MAX_PACK_BYTES)
+        .unwrap();
+    assert_eq!(read_segment(&at), Err(damaged.clone()));
+    let refused = append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(84))),
+        &june(),
+    );
+    assert_eq!(refused, Err(damaged.clone()));
+    assert_eq!(damaged.word(), "pack_damaged");
+    assert!(
+        !at.bodies.exists() && !at.refusals.exists(),
+        "nothing written"
+    );
+}
+
+/// PS2-RK-06: a kept body that is gone, that inflates to bytes whose BLAKE3 is
+/// not its receipt's, or that inflates to bytes that are not UTF-8 is refused
+/// `body_mismatch`, each by what differs; the same bytes under a true receipt
+/// read back.
+#[test]
+fn a_kept_body_gone_altered_or_not_text_is_refused_by_what_differs() {
+    let scratch = Scratch::new("ps2-body");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let month = june_month();
+    let at = names(&dir, month, 0);
+    let read = |receipt: &Receipt| body(scratch.root(), pack(&key), month, receipt);
+    let mismatch = |what: &'static str| {
+        Err::<String, _>(KeepError::BodyMismatch {
+            path: at.bodies.clone(),
+            what,
+        })
+    };
+    let text = invented(85);
+    let digest = brutex_core::blake3::hash(text.as_bytes());
+    let receipt = kept_in(&at, text.as_bytes(), digest);
+    assert_eq!(read(&receipt), Ok(text.clone()));
+    fs::remove_file(&at.bodies).unwrap();
+    assert_eq!(read(&receipt), mismatch("is missing"));
+    let mut other = digest;
+    other[31] ^= 1;
+    let altered = kept_in(&at, text.as_bytes(), other);
+    assert_eq!(
+        read(&altered),
+        mismatch("does not match its receipt's BLAKE3")
+    );
+    let raw = [0xff_u8, 0xfe, 0x00, 0x80];
+    let not_text = kept_in(&at, &raw, brutex_core::blake3::hash(&raw));
+    assert_eq!(read(&not_text), mismatch("is not UTF-8"));
+    let empty = kept_in(&at, b"", brutex_core::blake3::hash(b""));
+    assert_eq!(read(&empty), Ok(String::new()));
+    assert_eq!(
+        KeepError::BodyMismatch {
+            path: at.bodies.clone(),
+            what: "is not UTF-8",
+        }
+        .to_string(),
+        format!("body_mismatch: {} is not UTF-8", at.bodies.display())
+    );
+}
+
+/// PS2-RK-07: a receipt that owns refused rows whose `.rsx` is gone is damage
+/// at the file's first record; a receipt that owns none reads no file at all.
+#[test]
+fn refused_rows_whose_file_is_gone_are_damage() {
+    let scratch = Scratch::new("ps2-rsx-gone");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    let at = names(&dir, june_month(), 0);
+    assert_eq!(
+        refused_rows(
+            scratch.root(),
+            pack(&key),
+            june_month(),
+            0,
+            &crafted(0, 0, 2)
+        ),
+        Err(KeepError::Damaged {
+            path: at.refusals.clone(),
+            ordinal: 0,
+        })
+    );
+    assert_eq!(
+        refused_rows(
+            scratch.root(),
+            pack(&key),
+            june_month(),
+            0,
+            &crafted(0, 0, 0)
+        ),
+        Ok(Vec::new())
+    );
+    assert!(!dir.exists(), "a reader makes nothing");
+}
+
+/// PS2-RK-08: a directory at the pack lock's name refuses the append by name
+/// (`not_a_regular_file`, the lock's path) before any pack file is written;
+/// the lock's own door refuses it the same.
+#[test]
+fn a_directory_at_the_lock_name_refuses_the_append() {
+    let scratch = Scratch::new("ps2-lock-dir");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    let lock_at = dir.join(LOCK_NAME);
+    fs::create_dir_all(&lock_at).unwrap();
+    let refused = KeepError::NotRegular {
+        path: lock_at.clone(),
+    };
+    assert_eq!(
+        append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(86))),
+            &landing(day(2019, 6, 28), day(2019, 7, 2)),
+        ),
+        Err(refused.clone())
+    );
+    assert_eq!(
+        lock_within(&dir, Duration::from_millis(10)).map(|_| ()),
+        Err(refused.clone())
+    );
+    assert_eq!(refused.word(), "not_a_regular_file");
+    assert!(files_under(&dir).is_empty(), "no pack file, no journal");
+}
+
+/// PS2-RK-09: the empty path (where a walk up a relative path ends) has no
+/// parent to sync and no directory to make: both answer `Ok` and sync
+/// nothing.
+#[test]
+fn the_empty_path_has_no_parent_to_sync_and_nothing_to_create() {
+    DIR_SYNCS.with(|synced| synced.borrow_mut().clear());
+    assert_eq!(sync_parent(Path::new("")), Ok(()));
+    assert_eq!(create_dir_synced(Path::new("")), Ok(()));
+    assert!(
+        DIR_SYNCS.with(|synced| synced.borrow().is_empty()),
+        "nothing synced"
+    );
+}
+
+/// PS2-RK-10: the window journal at its edges. Shorter than one record, or
+/// exactly one torn record, holds no trusted record and the next record goes
+/// at index 0; one record past `MAX_WINDOW_RECORDS` (a sparse file, its length
+/// from one `stat`) is damage named at the cap, and an append is refused
+/// before it writes.
+#[test]
+fn a_window_journal_at_its_edges_is_read_or_refused_by_name() {
+    let scratch = Scratch::new("ps2-journal");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let journal = dir.join(WINDOWS_NAME);
+    fs::write(&journal, [5_u8; WINDOW_RECORD_LEN - 1]).unwrap();
+    assert_eq!(read_windows(&journal), Ok((0, None)));
+    assert_eq!(unfinished(scratch.root(), pack(&key)), Ok(None));
+    fs::write(&journal, [5_u8; WINDOW_RECORD_LEN]).unwrap();
+    assert_eq!(read_windows(&journal), Ok((0, None)));
+    append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(87))),
+        &landing(day(2019, 6, 28), day(2019, 7, 2)),
+    )
+    .unwrap();
+    let records = journal_of(scratch.root(), &key);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r.map(|r| r.state))
+            .collect::<Vec<_>>(),
+        [Some(WindowState::Open), Some(WindowState::Closed)],
+        "written over the torn record from index 0"
+    );
+    OpenOptions::new()
+        .write(true)
+        .open(&journal)
+        .unwrap()
+        .set_len((MAX_WINDOW_RECORDS + 1) * WINDOW_RECORD_LEN as u64)
+        .unwrap();
+    let damaged = KeepError::Damaged {
+        path: journal.clone(),
+        ordinal: MAX_WINDOW_RECORDS,
+    };
+    assert_eq!(read_windows(&journal), Err(damaged.clone()));
+    assert_eq!(unfinished(scratch.root(), pack(&key)), Err(damaged.clone()));
+    let before = held_in(scratch.root(), &key, june_month());
+    assert_eq!(
+        append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(88))),
+            &june(),
+        ),
+        Err(damaged)
+    );
+    assert_eq!(held_in(scratch.root(), &key, june_month()), before);
+}
+
+/// PS2-RK-11: an open window record whose named receipt is not the one the
+/// first month holds at that ordinal (its `asked_from`, `asked_to`, digest or
+/// run differs) is damage: the next append refuses it at the journal's last
+/// record and writes nothing. The record naming the receipt exactly is
+/// finished `completed` with no pointer to write.
+#[test]
+fn an_open_window_naming_another_receipt_is_damage() {
+    type Alter = fn(&mut WindowRecord);
+    let alters: [(&str, Alter); 5] = [
+        ("asked_from", |r| r.asked_from += 1),
+        ("asked_to", |r| r.asked_to -= 1),
+        ("digest", |r| r.digest[0] ^= 1),
+        ("run", |r| r.run += 1),
+        ("none", |_| {}),
+    ];
+    for (what, alter) in alters {
+        let scratch = Scratch::new("ps2-open-names");
+        let key = nifty();
+        append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(89))),
+            &june(),
+        )
+        .unwrap();
+        let held = held_in(scratch.root(), &key, june_month());
+        let mut record = WindowRecord {
+            asked_from: held[0].asked_from,
+            asked_to: held[0].asked_to,
+            digest: held[0].digest,
+            run: held[0].run,
+            month: june_month(),
+            segment: 0,
+            ordinal: 0,
+            state: WindowState::Open,
+            written: 0,
+        };
+        alter(&mut record);
+        let journal = pack_dir(scratch.root(), pack(&key))
+            .unwrap()
+            .join(WINDOWS_NAME);
+        fs::write(&journal, record.encode()).unwrap();
+        let next = append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(90))),
+            &june(),
+        );
+        if what == "none" {
+            assert!(next.is_ok(), "{next:?}");
+            let records = journal_of(scratch.root(), &key);
+            let closing = records[1].unwrap();
+            assert_eq!(
+                (closing.state, closing.written),
+                (WindowState::Completed, 0)
+            );
+            assert_eq!(held_in(scratch.root(), &key, june_month()).len(), 2);
+        } else {
+            assert_eq!(
+                next,
+                Err(KeepError::Damaged {
+                    path: journal.clone(),
+                    ordinal: 0,
+                }),
+                "{what} differs"
+            );
+            assert_eq!(
+                held_in(scratch.root(), &key, june_month()),
+                held,
+                "{what}: nothing written"
+            );
+            assert_eq!(journal_of(scratch.root(), &key).len(), 1, "{what}");
+        }
+    }
+}
+
+/// PS2-RK-12: an interrupted window finished into a later month whose newest
+/// segment is full: the missing pointer goes to the next segment, rolled and
+/// named like any roll, and the closing record says `completed` with one
+/// pointer written.
+#[test]
+fn a_finished_window_rolls_its_pointer_past_a_full_later_month() {
+    let scratch = Scratch::new("ps2-finish-roll");
+    let key = nifty();
+    let text = invented(91);
+    let window = landing(day(2019, 6, 28), day(2019, 7, 2));
+    let killed = killed_at(scratch.root(), &key, (3, 1), &text, &window);
+    assert!(killed.is_err(), "{killed:?}");
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    let july = names(&dir, july_month(), 0);
+    fs::write(&july.receipts, full_receipts()).unwrap();
+    append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(92))),
+        &landing(day(2019, 8, 5), day(2019, 8, 9)),
+    )
+    .unwrap();
+    let months = receipts(scratch.root(), pack(&key), july_month()).unwrap();
+    assert_eq!(months.len(), 2, "July rolled to its segment 1");
+    assert_eq!(months[0].1.receipts.len(), MAX_RECEIPTS as usize);
+    let [pointer] = months[1].1.receipts.as_slice() else {
+        panic!("segment 1 holds the one pointer: {months:?}");
+    };
+    assert_eq!(
+        (pointer.kept, pointer.segment, pointer.body_of),
+        (Kept::InFirstMonth, 0, 0)
+    );
+    assert_eq!(
+        body(scratch.root(), pack(&key), july_month(), pointer).unwrap(),
+        text
+    );
+    let closing = journal_of(scratch.root(), &key)[1].unwrap();
+    assert_eq!(
+        (closing.state, closing.written),
+        (WindowState::Completed, 1)
+    );
+}
+
+/// PS2-RK-13: a month whose last possible segment (`MAX_SEGMENTS - 1`) is
+/// full cannot roll: every append to the month is refused `receipts_full`
+/// naming that segment's receipts file, and nothing is written.
+#[test]
+fn a_month_whose_last_segment_is_full_is_refused_receipts_full() {
+    let scratch = Scratch::new("ps2-last-segment");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    for segment in 1..MAX_SEGMENTS - 1 {
+        fs::write(names(&dir, june_month(), segment).receipts, b"").unwrap();
+    }
+    let last = names(&dir, june_month(), MAX_SEGMENTS - 1);
+    fs::write(&last.receipts, full_receipts()).unwrap();
+    let before = lengths_under(&dir);
+    let refused = KeepError::ReceiptsFull {
+        pack: last.receipts.clone(),
+    };
+    for tag in [93, 93, 94] {
+        assert_eq!(
+            append(
+                scratch.root(),
+                pack(&key),
+                Offered::Answer(&answered(&invented(tag))),
+                &june(),
+            ),
+            Err(refused.clone())
+        );
+    }
+    assert_eq!(refused.word(), "receipts_full");
+    assert!(refused.to_string().contains("nothing written"), "{refused}");
+    let after: Vec<_> = lengths_under(&dir)
+        .into_iter()
+        .filter(|(p, _)| !p.ends_with(LOCK_NAME))
+        .collect();
+    assert_eq!(after, before, "nothing written");
+}
+
+/// PS2-RK-14: a body file the host refuses for a reason other than a full disk
+/// (a directory at the `.rsb`'s name) refuses the append with that reason and
+/// no receipt claims the body. Over months the open record is already down:
+/// the window is named open, and once the name is free the next append
+/// finds no first receipt and closes it `abandoned`.
+#[test]
+fn a_body_the_host_refuses_for_another_reason_refuses_the_append() {
+    let scratch = Scratch::new("ps2-rsb-dir");
+    let key = nifty();
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    let at = names(&dir, june_month(), 0);
+    fs::create_dir_all(&at.bodies).unwrap();
+    let refused = KeepError::NotRegular {
+        path: at.bodies.clone(),
+    };
+    assert_eq!(
+        append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(95))),
+            &june(),
+        ),
+        Err(refused.clone())
+    );
+    assert!(!at.receipts.exists(), "no receipt claims the body");
+    assert_eq!(
+        append(
+            scratch.root(),
+            pack(&key),
+            Offered::Answer(&answered(&invented(96))),
+            &landing(day(2019, 6, 28), day(2019, 7, 2)),
+        ),
+        Err(refused)
+    );
+    let open = unfinished(scratch.root(), pack(&key)).unwrap().unwrap();
+    assert_eq!((open.month, open.ordinal), (june_month(), 0));
+    fs::remove_dir(&at.bodies).unwrap();
+    append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&invented(97))),
+        &june(),
+    )
+    .unwrap();
+    let closing = journal_of(scratch.root(), &key)[1].unwrap();
+    assert_eq!(
+        (closing.state, closing.written),
+        (WindowState::Abandoned, 0)
+    );
+    assert!(held_in(scratch.root(), &key, july_month()).is_empty());
+}
+
+/// PS2-RK-15: a window over months whose open record cannot be written (the
+/// journal refused as a full disk) writes nothing else: no body, no receipt,
+/// no pointer. The next append keeps it whole.
+#[test]
+fn a_window_whose_open_record_is_refused_writes_nothing() {
+    let scratch = Scratch::new("ps2-open-refused");
+    let key = nifty();
+    let text = invented(98);
+    let window = landing(day(2019, 6, 28), day(2019, 7, 2));
+    let dir = pack_dir(scratch.root(), pack(&key)).unwrap();
+    let killed = killed_at(scratch.root(), &key, (4, 0), &text, &window);
+    assert_eq!(
+        killed,
+        Err(KeepError::Io {
+            op: "write",
+            path: dir.join(WINDOWS_NAME),
+            kind: io::ErrorKind::StorageFull,
+        })
+    );
+    assert!(held_in(scratch.root(), &key, june_month()).is_empty());
+    assert!(held_in(scratch.root(), &key, july_month()).is_empty());
+    assert!(!names(&dir, june_month(), 0).bodies.exists(), "no body");
+    let kept = append(
+        scratch.root(),
+        pack(&key),
+        Offered::Answer(&answered(&text)),
+        &window,
+    )
+    .unwrap();
+    assert_eq!(kept.further.len(), 1);
+    assert_eq!(
+        body(
+            scratch.root(),
+            pack(&key),
+            july_month(),
+            &kept.further[0].receipt
+        )
+        .unwrap(),
+        text
+    );
+}
