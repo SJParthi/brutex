@@ -3224,3 +3224,10 @@ mod cov_tests;
 #[cfg(test)]
 #[path = "reference_data_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL-PS1 (D-7335): the loader's and the writer's refusals no test
+// reached: generations, strays, bounds, a name the host refuses, a full
+// descriptor table.
+#[cfg(test)]
+#[path = "reference_data_ps1_tests.rs"]
+mod ps1_tests;
