@@ -53,7 +53,7 @@ fn the_dropbox_token_is_read_where_the_config_names_it_and_a_dead_one_is_named()
         CredentialReader::new(Answers(Ok("zq-invented-token"))),
     );
     let read = token.read().unwrap();
-    assert!(read == secret("zq-invented-token"));
+    assert_eq!(read, secret("zq-invented-token"));
     assert_eq!(token.reread(&read).unwrap_err(), Wait::TokenDead);
     let refused = ParameterStoreToken::new(
         config(true),

@@ -29,14 +29,13 @@ const GATE: &str =
 /// in time is `Silent` (a wait of a few milliseconds, the pipe left open).
 #[test]
 fn the_api_childs_gate_says_claimed_and_hears_its_stdin() {
-    match std::env::var(CASE).ok() {
-        Some(case) => gate_case(&case),
-        None => {
-            child("go", Some("go\n"));
-            child("release", Some("release\n"));
-            child("closed", None);
-            child("silent", Some(""));
-        }
+    if let Ok(case) = std::env::var(CASE) {
+        gate_case(&case);
+    } else {
+        child("go", Some("go\n"));
+        child("release", Some("release\n"));
+        child("closed", None);
+        child("silent", Some(""));
     }
 }
 
