@@ -470,10 +470,9 @@ impl fmt::Display for Refusal {
                 f,
                 "no band: a demerger goes ex on this day, so neither base reading holds"
             ),
-            Self::NotPositive { what, value } => write!(
-                f,
-                "no band: {what} is {value} paise, not a positive price"
-            ),
+            Self::NotPositive { what, value } => {
+                write!(f, "no band: {what} is {value} paise, not a positive price")
+            }
             Self::BaseOutOfRange { reading } => write!(
                 f,
                 "no band: the {} base or its first band does not fit paise i64",
@@ -483,10 +482,9 @@ impl fmt::Display for Refusal {
                 f,
                 "second {ts} refused: low {low} and high {high} are not a traded range"
             ),
-            Self::OutOfOrder { ts, last } => write!(
-                f,
-                "second {ts} refused: second {last} was already observed"
-            ),
+            Self::OutOfOrder { ts, last } => {
+                write!(f, "second {ts} refused: second {last} was already observed")
+            }
             Self::NegativeStep { step } => {
                 write!(f, "a price step of {step} paise is negative")
             }
@@ -782,7 +780,10 @@ pub fn quantile(samples: &[u64], permille: u16) -> Option<u64> {
     }
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
-    let rank = sorted.len().saturating_mul(usize::from(permille)).div_ceil(1_000);
+    let rank = sorted
+        .len()
+        .saturating_mul(usize::from(permille))
+        .div_ceil(1_000);
     sorted.get(rank.saturating_sub(1)).copied()
 }
 
@@ -874,4 +875,1233 @@ const fn xorshift(mut state: u64) -> u64 {
 /// Nanoseconds since `began`, saturated.
 fn elapsed_ns(began: Instant) -> u64 {
     u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    reason = "the same exception every test module in this workspace takes: a test that cannot panic cannot fail."
+)]
+mod tests {
+    use super::{
+        BAND_RULE, BandSide, Base, BaseReading, DESIGN_WIDTHS_PPM, DayBand, ExDay, Flex,
+        FlexReading, LABEL, Limits, Observed, PPM, Prints, RANGE_PPM, Refusal, SPEC_FLEX_PPM,
+        SessionRatio, bench_day, measure_checks, quantile, xorshift,
+    };
+
+    /// Rs 1,000.00: the base most cases stand on.
+    const RS_1000: i64 = 100_000;
+
+    /// R-BAND-2 at `paise` on an ordinary day.
+    fn base(paise: i64) -> Base {
+        Base::last_trade_before(ExDay::Ordinary, paise).expect("a positive base in range")
+    }
+
+    /// A band on R-BAND-2 at `paise`.
+    fn band(paise: i64, flex: FlexReading) -> DayBand {
+        DayBand::new(base(paise), flex)
+    }
+
+    /// A second that printed one price.
+    const fn at(ts: i64, price: i64) -> Prints {
+        Prints {
+            ts,
+            high: price,
+            low: price,
+        }
+    }
+
+    /// A second that printed from `low` to `high`.
+    const fn range(ts: i64, high: i64, low: i64) -> Prints {
+        Prints { ts, high, low }
+    }
+
+    const fn limits(lower: i64, upper: i64) -> Limits {
+        Limits { lower, upper }
+    }
+
+    /// Rule 4 for a buy (SPEC 9.3): it fills nothing in this second.
+    const fn buy_blocked(band: Limits, sec: Prints) -> bool {
+        sec.high >= band.upper
+    }
+
+    /// Rule 4 for a sell (SPEC 9.3): it fills nothing in this second.
+    const fn sell_blocked(band: Limits, sec: Prints) -> bool {
+        sec.low <= band.lower
+    }
+
+    fn observe(band: &mut DayBand, sec: Prints) -> Observed {
+        band.observe(sec).expect("the band observes this second")
+    }
+
+    fn limits_at(band: &DayBand, ts: i64) -> Limits {
+        band.limits(ts).expect("the band answers this second")
+    }
+
+    /// A limit at half-width `width` ppm on `side` of `base`, rounded inward.
+    fn limit_of(base: i64, width: u64, side: BandSide) -> i64 {
+        let offset =
+            i64::try_from(i128::from(base) * i128::from(width) / PPM).expect("an offset in range");
+        match side {
+            BandSide::Upper => base + offset,
+            BandSide::Lower => base - offset,
+        }
+    }
+
+    /// The rung of a reading's ladder just below a flexed half-width `width`.
+    fn width_below(flex: FlexReading, width: u64) -> u64 {
+        match flex {
+            FlexReading::FivePerStep => width - SPEC_FLEX_PPM,
+            FlexReading::FiveThreeTwo => [RANGE_PPM]
+                .into_iter()
+                .chain(DESIGN_WIDTHS_PPM)
+                .filter(|&rung| rung < width)
+                .max()
+                .expect("a flexed width has a rung below it"),
+        }
+    }
+
+    /// Marsaglia's xorshift64, seeded away from zero.
+    struct Rng(u64);
+
+    impl Rng {
+        fn seeded(seed: u64) -> Self {
+            Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+        }
+
+        fn below(&mut self, n: u64) -> i64 {
+            self.0 = xorshift(self.0);
+            i64::try_from(self.0 % n).expect("under n")
+        }
+    }
+
+    /// A random session of `len` traded seconds around `base`: stamps from
+    /// 09:15:00 with gaps of up to 90 seconds, small moves, now and then a
+    /// jump of 5% to 34% either way, so bands flex and the design's reading is
+    /// sometimes refuted, and now and then a lock exactly at the first band,
+    /// so seconds sit at a limit.
+    fn session(rng: &mut Rng, base: i64, len: usize) -> Vec<Prints> {
+        let mut ts = 33_300;
+        let mut price = base;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            ts += 1 + rng.below(90);
+            let up = rng.below(2) == 0;
+            price = match rng.below(40) {
+                0 => {
+                    let size = base * (5 + rng.below(30)) / 100;
+                    if up { price + size } else { price - size }
+                }
+                1 => {
+                    let first = base / 10;
+                    if up { base + first } else { base - first }
+                }
+                _ => {
+                    let size = base / 400 + 1;
+                    if up { price + size } else { price - size }
+                }
+            }
+            .max(1);
+            let spread = rng.below(3) * (base / 1_000 + 1);
+            out.push(range(ts, price + spread, price));
+        }
+        out
+    }
+
+    /// The design's first named case: prints exactly at the band.
+    #[test]
+    fn prints_exactly_at_the_band_are_at_it_and_flex_nothing() {
+        for flex in FlexReading::ALL {
+            let mut day = band(RS_1000, flex);
+            assert_eq!(day.base().first_limits(), limits(90_000, 110_000));
+            assert_eq!(
+                observe(&mut day, at(0, 110_000)),
+                Observed {
+                    limits: limits(90_000, 110_000),
+                    up: None,
+                    down: None,
+                    at_upper: true,
+                    at_lower: false,
+                },
+                "{flex:?}: a print at the upper limit is at the band, not past it"
+            );
+            assert_eq!(
+                observe(&mut day, at(1, 90_000)),
+                Observed {
+                    limits: limits(90_000, 110_000),
+                    up: None,
+                    down: None,
+                    at_upper: false,
+                    at_lower: true,
+                },
+                "{flex:?}: a print at the lower limit is at the band, not past it"
+            );
+            let both = observe(&mut day, range(2, 110_000, 90_000));
+            assert_eq!(
+                (both.at_upper, both.at_lower, both.up, both.down),
+                (true, true, None, None)
+            );
+            assert_eq!(limits_at(&day, 2), limits(90_000, 110_000));
+            // One paisa past is a flex: the same price one step on.
+            let past = observe(&mut day, at(3, 110_001));
+            assert_eq!(
+                past.up,
+                Some(Flex {
+                    from_ppm: 100_000,
+                    to_ppm: 150_000
+                })
+            );
+            assert_eq!(past.limits, limits(90_000, 115_000));
+            assert!(!past.at_upper);
+        }
+    }
+
+    /// The design's second named case: a flex observed, under both readings,
+    /// and every flex of each.
+    #[test]
+    fn a_flex_is_observed_from_a_print_past_the_band_and_holds_from_its_second() {
+        let flexes = |flex| {
+            let mut day = band(RS_1000, flex);
+            let trail: Vec<Result<Observed, Refusal>> = [
+                at(10, 112_000),
+                at(20, 116_000),
+                at(30, 119_000),
+                at(40, 121_000),
+            ]
+            .into_iter()
+            .map(|sec| day.observe(sec))
+            .collect();
+            (day, trail)
+        };
+        let (spec, trail) = flexes(FlexReading::FivePerStep);
+        let uppers: Vec<Option<(i64, Option<Flex>)>> = trail
+            .iter()
+            .map(|seen| seen.ok().map(|seen| (seen.limits.upper, seen.up)))
+            .collect();
+        let flex = |from_ppm, to_ppm| Some(Flex { from_ppm, to_ppm });
+        assert_eq!(
+            uppers,
+            [
+                Some((115_000, flex(100_000, 150_000))),
+                Some((120_000, flex(150_000, 200_000))),
+                Some((120_000, None)),
+                Some((125_000, flex(200_000, 250_000))),
+            ],
+            "SPEC 10.2's reading: 15%, 20%, 20% held, 25%"
+        );
+        // Each flex is in force from its own second, and not before it.
+        assert_eq!(limits_at(&spec, 9).upper, 110_000);
+        assert_eq!(limits_at(&spec, 10).upper, 115_000);
+        assert_eq!(limits_at(&spec, 19).upper, 115_000);
+        assert_eq!(limits_at(&spec, 20).upper, 120_000);
+        assert_eq!(limits_at(&spec, 40).upper, 125_000);
+        assert_eq!(limits_at(&spec, 40).lower, 90_000, "a rise flexes no fall");
+
+        let (design, trail) = flexes(FlexReading::FiveThreeTwo);
+        assert_eq!(
+            trail[..3]
+                .iter()
+                .map(|seen| seen.ok().map(|seen| (seen.limits.upper, seen.up)))
+                .collect::<Vec<_>>(),
+            [
+                Some((115_000, flex(100_000, 150_000))),
+                Some((118_000, flex(150_000, 180_000))),
+                Some((120_000, flex(180_000, 200_000))),
+            ],
+            "the design's reading: 15%, 18%, 20%"
+        );
+        assert_eq!(
+            trail[3],
+            Err(Refusal::PastTheLastFlex {
+                ts: 40,
+                side: BandSide::Upper,
+                price: 121_000
+            }),
+            "21% is past the design's last flex: the reading is refuted by name"
+        );
+        assert_eq!(limits_at(&design, 39).upper, 120_000);
+
+        // A fall flexes the lower side alone, under either reading.
+        for flex in FlexReading::ALL {
+            let mut day = band(RS_1000, flex);
+            let seen = observe(&mut day, at(50, 87_000));
+            assert_eq!(
+                seen.down,
+                Some(Flex {
+                    from_ppm: 100_000,
+                    to_ppm: 150_000
+                })
+            );
+            assert_eq!(seen.up, None);
+            assert_eq!(seen.limits, limits(85_000, 110_000));
+        }
+    }
+
+    /// The design's third named case: a sell at the lower band and a buy at the
+    /// upper band, read through rule 4 against the limits handed on.
+    #[test]
+    fn a_sell_at_the_lower_band_and_a_buy_at_the_upper_band() {
+        for flex in FlexReading::ALL {
+            let mut day = band(50_000, flex);
+            let top = at(100, 55_000);
+            let seen = observe(&mut day, top);
+            let (lower, upper) = limits_at(&day, 100).pair();
+            assert_eq!((lower, upper), (45_000, 55_000));
+            assert_eq!(
+                (seen.at_upper, buy_blocked(seen.limits, top)),
+                (true, true),
+                "a buy at the upper band fills nothing"
+            );
+            assert!(
+                !sell_blocked(seen.limits, top),
+                "a sell at the upper band is not held by it"
+            );
+
+            let bottom = at(101, 45_000);
+            let seen = observe(&mut day, bottom);
+            assert_eq!(
+                (seen.at_lower, sell_blocked(seen.limits, bottom)),
+                (true, true),
+                "a sell at the lower band fills nothing"
+            );
+            assert!(
+                !buy_blocked(seen.limits, bottom),
+                "a buy at the lower band is not held by it"
+            );
+
+            // A second that spans both limits holds both orders.
+            let both = range(102, 55_000, 45_000);
+            let seen = observe(&mut day, both);
+            assert_eq!(
+                (
+                    buy_blocked(seen.limits, both),
+                    sell_blocked(seen.limits, both)
+                ),
+                (true, true)
+            );
+        }
+    }
+
+    /// The design's fourth named case: resuming off the band. A lock at the
+    /// band holds every buy until a second prints off it, and the band never
+    /// narrows back.
+    #[test]
+    fn trading_resumes_off_the_band_and_the_band_never_narrows() {
+        for flex in FlexReading::ALL {
+            let mut day = band(RS_1000, flex);
+            for ts in 0..5 {
+                let lock = at(ts, 110_000);
+                assert!(
+                    buy_blocked(observe(&mut day, lock).limits, lock),
+                    "second {ts} is locked"
+                );
+            }
+            let off = at(5, 109_995);
+            let seen = observe(&mut day, off);
+            assert_eq!(
+                (seen.at_upper, buy_blocked(seen.limits, off)),
+                (false, false),
+                "one tick off the band, a buy fills"
+            );
+
+            // After a flex the old limit holds nothing, and a fall back does not
+            // narrow the band again.
+            let flexed = observe(&mut day, at(6, 111_000)).limits;
+            assert_eq!(flexed, limits(90_000, 115_000));
+            let back = at(7, RS_1000);
+            assert_eq!(observe(&mut day, back).limits, flexed);
+            let old_top = at(8, 110_000);
+            let seen = observe(&mut day, old_top);
+            assert_eq!(
+                (seen.at_upper, buy_blocked(seen.limits, old_top)),
+                (false, false)
+            );
+            assert_eq!(limits_at(&day, 1_000_000), flexed);
+        }
+    }
+
+    /// The design's fifth named case: a split day. R-BAND-1 takes the adjusted
+    /// Zerodha close of D-1 times the ratio measured inside D's session, so the
+    /// split, and any adjustment after it, cancels.
+    #[test]
+    fn a_split_day_takes_the_adjusted_close_times_the_session_ratio_inside_one_session() {
+        // D-1 closed at Rs 2,000.00 raw; a 1:2 split goes ex on D. Zerodha's
+        // history is back-adjusted, so its D-1 close reads Rs 1,000.00, and its
+        // first minute of D agrees with GDFL's raw print: rho = 1.
+        let split = Base::close_times_ratio(
+            ExDay::Ordinary,
+            100_000,
+            SessionRatio {
+                raw: 101_000,
+                adjusted: 101_000,
+            },
+        )
+        .expect("the split day has an R-BAND-1 base");
+        assert_eq!(
+            (split.reading(), split.paise()),
+            (BaseReading::CloseTimesRatio, 100_000)
+        );
+        // A later adjustment by 5 rescales Zerodha's whole series; the ratio
+        // measured in D's session (5) rescales it back.
+        let later = Base::close_times_ratio(
+            ExDay::Ordinary,
+            20_000,
+            SessionRatio {
+                raw: 101_000,
+                adjusted: 20_200,
+            },
+        )
+        .expect("an R-BAND-1 base under a later adjustment");
+        assert_eq!(later.paise(), split.paise());
+        for flex in FlexReading::ALL {
+            let mut day = DayBand::new(split, flex);
+            for (ts, price) in [(0, 101_000), (1, 95_000), (2, 105_000), (3, 100_500)] {
+                let seen = observe(&mut day, at(ts, price));
+                assert_eq!(
+                    (seen.up, seen.down),
+                    (None, None),
+                    "the post-split session needs no flex"
+                );
+                assert_eq!(seen.limits, limits(90_000, 110_000));
+            }
+        }
+        // R-BAND-2 stands on D-1's raw last trade, in the old basis. The first
+        // post-split print refutes the design's reading; SPEC's reading flexes
+        // until it holds it. That band is the old basis's, and the headline
+        // takes the worse lane per trade (D-8210; docs/06-limits.md).
+        let old = base(200_000);
+        let mut design = DayBand::new(old, FlexReading::FiveThreeTwo);
+        assert_eq!(
+            design.observe(at(0, 101_000)),
+            Err(Refusal::PastTheLastFlex {
+                ts: 0,
+                side: BandSide::Lower,
+                price: 101_000
+            })
+        );
+        let mut spec = DayBand::new(old, FlexReading::FivePerStep);
+        let seen = observe(&mut spec, at(0, 101_000));
+        assert_eq!(
+            seen.down,
+            Some(Flex {
+                from_ppm: 100_000,
+                to_ppm: 500_000
+            })
+        );
+        assert_eq!(seen.limits, limits(100_000, 220_000));
+    }
+
+    /// The design's sixth named case: a demerger ex-day is skipped under both
+    /// readings, by name.
+    #[test]
+    fn a_demerger_ex_day_is_skipped_under_both_readings() {
+        let ratio = SessionRatio {
+            raw: 50_000,
+            adjusted: 50_000,
+        };
+        assert_eq!(
+            Base::close_times_ratio(ExDay::Demerger, RS_1000, ratio),
+            Err(Refusal::DemergerExDay)
+        );
+        assert_eq!(
+            Base::last_trade_before(ExDay::Demerger, RS_1000),
+            Err(Refusal::DemergerExDay)
+        );
+        assert!(
+            Refusal::DemergerExDay
+                .to_string()
+                .contains("demerger goes ex")
+        );
+        // The same prices on an ordinary day stand.
+        assert!(Base::close_times_ratio(ExDay::Ordinary, RS_1000, ratio).is_ok());
+        assert!(Base::last_trade_before(ExDay::Ordinary, RS_1000).is_ok());
+    }
+
+    /// The design's seventh named case: the first print of the day is already
+    /// at the band, a gap up to the limit (and the gap down), under both bases.
+    #[test]
+    fn a_first_print_of_the_day_already_at_the_band() {
+        let r1 = Base::close_times_ratio(
+            ExDay::Ordinary,
+            RS_1000,
+            SessionRatio {
+                raw: 110_000,
+                adjusted: 110_000,
+            },
+        )
+        .expect("an R-BAND-1 base");
+        for start in [r1, base(RS_1000)] {
+            for flex in FlexReading::ALL {
+                let mut up = DayBand::new(start, flex);
+                let open = at(33_300, 110_000);
+                let seen = observe(&mut up, open);
+                assert_eq!(
+                    (seen.at_upper, seen.up),
+                    (true, None),
+                    "the open at the band flexes nothing"
+                );
+                assert!(
+                    buy_blocked(seen.limits, open),
+                    "a buy at the open fills nothing"
+                );
+                let mut down = DayBand::new(start, flex);
+                let open = at(33_300, 90_000);
+                let seen = observe(&mut down, open);
+                assert_eq!((seen.at_lower, seen.down), (true, None));
+                assert!(
+                    sell_blocked(seen.limits, open),
+                    "a sell at the open fills nothing"
+                );
+            }
+        }
+    }
+
+    /// THE BAR's gaps: a no-trade gap, then a print past several flexes, takes
+    /// them all in its one second; an opening gap inside the range moves
+    /// nothing.
+    #[test]
+    fn a_no_trade_gap_then_a_print_past_several_flexes_takes_them_in_one_second() {
+        let mut spec = band(RS_1000, FlexReading::FivePerStep);
+        observe(&mut spec, at(33_300, RS_1000));
+        let seen = observe(&mut spec, at(36_900, 127_000));
+        assert_eq!(
+            seen.up,
+            Some(Flex {
+                from_ppm: 100_000,
+                to_ppm: 300_000
+            }),
+            "four steps of 5% at once"
+        );
+        assert_eq!(seen.limits.upper, 130_000);
+        assert_eq!(
+            limits_at(&spec, 36_899).upper,
+            110_000,
+            "the gap itself flexed nothing"
+        );
+
+        let mut design = band(RS_1000, FlexReading::FiveThreeTwo);
+        let seen = observe(&mut design, at(36_900, 119_500));
+        assert_eq!(
+            seen.up,
+            Some(Flex {
+                from_ppm: 100_000,
+                to_ppm: 200_000
+            }),
+            "the design's three at once"
+        );
+
+        for flex in FlexReading::ALL {
+            let mut day = band(RS_1000, flex);
+            let seen = observe(&mut day, at(33_300, 107_000));
+            assert_eq!(
+                (seen.up, seen.down, seen.limits),
+                (None, None, limits(90_000, 110_000))
+            );
+        }
+    }
+
+    /// One second past both limits flexes both sides; under the design's
+    /// reading a side past its last flex refuses, upper or lower.
+    #[test]
+    fn a_second_past_both_limits_flexes_both_sides() {
+        let mut spec = band(RS_1000, FlexReading::FivePerStep);
+        let seen = observe(&mut spec, range(5, 113_000, 87_000));
+        let flex = Some(Flex {
+            from_ppm: 100_000,
+            to_ppm: 150_000,
+        });
+        assert_eq!((seen.up, seen.down), (flex, flex));
+        assert_eq!(seen.limits, limits(85_000, 115_000));
+
+        let mut design = band(RS_1000, FlexReading::FiveThreeTwo);
+        assert_eq!(
+            design.observe(range(5, 125_000, 95_000)),
+            Err(Refusal::PastTheLastFlex {
+                ts: 5,
+                side: BandSide::Upper,
+                price: 125_000
+            })
+        );
+        let mut design = band(RS_1000, FlexReading::FiveThreeTwo);
+        assert_eq!(
+            design.observe(range(6, 100_000, 75_000)),
+            Err(Refusal::PastTheLastFlex {
+                ts: 6,
+                side: BandSide::Lower,
+                price: 75_000
+            })
+        );
+    }
+
+    /// The band at an earlier second is the band as it stood then, whatever
+    /// was observed since.
+    #[test]
+    fn the_band_answers_an_earlier_second_as_it_stood_then() {
+        let mut day = band(RS_1000, FlexReading::FivePerStep);
+        for sec in [
+            at(10, 112_000),
+            at(15, 88_000),
+            at(20, 117_000),
+            at(25, 100_000),
+        ] {
+            observe(&mut day, sec);
+        }
+        for (ts, want) in [
+            (-5, limits(90_000, 110_000)),
+            (9, limits(90_000, 110_000)),
+            (10, limits(90_000, 115_000)),
+            (14, limits(90_000, 115_000)),
+            (15, limits(85_000, 115_000)),
+            (19, limits(85_000, 115_000)),
+            (20, limits(85_000, 120_000)),
+            (1_000, limits(85_000, 120_000)),
+        ] {
+            assert_eq!(limits_at(&day, ts), want, "second {ts}");
+        }
+        // Observing a second again changes nothing it already holds, and a
+        // wider range in the same second flexes in that second.
+        let again = observe(&mut day, at(25, 100_000));
+        assert_eq!((again.up, again.down), (None, None));
+        let wider = observe(&mut day, range(25, 121_000, 100_000));
+        assert_eq!(wider.limits.upper, 125_000);
+        assert_eq!(limits_at(&day, 24).upper, 120_000);
+    }
+
+    /// Every boundary on each side and under each reading: one paisa inside,
+    /// at the limit, one paisa past.
+    #[test]
+    fn a_print_one_paisa_inside_at_and_past_each_limit() {
+        for flex in FlexReading::ALL {
+            for (side, limit, toward) in
+                [(BandSide::Upper, 110_000, 1), (BandSide::Lower, 90_000, -1)]
+            {
+                for (shift, at_band, flexed) in
+                    [(-1, false, false), (0, true, false), (1, false, true)]
+                {
+                    let mut day = band(RS_1000, flex);
+                    let seen = observe(&mut day, at(0, limit + shift * toward));
+                    let (at_side, flex_side) = match side {
+                        BandSide::Upper => (seen.at_upper, seen.up),
+                        BandSide::Lower => (seen.at_lower, seen.down),
+                    };
+                    assert_eq!(
+                        at_side, at_band,
+                        "{flex:?} {side:?} shift {shift}: at the band"
+                    );
+                    assert_eq!(
+                        flex_side.is_some(),
+                        flexed,
+                        "{flex:?} {side:?} shift {shift}: flexed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Limits round inward to the paisa: the upper down, the lower up, the
+    /// narrowest band the rule allows (OP-12, "the strict way").
+    #[test]
+    fn the_limits_round_inward_to_the_paisa() {
+        // 10% of Rs 100.05 is Rs 10.005: the band is Rs 90.05 to Rs 110.05,
+        // where the exact one is Rs 90.045 to Rs 110.055.
+        assert_eq!(base(10_005).first_limits(), limits(9_005, 11_005));
+        assert_eq!(base(19).first_limits(), limits(18, 20));
+        assert_eq!(
+            base(1).first_limits(),
+            limits(1, 1),
+            "a one-paisa base has no room either way"
+        );
+        // A flexed width rounds the same way: 15% of 10,005 is 1,500.75.
+        let mut day = band(10_005, FlexReading::FivePerStep);
+        assert_eq!(observe(&mut day, at(0, 11_006)).limits.upper, 11_505);
+        assert_eq!(observe(&mut day, at(1, 9_004)).limits.lower, 8_505);
+    }
+
+    /// Each reading's base: R-BAND-2 as given; R-BAND-1 snapped to the paisa
+    /// half-up, once, with the feeds' gap inside the ratio.
+    #[test]
+    fn the_base_of_each_reading() {
+        let r2 = base(12_345);
+        assert_eq!(
+            (r2.reading(), r2.paise()),
+            (BaseReading::LastTradeBefore, 12_345)
+        );
+        let r1 = |prev, raw, adjusted| {
+            Base::close_times_ratio(ExDay::Ordinary, prev, SessionRatio { raw, adjusted })
+                .map(Base::paise)
+        };
+        assert_eq!(r1(3, 1, 2), Ok(2), "1.5 rounds half-up to 2");
+        assert_eq!(r1(5, 1, 4), Ok(1), "1.25 rounds to 1");
+        assert_eq!(r1(7, 3, 2), Ok(11), "10.5 rounds half-up to 11");
+        assert_eq!(
+            r1(RS_1000, 101_050, 101_000),
+            Ok(100_050),
+            "the feeds' 5 bp gap moves the base 5 bp"
+        );
+        let gapped = Base::close_times_ratio(
+            ExDay::Ordinary,
+            RS_1000,
+            SessionRatio {
+                raw: 101_050,
+                adjusted: 101_000,
+            },
+        )
+        .expect("an R-BAND-1 base");
+        assert_eq!(gapped.first_limits(), limits(90_045, 110_055));
+    }
+
+    /// Every refusal, by name, and a broken band keeps refusing from its
+    /// second while its earlier answers stand.
+    #[test]
+    fn every_refusal_is_named() {
+        let ratio = |raw, adjusted| SessionRatio { raw, adjusted };
+        let not_positive = |what, value| Err(Refusal::NotPositive { what, value });
+        assert_eq!(
+            Base::close_times_ratio(ExDay::Ordinary, 0, ratio(1, 1)),
+            not_positive("the adjusted close of D-1", 0)
+        );
+        assert_eq!(
+            Base::close_times_ratio(ExDay::Ordinary, 1, ratio(-1, 1)),
+            not_positive("the session ratio's raw price", -1)
+        );
+        assert_eq!(
+            Base::close_times_ratio(ExDay::Ordinary, 1, ratio(1, 0)),
+            not_positive("the session ratio's adjusted price", 0)
+        );
+        assert_eq!(
+            Base::close_times_ratio(ExDay::Ordinary, 1, ratio(1, 3)),
+            not_positive("the base price", 0),
+            "a third of a paisa snaps to no base"
+        );
+        assert_eq!(
+            Base::last_trade_before(ExDay::Ordinary, -7),
+            not_positive("the last trade of D-1", -7)
+        );
+        assert_eq!(
+            Base::close_times_ratio(ExDay::Ordinary, i64::MAX, ratio(i64::MAX, 1)),
+            Err(Refusal::BaseOutOfRange {
+                reading: BaseReading::CloseTimesRatio
+            }),
+            "a base past i64"
+        );
+        assert_eq!(
+            Base::last_trade_before(ExDay::Ordinary, i64::MAX),
+            Err(Refusal::BaseOutOfRange {
+                reading: BaseReading::LastTradeBefore
+            }),
+            "a base whose first band is past i64"
+        );
+
+        let mut day = band(RS_1000, FlexReading::FiveThreeTwo);
+        for bad in [range(1, 100, 0), range(1, 99, 100), range(1, -5, -6)] {
+            assert_eq!(
+                day.observe(bad),
+                Err(Refusal::BadPrints {
+                    ts: 1,
+                    high: bad.high,
+                    low: bad.low
+                })
+            );
+        }
+        observe(&mut day, at(5, RS_1000));
+        assert_eq!(
+            day.observe(at(4, RS_1000)),
+            Err(Refusal::OutOfOrder { ts: 4, last: 5 })
+        );
+        assert_eq!(
+            limits_at(&day, 5),
+            limits(90_000, 110_000),
+            "a refused second changes nothing"
+        );
+        assert_eq!(
+            day.near(at(5, RS_1000), -1),
+            Err(Refusal::NegativeStep { step: -1 })
+        );
+        assert_eq!(
+            day.near(range(5, 1, 2), 1),
+            Err(Refusal::BadPrints {
+                ts: 5,
+                high: 1,
+                low: 2
+            })
+        );
+
+        let refuted = Refusal::PastTheLastFlex {
+            ts: 40,
+            side: BandSide::Upper,
+            price: 130_000,
+        };
+        assert_eq!(day.observe(at(40, 130_000)), Err(refuted));
+        assert_eq!(
+            day.observe(at(41, RS_1000)),
+            Err(refuted),
+            "a broken band stays broken"
+        );
+        assert_eq!(
+            day.observe(at(39, RS_1000)),
+            Err(Refusal::OutOfOrder { ts: 39, last: 40 })
+        );
+        assert_eq!(
+            limits_at(&day, 39),
+            limits(90_000, 110_000),
+            "its earlier answers stand"
+        );
+        assert_eq!(day.limits(40), Err(refuted));
+        assert_eq!(day.limits(41), Err(refuted));
+        assert_eq!(day.near(at(41, RS_1000), 5), Err(refuted));
+        assert_eq!(day.near(at(39, RS_1000), 5), Ok(false));
+
+        let texts = [
+            (Refusal::DemergerExDay, "demerger"),
+            (
+                Refusal::NotPositive {
+                    what: "the last trade of D-1",
+                    value: 0,
+                },
+                "the last trade of D-1 is 0 paise",
+            ),
+            (
+                Refusal::BaseOutOfRange {
+                    reading: BaseReading::CloseTimesRatio,
+                },
+                "the R-BAND-1 base",
+            ),
+            (
+                Refusal::BadPrints {
+                    ts: 1,
+                    high: 2,
+                    low: 3,
+                },
+                "low 3 and high 2",
+            ),
+            (
+                Refusal::OutOfOrder { ts: 4, last: 5 },
+                "second 5 was already observed",
+            ),
+            (Refusal::NegativeStep { step: -1 }, "-1 paise is negative"),
+            (refuted, "130000 is past the Upper limit's last flex"),
+            (
+                Refusal::OutOfRange {
+                    ts: 0,
+                    side: BandSide::Lower,
+                    price: 7,
+                },
+                "the Lower flex 7 needs",
+            ),
+        ];
+        for (why, words) in texts {
+            let text = why.to_string();
+            assert!(text.contains(words), "{text:?} names {words:?}");
+        }
+    }
+
+    /// THE BAR's `i128` guards: a flex whose half-width is past `u64` parts per
+    /// million, or whose limit is past paise `i64`, is refused by name, never
+    /// wrapped or saturated.
+    #[test]
+    fn the_i128_guards_refuse_a_band_past_the_types() {
+        let mut tiny = band(1, FlexReading::FivePerStep);
+        assert_eq!(
+            tiny.observe(at(0, 1_000_000_000_000_000_000)),
+            Err(Refusal::OutOfRange {
+                ts: 0,
+                side: BandSide::Upper,
+                price: 1_000_000_000_000_000_000
+            }),
+            "a print 10^18 times a one-paisa base needs a half-width past u64"
+        );
+        let big = 1_i64 << 62;
+        let mut wide = band(big, FlexReading::FivePerStep);
+        assert_eq!(
+            wide.observe(at(0, i64::MAX)),
+            Err(Refusal::OutOfRange {
+                ts: 0,
+                side: BandSide::Upper,
+                price: i64::MAX
+            }),
+            "doubling 2^62 is one paisa past i64"
+        );
+        let mut held = band(big, FlexReading::FivePerStep);
+        let seen = observe(&mut held, at(0, big + big / 5));
+        assert_eq!(
+            seen.up,
+            Some(Flex {
+                from_ppm: 100_000,
+                to_ppm: 200_000
+            })
+        );
+        let mut design = band(big, FlexReading::FiveThreeTwo);
+        assert!(matches!(
+            design.observe(at(0, i64::MAX)),
+            Err(Refusal::PastTheLastFlex { .. })
+        ));
+    }
+
+    /// The lane test: within one price step of a limit, or past one.
+    #[test]
+    fn near_is_within_one_step_of_a_limit() {
+        let day = band(RS_1000, FlexReading::FivePerStep);
+        let step = 5;
+        assert_eq!(
+            day.near(at(0, 109_995), step),
+            Ok(true),
+            "a high one step under the upper limit"
+        );
+        assert_eq!(
+            day.near(range(0, RS_1000, 90_005), step),
+            Ok(true),
+            "a low one step over the lower limit"
+        );
+        assert_eq!(
+            day.near(range(0, 109_994, 90_006), step),
+            Ok(false),
+            "both a paisa further in"
+        );
+        assert_eq!(
+            day.near(at(0, 110_000), 0),
+            Ok(true),
+            "step zero: at the band"
+        );
+        assert_eq!(
+            day.near(at(0, 109_999), 0),
+            Ok(false),
+            "step zero: one paisa in"
+        );
+        assert_eq!(
+            day.near(at(0, 111_000), 0),
+            Ok(true),
+            "past a limit not yet observed"
+        );
+    }
+
+    /// The label, the rule word, the readings' names and the constants they
+    /// are built from.
+    #[test]
+    fn the_label_the_rule_word_and_the_reading_names() {
+        assert_eq!(LABEL, "band computed");
+        assert_eq!(BAND_RULE, "fno-band-v1");
+        assert_eq!(
+            BaseReading::ALL.map(BaseReading::id),
+            ["R-BAND-1", "R-BAND-2"]
+        );
+        assert_eq!(
+            FlexReading::ALL.map(FlexReading::id),
+            [
+                "flex 5% a step (SPEC 10.2)",
+                "flex 5%, then 3%, then 2% (FNO-BAND design)"
+            ]
+        );
+        assert_eq!((RANGE_PPM, SPEC_FLEX_PPM), (100_000, 50_000), "10% and 5%");
+        assert_eq!(
+            DESIGN_WIDTHS_PPM,
+            [
+                RANGE_PPM + 50_000,
+                RANGE_PPM + 50_000 + 30_000,
+                RANGE_PPM + 50_000 + 30_000 + 20_000
+            ],
+            "10% then 5%, then 3%, then 2%"
+        );
+        let day = band(RS_1000, FlexReading::FiveThreeTwo);
+        assert_eq!(
+            (day.base(), day.flex()),
+            (base(RS_1000), FlexReading::FiveThreeTwo)
+        );
+        assert_eq!(limits(1, 2).pair(), (1, 2));
+    }
+
+    /// The bench's quantiles take the nearest rank.
+    #[test]
+    fn quantiles_take_the_nearest_rank() {
+        assert_eq!(quantile(&[], 500), None);
+        assert_eq!(quantile(&[1, 2], 1_001), None);
+        assert_eq!(quantile(&[5], 0), Some(5));
+        let hundred: Vec<u64> = (1..=100).rev().collect();
+        assert_eq!(quantile(&hundred, 500), Some(50));
+        assert_eq!(quantile(&hundred, 990), Some(99));
+        assert_eq!(quantile(&hundred, 1_000), Some(100));
+        assert_eq!(quantile(&hundred, 1), Some(1));
+    }
+
+    /// The bench's fixture, at a tiny size: every second timed once each way,
+    /// one flex a side, nothing refused; and the one refusal it passes on.
+    #[test]
+    fn the_bench_fixture_times_every_second_it_walks() {
+        for flex in FlexReading::ALL {
+            let (mut day, seconds) = bench_day(flex, 50);
+            assert_eq!(
+                day.base(),
+                base(RS_1000),
+                "the bench base is R-BAND-2 at Rs 1,000.00"
+            );
+            assert_eq!(seconds.len(), 50);
+            // After the first two, every second stays inside the flexed band.
+            for sec in &seconds[2..] {
+                assert!(sec.low >= 86_000, "{sec:?}");
+                assert!(sec.high < 114_000, "{sec:?}");
+                assert!(sec.high >= sec.low, "{sec:?}");
+            }
+            let samples = measure_checks(&mut day, &seconds).expect("the fixture is a valid day");
+            assert_eq!(
+                (samples.check_ns.len(), samples.lookback_ns.len()),
+                (50, 50)
+            );
+            assert_eq!((samples.flexes, samples.refused), (2, 0));
+            assert_eq!(limits_at(&day, 49), limits(85_000, 115_000));
+            let (mut empty, none) = bench_day(flex, 0);
+            assert_eq!(
+                measure_checks(&mut empty, &none).map(|s| s.check_ns.len()),
+                Ok(0)
+            );
+        }
+        let (mut day, _) = bench_day(FlexReading::FivePerStep, 0);
+        assert_eq!(
+            measure_checks(&mut day, &[at(5, RS_1000), at(4, RS_1000)]),
+            Err(Refusal::OutOfOrder { ts: 4, last: 5 })
+        );
+    }
+
+    /// No look-ahead (SPEC FIB-I1): on seeded random sessions, the band at
+    /// every second up to a cut is the same whatever the seconds after the cut
+    /// print.
+    #[test]
+    fn no_later_second_moves_an_earlier_band() {
+        for seed in 1..=150 {
+            let mut rng = Rng::seeded(seed);
+            let start = 1_000 + rng.below(400_000);
+            let seconds = session(&mut rng, start, 160);
+            let cut = usize::try_from(rng.below(160)).expect("an index");
+            let mut other = seconds[..=cut].to_vec();
+            let mut future = Rng::seeded(seed + 10_000);
+            let last = seconds[cut].ts;
+            other.extend(
+                session(&mut future, start, 160 - cut - 1)
+                    .into_iter()
+                    .map(|sec| range(last + sec.ts - 33_300, sec.high, sec.low)),
+            );
+            for flex in FlexReading::ALL {
+                let mut one = band(start, flex);
+                let mut two = band(start, flex);
+                for sec in &seconds {
+                    let _ = one.observe(*sec);
+                }
+                for sec in &other {
+                    let _ = two.observe(*sec);
+                }
+                for sec in &seconds[..=cut] {
+                    for ts in [sec.ts - 1, sec.ts] {
+                        assert_eq!(
+                            one.limits(ts),
+                            two.limits(ts),
+                            "seed {seed} {flex:?} second {ts}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// On seeded random sessions: the band holds every print it observed in
+    /// that print's second, answers that second as observe did, and never
+    /// narrows; a broken band refuses every later second the same way.
+    #[test]
+    fn the_band_holds_every_print_it_observed_and_never_narrows() {
+        let mut refuted = 0;
+        for seed in 1..=150 {
+            let mut rng = Rng::seeded(seed);
+            let start = 1_000 + rng.below(400_000);
+            for flex in FlexReading::ALL {
+                let mut day = band(start, flex);
+                let mut before = day.base().first_limits();
+                let mut broke: Option<Refusal> = None;
+                for sec in session(&mut rng, start, 200) {
+                    match (day.observe(sec), broke) {
+                        (Ok(seen), None) => {
+                            assert!(seen.limits.lower <= sec.low, "seed {seed}: holds the low");
+                            assert!(sec.high <= seen.limits.upper, "seed {seed}: holds the high");
+                            assert!(
+                                seen.limits.lower <= before.lower,
+                                "seed {seed}: never narrows"
+                            );
+                            assert!(
+                                seen.limits.upper >= before.upper,
+                                "seed {seed}: never narrows"
+                            );
+                            assert_eq!(day.limits(sec.ts), Ok(seen.limits));
+                            before = seen.limits;
+                        }
+                        (Err(why), None) => {
+                            refuted += 1;
+                            assert!(
+                                matches!(why, Refusal::PastTheLastFlex { .. }),
+                                "seed {seed}: {why}"
+                            );
+                            broke = Some(why);
+                        }
+                        (outcome, Some(why)) => assert_eq!(outcome, Err(why), "seed {seed}"),
+                    }
+                }
+            }
+        }
+        assert!(
+            refuted > 0,
+            "the sessions refute the design's reading at least once"
+        );
+    }
+
+    /// On seeded random sessions, each flex is the fewest steps of its reading
+    /// that hold the print: the rung below the new half-width would not.
+    #[test]
+    fn each_flex_is_the_fewest_steps_that_hold_the_print() {
+        let mut flexes = 0;
+        for seed in 1..=150 {
+            let mut rng = Rng::seeded(seed);
+            let start = 1_000 + rng.below(400_000);
+            for flex in FlexReading::ALL {
+                let mut day = band(start, flex);
+                for sec in session(&mut rng, start, 200) {
+                    let Ok(seen) = day.observe(sec) else { break };
+                    for (side, moved, print) in [
+                        (BandSide::Upper, seen.up, sec.high),
+                        (BandSide::Lower, seen.down, sec.low),
+                    ] {
+                        let Some(moved) = moved else { continue };
+                        flexes += 1;
+                        let below = limit_of(start, width_below(flex, moved.to_ppm), side);
+                        let short = match side {
+                            BandSide::Upper => below < print,
+                            BandSide::Lower => below > print,
+                        };
+                        assert!(
+                            short,
+                            "seed {seed} {flex:?} {side:?}: one rung less would hold {print}"
+                        );
+                        assert!(moved.to_ppm > moved.from_ppm);
+                    }
+                }
+            }
+        }
+        assert!(flexes > 100, "the sessions flex: {flexes}");
+    }
+
+    /// While the design's reading holds, its band is never wider than SPEC's
+    /// on the same prints: its ladder is never above SPEC's (D-8211).
+    #[test]
+    fn the_designs_band_is_never_wider_than_specs_while_it_holds() {
+        for seed in 1..=150 {
+            let mut rng = Rng::seeded(seed);
+            let start = 1_000 + rng.below(400_000);
+            let mut spec = band(start, FlexReading::FivePerStep);
+            let mut design = band(start, FlexReading::FiveThreeTwo);
+            for sec in session(&mut rng, start, 200) {
+                let wide = spec.observe(sec).expect("SPEC's reading has no last flex");
+                let Ok(narrow) = design.observe(sec) else {
+                    break;
+                };
+                assert!(narrow.limits.upper <= wide.limits.upper, "seed {seed}");
+                assert!(narrow.limits.lower >= wide.limits.lower, "seed {seed}");
+            }
+        }
+    }
+
+    /// Asking each second right after observing it, or observing the whole day
+    /// first and asking in a shuffled order, gives the same answers.
+    #[test]
+    fn asking_in_any_order_gives_the_same_answers() {
+        for seed in 1..=100 {
+            let mut rng = Rng::seeded(seed);
+            let start = 1_000 + rng.below(400_000);
+            let seconds = session(&mut rng, start, 120);
+            for flex in FlexReading::ALL {
+                let mut walking = band(start, flex);
+                let asked: Vec<_> = seconds
+                    .iter()
+                    .map(|sec| {
+                        (
+                            sec.ts,
+                            walking.observe(*sec).and_then(|_| walking.limits(sec.ts)),
+                        )
+                    })
+                    .collect();
+                let mut whole = band(start, flex);
+                for sec in &seconds {
+                    let _ = whole.observe(*sec);
+                }
+                let mut order: Vec<usize> = (0..asked.len()).collect();
+                for i in (1..order.len()).rev() {
+                    let j = usize::try_from(rng.below(u64::try_from(i + 1).expect("a count")))
+                        .expect("an index");
+                    order.swap(i, j);
+                }
+                for i in order {
+                    let (ts, answer) = asked[i];
+                    assert_eq!(whole.limits(ts), answer, "seed {seed} {flex:?} second {ts}");
+                }
+            }
+        }
+    }
+
+    /// The lane rule of PARTS FNO-BAND: a second no lane calls near (within
+    /// one price step of a limit, or past one) has the same rule-4 outcome in
+    /// every lane, so a trade made only of such seconds walks one lane.
+    #[test]
+    fn a_trade_far_from_every_band_walks_one_lane() {
+        let (mut far, mut near) = (0, 0);
+        for seed in 1..=100 {
+            let mut rng = Rng::seeded(seed);
+            let start = 1_000 + rng.below(400_000);
+            let close = Base::close_times_ratio(
+                ExDay::Ordinary,
+                start,
+                SessionRatio {
+                    raw: 1_000_000 + rng.below(800),
+                    adjusted: 1_000_000,
+                },
+            )
+            .expect("an R-BAND-1 base");
+            let mut lanes: Vec<DayBand> = [close, base(start)]
+                .into_iter()
+                .flat_map(|stand| FlexReading::ALL.map(|flex| DayBand::new(stand, flex)))
+                .collect();
+            let step = start / 2_000 + 1;
+            for sec in session(&mut rng, start, 150) {
+                // A lane the data refuted is no lane any more: FNO-RUN drops it,
+                // so only the standing lanes are asked.
+                let standing: Vec<(bool, Limits)> = lanes
+                    .iter_mut()
+                    .filter_map(|lane| {
+                        let stands = lane.observe(sec).is_ok();
+                        stands.then(|| {
+                            (
+                                lane.near(sec, step).expect("a standing lane answers near"),
+                                limits_at(lane, sec.ts),
+                            )
+                        })
+                    })
+                    .collect();
+                assert!(
+                    standing.len() >= 2,
+                    "SPEC's reading never refutes: both of its lanes stand"
+                );
+                if standing.iter().any(|&(close, _)| close) {
+                    near += 1;
+                    continue;
+                }
+                far += 1;
+                for (_, limits) in standing {
+                    assert!(
+                        !buy_blocked(limits, sec),
+                        "seed {seed}: no lane holds a buy"
+                    );
+                    assert!(
+                        !sell_blocked(limits, sec),
+                        "seed {seed}: no lane holds a sell"
+                    );
+                }
+            }
+        }
+        assert!(far > 1_000, "{far} seconds far from every band");
+        assert!(near > 100, "{near} seconds near a band");
+    }
 }
