@@ -3506,4 +3506,73 @@ mod tests {
             assert!(code.contains("fills_at("), "{name} prices through fills_at");
         }
     }
+
+    /// BASE-COV-LIBS-LS2: THE SLICE FACTS ANSWER A QUESTION ABOUT BARS THEY DO
+    /// NOT HOLD WITH "NO", never a panic or a guess: a reversed range, a range
+    /// starting or ending past the slice, and an entry past it or on a slice
+    /// with no verdict at all.
+    #[test]
+    fn a_range_or_entry_outside_the_slice_facts_is_answered_no() {
+        let (bars, column) = swept();
+        let facts = super::SliceFacts::of(&bars, &column);
+        let past = bars.len() + 5;
+        assert!(facts.path_accepts(10, 10));
+        assert!(!facts.path_accepts(11, 10), "a reversed range");
+        assert!(
+            !facts.path_accepts(past, past),
+            "a range starting past the slice"
+        );
+        assert!(
+            !facts.path_accepts(0, past),
+            "a range ending past the slice"
+        );
+        assert!(
+            !facts.refused_within(past, past + 1),
+            "a range clamped to nothing"
+        );
+        assert!(!facts.refused_within(11, 10));
+        let entry = *column.sources().first().expect("a swept row");
+        assert!(super::entry_is_priceable(
+            &bars,
+            entry,
+            Direction::Long,
+            &facts
+        ));
+        assert!(!super::entry_is_priceable(
+            &bars,
+            bars.len(),
+            Direction::Long,
+            &facts
+        ));
+        let blind = super::SliceFacts::of(&bars, &Column::default());
+        assert!(!super::entry_is_priceable(
+            &bars,
+            entry,
+            Direction::Long,
+            &blind
+        ));
+    }
+
+    /// AN ACCEPTED BAR OFF THE WHOLE MINUTE CANNOT ENTER, EXIT OR PRICE: the
+    /// evaluator accepts it, the slice facts do not.
+    #[test]
+    fn an_accepted_bar_off_the_whole_minute_is_not_accepted_by_the_slice_facts() {
+        let mut bars = crate::synthetic::sessions(8);
+        let at = bars.len() / 2;
+        bars.get_mut(at).expect("a middle bar").ts_micros += 1;
+        // COMBINED: a corrupt bar later in the same slice stays refused.
+        let corrupt = at + 10;
+        let bar = bars.get_mut(corrupt).expect("a later bar");
+        bar.high = bar.low - 1;
+        let column = Column::build(&bars, &mut evaluator());
+        assert!(
+            column.accepts(at),
+            "the evaluator does not read the clock grid"
+        );
+        assert!(!column.accepts(corrupt));
+        let facts = super::SliceFacts::of(&bars, &column);
+        assert!(!facts.accepts(at));
+        assert!(!facts.accepts(corrupt));
+        assert!(facts.accepts(at - 1) && facts.accepts(at + 1));
+    }
 }
