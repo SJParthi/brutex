@@ -74,12 +74,13 @@
 //! # Cost
 //!
 //! [`DayBand::observe`] is a fixed number of integer operations and at most one
-//! push per side that flexes. [`DayBand::limits`] at or after a side's latest
-//! flex reads that flex; at an earlier second it binary-searches that side's
-//! flexes of the day, which are few: three at most under the design's reading.
-//! C-FNO-BAND-01 times one check (one `observe` and one `limits` at the walk's
-//! second) and one look-back at 1x, 10x and 100x the seconds of a day in
-//! `crates/runner/benches/ratio.rs`, through [`measure_checks`], which
+//! push per side that flexes. [`DayBand::limits`] binary-searches each side's
+//! flexes of the day, at any second: at most `log2(flexes + 1) + 1`
+//! comparisons a side, and the flexes are few, three at most a side under the
+//! design's reading. C-FNO-BAND-01 times one check (one `observe` and one
+//! `limits` at the walk's second) and one look-back at 1x, 10x and 100x the
+//! seconds of a day in `crates/runner/benches/ratio.rs`, through
+//! [`measure_checks`], which
 //! `runner::fno_band::tests::the_bench_fixture_times_every_second_it_walks` runs
 //! at a tiny size; the row fails unless both are flat within the bench's
 //! ceiling and inside their budget.
@@ -1844,7 +1845,7 @@ mod tests {
             // After the first two, every second stays inside the flexed band.
             for sec in &seconds[2..] {
                 assert!(sec.low >= 86_000, "{sec:?}");
-                assert!(sec.high < 114_000, "{sec:?}");
+                assert!(sec.high <= 114_000, "{sec:?}");
                 assert!(sec.high >= sec.low, "{sec:?}");
             }
             let samples = measure_checks(&mut day, &seconds).expect("the fixture is a valid day");

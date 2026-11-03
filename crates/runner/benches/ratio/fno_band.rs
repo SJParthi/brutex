@@ -3,8 +3,8 @@
 //!
 //! A check is what the fill walk does in each traded second: one
 //! `DayBand::observe` and one `DayBand::limits` at that second. A look-back is
-//! one `limits` at an earlier second of the day, which binary-searches that
-//! side's flexes. Both are timed one call at a time, under both flex readings,
+//! one `limits` at an earlier second of the day. Each `limits` binary-searches
+//! a side's flexes. Both are timed one call at a time, under both flex readings,
 //! over 22,500 of each at every size (100 days of 225 seconds, 10 of 2,250 and
 //! one of 22,500, a whole session), so every quantile rests on the same count.
 //! The row fails unless each p99 is flat within the harness's ceiling at 10x
@@ -62,10 +62,11 @@ pub(crate) fn one_band_check_is_flat(id: &str) -> bool {
             ok &= ratio(&format!("{label}, 100x"), ps(base), ps(hundred));
             let worst = base.max(ten).max(hundred);
             let within = worst <= BUDGET_NS;
-            println!(
-                "{label}: worst {worst} ns, budget {BUDGET_NS} ns   {}",
-                if within { "ok" } else { "OVER BUDGET" }
-            );
+            let verdict = ["OVER BUDGET", "ok"]
+                .get(usize::from(within))
+                .copied()
+                .unwrap_or_default();
+            println!("{label}: worst {worst} ns, budget {BUDGET_NS} ns   {verdict}");
             ok &= within;
         }
     }

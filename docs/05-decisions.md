@@ -87756,7 +87756,8 @@ drives each refusal below.
    10.2); R-BAND-2's base is in the old basis across a split, bonus or rights
    issue while R4-26 is not live; NSE's rounding of its band to the tick;
    which flex reading NSE applies; "at the band" is a printed price, not a
-   locked queue (SPEC 10.2); and a look-back's binary search.
+   locked queue (SPEC 10.2); and `limits`' binary search over a side's flexes
+   of the day.
 4. **D-8213 to D-8219 are unused.**
 
 <!-- slot FNO-CLOCK -->
