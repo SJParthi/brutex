@@ -131,7 +131,6 @@ fn every_reservation_of_a_real_walk_refused_in_turn_is_a_memory_halt() {
     let (rows, live) = every_live();
     let column = Column::try_from_rows(&rows).unwrap();
     let whole = ladder().walk_column(&column, &live, NO_REPORT);
-    let mut refused = 0_u32;
     for n in 0..256 {
         let (sweep, fired) = refusing(n, || ladder().walk_column(&column, &live, NO_REPORT));
         if !fired {
@@ -140,10 +139,10 @@ fn every_reservation_of_a_real_walk_refused_in_turn_is_a_memory_halt() {
                 whole.halted.map(|h| h.breach)
             );
             assert_eq!(sweep.levels.len(), whole.levels.len());
-            assert!(refused >= 6, "only {refused} reservations were reached");
+            // Each of the `n` reservations before this one was refused in turn.
+            assert!(n >= 6, "only {n} reservations were reached");
             return;
         }
-        refused += 1;
         let halt = sweep.halted.unwrap_or_else(|| panic!("{n}: no halt"));
         assert_eq!(halt.breach, Breach::Memory, "{n}");
         for level in &sweep.levels {
