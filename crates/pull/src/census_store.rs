@@ -4519,3 +4519,9 @@ mod kept_tests;
 #[cfg(test)]
 #[path = "census_store_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL-PS2 (D-7336): the arms the modules above leave unreached,
+// each driven by the input that reaches it.
+#[cfg(test)]
+#[path = "census_store_ps2_tests.rs"]
+mod ps2_tests;
