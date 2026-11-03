@@ -1260,9 +1260,13 @@ mod tests {
         let temp = Temp::new();
         seed(&temp, 3);
         seed(&temp, 4);
-        let result = prepare_with(&temp.0, window(1, 4), |_| async {
-            Err("network must not be used".to_owned())
-        })
+        let result = prepare_with(
+            &temp.0,
+            window(1, 4),
+            |url| -> std::future::Ready<Result<Vec<u8>, String>> {
+                unreachable!("{url}: a fully cached window must not use the network")
+            },
+        )
         .await
         .expect("fully cached window");
         assert_eq!(result.len(), 2);
@@ -1504,9 +1508,14 @@ mod tests {
         assert_eq!(cache.len(), 3);
         assert!(!cache.contains_key(&day(2).days_from_epoch()));
         assert!(!paths(&temp.0, day(2)).0.exists());
-        prepare_observed_with(&temp.0, &dates, &mut cache, |_| async {
-            Err("cached dates must never fetch again".to_owned())
-        })
+        prepare_observed_with(
+            &temp.0,
+            &dates,
+            &mut cache,
+            |url| -> std::future::Ready<Result<Vec<u8>, String>> {
+                unreachable!("{url}: cached dates must never fetch again")
+            },
+        )
         .await
         .expect("duplicate dates and calls reuse receipted files");
         assert_eq!(cache.len(), 3);
@@ -1578,15 +1587,19 @@ mod tests {
             decode(&bytes).expect("initial validated cache"),
         )]);
         let different_root = temp.0.join("other");
-        let mut fetched = false;
-        let error = prepare_observed_with(&different_root, &[day(3)], &mut cache, |_| {
-            fetched = true;
-            std::future::ready(Err("unexpected network".to_owned()))
-        })
+        // A fetch here fails the test at the fetch: the claim `fetched` held,
+        // checked where it is broken (BASE-COV-PULL-PS1).
+        let error = prepare_observed_with(
+            &different_root,
+            &[day(3)],
+            &mut cache,
+            |url| -> std::future::Ready<Result<Vec<u8>, String>> {
+                unreachable!("{url}: a root with no receipt is refused before any fetch")
+            },
+        )
         .await
         .expect_err("wrong cache root refuses");
         assert!(error.contains("no receipted evidence"));
-        assert!(!fetched);
         let mut requested = Vec::new();
         let error = prepare_observed_with(&temp.0, &[day(23), day(22)], &mut cache, |url| {
             let result = if url == source_url(day(22)) {
@@ -1786,22 +1799,61 @@ mod tests {
         assert!(decode(&corrupt).is_err());
     }
 
+    /// The day an official sample's name states: `NSE_CM_security_`, eight
+    /// digits `ddmmyyyy`, then `.csv.gz`.
     fn sample_day(name: &str) -> Result<Day, String> {
         let stamp = name
             .strip_prefix("NSE_CM_security_")
             .and_then(|name| name.strip_suffix(".csv.gz"))
             .filter(|stamp| stamp.len() == 8 && stamp.bytes().all(|byte| byte.is_ascii_digit()))
             .ok_or_else(|| format!("invalid dated NSE master filename: {name}"))?;
-        let (day, remainder) = stamp.split_at_checked(2).ok_or("missing day")?;
-        let (month, year) = remainder.split_at_checked(2).ok_or("missing month")?;
-        Day::new(
-            year.parse().map_err(|why| format!("invalid year: {why}"))?,
-            month
-                .parse()
-                .map_err(|why| format!("invalid month: {why}"))?,
-            day.parse().map_err(|why| format!("invalid day: {why}"))?,
-        )
-        .map_err(|why| why.to_string())
+        // Eight ASCII digits (BASE-COV-PULL-PS1): each part is its digits'
+        // value, so no part can fail to read and no refusal is left that no
+        // name reaches.
+        let (day, rest) = stamp.as_bytes().split_at(2);
+        let (month, year) = rest.split_at(2);
+        let two = |digits: &[u8]| {
+            digits
+                .iter()
+                .fold(0_u8, |value, digit| value * 10 + (digit - b'0'))
+        };
+        let year = year
+            .iter()
+            .fold(0_u16, |value, digit| value * 10 + u16::from(digit - b'0'));
+        Day::new(year, two(month), two(day)).map_err(|why| why.to_string())
+    }
+
+    /// The official samples' names state their day, `ddmmyyyy` between the
+    /// master's prefix and `.csv.gz` (BASE-COV-PULL-PS1): eight digits that
+    /// are a date are that day, day before month; eight that are none are
+    /// refused in the date's own words; any other name (a stamp of seven or
+    /// nine digits or with a letter in it, another prefix or suffix) is
+    /// refused by name. The helper the real-data test below reads its
+    /// directory with, proven on invented names, so it runs on every host.
+    #[test]
+    fn a_sample_name_states_its_day_or_is_refused() {
+        assert_eq!(sample_day("NSE_CM_security_03082026.csv.gz"), Ok(day(3)));
+        assert_eq!(
+            sample_day("NSE_CM_security_01092026.csv.gz"),
+            Ok(Day::new(2026, 9, 1).expect("a date"))
+        );
+        let no_date = Day::new(2026, 2, 31).expect_err("31 February is no date");
+        assert_eq!(
+            sample_day("NSE_CM_security_31022026.csv.gz"),
+            Err(no_date.to_string())
+        );
+        for name in [
+            "NSE_CM_security_0308202.csv.gz",
+            "NSE_CM_security_030820266.csv.gz",
+            "NSE_CM_security_0308202x.csv.gz",
+            "NSE_CM_SECURITY_03082026.csv.gz",
+            "NSE_CM_security_03082026.csv",
+        ] {
+            assert_eq!(
+                sample_day(name),
+                Err(format!("invalid dated NSE master filename: {name}"))
+            );
+        }
     }
 
     // Explicitly invoked only with the directory of public NSE downloads.
@@ -2037,15 +2089,16 @@ mod cloud_mutant_tests {
         );
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut head = String::new();
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-                head.push_str(&line);
-            }
+            // The request head: every line up to the blank line that ends it,
+            // each given back its CRLF; a failed read, or a peer that hangs up
+            // first, ends it there (BASE-COV-PULL-PS1: no client of the suite
+            // hangs up early, so a loop's end-of-input side was never taken).
+            let head: String = BufReader::new(stream.try_clone().unwrap())
+                .lines()
+                .map_while(Result::ok)
+                .take_while(|line| !line.is_empty())
+                .map(|line| line + "\r\n")
+                .collect();
             // The client may hang up as soon as it refuses the head.
             let _ignored = stream.write_all(&answer);
             let _ignored = stream.flush();
@@ -2341,3 +2394,9 @@ mod cloud_mutant_tests {
         server.join().unwrap();
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): the day lock's vanished path and unflockable
+// descriptor, driven.
+#[cfg(test)]
+#[path = "cash_session_cache_ps1_tests.rs"]
+mod ps1_tests;
