@@ -75,8 +75,9 @@
 //!   says which day slots had a file.
 //!
 //! Every file is sealed by its own BLAKE3 trailer, and every month header
-//! carries the BLAKE3 of the dictionary file it was built against, so a set
-//! mixed from two builds is refused by name ([`OpenError::Corrupt`]). Each
+//! carries the BLAKE3 of the dictionary file it was built against, so a
+//! month built against another dictionary, whose cells would name other
+//! symbols, is refused by name ([`OpenError::Corrupt`]). Each
 //! file is written whole to a hidden `.part` file and renamed into place; the
 //! dictionary is written last. A build is a pure function of the batch-1
 //! files: rebuilding over the same files writes the same bytes
@@ -263,7 +264,10 @@ impl fmt::Display for ParseError {
                 needed,
             } => write!(f, "line {line} has {found} columns, {needed} needed"),
             Self::BadSymbol { line, text } => {
-                write!(f, "line {line}: column {SYMBOL_COLUMN} {text:?} is not a symbol")
+                write!(
+                    f,
+                    "line {line}: column {SYMBOL_COLUMN} {text:?} is not a symbol"
+                )
             }
             Self::BadNumber { line, column, text } => write!(
                 f,
@@ -273,7 +277,10 @@ impl fmt::Display for ParseError {
                 line,
                 symbol,
                 first,
-            } => write!(f, "line {line}: a second {SERIES} row for {symbol} (first at line {first})"),
+            } => write!(
+                f,
+                "line {line}: a second {SERIES} row for {symbol} (first at line {first})"
+            ),
             Self::NoEqRows => write!(f, "the file lists no {SERIES} row"),
         }
     }
@@ -442,7 +449,8 @@ pub fn source_file(name: &str) -> Result<Option<SourceFile>, BuildError> {
             .unwrap_or(0)
     };
     let small = |value: u16| u8::try_from(value).unwrap_or(0);
-    let day = Day::new(number(4, 8), small(number(2, 4)), small(number(0, 2))).map_err(|_| bad())?;
+    let day =
+        Day::new(number(4, 8), small(number(2, 4)), small(number(0, 2))).map_err(|_| bad())?;
     let batch = batch.parse::<u8>().map_err(|_| bad())?;
     Ok(Some(SourceFile { day, batch }))
 }
@@ -493,7 +501,10 @@ impl fmt::Display for BuildError {
             Self::Read { path, why } => write!(f, "cannot read {}: {why}", path.display()),
             Self::Write { path, why } => write!(f, "cannot write {}: {why}", path.display()),
             Self::BadSourceName { name } => {
-                write!(f, "{name:?} starts as a margin file and is not {SOURCE_PREFIX}DDMMYYYY_N{SOURCE_SUFFIX}")
+                write!(
+                    f,
+                    "{name:?} starts as a margin file and is not {SOURCE_PREFIX}DDMMYYYY_N{SOURCE_SUFFIX}"
+                )
             }
             Self::Parse { name, error } => write!(f, "{name}: {error}"),
             Self::NoDays => write!(f, "no batch-{BATCH} margin file was read"),
@@ -565,7 +576,10 @@ impl Encoded {
     /// [`MarginTable::from_bytes`] takes them.
     #[must_use]
     pub fn month_bytes(&self) -> Vec<&[u8]> {
-        self.months.iter().map(|(_, bytes)| bytes.as_slice()).collect()
+        self.months
+            .iter()
+            .map(|(_, bytes)| bytes.as_slice())
+            .collect()
     }
 }
 
@@ -605,7 +619,9 @@ fn seal(mut bytes: Vec<u8>) -> Vec<u8> {
 
 /// The last [`DIGEST_LEN`] bytes of a sealed file.
 fn trailer(bytes: &[u8]) -> &[u8] {
-    bytes.get(bytes.len().saturating_sub(DIGEST_LEN)..).unwrap_or(&[])
+    bytes
+        .get(bytes.len().saturating_sub(DIGEST_LEN)..)
+        .unwrap_or(&[])
 }
 
 /// BLAKE3 over the dictionary's trailer and each month's, in month order:
@@ -654,7 +670,10 @@ pub fn encode(days: &[(Day, Vec<MarginRow>)]) -> Result<Encoded, BuildError> {
     dictionary.extend_from_slice(&[first.month(), 0]);
     put_u16(&mut dictionary, last.year());
     dictionary.extend_from_slice(&[last.month(), 0, 0, 0]);
-    put_u32(&mut dictionary, u32::try_from(names.len()).unwrap_or(u32::MAX));
+    put_u32(
+        &mut dictionary,
+        u32::try_from(names.len()).unwrap_or(u32::MAX),
+    );
     for name in &names {
         let mut padded = [0u8; SYMBOL_CAPACITY];
         for (slot, byte) in padded.iter_mut().zip(name.as_str().bytes()) {
@@ -679,11 +698,15 @@ pub fn encode(days: &[(Day, Vec<MarginRow>)]) -> Result<Encoded, BuildError> {
             .insert(day.day(), cells);
     }
     let empty = BTreeMap::new();
-    let months = (month_index(first.year(), first.month())..=month_index(last.year(), last.month()))
+    let months = (month_index(first.year(), first.month())
+        ..=month_index(last.year(), last.month()))
         .map(|at| {
             let (year, month) = month_of(at);
             let held = by_month.get(&at).unwrap_or(&empty);
-            (month_name(year, month), month_file(year, month, names.len(), &bound, held))
+            (
+                month_name(year, month),
+                month_file(year, month, names.len(), &bound, held),
+            )
         })
         .collect();
     Ok(Encoded {
@@ -703,7 +726,8 @@ fn month_file(
     bound: &[u8; DIGEST_LEN],
     held: &BTreeMap<u8, HashMap<usize, [u32; 3]>>,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(MONTH_HEADER_LEN + DAY_SLOTS * symbols * CELL_LEN + DIGEST_LEN);
+    let mut out =
+        Vec::with_capacity(MONTH_HEADER_LEN + DAY_SLOTS * symbols * CELL_LEN + DIGEST_LEN);
     out.extend_from_slice(&MONTH_MAGIC);
     put_u16(&mut out, VERSION);
     put_u16(&mut out, year);
@@ -738,12 +762,18 @@ struct Listing {
 
 fn list_sources(src: &Path) -> Result<Listing, BuildError> {
     let mut listing = Listing::default();
-    for entry in fs::read_dir(src).map_err(|e| read_error(src, &e))? {
-        let entry = entry.map_err(|e| read_error(src, &e))?;
+    // One error path for the directory and for each of its entries: an
+    // entry the listing cannot read refuses the build like the directory.
+    let entries = fs::read_dir(src)
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .map_err(|e| read_error(src, &e))?;
+    for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         match source_file(&name)? {
             None => listing.not_source.push(name),
-            Some(file) if file.batch == BATCH => listing.sources.push((file.day, entry.path(), name)),
+            Some(file) if file.batch == BATCH => {
+                listing.sources.push((file.day, entry.path(), name))
+            }
             Some(_) => listing.other_batches.push(name),
         }
     }
@@ -915,7 +945,10 @@ fn read_dictionary(bytes: &[u8]) -> Result<Dictionary, OpenError> {
         .unwrap_or(&[]);
     let mut names = Vec::with_capacity(count);
     for padded in body.chunks_exact(SYMBOL_CAPACITY) {
-        let used = padded.iter().position(|&b| b == 0).unwrap_or(SYMBOL_CAPACITY);
+        let used = padded
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(SYMBOL_CAPACITY);
         let (text, tail) = padded.split_at_checked(used).unwrap_or((padded, &[]));
         let name = std::str::from_utf8(text)
             .ok()
@@ -923,7 +956,10 @@ fn read_dictionary(bytes: &[u8]) -> Result<Dictionary, OpenError> {
             .filter(|name| name.as_str().as_bytes() == text)
             .filter(|_| tail.iter().all(|&b| b == 0));
         let Some(name) = name else {
-            return Err(corrupt(DICTIONARY, "a name that is not a symbol as written"));
+            return Err(corrupt(
+                DICTIONARY,
+                "a name that is not a symbol as written",
+            ));
         };
         if names.last().is_some_and(|before| *before >= name) {
             return Err(corrupt(DICTIONARY, "names not strictly sorted"));
@@ -1031,15 +1067,26 @@ impl fmt::Display for MarginUnknown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OutsideSpan { day } => {
-                write!(f, "margin unknown: {day} is outside the months the table holds")
+                write!(
+                    f,
+                    "margin unknown: {day} is outside the months the table holds"
+                )
             }
-            Self::NoFile { day } => write!(f, "margin unknown: no batch-{BATCH} file of {day} was read"),
+            Self::NoFile { day } => {
+                write!(f, "margin unknown: no batch-{BATCH} file of {day} was read")
+            }
             Self::NotASymbol { text } => write!(f, "margin unknown: {text:?} is not a symbol"),
             Self::NeverListed { symbol, day } => {
-                write!(f, "margin unknown: {symbol} on {day}: no file read lists it")
+                write!(
+                    f,
+                    "margin unknown: {symbol} on {day}: no file read lists it"
+                )
             }
             Self::NotListed { symbol, day } => {
-                write!(f, "margin unknown: {symbol} on {day}: that day's file does not list it")
+                write!(
+                    f,
+                    "margin unknown: {symbol} on {day}: that day's file does not list it"
+                )
             }
         }
     }
@@ -1217,13 +1264,24 @@ impl MarginTable {
         let mut cells = Vec::with_capacity(months.len() * DAY_SLOTS * symbols);
         for (at, bytes) in (span.first..=span.last).zip(months) {
             let (year, month) = month_of(at);
-            held.push(read_month(&month_name(year, month), bytes, at, symbols, &bound)?);
+            held.push(read_month(
+                &month_name(year, month),
+                bytes,
+                at,
+                symbols,
+                &bound,
+            )?);
             let body = bytes
                 .get(MONTH_HEADER_LEN..bytes.len() - DIGEST_LEN)
                 .unwrap_or(&[]);
             cells.extend(body.chunks_exact(CELL_LEN).map(cell_of));
         }
-        let index = span.names.iter().enumerate().map(|(i, s)| (*s, i)).collect();
+        let index = span
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (*s, i))
+            .collect();
         Ok(Self {
             first: span.first,
             months: months.len(),
@@ -1323,5 +1381,1294 @@ impl MarginTable {
     #[must_use]
     pub fn file_digest_hex(&self) -> String {
         hex(&self.digest)
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod tests {
+    use super::*;
+
+    // EVERY ROW BELOW IS INVENTED. The `ZZ` symbols are no NSE symbol, the
+    // `INE000Z` codes are no ISIN and no number is any stock's margin. The
+    // first line of `FIXTURE` stands where a header record would: its third
+    // column is not `EQ`, which is all this reader asks of a line it skips.
+    const FIXTURE: &str = "\
+10,ZZHEAD,01062020,1\r\n\
+20,ZZFOUR,EQ,INE000Z01011,20.00,9.10,20.00,5.00,0.00,25.00\r\n\
+20,ZZEXACT,EQ,INE000Z01029,22.11,22.11,22.11,0.00,0.00,22.11\r\n\
+20,ZZCAP,EQ,INE000Z01037,10.00,9.10,10.00,2.50,0.00,12.50\r\n\
+20,ZZEXTRA,EQ,INE000Z01045,15.00,9.10,15.00,5.00,5.00,25.00\r\n\
+20,ZZFOUR,BE,INE000Z01011,40.00,9.10,40.00,5.00,10.00,55.00\r\n\
+20,ZZODD,N1,short\r\n";
+
+    fn day(year: u16, month: u8, of: u8) -> Day {
+        Day::new(year, month, of).unwrap()
+    }
+
+    fn row(symbol: &str, var_ppm: u32, elm_ppm: u32, extra_ppm: u32) -> MarginRow {
+        MarginRow {
+            symbol: Symbol::new(symbol).unwrap(),
+            series: SERIES,
+            var_ppm,
+            elm_ppm,
+            extra_ppm,
+        }
+    }
+
+    fn table_of(days: &[(Day, Vec<MarginRow>)]) -> MarginTable {
+        let encoded = encode(days).unwrap();
+        MarginTable::from_bytes(&encoded.dictionary, &encoded.month_bytes()).unwrap()
+    }
+
+    fn ratio(num: u64, den: u64) -> (u64, u64) {
+        (num, den)
+    }
+
+    fn terms(r: Ratio) -> (u64, u64) {
+        (r.numerator(), r.denominator())
+    }
+
+    fn file_name(on: Day, batch: u8) -> String {
+        format!(
+            "C_VAR1_{:02}{:02}{:04}_{batch}.DAT",
+            on.day(),
+            on.month(),
+            on.year()
+        )
+    }
+
+    /// A fresh scratch directory of this process, named in upper case.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("BRUTEX-NSM-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn reseal(bytes: &mut Vec<u8>) {
+        bytes.truncate(bytes.len() - DIGEST_LEN);
+        let digest = brutex_core::blake3::hash(bytes);
+        bytes.extend_from_slice(&digest);
+    }
+
+    // ─────────────────────────────── parsing ───────────────────────────────
+
+    #[test]
+    fn fixture_rows_parse_to_exact_parts_per_million() {
+        let parsed = parse_counted(FIXTURE.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.rows,
+            vec![
+                row("ZZFOUR", 200_000, 50_000, 0),
+                row("ZZEXACT", 221_100, 0, 0),
+                row("ZZCAP", 100_000, 25_000, 0),
+                row("ZZEXTRA", 150_000, 50_000, 50_000),
+            ]
+        );
+        assert_eq!(
+            parsed.other_series, 3,
+            "the header line, the BE row and the N1 row"
+        );
+        assert!(parsed.rows.iter().all(|r| r.series == SERIES));
+        assert_eq!(parse_c_var1(FIXTURE.as_bytes()).unwrap(), parsed.rows);
+        // No trailing newline, LF only, spaces around fields: the same rows.
+        let bare = "20, ZZFOUR ,EQ,X,0,0, 20.00 ,5,0.0000,25";
+        assert_eq!(
+            parse_c_var1(bare.as_bytes()).unwrap(),
+            vec![row("ZZFOUR", 200_000, 50_000, 0)]
+        );
+    }
+
+    #[test]
+    fn every_percentage_form_is_held_exactly_or_refused() {
+        let held: [(&str, u32); 7] = [
+            ("20,ZZA,EQ,X,0,0,12,0,0", 120_000),
+            ("20,ZZA,EQ,X,0,0,12.5,0,0", 125_000),
+            ("20,ZZA,EQ,X,0,0,22.11,0,0", 221_100),
+            ("20,ZZA,EQ,X,0,0,0.0001,0,0", 1),
+            ("20,ZZA,EQ,X,0,0,0,0,0", 0),
+            ("20,ZZA,EQ,X,0,0,007.5000,0,0", 75_000),
+            ("20,ZZA,EQ,X,0,0,429496.7294,0,0", ABSENT - 1),
+        ];
+        for (line, ppm) in held {
+            assert_eq!(
+                parse_c_var1(line.as_bytes()).unwrap()[0].var_ppm,
+                ppm,
+                "{line}"
+            );
+        }
+        let refused = [
+            "20,ZZA,EQ,X,0,0,12.,0,0",
+            "20,ZZA,EQ,X,0,0,.5,0,0",
+            "20,ZZA,EQ,X,0,0,1.23456,0,0",
+            "20,ZZA,EQ,X,0,0,1.2A,0,0",
+            "20,ZZA,EQ,X,0,0,1A,0,0",
+            "20,ZZA,EQ,X,0,0,-1,0,0",
+            "20,ZZA,EQ,X,0,0,+1,0,0",
+            "20,ZZA,EQ,X,0,0,,0,0",
+            "20,ZZA,EQ,X,0,0,1e3,0,0",
+            "20,ZZA,EQ,X,0,0,429496.7295,0,0",
+            "20,ZZA,EQ,X,0,0,429497,0,0",
+            "20,ZZA,EQ,X,0,0,99999999999999999999,0,0",
+            "20,ZZA,EQ,X,0,0,18446744073709551616,0,0",
+            "20,ZZA,EQ,X,0,0,1844674407370956,0,0",
+            "20,ZZA,EQ,X,0,0,1844674407370955.9999,0,0",
+        ];
+        for line in refused {
+            let text = line.split(',').nth(6).unwrap().to_owned();
+            assert_eq!(
+                parse_c_var1(line.as_bytes()),
+                Err(ParseError::BadNumber {
+                    line: 1,
+                    column: VAR_COLUMN,
+                    text
+                }),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_rows_are_refused_by_line_and_name() {
+        let cases: [(&[u8], ParseError); 10] = [
+            (
+                b"20,ZZA,EQ,X,0,0,1,1,1\n\n20,ZZB,EQ,X,0,0,1,1,1\n",
+                ParseError::EmptyLine { line: 2 },
+            ),
+            (b"\n", ParseError::EmptyLine { line: 1 }),
+            (
+                b"20,ZZA,EQ,X,0,0,1,1,1\n20,Z\xFFZ,EQ,X\n",
+                ParseError::NotText { line: 2 },
+            ),
+            (b"20,ZZA", too_few(1, 2, SERIES_COLUMN)),
+            (b"20,ZZA,EQ,X,0,0,1,1", too_few(1, 8, EXTRA_COLUMN)),
+            (
+                b"20,ZZ.A,EQ,X,0,0,1,1,1",
+                ParseError::BadSymbol {
+                    line: 1,
+                    text: "ZZ.A".to_owned(),
+                },
+            ),
+            (
+                b"20,ZZA,EQ,X,0,0,1,1.,1",
+                ParseError::BadNumber {
+                    line: 1,
+                    column: ELM_COLUMN,
+                    text: "1.".to_owned(),
+                },
+            ),
+            (
+                b"20,ZZA,EQ,X,0,0,1,1,X",
+                ParseError::BadNumber {
+                    line: 1,
+                    column: EXTRA_COLUMN,
+                    text: "X".to_owned(),
+                },
+            ),
+            (
+                b"20,ZZA,EQ,X,0,0,1,1,1\r\n20,ZZB,BE,X\r\n20,ZZA,EQ,X,0,0,2,2,2\r\n",
+                ParseError::DuplicateSymbol {
+                    line: 3,
+                    symbol: Symbol::new("ZZA").unwrap(),
+                    first: 1,
+                },
+            ),
+            (
+                b"10,ZZHEAD,01062020,1\n20,ZZA,BE,X,0,0,1,1,1\n",
+                ParseError::NoEqRows,
+            ),
+        ];
+        for (case, (bytes, refusal)) in cases.into_iter().enumerate() {
+            assert_eq!(parse_c_var1(bytes), Err(refusal), "case {case}");
+        }
+        assert_eq!(
+            parse_c_var1(b""),
+            Err(ParseError::NoEqRows),
+            "an empty download"
+        );
+    }
+
+    #[test]
+    fn every_parse_refusal_says_what_and_where() {
+        let said = [
+            (ParseError::NotText { line: 4 }, "line 4 is not UTF-8 text"),
+            (
+                ParseError::EmptyLine { line: 2 },
+                "line 2 is empty before the file's end",
+            ),
+            (too_few(3, 2, 9), "line 3 has 2 columns, 9 needed"),
+            (
+                ParseError::BadSymbol {
+                    line: 5,
+                    text: "ZZ.A".to_owned(),
+                },
+                "line 5: column 2 \"ZZ.A\" is not a symbol",
+            ),
+            (
+                ParseError::BadNumber {
+                    line: 6,
+                    column: 8,
+                    text: "1.".to_owned(),
+                },
+                "line 6: column 8 \"1.\" is not a percentage held exactly",
+            ),
+            (
+                ParseError::DuplicateSymbol {
+                    line: 9,
+                    symbol: Symbol::new("ZZA").unwrap(),
+                    first: 2,
+                },
+                "line 9: a second EQ row for ZZA (first at line 2)",
+            ),
+            (ParseError::NoEqRows, "the file lists no EQ row"),
+        ];
+        for (refusal, words) in said {
+            assert_eq!(refusal.to_string(), words);
+        }
+    }
+
+    #[test]
+    fn a_non_eq_series_is_ignored_and_counted() {
+        // A BE row for a symbol also listed EQ is no duplicate; malformed rows
+        // of other series are never read far enough to be refused.
+        let text = "20,ZZA,BE,X,99,99,99,99,99,99\n20,ZZA,EQ,X,0,0,10,2.5,0\n20,ZZB,BZ,X,NOT,A,NUMBER\n20,ZZC,N1\n";
+        let parsed = parse_counted(text.as_bytes()).unwrap();
+        assert_eq!(parsed.rows, vec![row("ZZA", 100_000, 25_000, 0)]);
+        assert_eq!(parsed.other_series, 3);
+        let table = table_of(&[(day(2020, 6, 1), parsed.rows)]);
+        assert_eq!(
+            table.margin("ZZB", day(2020, 6, 1)),
+            Err(MarginUnknown::NeverListed {
+                symbol: Symbol::new("ZZB").unwrap(),
+                day: day(2020, 6, 1),
+            }),
+            "a symbol listed only under another series is never listed"
+        );
+    }
+
+    // ───────────────────────────── source names ────────────────────────────
+
+    #[test]
+    fn a_margin_files_name_gives_its_day_and_batch() {
+        assert_eq!(
+            source_file("C_VAR1_01062020_1.DAT").unwrap(),
+            Some(SourceFile {
+                day: day(2020, 6, 1),
+                batch: 1
+            })
+        );
+        assert_eq!(
+            source_file("C_VAR1_29022020_6.DAT").unwrap(),
+            Some(SourceFile {
+                day: day(2020, 2, 29),
+                batch: 6
+            })
+        );
+        assert_eq!(source_file("README.md").unwrap(), None);
+        assert_eq!(source_file("F_VAR1_01062020_1.DAT").unwrap(), None);
+        for name in [
+            "C_VAR1_01062020_1.dat",
+            "C_VAR1_0106202_1.DAT",
+            "C_VAR1_010620200_1.DAT",
+            "C_VAR1_01O62020_1.DAT",
+            "C_VAR1_01062020_.DAT",
+            "C_VAR1_01062020_X.DAT",
+            "C_VAR1_01062020_+1.DAT",
+            "C_VAR1_01062020_999.DAT",
+            "C_VAR1_01062020.DAT",
+            "C_VAR1_31022020_1.DAT",
+            "C_VAR1_00062020_1.DAT",
+            "C_VAR1_01132020_1.DAT",
+            "C_VAR1_01061969_1.DAT",
+        ] {
+            assert_eq!(
+                source_file(name),
+                Err(BuildError::BadSourceName {
+                    name: name.to_owned()
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    // ──────────────────────────────── leverage ─────────────────────────────
+
+    fn margin_of(var_ppm: u32, elm_ppm: u32, extra_ppm: u32) -> Margin {
+        Margin {
+            day: day(2020, 6, 1),
+            var_ppm,
+            elm_ppm,
+            extra_ppm,
+        }
+    }
+
+    #[test]
+    fn twenty_five_percent_is_four_times() {
+        assert_eq!(
+            terms(leverage(margin_of(200_000, 50_000, 0), Reading::Day)),
+            ratio(4, 1)
+        );
+    }
+
+    #[test]
+    fn twenty_two_point_one_one_percent_is_the_exact_ratio() {
+        let l = leverage(margin_of(221_100, 0, 0), Reading::Day);
+        assert_eq!(terms(l), ratio(10_000, 2_211));
+        // 100 / 22.11, cross-multiplied in hundredths: 100 x 2211 = 22.11 x 10000.
+        assert_eq!(l.numerator() * 2_211, l.denominator() * 10_000);
+        assert_eq!(l.to_string(), "10000/2211");
+    }
+
+    #[test]
+    fn twelve_and_a_half_percent_caps_at_five() {
+        assert_eq!(
+            terms(leverage(margin_of(100_000, 25_000, 0), Reading::Day)),
+            ratio(5, 1)
+        );
+    }
+
+    #[test]
+    fn the_floor_is_the_cap_at_and_around_twenty_percent() {
+        assert_eq!(
+            terms(leverage(margin_of(0, 0, 0), Reading::Day)),
+            ratio(5, 1)
+        );
+        assert_eq!(
+            terms(leverage(margin_of(150_000, 50_000, 0), Reading::Day)),
+            ratio(5, 1)
+        );
+        assert_eq!(
+            terms(leverage(margin_of(150_000, 50_001, 0), Reading::Day)),
+            ratio(1_000_000, 200_001)
+        );
+        assert_eq!(
+            terms(leverage(margin_of(1_000_000, 0, 0), Reading::Day)),
+            ratio(1, 1)
+        );
+        assert_eq!(
+            terms(leverage(margin_of(1_000_000, 250_000, 0), Reading::Day)),
+            ratio(4, 5)
+        );
+        let top = leverage(
+            margin_of(ABSENT - 1, ABSENT - 1, ABSENT - 1),
+            Reading::WithExtra,
+        );
+        assert_eq!(
+            top.numerator() * (3 * u64::from(ABSENT - 1)),
+            top.denominator() * 1_000_000
+        );
+    }
+
+    #[test]
+    fn the_column_nine_reading_adds_the_extra_margin() {
+        let m = margin_of(150_000, 50_000, 50_000);
+        assert_eq!(m.total_ppm(Reading::Day), 200_000);
+        assert_eq!(m.total_ppm(Reading::Today), 200_000);
+        assert_eq!(m.total_ppm(Reading::WithExtra), 250_000);
+        assert_eq!(terms(leverage(m, Reading::Day)), ratio(5, 1));
+        assert_eq!(terms(leverage(m, Reading::Today)), ratio(5, 1));
+        assert_eq!(terms(leverage(m, Reading::WithExtra)), ratio(4, 1));
+    }
+
+    #[test]
+    fn ratios_order_by_value() {
+        let at = |var| leverage(margin_of(var, 0, 0), Reading::Day);
+        let mut seen = [
+            at(1_250_000),
+            at(221_100),
+            at(100_000),
+            at(1_000_000),
+            at(250_000),
+        ];
+        seen.sort();
+        let ordered: Vec<(u64, u64)> = seen.iter().map(|r| terms(*r)).collect();
+        assert_eq!(ordered, [(4, 5), (1, 1), (4, 1), (10_000, 2_211), (5, 1)]);
+        assert_eq!(
+            at(250_000).partial_cmp(&at(100_000)),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert!(at(221_100) > at(250_000));
+    }
+
+    // ─────────────────────────── the table and lookups ─────────────────────
+
+    /// May to July 2020: files on 29 May, 1 and 3 June and 31 July; `ZZC`
+    /// listed on 31 July only.
+    fn three_months() -> MarginTable {
+        table_of(&[
+            (
+                day(2020, 5, 29),
+                vec![
+                    row("ZZA", 100_000, 25_000, 0),
+                    row("ZZB", 200_000, 50_000, 0),
+                ],
+            ),
+            (
+                day(2020, 6, 1),
+                vec![
+                    row("ZZB", 221_100, 0, 0),
+                    row("ZZA", 150_000, 50_000, 50_000),
+                ],
+            ),
+            (day(2020, 6, 3), vec![row("ZZA", 300_000, 50_000, 0)]),
+            (
+                day(2020, 7, 31),
+                vec![row("ZZC", 10_000, 0, 0), row("ZZA", 120_000, 0, 0)],
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_listed_day_answers_its_own_files_columns() {
+        let table = three_months();
+        assert_eq!(table.span(), ((2020, 5), (2020, 7)));
+        assert_eq!(table.symbols(), 3);
+        assert_eq!(
+            table.margin("ZZA", day(2020, 6, 1)),
+            Ok(Margin {
+                day: day(2020, 6, 1),
+                var_ppm: 150_000,
+                elm_ppm: 50_000,
+                extra_ppm: 50_000
+            })
+        );
+        assert_eq!(
+            table.margin("ZZB", day(2020, 6, 1)).map(|m| m.var_ppm),
+            Ok(221_100)
+        );
+        assert_eq!(
+            table.margin("ZZA", day(2020, 6, 3)).map(|m| m.var_ppm),
+            Ok(300_000)
+        );
+        assert_eq!(
+            table.margin("ZZC", day(2020, 7, 31)).map(|m| m.var_ppm),
+            Ok(10_000)
+        );
+        assert_eq!(
+            table.margin("Zza", day(2020, 5, 29)).map(|m| m.var_ppm),
+            Ok(100_000)
+        );
+        let shown = format!("{table:?}");
+        assert!(
+            shown.starts_with("MarginTable { span: (2020, 5)..=(2020, 7), symbols: 3, digest: ")
+        );
+        assert!(shown.ends_with(&format!("{} }}", table.file_digest_hex())));
+    }
+
+    #[test]
+    fn a_missing_day_is_margin_unknown_never_another_days_value() {
+        let table = three_months();
+        let between = day(2020, 6, 2);
+        assert_eq!(
+            table.margin("ZZA", between),
+            Err(MarginUnknown::NoFile { day: between })
+        );
+        let quiet = day(2020, 7, 1);
+        assert_eq!(
+            table.margin("ZZA", quiet),
+            Err(MarginUnknown::NoFile { day: quiet })
+        );
+        let before = day(2020, 4, 30);
+        assert_eq!(
+            table.margin("ZZA", before),
+            Err(MarginUnknown::OutsideSpan { day: before })
+        );
+        let after = day(2020, 8, 1);
+        assert_eq!(
+            table.margin("ZZA", after),
+            Err(MarginUnknown::OutsideSpan { day: after })
+        );
+        let listed = day(2020, 6, 3);
+        let zzb = Symbol::new("ZZB").unwrap();
+        assert_eq!(
+            table.margin("ZZB", listed),
+            Err(MarginUnknown::NotListed {
+                symbol: zzb,
+                day: listed
+            })
+        );
+        let zzq = Symbol::new("ZZQ").unwrap();
+        assert_eq!(
+            table.margin("ZZQ", listed),
+            Err(MarginUnknown::NeverListed {
+                symbol: zzq,
+                day: listed
+            })
+        );
+        assert_eq!(
+            table.margin("ZZ.A", listed),
+            Err(MarginUnknown::NotASymbol {
+                text: "ZZ.A".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_month_with_no_file_inside_the_span_holds_no_day() {
+        let table = table_of(&[
+            (day(2019, 12, 31), vec![row("ZZA", 100_000, 0, 0)]),
+            (day(2020, 2, 29), vec![row("ZZA", 110_000, 0, 0)]),
+        ]);
+        assert_eq!(table.span(), ((2019, 12), (2020, 2)));
+        for of in 1..=31 {
+            let jan = day(2020, 1, of);
+            assert_eq!(
+                table.margin("ZZA", jan),
+                Err(MarginUnknown::NoFile { day: jan })
+            );
+        }
+        assert_eq!(
+            table.margin("ZZA", day(2019, 12, 31)).map(|m| m.var_ppm),
+            Ok(100_000)
+        );
+        assert_eq!(
+            table.margin("ZZA", day(2020, 2, 29)).map(|m| m.var_ppm),
+            Ok(110_000)
+        );
+    }
+
+    #[test]
+    fn every_unknown_margin_says_why() {
+        let on = day(2020, 6, 2);
+        let zza = Symbol::new("ZZA").unwrap();
+        let said = [
+            (
+                MarginUnknown::OutsideSpan { day: on },
+                "margin unknown: 2020-06-02 is outside the months the table holds",
+            ),
+            (
+                MarginUnknown::NoFile { day: on },
+                "margin unknown: no batch-1 file of 2020-06-02 was read",
+            ),
+            (
+                MarginUnknown::NotASymbol {
+                    text: "ZZ.A".to_owned(),
+                },
+                "margin unknown: \"ZZ.A\" is not a symbol",
+            ),
+            (
+                MarginUnknown::NeverListed {
+                    symbol: zza,
+                    day: on,
+                },
+                "margin unknown: ZZA on 2020-06-02: no file read lists it",
+            ),
+            (
+                MarginUnknown::NotListed {
+                    symbol: zza,
+                    day: on,
+                },
+                "margin unknown: ZZA on 2020-06-02: that day's file does not list it",
+            ),
+        ];
+        for (unknown, words) in said {
+            assert_eq!(unknown.to_string(), words);
+        }
+    }
+
+    #[test]
+    fn on_a_rename_day_only_the_dated_symbol_answers() {
+        // ZZOLD is listed up to 2 June and ZZNEW from 3 June, the rename day.
+        let table = table_of(&[
+            (day(2020, 6, 2), vec![row("ZZOLD", 100_000, 50_000, 0)]),
+            (day(2020, 6, 3), vec![row("ZZNEW", 200_000, 50_000, 0)]),
+        ]);
+        let rename = day(2020, 6, 3);
+        let old = Symbol::new("ZZOLD").unwrap();
+        let new = Symbol::new("ZZNEW").unwrap();
+        assert_eq!(
+            table.margin("ZZOLD", rename),
+            Err(MarginUnknown::NotListed {
+                symbol: old,
+                day: rename
+            })
+        );
+        assert_eq!(
+            table.margin("ZZNEW", rename).map(|m| m.var_ppm),
+            Ok(200_000)
+        );
+        let before = day(2020, 6, 2);
+        assert_eq!(
+            table.margin("ZZNEW", before),
+            Err(MarginUnknown::NotListed {
+                symbol: new,
+                day: before
+            })
+        );
+        assert_eq!(
+            table.margin("ZZOLD", before).map(|m| m.var_ppm),
+            Ok(100_000)
+        );
+        // Today's reading under today's symbol, the trade day's under its own.
+        let three = table.readings("ZZOLD", before, "ZZNEW", rename).unwrap();
+        assert_eq!(terms(three.day), ratio(5, 1));
+        assert_eq!(terms(three.today), ratio(4, 1));
+    }
+
+    #[test]
+    fn the_first_of_june_2020_method_change_reads_the_same_totals() {
+        // T01-21: the method changed on 1 Jun 2020 and the totals did not.
+        // The split between columns 7 and 8 differs either side; M is their
+        // sum on both sides, so no date switch exists in this reader.
+        let table = table_of(&[
+            (
+                day(2020, 5, 29),
+                vec![
+                    row("ZZA", 150_000, 50_000, 0),
+                    row("ZZB", 200_000, 50_000, 0),
+                ],
+            ),
+            (
+                day(2020, 6, 1),
+                vec![
+                    row("ZZA", 175_000, 25_000, 0),
+                    row("ZZB", 225_000, 25_000, 0),
+                ],
+            ),
+        ]);
+        for (symbol, l) in [("ZZA", ratio(5, 1)), ("ZZB", ratio(4, 1))] {
+            let before = table.margin(symbol, day(2020, 5, 29)).unwrap();
+            let after = table.margin(symbol, day(2020, 6, 1)).unwrap();
+            assert_ne!(before.var_ppm, after.var_ppm, "the split is kept as read");
+            assert_eq!(
+                before.total_ppm(Reading::Day),
+                after.total_ppm(Reading::Day)
+            );
+            assert_eq!(terms(leverage(before, Reading::Day)), l);
+            assert_eq!(terms(leverage(after, Reading::Day)), l);
+        }
+    }
+
+    #[test]
+    fn the_today_reading_reads_todays_file_and_refuses_without_it() {
+        let trade = day(2020, 6, 1);
+        let today = day(2020, 7, 31);
+        let table = table_of(&[
+            (trade, vec![row("ZZA", 150_000, 50_000, 50_000)]),
+            (today, vec![row("ZZA", 300_000, 50_000, 0)]),
+        ]);
+        let three = table.readings("ZZA", trade, "ZZA", today).unwrap();
+        assert_eq!(terms(three.day), ratio(5, 1));
+        assert_eq!(terms(three.today), ratio(20, 7));
+        assert_eq!(terms(three.with_extra), ratio(4, 1));
+        assert_eq!(
+            terms(three.smallest()),
+            ratio(20, 7),
+            "today's file is the smallest here"
+        );
+        // No file of today: refused for today, never the newest file held.
+        let missing = day(2020, 7, 30);
+        assert_eq!(
+            table.readings("ZZA", trade, "ZZA", missing),
+            Err(MarginUnknown::NoFile { day: missing })
+        );
+        // And no file of the trade day: refused for the trade day.
+        let none = day(2020, 6, 2);
+        assert_eq!(
+            table.readings("ZZA", none, "ZZA", today),
+            Err(MarginUnknown::NoFile { day: none })
+        );
+    }
+
+    #[test]
+    fn the_smallest_reading_is_valid_under_every_reading() {
+        let trade = day(2020, 6, 1);
+        let today = day(2020, 6, 3);
+        let table = table_of(&[
+            (
+                trade,
+                vec![
+                    row("ZZA", 200_000, 50_000, 125_000),
+                    row("ZZB", 200_000, 50_000, 0),
+                ],
+            ),
+            (
+                today,
+                vec![row("ZZA", 100_000, 0, 0), row("ZZB", 200_000, 50_000, 0)],
+            ),
+        ]);
+        let a = table.readings("ZZA", trade, "ZZA", today).unwrap();
+        assert_eq!(
+            (terms(a.day), terms(a.today), terms(a.with_extra)),
+            ((4, 1), (5, 1), (8, 3))
+        );
+        assert_eq!(
+            terms(a.smallest()),
+            ratio(8, 3),
+            "the column-9 reading is the smallest"
+        );
+        let b = table.readings("ZZB", trade, "ZZB", today).unwrap();
+        assert_eq!(terms(b.smallest()), ratio(4, 1), "all three equal");
+        for r in [a.day, a.today, a.with_extra] {
+            assert!(a.smallest() <= r);
+        }
+    }
+
+    #[test]
+    fn encode_refuses_no_day_and_days_out_of_order() {
+        assert_eq!(encode(&[]), Err(BuildError::NoDays));
+        let twice = [
+            (day(2020, 6, 1), vec![row("ZZA", 1, 1, 1)]),
+            (day(2020, 6, 1), vec![row("ZZA", 2, 2, 2)]),
+        ];
+        assert_eq!(
+            encode(&twice),
+            Err(BuildError::DayOrder {
+                day: day(2020, 6, 1)
+            })
+        );
+        let back = [
+            (day(2020, 6, 2), vec![row("ZZA", 1, 1, 1)]),
+            (day(2020, 6, 1), vec![row("ZZA", 2, 2, 2)]),
+        ];
+        assert_eq!(
+            encode(&back),
+            Err(BuildError::DayOrder {
+                day: day(2020, 6, 1)
+            })
+        );
+    }
+
+    #[test]
+    fn the_bytes_do_not_depend_on_the_order_rows_are_listed_in() {
+        let one = encode(&[(
+            day(2020, 6, 1),
+            vec![row("ZZB", 2, 2, 2), row("ZZA", 1, 1, 1)],
+        )])
+        .unwrap();
+        let two = encode(&[(
+            day(2020, 6, 1),
+            vec![row("ZZA", 1, 1, 1), row("ZZB", 2, 2, 2)],
+        )])
+        .unwrap();
+        assert_eq!(one, two);
+        assert_eq!(one.symbols, 2);
+        assert_eq!(
+            (one.first_day, one.last_day),
+            (day(2020, 6, 1), day(2020, 6, 1))
+        );
+        assert_eq!(one.months.len(), 1);
+        assert_eq!(one.months[0].0, "2020-06.nsm");
+        assert_eq!(
+            one.months[0].1.len(),
+            MONTH_HEADER_LEN + DAY_SLOTS * 2 * CELL_LEN + DIGEST_LEN
+        );
+        assert_eq!(
+            one.dictionary.len(),
+            DICTIONARY_HEADER_LEN + 2 * SYMBOL_CAPACITY + DIGEST_LEN
+        );
+        assert_eq!(one.month_bytes(), vec![one.months[0].1.as_slice()]);
+    }
+
+    #[test]
+    fn a_twenty_four_byte_symbol_round_trips() {
+        let long = "ZZABCDEFGHIJKLMNOPQRSTUV";
+        assert_eq!(long.len(), SYMBOL_CAPACITY);
+        let table = table_of(&[(day(2020, 6, 1), vec![row(long, 1, 2, 3)])]);
+        assert_eq!(
+            table.margin(long, day(2020, 6, 1)).map(|m| m.extra_ppm),
+            Ok(3)
+        );
+    }
+
+    // ───────────────────────────── build and open ──────────────────────────
+
+    /// Writes `files` (name, text) into a fresh `src`, in the order given.
+    fn source_dir(tag: &str, files: &[(String, &str)]) -> PathBuf {
+        let src = scratch(tag);
+        for (name, text) in files {
+            fs::write(src.join(name), text).unwrap();
+        }
+        src
+    }
+
+    const DAY_ONE: &str =
+        "10,ZZHEAD,01062020,1\n20,ZZB,EQ,X,0,0,20.00,5.00,0\n20,ZZA,EQ,X,0,0,10,2.5,0\n";
+    const DAY_ONE_REORDERED: &str =
+        "20,ZZA,EQ,X,0,0,10,2.5,0\n20,ZZB,EQ,X,0,0,20.00,5.00,0\n10,ZZHEAD,01062020,1\n";
+    const DAY_TWO: &str =
+        "20,ZZA,EQ,X,0,0,22.11,0,0\n20,ZZC,EQ,X,0,0,30,5,5\n20,ZZC,BE,X,1,1,1,1,1\n";
+    const BATCH_TWO: &str = "20,ZZA,EQ,X,0,0,99,0,0\n";
+
+    fn three_files(first: &str) -> Vec<(String, &str)> {
+        vec![
+            (file_name(day(2020, 7, 1), 1), DAY_TWO),
+            (file_name(day(2020, 6, 1), 1), first),
+            (file_name(day(2020, 6, 1), 2), BATCH_TWO),
+        ]
+    }
+
+    #[test]
+    fn only_batch_one_of_the_day_is_read_and_the_rest_is_named() {
+        let mut files = three_files(DAY_ONE);
+        files.push((file_name(day(2020, 6, 1), 6), BATCH_TWO));
+        files.push(("README.md".to_owned(), "NOT A MARGIN FILE"));
+        let src = source_dir("BATCH", &files);
+        let out = scratch("BATCH-OUT");
+        let report = build_from_dir(&src, &out).unwrap();
+        assert_eq!(report.dir, out.join(DIR_NAME));
+        assert_eq!(report.files_read, 2);
+        assert_eq!(report.rows, 4);
+        assert_eq!(report.other_series, 2, "the header line and the BE row");
+        assert_eq!(report.symbols, 3);
+        assert_eq!(
+            (report.first_day, report.last_day),
+            (day(2020, 6, 1), day(2020, 7, 1))
+        );
+        assert_eq!(report.months, 2);
+        assert_eq!(
+            report.other_batches,
+            vec![file_name(day(2020, 6, 1), 2), file_name(day(2020, 6, 1), 6)]
+        );
+        assert_eq!(report.not_source, vec!["README.md".to_owned()]);
+        let table = MarginTable::open(&report.dir).unwrap();
+        assert_eq!(table.file_digest_hex(), report.digest_hex);
+        assert_eq!(report.digest_hex.len(), 2 * DIGEST_LEN);
+        assert_eq!(hex(&table.file_digest()), report.digest_hex);
+        assert_eq!(
+            table.margin("ZZA", day(2020, 6, 1)).map(|m| m.var_ppm),
+            Ok(100_000),
+            "batch 1's value, not batch 2's"
+        );
+        assert_eq!(
+            table.margin("ZZC", day(2020, 7, 1)).map(|m| m.extra_ppm),
+            Ok(50_000)
+        );
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn the_build_is_the_same_bytes_whatever_order_files_and_rows_come_in() {
+        let mut files = three_files(DAY_ONE);
+        let src_a = source_dir("ORDER-A", &files);
+        files.reverse();
+        files[1].1 = DAY_ONE_REORDERED;
+        let src_b = source_dir("ORDER-B", &files);
+        let (out_a, out_b) = (scratch("ORDER-A-OUT"), scratch("ORDER-B-OUT"));
+        let a = build_from_dir(&src_a, &out_a).unwrap();
+        let b = build_from_dir(&src_b, &out_b).unwrap();
+        assert_eq!(a.digest_hex, b.digest_hex);
+        for name in ["2020-06.nsm", "2020-07.nsm", DICTIONARY] {
+            assert_eq!(
+                fs::read(a.dir.join(name)).unwrap(),
+                fs::read(b.dir.join(name)).unwrap(),
+                "{name}"
+            );
+        }
+        // A rebuild over the same files writes the same bytes, and no part
+        // file is left behind.
+        let again = build_from_dir(&src_a, &out_a).unwrap();
+        assert_eq!(again, a);
+        let mut left: Vec<String> = fs::read_dir(&a.dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["2020-06.nsm", "2020-07.nsm", DICTIONARY]);
+        // One more day changes the digest.
+        fs::write(src_a.join(file_name(day(2020, 7, 2), 1)), DAY_TWO).unwrap();
+        assert_ne!(
+            build_from_dir(&src_a, &out_a).unwrap().digest_hex,
+            a.digest_hex
+        );
+        for dir in [src_a, src_b, out_a, out_b] {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    /// Whether a refusal's words begin `<words> <path>: `: its variant and
+    /// its path, whatever the operating system says after them.
+    fn begins(refusal: &dyn fmt::Display, words: &str, path: &Path) -> bool {
+        refusal
+            .to_string()
+            .starts_with(&format!("{words} {}: ", path.display()))
+    }
+
+    #[test]
+    fn every_build_refusal_names_its_path_file_or_day() {
+        let out = scratch("REFUSE-OUT");
+        let missing = out.join("NO-SUCH-SOURCE");
+        let refused = build_from_dir(&missing, &out).unwrap_err();
+        assert!(begins(&refused, "cannot read", &missing), "{refused}");
+        let only_other = source_dir("REFUSE-EMPTY", &[("README.md".to_owned(), "X")]);
+        assert_eq!(build_from_dir(&only_other, &out), Err(BuildError::NoDays));
+        let bad_name = source_dir(
+            "REFUSE-NAME",
+            &[("C_VAR1_31022020_1.DAT".to_owned(), DAY_ONE)],
+        );
+        assert_eq!(
+            build_from_dir(&bad_name, &out),
+            Err(BuildError::BadSourceName {
+                name: "C_VAR1_31022020_1.DAT".to_owned()
+            })
+        );
+        let empty_file = source_dir("REFUSE-PARSE", &[(file_name(day(2020, 6, 1), 1), "")]);
+        assert_eq!(
+            build_from_dir(&empty_file, &out),
+            Err(BuildError::Parse {
+                name: file_name(day(2020, 6, 1), 1),
+                error: ParseError::NoEqRows
+            })
+        );
+        let unreadable = scratch("REFUSE-READ");
+        let dir_named = unreadable.join(file_name(day(2020, 6, 1), 1));
+        fs::create_dir(&dir_named).unwrap();
+        let refused = build_from_dir(&unreadable, &out).unwrap_err();
+        assert!(begins(&refused, "cannot read", &dir_named), "{refused}");
+        let src = source_dir("REFUSE-SRC", &[(file_name(day(2020, 6, 1), 1), DAY_ONE)]);
+        let file_out = out.join("A-FILE");
+        fs::write(&file_out, "X").unwrap();
+        let blocked = file_out.join(DIR_NAME);
+        let refused = build_from_dir(&src, &file_out).unwrap_err();
+        assert!(begins(&refused, "cannot write", &blocked), "{refused}");
+        let part_out = scratch("REFUSE-PART");
+        let part = part_out.join(DIR_NAME).join(".2020-06.nsm.part");
+        fs::create_dir_all(&part).unwrap();
+        let refused = build_from_dir(&src, &part_out).unwrap_err();
+        assert!(begins(&refused, "cannot write", &part), "{refused}");
+        let rename_out = scratch("REFUSE-RENAME");
+        let target = rename_out.join(DIR_NAME).join("2020-06.nsm");
+        fs::create_dir_all(target.join("CHILD")).unwrap();
+        let refused = build_from_dir(&src, &rename_out).unwrap_err();
+        assert!(begins(&refused, "cannot write", &target), "{refused}");
+        // The dictionary is written last: the months are in place and the
+        // dictionary's own write is refused by its path.
+        let last_out = scratch("REFUSE-LAST");
+        let dictionary_part = last_out.join(DIR_NAME).join(".symbols.nsd.part");
+        fs::create_dir_all(&dictionary_part).unwrap();
+        let refused = build_from_dir(&src, &last_out).unwrap_err();
+        assert!(
+            begins(&refused, "cannot write", &dictionary_part),
+            "{refused}"
+        );
+        assert!(last_out.join(DIR_NAME).join("2020-06.nsm").is_file());
+        for dir in [
+            out, only_other, bad_name, empty_file, unreadable, src, part_out, rename_out, last_out,
+        ] {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn every_build_refusal_says_what() {
+        let path = PathBuf::from("/X/Y");
+        let said = [
+            (
+                BuildError::Read {
+                    path: path.clone(),
+                    why: "GONE".to_owned(),
+                },
+                "cannot read /X/Y: GONE",
+            ),
+            (
+                BuildError::Write {
+                    path,
+                    why: "FULL".to_owned(),
+                },
+                "cannot write /X/Y: FULL",
+            ),
+            (
+                BuildError::BadSourceName {
+                    name: "C_VAR1_X.DAT".to_owned(),
+                },
+                "\"C_VAR1_X.DAT\" starts as a margin file and is not C_VAR1_DDMMYYYY_N.DAT",
+            ),
+            (
+                BuildError::Parse {
+                    name: "C_VAR1_01062020_1.DAT".to_owned(),
+                    error: ParseError::NoEqRows,
+                },
+                "C_VAR1_01062020_1.DAT: the file lists no EQ row",
+            ),
+            (BuildError::NoDays, "no batch-1 margin file was read"),
+            (
+                BuildError::DayOrder {
+                    day: day(2020, 6, 1),
+                },
+                "2020-06-01 is given twice or out of order",
+            ),
+        ];
+        for (refusal, words) in said {
+            assert_eq!(refusal.to_string(), words);
+        }
+        let open = [
+            (
+                OpenError::Read {
+                    path: PathBuf::from("/X/Y"),
+                    why: "GONE".to_owned(),
+                },
+                "cannot read /X/Y: GONE",
+            ),
+            (
+                corrupt("2020-06.nsm", "wrong magic"),
+                "2020-06.nsm is refused: wrong magic",
+            ),
+        ];
+        for (refusal, words) in open {
+            assert_eq!(refusal.to_string(), words);
+        }
+    }
+
+    #[test]
+    fn open_refuses_a_missing_dictionary_or_month_by_path() {
+        let src = source_dir("OPEN-SRC", &three_files(DAY_ONE));
+        let out = scratch("OPEN-OUT");
+        let report = build_from_dir(&src, &out).unwrap();
+        let month = report.dir.join("2020-07.nsm");
+        fs::remove_file(&month).unwrap();
+        let refused = MarginTable::open(&report.dir).unwrap_err();
+        assert!(begins(&refused, "cannot read", &month), "{refused}");
+        let dictionary = report.dir.join(DICTIONARY);
+        fs::write(&dictionary, "X").unwrap();
+        assert_eq!(
+            MarginTable::open(&report.dir).unwrap_err(),
+            corrupt(DICTIONARY, "shorter than its header and digest")
+        );
+        fs::remove_file(&dictionary).unwrap();
+        let refused = MarginTable::open(&report.dir).unwrap_err();
+        assert!(begins(&refused, "cannot read", &dictionary), "{refused}");
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    // ───────────────────────────── corrupt bytes ───────────────────────────
+
+    fn sample() -> Encoded {
+        encode(&[
+            (
+                day(2020, 6, 1),
+                vec![row("ZZA", 1, 2, 3), row("ZZB", 4, 5, 6)],
+            ),
+            (day(2020, 6, 30), vec![row("ZZB", 7, 8, 9)]),
+        ])
+        .unwrap()
+    }
+
+    fn refusal(dictionary: &[u8], month: &[u8]) -> OpenError {
+        MarginTable::from_bytes(dictionary, &[month]).unwrap_err()
+    }
+
+    #[test]
+    fn every_corrupt_dictionary_is_refused_by_name() {
+        let good = sample();
+        let month = good.months[0].1.as_slice();
+        let refused = |edit: &dyn Fn(&mut Vec<u8>), what: &'static str| {
+            let mut bytes = good.dictionary.clone();
+            edit(&mut bytes);
+            assert_eq!(refusal(&bytes, month), corrupt(DICTIONARY, what), "{what}");
+        };
+        refused(
+            &|b| b.truncate(DICTIONARY_HEADER_LEN + DIGEST_LEN - 1),
+            "shorter than its header and digest",
+        );
+        refused(
+            &|b| b[DICTIONARY_HEADER_LEN] ^= 1,
+            "its digest does not match its bytes",
+        );
+        refused(
+            &|b| {
+                b[0] ^= 1;
+                reseal(b)
+            },
+            "wrong magic",
+        );
+        refused(
+            &|b| {
+                b[8] = 2;
+                reseal(b)
+            },
+            "unknown format version",
+        );
+        refused(
+            &|b| {
+                b[20] = 3;
+                reseal(b)
+            },
+            "its length is not its symbol count's",
+        );
+        refused(
+            &|b| {
+                b[12] = 0;
+                reseal(b)
+            },
+            "a span month outside 1 to 12",
+        );
+        refused(
+            &|b| {
+                b[12] = 13;
+                reseal(b)
+            },
+            "a span month outside 1 to 12",
+        );
+        refused(
+            &|b| {
+                b[16] = 13;
+                reseal(b)
+            },
+            "a span month outside 1 to 12",
+        );
+        refused(
+            &|b| {
+                b[16] = 5;
+                reseal(b)
+            },
+            "its span ends before it starts",
+        );
+        let name = DICTIONARY_HEADER_LEN;
+        let not_a_name = "a name that is not a symbol as written";
+        refused(
+            &|b| {
+                b[name] = b'z';
+                reseal(b)
+            },
+            not_a_name,
+        );
+        refused(
+            &|b| {
+                b[name + 5] = b'Z';
+                reseal(b)
+            },
+            not_a_name,
+        );
+        refused(
+            &|b| {
+                b[name + 1] = b'.';
+                reseal(b)
+            },
+            not_a_name,
+        );
+        refused(
+            &|b| {
+                b[name] = 0;
+                reseal(b)
+            },
+            not_a_name,
+        );
+        refused(
+            &|b| {
+                b[name] = 0xFF;
+                reseal(b)
+            },
+            not_a_name,
+        );
+        refused(
+            &|b| {
+                b[name + SYMBOL_CAPACITY + 2] = b'A';
+                reseal(b)
+            },
+            "names not strictly sorted",
+        );
+        refused(
+            &|b| {
+                b[name + 2] = b'C';
+                reseal(b)
+            },
+            "names not strictly sorted",
+        );
+        let none: [&[u8]; 0] = [];
+        assert_eq!(
+            MarginTable::from_bytes(&good.dictionary, &none).unwrap_err(),
+            corrupt(DICTIONARY, "its span is not the months given")
+        );
+    }
+
+    #[test]
+    fn every_corrupt_month_is_refused_by_name() {
+        let good = sample();
+        let refused = |edit: &dyn Fn(&mut Vec<u8>), what: &'static str| {
+            let mut bytes = good.months[0].1.clone();
+            edit(&mut bytes);
+            assert_eq!(
+                refusal(&good.dictionary, &bytes),
+                corrupt("2020-06.nsm", what),
+                "{what}"
+            );
+        };
+        refused(
+            &|b| b.truncate(b.len() - 1),
+            "its length is not the dictionary's stride",
+        );
+        refused(
+            &|b| b[MONTH_HEADER_LEN] ^= 1,
+            "its digest does not match its bytes",
+        );
+        refused(
+            &|b| {
+                b[0] ^= 1;
+                reseal(b)
+            },
+            "wrong magic",
+        );
+        refused(
+            &|b| {
+                b[8] = 2;
+                reseal(b)
+            },
+            "unknown format version",
+        );
+        refused(
+            &|b| {
+                b[10] ^= 1;
+                reseal(b)
+            },
+            "its header names another month",
+        );
+        refused(
+            &|b| {
+                b[12] = 7;
+                reseal(b)
+            },
+            "its header names another month",
+        );
+        refused(
+            &|b| {
+                b[16] = 3;
+                reseal(b)
+            },
+            "its symbol count is not the dictionary's",
+        );
+        refused(
+            &|b| {
+                b[24] ^= 1;
+                reseal(b)
+            },
+            "it was built against another dictionary",
+        );
+        refused(
+            &|b| {
+                b[23] = 0x40;
+                reseal(b)
+            },
+            "a held day past the month's end",
+        );
+        assert!(MarginTable::from_bytes(&good.dictionary, &[good.months[0].1.as_slice()]).is_ok());
+    }
+
+    #[test]
+    fn a_month_built_against_another_dictionary_is_refused() {
+        // Same span, same symbol count, other symbols: the cells would name
+        // ZZC where the dictionary says ZZB.
+        let one = sample();
+        let other = encode(&[
+            (
+                day(2020, 6, 1),
+                vec![row("ZZA", 9, 9, 9), row("ZZC", 9, 9, 9)],
+            ),
+            (day(2020, 6, 30), vec![row("ZZC", 9, 9, 9)]),
+        ])
+        .unwrap();
+        assert_eq!(one.months[0].1.len(), other.months[0].1.len());
+        assert_eq!(
+            refusal(&one.dictionary, &other.months[0].1),
+            corrupt("2020-06.nsm", "it was built against another dictionary")
+        );
     }
 }
