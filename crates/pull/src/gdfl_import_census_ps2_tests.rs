@@ -25,8 +25,8 @@ fn a_census_under_a_file_where_manifest_belongs_is_refused_by_its_path() {
             .map_or(0, |since| since.as_nanos())
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let room = census_room(&root, &[]).expect("an absent census is empty");
-    assert_eq!((room.n_valid, room.batch, room.new), (0, 0, 0));
+    let empty = census_room(&root, &[]).expect("an absent census is empty");
+    assert_eq!((empty.n_valid, empty.batch, empty.new), (0, 0, 0));
     std::fs::write(root.join("manifest"), b"invented: a file, not a directory").unwrap();
     let why = census_room(&root, &[]).expect_err("refused");
     let path = manifest_path(&root, Vendor::Gdfl);
