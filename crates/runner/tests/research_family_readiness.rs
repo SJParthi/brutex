@@ -1,4 +1,8 @@
 //! Generated scope/price fixtures only; no institutional admission is implied.
+#![allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a fixture that does not hold must fail the test loudly"
+)]
 use brutex_core::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
 use brutex_core::universe::{FNO_UNDERLYINGS, NIFTY_TOTAL_MARKET};
 use runner::excursion::Side;
@@ -428,7 +432,8 @@ fn legacy_resolution_identity_matches_the_recorded_pre_extraction_library() -> T
             10_000,
             ForcedStopV1::Disabled,
             printed_ohlcv_cost_model_id_v1(),
-        )?;
+        )
+        .expect("a V1-cost policy is constructible; only its resolution is refused");
         assert!(
             matches!(
                 old.resolve_attested(series),
@@ -470,7 +475,8 @@ fn new_resolution_retains_physical_refusals_and_exact_source_identity() -> TestR
         "generated-build",
         [7; 32],
         &changed,
-    )?;
+    )
+    .expect("a complete series identity");
     let revised = policy.resolve_research_attested(source)?;
     assert_eq!(original.stop_levels_ppm(), revised.stop_levels_ppm());
     assert_ne!(original.training_digest(), revised.training_digest());
@@ -482,7 +488,8 @@ fn new_resolution_retains_physical_refusals_and_exact_source_identity() -> TestR
         "generated-build",
         [7; 32],
         &changed,
-    )?;
+    )
+    .expect("a complete series identity");
     assert!(policy.resolve_research_attested(source).is_err());
     Ok(())
 }
@@ -500,11 +507,8 @@ fn eligible_cash_prices_and_replays_every_boolean_coordinate_without_index_alias
     let key = InstrumentKey::cash(Exchange::Nse, "RELIANCE")?;
     let family = ResearchFamilyV1::new(key)?;
     assert!(family.is_cash());
-    let availability = if family.is_cash() {
-        indicators::vwap::Availability::Present
-    } else {
-        indicators::vwap::Availability::Absent
-    };
+    // Cash, asserted above: an equity carries VWAP evidence (D-0507).
+    let availability = indicators::vwap::Availability::Present;
     let bars = runner::synthetic::sessions(8);
     let mut evaluator = Evaluator::with_calendar(
         Widths::pinned()?,
@@ -522,7 +526,8 @@ fn eligible_cash_prices_and_replays_every_boolean_coordinate_without_index_alias
         "generated-cash-authority-fixture",
         [7; 32],
         &bars,
-    )?;
+    )
+    .expect("a complete series identity");
     let foreign_key = InstrumentKey::cash(Exchange::Nse, "ADANIENT")?;
     let foreign_source = ExecutionSeriesV1::new(
         &foreign_key,
@@ -530,7 +535,8 @@ fn eligible_cash_prices_and_replays_every_boolean_coordinate_without_index_alias
         "generated-cash-authority-fixture",
         [7; 32],
         &bars,
-    )?;
+    )
+    .expect("a complete series identity");
     for (side, direction) in [
         (Side::Long, Direction::Long),
         (Side::Short, Direction::Short),
