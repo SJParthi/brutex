@@ -3803,3 +3803,10 @@ mod split_tests;
 #[cfg(test)]
 #[path = "gdfl_import_ia2_tests.rs"]
 mod ia2_tests;
+
+// BASE-COV-PULL-PS1 (D-7335): a probe of a refused old-symbol stem and a twin
+// member, a lineage ledger that refuses a day's lines, a warm-up with no worker
+// thread, and a lineage rescan's warm-up, driven.
+#[cfg(test)]
+#[path = "gdfl_import_ps1_tests.rs"]
+mod ps1_tests;
