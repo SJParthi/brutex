@@ -898,3 +898,10 @@ pub fn read_all(store: &Path) -> Result<Vec<Result<Entry, u64>>, String> {
 #[cfg(test)]
 #[path = "gdfl_run_ledger_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL-PS2: alerts the host will not take, claims too long, gone or
+// unwritable, a journal id at the largest, a journal that will not open, and
+// the longest record.
+#[cfg(test)]
+#[path = "gdfl_run_ledger_ps2_tests.rs"]
+mod ps2_tests;
