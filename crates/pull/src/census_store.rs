@@ -244,6 +244,8 @@ pub fn current_epoch_in(dir: &Path) -> Result<Option<u32>, ListRefusal> {
         SegmentDir::Absent => return Ok(None),
         SegmentDir::Real => {}
     }
+    #[cfg(test)]
+    seam::at("segment.looked", dir);
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(absent)
@@ -658,6 +660,8 @@ pub fn read_epoch(path: &Path, vendor: Vendor, segment: Segment) -> Result<Manif
             size: meta.len(),
         }));
     }
+    #[cfg(test)]
+    seam::at("epoch.measured", path);
     let read_so_far = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let _ = (&file)
         .take(cap.saturating_add(1).saturating_sub(read_so_far))
@@ -1967,6 +1971,8 @@ impl KeptCensus {
         if now.len != self.stamp.len {
             return Ok(Err("length_moved"));
         }
+        #[cfg(test)]
+        seam::at("kept.stamped", &self.loaded.path);
         let mut region = vec![0_u8; HEADER_REGION_LEN];
         if file.read_exact_at(&mut region, 0).is_err() {
             return Ok(Err("header_unread"));
@@ -2461,6 +2467,8 @@ fn stage(staging: &Path, vendor: Vendor, parts: &[Manifest]) -> Result<Vec<Writt
         });
         wrote.map_err(|why| format!("{}: {why}", path.display()))?;
         sync_dir(&dir)?;
+        #[cfg(test)]
+        seam::at("stage.written", &path);
         let back = read_epoch(&path, vendor, segment)?;
         if back.keys() != part.keys()
             || back.total_rows() != part.total_rows()
@@ -2491,6 +2499,8 @@ fn stage(staging: &Path, vendor: Vendor, parts: &[Manifest]) -> Result<Vec<Writt
             bytes: u64::try_from(image.len()).unwrap_or(u64::MAX),
         });
     }
+    #[cfg(test)]
+    seam::at("migrate.staged", staging);
     Ok(written)
 }
 
@@ -2854,6 +2864,8 @@ pub fn require_feature(root: &Path, vendor: Vendor, feature: &str) -> Result<boo
             return Ok(false);
         }
     }
+    #[cfg(test)]
+    seam::at("requires.read", &at);
     let Some(mut file) = open_requires(&at, true)? else {
         return Err(format!(
             "{} could not be created for the requirement; nothing was written",
@@ -3033,6 +3045,8 @@ pub fn holds_sealed_stub(path: &Path) -> bool {
     if len != STUB_LEN as u64 {
         return false;
     }
+    #[cfg(test)]
+    seam::at("stub.opened", path);
     let mut head = [0_u8; 16];
     file.read_exact(&mut head).is_ok()
         && head.starts_with(b"BRUTEXM")
@@ -3191,6 +3205,8 @@ fn seal_held(root: &Path, vendor: Vendor) -> Result<Seal, String> {
             torn_receipt,
         });
     }
+    #[cfg(test)]
+    seam::at("seal.drift_checked", &legacy);
     let held = fs::symlink_metadata(&legacy)
         .map_err(|why| format!("{}: {why}; nothing was written", legacy.display()))?;
     if !held.is_file() || held.len() != recorded {
@@ -3204,6 +3220,8 @@ fn seal_held(root: &Path, vendor: Vendor) -> Result<Seal, String> {
     // ONE INODE UNDER BOTH NAMES: an interrupted seal already linked it. A
     // superseded name holding anything else makes the link fail by name.
     if !same_inode(&superseded, &held) {
+        #[cfg(test)]
+        seam::at("seal.linking", &superseded);
         fs::hard_link(&legacy, &superseded).map_err(|why| {
             format!(
                 "{} could not be linked to {}: {why}; nothing was written",
@@ -3251,6 +3269,8 @@ fn install_stub(legacy: &Path, vendor: Vendor) -> Result<(), String> {
             )
         })?;
     drop(file);
+    #[cfg(test)]
+    seam::at("stub.staged", legacy);
     fs::rename(&staged, legacy).map_err(|why| {
         format!(
             "{} could not be renamed over {}: {why}; {} still holds the census",
@@ -3414,6 +3434,8 @@ fn settle_seal_receipt(
                 .map(named)
                 .find(|candidate| fs::symlink_metadata(candidate).is_err())
                 .ok_or_else(|| format!("{}: no free name to keep it under", path.display()))?;
+            #[cfg(test)]
+            seam::at("receipt.aside", path);
             fs::rename(path, &aside).map_err(|failed| {
                 format!(
                     "{} is no whole seal receipt ({why}) and could not be moved to {}: \
@@ -4494,6 +4516,40 @@ fn append_journal(path: &Path, lines: &str) -> Result<(), String> {
     text.push_str(lines);
     file.write_all(text.as_bytes()).map_err(refused)?;
     file.sync_all().map_err(refused)
+}
+
+/// Test seams between two host calls that another process could split
+/// (D-7336): a test plants one step under a name, and the next pass of that
+/// name on this thread runs it, once, with the path the code is at, the way
+/// another writer landing between the two calls would. Per thread, so tests
+/// running at once never meet each other's steps; and absent from every build
+/// but this crate's own tests.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Step = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Plants `step` for the next pass of `name` on this thread.
+    pub(crate) fn plant(name: &'static str, step: impl FnOnce(&Path) + 'static) {
+        STEPS.with_borrow_mut(|held| held.push((name, Box::new(step))));
+    }
+
+    /// Runs the step planted for `name`, once.
+    pub(super) fn at(name: &'static str, path: &Path) {
+        let step = STEPS.with_borrow_mut(|held| {
+            let found = held.iter().position(|(at, _)| *at == name)?;
+            Some(held.remove(found).1)
+        });
+        if let Some(step) = step {
+            step(path);
+        }
+    }
 }
 
 /// The arms only this module can reach: the run-level compaction, the epoch

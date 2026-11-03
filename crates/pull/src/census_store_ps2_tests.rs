@@ -1080,3 +1080,377 @@ fn an_empty_journal_takes_an_append_with_no_torn_mark() {
         "run 1 source=invented\nrun 2 source=invented\n"
     );
 }
+
+// ═══ Between two host calls (the seams, D-7336) ═════════════════════════════
+
+/// A SEGMENT DIRECTORY GONE BETWEEN ITS LOOK AND ITS LISTING holds no epoch,
+/// and one replaced by a file there is no directory to list: neither is a
+/// refusal, as neither is when the look itself finds it.
+#[test]
+fn a_segment_directory_gone_between_its_look_and_its_listing_holds_no_epoch() {
+    let scratch = Scratch::new("SEAM-LOOKED");
+    let dir = scratch.root().join("segment");
+    fs::create_dir_all(&dir).expect("dir");
+    seam::plant("segment.looked", |at| fs::remove_dir(at).expect("removed"));
+    assert_eq!(current_epoch_in(&dir), Ok(None), "gone");
+    fs::create_dir_all(&dir).expect("dir");
+    seam::plant("segment.looked", |at| {
+        fs::remove_dir(at).expect("removed");
+        fs::write(at, b"invented").expect("a file at the name");
+    });
+    assert_eq!(current_epoch_in(&dir), Ok(None), "a file there now");
+}
+
+/// AN EPOCH THAT GROWS BETWEEN ITS MEASURE AND ITS READ is refused past its
+/// cap, with the bytes the read found: the read is bounded, never trusted to
+/// the length the handle had.
+#[test]
+fn an_epoch_that_grows_between_its_measure_and_its_read_is_refused_past_its_cap() {
+    let scratch = Scratch::new("SEAM-GROWS");
+    let path = put(scratch.root(), &full_at_two(), 1);
+    let cap = fs::metadata(&path).expect("len").len();
+    seam::plant("epoch.measured", |at| {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(at)
+            .expect("append");
+        file.write_all(&[0_u8; 7]).expect("grown");
+    });
+    let why = read_epoch(&path, Vendor::Gdfl, Segment::Fno).expect_err("refused");
+    assert!(
+        why.contains(&format!(
+            "holds {} bytes, more than the {cap} this reader takes",
+            cap + 1
+        )),
+        "{why}"
+    );
+}
+
+/// A KEPT CENSUS CUT BETWEEN ITS STAMP AND ITS HEADER READ is not current:
+/// its header could not be read.
+#[test]
+fn a_kept_census_cut_between_its_stamp_and_its_header_read_is_not_current() {
+    let scratch = Scratch::new("SEAM-STAMPED");
+    let root = scratch.root();
+    let target = Target::single(root, Vendor::Zerodha);
+    let _ = record(root, Vendor::Zerodha, &[row(0, 1)]).expect("a census file");
+    let loaded = target.load().expect("loads");
+    let stamp = Stamp::of(&fs::symlink_metadata(&loaded.path).expect("stat"));
+    let held = KeptCensus { loaded, stamp };
+    seam::plant("kept.stamped", |at| {
+        let file = fs::OpenOptions::new().write(true).open(at).expect("open");
+        file.set_len(100).expect("cut");
+    });
+    assert_eq!(held.still_current(&target), Ok(Err("header_unread")));
+}
+
+/// A MIGRATION WHOSE RECEIPT CANNOT BE WRITTEN renames nothing into place.
+#[test]
+fn a_migration_whose_receipt_cannot_be_written_renames_nothing() {
+    let scratch = Scratch::new("SEAM-RECEIPT");
+    let root = scratch.root();
+    let _ = record(root, Vendor::Zerodha, &[row(0, 1)]).expect("a single-file census");
+    seam::plant("migrate.staged", |staging| {
+        fs::create_dir_all(staging.join(MIGRATION_RECEIPT).join("inside")).expect("in the way");
+    });
+    let why = migrate(root, Vendor::Zerodha).expect_err("refused");
+    assert!(why.contains(MIGRATION_RECEIPT), "{why}");
+    assert!(fs::symlink_metadata(vendor_dir(root, Vendor::Zerodha)).is_err());
+    assert!(holds_census(root), "the single file is untouched");
+}
+
+/// A MIGRATION WHOSE RENAME MEETS A DIRECTORY AT THE VERSION-4 NAME names
+/// both, and leaves the staging directory for inspection.
+#[test]
+fn a_migration_whose_rename_is_refused_leaves_its_staging() {
+    let scratch = Scratch::new("SEAM-RENAME");
+    let root = scratch.root();
+    let _ = record(root, Vendor::Zerodha, &[row(0, 1)]).expect("a single-file census");
+    let dir = vendor_dir(root, Vendor::Zerodha);
+    seam::plant("migrate.staged", move |_staging| {
+        fs::create_dir_all(dir.join("planted")).expect("a directory at the v4 name");
+    });
+    let why = migrate(root, Vendor::Zerodha).expect_err("refused");
+    let staging = staging_dir(root, Vendor::Zerodha);
+    assert!(why.contains("could not be renamed to"), "{why}");
+    assert!(
+        why.contains("the staging directory is left for inspection"),
+        "{why}"
+    );
+    assert!(staging.join(MIGRATION_RECEIPT).is_file(), "staging kept");
+    assert!(holds_census(root), "the single file is untouched");
+}
+
+/// Whether the zerodha single file still holds a census (not a stub).
+fn holds_census(root: &Path) -> bool {
+    let single = manifest_path(root, Vendor::Zerodha);
+    single.is_file() && !holds_sealed_stub(&single)
+}
+
+/// A STAGED EPOCH THAT READS BACK OTHERWISE THAN IT WAS WRITTEN is refused
+/// with both counts, and nothing is renamed into place.
+#[test]
+fn a_staged_epoch_that_reads_back_otherwise_is_refused() {
+    let scratch = Scratch::new("SEAM-READBACK");
+    let root = scratch.root();
+    let _ = record(root, Vendor::Zerodha, &[row(0, 1)]).expect("a single-file census");
+    let mut other =
+        Manifest::partition_genesis(Vendor::Zerodha, Segment::Index, 64).expect("genesis");
+    other.record_held(index_row(4)).expect("an index row");
+    let image = other.image();
+    seam::plant("stage.written", move |path| {
+        fs::write(path, &image).expect("another epoch at the staged name");
+    });
+    let why = migrate(root, Vendor::Zerodha).expect_err("refused");
+    assert!(
+        why.contains("did not read back as written: 1 keys 4 rows"),
+        "{why}"
+    );
+    assert!(why.contains("nothing was renamed into place"), "{why}");
+    assert!(fs::symlink_metadata(vendor_dir(root, Vendor::Zerodha)).is_err());
+}
+
+/// A REQUIREMENT ANOTHER WRITER PUT IN FORCE BETWEEN THE READ AND THE APPEND
+/// is in force: nothing is written.
+#[test]
+fn a_requirement_put_in_force_between_the_read_and_the_append_writes_nothing() {
+    let scratch = Scratch::new("SEAM-REQUIRES");
+    let root = scratch.root();
+    let wrote = format!(
+        "{REQUIRES_FORMAT}\nrequires={FEATURE_CENSUS_V4} vendor=gdfl since={V4_READER_SINCE} at=1\n"
+    );
+    let planted = wrote.clone();
+    seam::plant("requires.read", move |at| {
+        fs::write(at, &planted).expect("another writer's line");
+    });
+    assert_eq!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4),
+        Ok(false)
+    );
+    assert_eq!(
+        fs::read_to_string(requires_path(root)).expect("requires"),
+        wrote
+    );
+}
+
+/// A STUB CUT BETWEEN ITS OPEN AND ITS READ is no stub.
+#[test]
+fn a_stub_cut_between_its_open_and_its_read_is_no_stub() {
+    let scratch = Scratch::new("SEAM-STUB");
+    let at = scratch.root().join("manifest").join("zerodha.man");
+    fs::write(&at, sealed_stub(Vendor::Zerodha)).expect("the stub");
+    seam::plant("stub.opened", |path| {
+        let file = fs::OpenOptions::new().write(true).open(path).expect("open");
+        file.set_len(0).expect("cut");
+    });
+    assert!(!holds_sealed_stub(&at));
+}
+
+/// A migrated zerodha store: a receipt naming `bytes` and a single file of
+/// that many invented bytes.
+fn migrated_with(root: &Path, bytes: usize) -> PathBuf {
+    let dir = vendor_dir(root, Vendor::Zerodha);
+    fs::create_dir_all(&dir).expect("migrated");
+    fs::write(
+        dir.join(MIGRATION_RECEIPT),
+        format!("legacy_bytes={bytes}\n"),
+    )
+    .expect("receipt");
+    let legacy = manifest_path(root, Vendor::Zerodha);
+    fs::write(&legacy, vec![7_u8; bytes]).expect("the single file");
+    legacy
+}
+
+/// A SINGLE FILE THAT MOVED AFTER ITS DRIFT CHECK is not sealed, and a
+/// superseded name another writer took is not linked over.
+#[test]
+fn a_single_file_that_moved_after_its_drift_check_is_not_sealed() {
+    let scratch = Scratch::new("SEAM-SEAL");
+    let root = scratch.root();
+    let legacy = migrated_with(root, 40);
+    seam::plant("seal.drift_checked", |at| {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(at)
+            .expect("append");
+        file.write_all(b"grown").expect("grown");
+    });
+    let why = seal_legacy(root, Vendor::Zerodha).expect_err("refused");
+    assert!(
+        why.contains("is 45 bytes and not a plain file of the 40 bytes the migration recorded"),
+        "{why}"
+    );
+    assert!(fs::symlink_metadata(superseded_path(root, Vendor::Zerodha)).is_err());
+
+    let _ = fs::write(&legacy, vec![7_u8; 40]);
+    seam::plant("seal.linking", |superseded| {
+        fs::write(superseded, b"another writer's file").expect("taken");
+    });
+    let why = seal_legacy(root, Vendor::Zerodha).expect_err("refused");
+    assert!(why.contains("could not be linked to"), "{why}");
+    assert_eq!(
+        fs::read(&legacy).expect("legacy"),
+        vec![7_u8; 40],
+        "untouched"
+    );
+}
+
+/// A STUB THAT CANNOT BE RENAMED OVER THE SINGLE FILE leaves the census where
+/// it is, and says so.
+#[test]
+fn a_stub_that_cannot_be_renamed_over_the_census_is_named() {
+    let scratch = Scratch::new("SEAM-STUB-RENAME");
+    let root = scratch.root();
+    let _ = migrated_with(root, 40);
+    seam::plant("stub.staged", |legacy| {
+        fs::remove_file(legacy).expect("the census moved away");
+        fs::create_dir_all(legacy.join("inside")).expect("a directory at its name");
+    });
+    let why = seal_legacy(root, Vendor::Zerodha).expect_err("refused");
+    assert!(why.contains("could not be renamed over"), "{why}");
+    assert!(why.contains("still holds the census"), "{why}");
+}
+
+/// A TORN SEAL RECEIPT GONE BEFORE IT IS MOVED ASIDE is named with the name it
+/// was to be kept under; nothing is written.
+#[test]
+fn a_torn_receipt_gone_before_it_is_moved_aside_is_named() {
+    let scratch = Scratch::new("SEAM-ASIDE");
+    let path = scratch.root().join("SEALED");
+    fs::write(&path, b"torn").expect("a torn receipt");
+    seam::plant("receipt.aside", |at| fs::remove_file(at).expect("gone"));
+    let why = settle_seal_receipt(&path, &scratch.root().join("kept"), 5).expect_err("refused");
+    assert!(why.contains("is no whole seal receipt"), "{why}");
+    assert!(why.contains("could not be moved to"), "{why}");
+    assert!(why.contains("nothing was written"), "{why}");
+    assert!(
+        fs::symlink_metadata(&path).is_err(),
+        "no receipt was written"
+    );
+}
+
+/// A MONTH WHOSE HEADER SLOT FAILS ITS CHECKSUM is named slot-damaged, its
+/// month unreadable, and it offers no row: the read fell back to an older
+/// generation, so the row would be that generation's. The recount is then not
+/// clean.
+#[test]
+fn a_reverted_month_is_named_and_offers_no_row() {
+    let scratch = Scratch::new("WALK-REVERTED");
+    let root = scratch.root();
+    let path = bars(root, Vendor::Zerodha, ym(2031, 6), 3);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("the month");
+    let mut one = [0_u8; 1];
+    file.read_exact_at(&mut one, 16_384 + 56).expect("slot 1");
+    file.write_all_at(&[one[0] ^ 0x01], 16_384 + 56)
+        .expect("one checksum byte flipped");
+    drop(file);
+    let found = recount(root, Vendor::Zerodha, span_from(2031, 1, 1), None).expect("recounts");
+    assert_eq!(found.slot_damaged.len(), 1, "{found:?}");
+    assert_eq!(found.slot_damaged[0].0, path);
+    assert!(matches!(
+        found.slot_damaged[0].1.verdict,
+        store::header::MonthVerdict::Reverted { .. }
+    ));
+    assert_eq!(found.months_unreadable, vec![ym(2031, 6)]);
+    assert_eq!((found.unreadable, found.offered), (0, 0));
+    assert!(!found.clean(), "a damaged slot is not clean");
+}
+
+/// MORE UNREADABLE MONTHS THAN THE CAP are all counted and only the first
+/// fifty named, each with why.
+#[test]
+fn unreadable_months_past_the_cap_are_counted_and_not_named() {
+    let scratch = Scratch::new("WALK-UNREADABLE");
+    let root = scratch.root();
+    let rung = root
+        .join(store::path::STORE_ROOT)
+        .join("zerodha")
+        .join("NSE")
+        .join("INDEX")
+        .join("NIFTY")
+        .join(Timeframe::SECOND_1.as_str());
+    fs::create_dir_all(&rung).expect("rung");
+    for n in 0..=NAMED {
+        let month = ym(
+            2031 + u16::try_from(n / 12).expect("a year"),
+            1 + u8::try_from(n % 12).expect("a month"),
+        );
+        fs::write(rung.join(format!("{month}.bin")), b"invented: no bar file").expect("garbage");
+    }
+    let found = recount(root, Vendor::Zerodha, span_from(2031, 1, 1), None).expect("recounts");
+    assert_eq!(found.unreadable, NAMED as u64 + 1);
+    assert_eq!(found.unreadable_named.len(), NAMED);
+    assert_eq!(found.months_unreadable.len(), NAMED + 1);
+    assert!(!found.clean());
+}
+
+/// An INDEX epoch of zerodha whose older generation holds the one invented
+/// index row at 4 rows, and whose newer commit (a second key) is cut off: it
+/// loads DEGRADED with the older generation's counts.
+fn degraded_index_image(capacity: u64) -> Vec<u8> {
+    let lab = Scratch::new("SEAM-DEGRADED-LAB");
+    let mut census =
+        Manifest::partition_genesis(Vendor::Zerodha, Segment::Index, capacity).expect("genesis");
+    census.record_held(index_row(4)).expect("a row");
+    let path = epoch_path(lab.root(), Vendor::Zerodha, Segment::Index, 1);
+    fs::create_dir_all(path.parent().expect("dir")).expect("dir");
+    fs::write(&path, census.image()).expect("epoch 1");
+    let mut other = row_at(91, ym(2019, 12), 1, 10, 11);
+    other.entry.key.segment = Segment::Index;
+    other.entry.key.contract = None;
+    let target = Target::partition(lab.root(), Vendor::Zerodha, Segment::Index);
+    let _ = cycle(&target, &[other], Mode::AllOrNothing).expect("an append");
+    let mut bytes = fs::read(&path).expect("the epoch");
+    bytes.truncate(bytes.len() - 128);
+    bytes
+}
+
+/// A STAGED EPOCH THAT READS BACK WITH ITS KEYS BUT OTHER ROWS, OTHER ENTRIES
+/// OR ANOTHER CAPACITY is refused each time: every count is compared, not the
+/// keys alone.
+#[test]
+fn a_staged_epoch_that_differs_in_any_count_is_refused() {
+    let census_of = |root: &Path| {
+        let _ = record(root, Vendor::Zerodha, &[index_row(4)]).expect("a single-file census");
+        read_single(&manifest_path(root, Vendor::Zerodha), Vendor::Zerodha).expect("loads")
+    };
+    let probe = Scratch::new("SEAM-COUNTS-PROBE");
+    let part = census_of(probe.root())
+        .partitions()
+        .expect("splits")
+        .into_iter()
+        .find(|part| part.segment() == Some(Segment::Index))
+        .expect("an index part");
+    let capacity = part.capacity();
+    let index = |rows: &[u64], capacity: u64| {
+        let mut census = Manifest::partition_genesis(Vendor::Zerodha, Segment::Index, capacity)
+            .expect("genesis");
+        for &one in rows {
+            census.record_held(index_row(one)).expect("a row");
+        }
+        census.image()
+    };
+    for (what, image) in [
+        ("rows", index(&[5], capacity)),
+        ("entries", index(&[2, 4], capacity)),
+        ("capacity", index(&[4], capacity + 2)),
+        ("degraded", degraded_index_image(capacity)),
+    ] {
+        let scratch = Scratch::new("SEAM-COUNTS");
+        let root = scratch.root();
+        let _ = census_of(root);
+        seam::plant("stage.written", move |path| {
+            fs::write(path, &image).expect("another epoch at the staged name");
+        });
+        let why = migrate(root, Vendor::Zerodha).expect_err(what);
+        assert!(
+            why.contains("did not read back as written"),
+            "{what}: {why}"
+        );
+        assert!(fs::symlink_metadata(vendor_dir(root, Vendor::Zerodha)).is_err());
+    }
+}
