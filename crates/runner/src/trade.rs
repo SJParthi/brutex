@@ -3638,6 +3638,71 @@ mod tests {
         assert_eq!(holed.trades, derived.trades);
     }
 
+    /// A SIGNAL AT 23:59 IST WHOSE NEXT MINUTE IS THE NEXT DAY IS NOT
+    /// ENTERED: the entry is immediate (one minute later) and the new day ends
+    /// at its own 15:09, but signal and entry are not one session, so the
+    /// signal is counted too late and recorded nowhere; the first signal of the
+    /// new day trades as usual.
+    #[test]
+    fn a_signal_whose_next_minute_is_the_next_day_is_not_entered() {
+        const MINUTE: i64 = 60_000_000;
+        let mut bars = crate::synthetic::sessions(6);
+        let close = bars.last().expect("six sessions").ts_micros;
+        let late = bars.len();
+        let mut late_bar = crate::synthetic::bar(5, 0);
+        late_bar.ts_micros = close + 510 * MINUTE;
+        bars.push(late_bar);
+        for minute in 0..930_i64 {
+            let mut bar = crate::synthetic::bar(6, usize::try_from(minute % 375).expect("small"));
+            bar.ts_micros = close + 511 * MINUTE + minute * MINUTE;
+            bars.push(bar);
+        }
+        let midnight = late + 1;
+        assert_eq!(
+            indicators::ist_day(bars.get(midnight).expect("the first new-day bar").ts_micros),
+            indicators::ist_day(bars.get(late).expect("the 23:59 bar").ts_micros) + 1,
+            "the premise: 23:59 IST and the next minute straddle a day"
+        );
+        let column = Column::build(&bars, &mut evaluator());
+        assert!(column.sources().contains(&late) && column.accepts(midnight));
+        let facts = super::SliceFacts::of(&bars, &column);
+        assert!(
+            facts
+                .exits()
+                .get(midnight)
+                .copied()
+                .flatten()
+                .is_some_and(|exit| exit.real)
+        );
+        let walked = walk(&bars, &column, &ConditionMask::ZERO, h(5), Direction::Long);
+        assert!(walked.reconciles());
+        assert!(
+            walked
+                .trades
+                .iter()
+                .all(|trade| trade.entry_bar != midnight)
+        );
+        assert!(
+            walked
+                .eligible
+                .iter()
+                .all(|trade| trade.entry_bar != midnight)
+        );
+        assert!(
+            walked
+                .occupancy
+                .iter()
+                .all(|held| held.entry_bar != midnight)
+        );
+        assert!(
+            walked
+                .trades
+                .iter()
+                .any(|trade| trade.entry_bar == midnight + 1),
+            "the first signal of the new day trades"
+        );
+    }
+
     #[test]
     fn a_range_or_entry_outside_the_slice_facts_is_answered_no() {
         let (bars, column) = swept();
