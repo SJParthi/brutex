@@ -5237,7 +5237,10 @@ mod tests {
         assert_eq!(a.digest(), b.digest());
 
         let mut changed = input.clone();
-        if let Some(bar) = changed.get_mut(50) {
+        {
+            let bar = changed
+                .get_mut(50)
+                .expect("a fixture index inside the collection");
             bar.volume = bar.volume.saturating_add(1);
         }
         let c = policy()
@@ -5280,18 +5283,14 @@ mod tests {
         };
         let sealed = ExecutionRunV1::new(&other_feed_run, &input, None);
         assert!(sealed.is_ok());
-        let Some(sealed) = sealed.ok() else {
-            return;
-        };
+        let sealed = sealed.expect("a fixture step that must succeed");
         let resolved = policy()
             .resolve(&instrument, &input)
             .unwrap_or_else(|_| unreachable_resolved());
         let series =
             ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input);
         assert!(series.is_ok());
-        let Some(series) = series.ok() else {
-            return;
-        };
+        let series = series.expect("a fixture step that must succeed");
         assert_eq!(
             resolved.evaluate_training_grid_attested(
                 series,
@@ -5684,27 +5683,47 @@ mod tests {
         value.training_last_ts_micros = value.training_last_ts_micros.saturating_add(1);
         changes.push(digest_resolved(&value));
         let mut value = base.clone();
-        if let Some(level) = value.stop_levels_ppm.first_mut() {
+        {
+            let level = value
+                .stop_levels_ppm
+                .first_mut()
+                .expect("a fixture index inside the collection");
             *level = level.saturating_add(1);
         }
         changes.push(digest_resolved(&value));
         let mut value = base.clone();
-        if let Some(level) = value.target_levels_ppm.first_mut() {
+        {
+            let level = value
+                .target_levels_ppm
+                .first_mut()
+                .expect("a fixture index inside the collection");
             *level = level.saturating_add(1);
         }
         changes.push(digest_resolved(&value));
         let mut value = base.clone();
-        if let Some(level) = value.trail_levels_ppm.first_mut() {
+        {
+            let level = value
+                .trail_levels_ppm
+                .first_mut()
+                .expect("a fixture index inside the collection");
             *level = level.saturating_add(1);
         }
         changes.push(digest_resolved(&value));
         let mut value = base.clone();
-        if let Some(pair) = value.ratio_pairs.first_mut() {
+        {
+            let pair = value
+                .ratio_pairs
+                .first_mut()
+                .expect("a fixture index inside the collection");
             pair.target_index = pair.target_index.saturating_add(1);
         }
         changes.push(digest_resolved(&value));
         let mut value = base.clone();
-        if let Some(admitted) = value.ratio_bitmap.first_mut() {
+        {
+            let admitted = value
+                .ratio_bitmap
+                .first_mut()
+                .expect("a fixture index inside the collection");
             *admitted = !*admitted;
         }
         changes.push(digest_resolved(&value));
@@ -5797,7 +5816,10 @@ mod tests {
         );
         let mut duplicate = bars(3);
         let first = duplicate.first().map_or(0, |bar| bar.ts_micros);
-        if let Some(second) = duplicate.get_mut(1) {
+        {
+            let second = duplicate
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             second.ts_micros = first;
         }
         assert!(matches!(
@@ -5805,7 +5827,10 @@ mod tests {
             Err(ExitGridErrorV1::NonIncreasingTimestamp { .. })
         ));
         let mut backward = bars(3);
-        if let Some(second) = backward.get_mut(1) {
+        {
+            let second = backward
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             second.ts_micros = -ONE_MINUTE_MICROS;
         }
         assert!(matches!(
@@ -5813,7 +5838,10 @@ mod tests {
             Err(ExitGridErrorV1::NonIncreasingTimestamp { .. })
         ));
         let mut off_grid = bars(3);
-        if let Some(second) = off_grid.get_mut(1) {
+        {
+            let second = off_grid
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             second.ts_micros = second.ts_micros.saturating_add(1);
         }
         assert!(matches!(
@@ -5826,7 +5854,10 @@ mod tests {
     fn whole_minute_gaps_stay_gaps_without_changing_observed_ranges() {
         let compact = bars(4);
         let mut gapped = compact.clone();
-        if let Some(bar) = gapped.get_mut(2) {
+        {
+            let bar = gapped
+                .get_mut(2)
+                .expect("a fixture index inside the collection");
             bar.ts_micros = bar.ts_micros.saturating_add(ONE_MINUTE_MICROS);
         }
         if let Some(bar) = gapped.get_mut(3) {
@@ -5879,7 +5910,10 @@ mod tests {
     #[test]
     fn corrupt_nonpositive_flat_and_extreme_arithmetic_inputs_never_fabricate_a_level() {
         let mut corrupt = bars(4);
-        if let Some(bar) = corrupt.get_mut(1) {
+        {
+            let bar = corrupt
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             bar.high = bar.low.saturating_sub(1);
         }
         assert!(matches!(
@@ -5888,7 +5922,10 @@ mod tests {
         ));
 
         let mut zero_open = bars(4);
-        if let Some(bar) = zero_open.get_mut(1) {
+        {
+            let bar = zero_open
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             bar.open = 0;
             bar.low = 0;
             bar.close = 0;
@@ -6075,15 +6112,11 @@ mod tests {
             resolved.side(),
         );
         assert!(evaluated.is_ok());
-        let Some(mut evaluated) = evaluated.ok() else {
-            return;
-        };
+        let mut evaluated = evaluated.expect("a fixture step that must succeed");
         evaluated.grid = grid;
         let validated = resolved.validate_evaluation(&evaluated);
         assert!(validated.is_ok());
-        let Some(validated) = validated.ok() else {
-            return;
-        };
+        let validated = validated.expect("a fixture step that must succeed");
         for (ordinal, cell) in validated.evaluated.grid.cells.iter().enumerate() {
             let coordinate = Chosen::from_cell(cell);
             assert_eq!(
@@ -6587,9 +6620,7 @@ mod tests {
             crate::excursion::Side::Long,
         );
         assert!(evaluated_result.is_ok());
-        let Some(evaluated) = evaluated_result.ok() else {
-            return;
-        };
+        let evaluated = evaluated_result.expect("a fixture step that must succeed");
         let grid = evaluated.grid();
         assert_eq!(
             u64::try_from(grid.cells.len()).unwrap_or(u64::MAX),
@@ -6598,7 +6629,10 @@ mod tests {
         assert_eq!(resolved.select(&evaluated), Ok(None));
 
         let mut changed = input.clone();
-        if let Some(bar) = changed.first_mut() {
+        {
+            let bar = changed
+                .first_mut()
+                .expect("a fixture index inside the collection");
             bar.volume = bar.volume.saturating_add(1);
         }
         assert_eq!(
@@ -6931,7 +6965,10 @@ mod tests {
         // A grid minted by another resolution, or over another horizon, is
         // refused before any walk.
         let mut changed = input.clone();
-        if let Some(bar) = changed.first_mut() {
+        {
+            let bar = changed
+                .first_mut()
+                .expect("a fixture index inside the collection");
             bar.volume = bar.volume.saturating_add(1);
         }
         let other = policy()
@@ -7025,7 +7062,10 @@ mod tests {
         // THE TOKEN CANNOT BE SPENT ON ANOTHER RESOLUTION. One changed bar
         // re-keys the training digest and therefore the resolution digest.
         let mut changed = input.clone();
-        if let Some(bar) = changed.first_mut() {
+        {
+            let bar = changed
+                .first_mut()
+                .expect("a fixture index inside the collection");
             bar.volume = bar.volume.saturating_add(1);
         }
         let other = policy()
@@ -7102,7 +7142,10 @@ mod tests {
             .attest_training(series, &column, Horizon::DEFAULT)
             .expect("the exact training slice attests");
         let mut changed = input.clone();
-        if let Some(bar) = changed.first_mut() {
+        {
+            let bar = changed
+                .first_mut()
+                .expect("a fixture index inside the collection");
             bar.volume = bar.volume.saturating_add(1);
         }
 
@@ -7215,7 +7258,10 @@ mod tests {
         );
 
         let mut off_minute = shifted_bars(3, 1);
-        if let Some(bar) = off_minute.get_mut(1) {
+        {
+            let bar = off_minute
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             bar.ts_micros = bar.ts_micros.saturating_add(1);
         }
         assert!(matches!(
@@ -7225,7 +7271,10 @@ mod tests {
 
         let mut duplicate = shifted_bars(3, 1);
         let first_stamp = duplicate.first().map_or(0, |bar| bar.ts_micros);
-        if let Some(bar) = duplicate.get_mut(1) {
+        {
+            let bar = duplicate
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             bar.ts_micros = first_stamp;
         }
         assert!(matches!(
@@ -7234,7 +7283,10 @@ mod tests {
         ));
 
         let mut corrupt = shifted_bars(3, 1);
-        if let Some(bar) = corrupt.get_mut(1) {
+        {
+            let bar = corrupt
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             bar.high = bar.low.saturating_sub(1);
         }
         assert!(matches!(
@@ -7243,7 +7295,10 @@ mod tests {
         ));
 
         let mut whole_minute_gap = shifted_bars(3, 1);
-        if let Some(bar) = whole_minute_gap.get_mut(2) {
+        {
+            let bar = whole_minute_gap
+                .get_mut(2)
+                .expect("a fixture index inside the collection");
             bar.ts_micros = bar.ts_micros.saturating_add(ONE_MINUTE_MICROS);
         }
         assert_eq!(
@@ -7259,14 +7314,10 @@ mod tests {
         let series =
             ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &clean);
         assert!(series.is_ok());
-        let Some(series) = series.ok() else {
-            return;
-        };
+        let series = series.expect("a fixture step that must succeed");
         let oos = OosExecutionSeriesV1::new(series, 0);
         assert!(oos.is_ok());
-        let Some(oos) = oos.ok() else {
-            return;
-        };
+        let oos = oos.expect("a fixture step that must succeed");
         let run = test_execution_run(
             &instrument,
             &ConditionMask::ZERO,
@@ -7274,9 +7325,7 @@ mod tests {
             &clean,
         );
         assert!(run.is_ok());
-        let Some(run) = run.ok() else {
-            return;
-        };
+        let run = run.expect("a fixture step that must succeed");
         assert_eq!(
             resolved.replay_selected(oos, &test_column(&clean), &wrong_side, run,),
             Err(ExitGridErrorV1::SelectionDigestMismatch)
@@ -7553,7 +7602,10 @@ mod tests {
             });
             true
         }));
-        if let Some(slot) = cells.first_mut() {
+        {
+            let slot = cells
+                .first_mut()
+                .expect("a fixture index inside the collection");
             slot.trades = 10;
             slot.wins = 6;
             slot.pessimistic = 100;
@@ -7582,9 +7634,7 @@ mod tests {
             resolved.side(),
         );
         assert!(evaluated.is_ok());
-        let Some(mut evaluated) = evaluated.ok() else {
-            return;
-        };
+        let mut evaluated = evaluated.expect("a fixture step that must succeed");
         evaluated.grid = grid;
         assert_eq!(
             resolved
@@ -7595,9 +7645,7 @@ mod tests {
         let clean_coordinate = Chosen::from_cell(&clean);
         let validated = resolved.validate_evaluation(&evaluated);
         assert!(validated.is_ok());
-        let Some(validated) = validated.ok() else {
-            return;
-        };
+        let validated = validated.expect("a fixture step that must succeed");
         assert_eq!(
             resolved
                 .authorize_coordinate(&validated, clean_coordinate)
@@ -7644,9 +7692,7 @@ mod tests {
 
         let wrong_offset = resolved.validate_evaluation(&evaluated);
         assert!(wrong_offset.is_ok());
-        let Some(mut wrong_offset) = wrong_offset.ok() else {
-            return;
-        };
+        let mut wrong_offset = wrong_offset.expect("a fixture step that must succeed");
         if let Some(Some(offset)) = wrong_offset.coordinate_row_offsets.first_mut() {
             *offset = offset.saturating_add(1);
         }
