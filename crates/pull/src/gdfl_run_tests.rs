@@ -376,13 +376,16 @@ fn a_run_whose_sink_was_refused_refuses_before_any_lock() {
         "nothing written"
     );
     // `of_process` says so for a process with no sink installed, which this
-    // test binary has unless another test installed one.
-    if telemetry::global().is_none() {
-        assert_eq!(
-            LogState::of_process("no sink"),
-            LogState::Refused("no sink".to_owned())
-        );
-    }
+    // test binary is: every test here that installs one does it in a child
+    // of its own (D-0995's runner).
+    assert!(
+        telemetry::global().is_none(),
+        "a sink was installed in the test process itself"
+    );
+    assert_eq!(
+        LogState::of_process("no sink"),
+        LogState::Refused("no sink".to_owned())
+    );
     std::fs::remove_dir_all(store).unwrap();
 }
 

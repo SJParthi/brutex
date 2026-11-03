@@ -146,12 +146,13 @@ fn a_late_day_for_a_sealed_month_lands_as_its_successor_generation() {
                 served(&whole, path, symbol),
                 "{path:?}"
             );
-            if sealed_months.contains(&path) {
-                assert_eq!(
-                    store::generation::served(&sealed, path).unwrap().ordinal(),
-                    1
-                );
-            }
+            // Every month of the import is sealed, so each is served from its
+            // successor generation.
+            assert!(sealed_months.contains(&path), "{path:?}");
+            assert_eq!(
+                store::generation::served(&sealed, path).unwrap().ordinal(),
+                1
+            );
         }
         let journal = std::fs::read_to_string(sealed.join("audit").join("gdfl.repairs")).unwrap();
         let repairing = journal
@@ -207,13 +208,19 @@ fn a_day_a_sealed_month_holds_is_already_present_and_writes_nothing() {
             );
         }
         let after = tree(&sealed);
-        let changed: Vec<&PathBuf> = after
-            .iter()
-            .filter(|(path, bytes)| before.get(*path) != Some(*bytes))
-            .map(|(path, _)| path)
-            .filter(|path| path.starts_with("bars") || path.starts_with("bar-revisions-v1"))
-            .collect();
-        assert!(changed.is_empty(), "{changed:?}");
+        let bars_of = |held: &BTreeMap<PathBuf, Vec<u8>>| -> BTreeMap<PathBuf, Vec<u8>> {
+            held.iter()
+                .filter(|(path, _)| {
+                    path.starts_with("bars") || path.starts_with("bar-revisions-v1")
+                })
+                .map(|(path, bytes)| (path.clone(), bytes.clone()))
+                .collect()
+        };
+        assert_eq!(
+            bars_of(&before),
+            bars_of(&after),
+            "no bar file written, removed or changed"
+        );
         assert!(
             !std::fs::read_to_string(sealed.join("audit").join("gdfl.repairs"))
                 .unwrap_or_default()
@@ -292,13 +299,11 @@ fn journal_lines(store: &Path, verb: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every file under `dir`, or nothing when it does not exist.
-fn files_or_none(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    if dir.exists() {
-        tree(dir)
-    } else {
-        BTreeMap::new()
-    }
+/// Every file under `dir`, the served month's revisions folder, which
+/// every run here has made by the time it is read.
+fn revisions_in(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    assert!(dir.is_dir(), "{} is not made", dir.display());
+    tree(dir)
 }
 
 /// **A RESUMED LATE DAY AT A MONTH SERVED FROM A REVISION** (SC4-17,
@@ -373,7 +378,7 @@ fn a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor() {
             "{origin}"
         );
         let originals = tree(&served_from.join("bars"));
-        let revisions = files_or_none(&served_from.join("bar-revisions-v1"));
+        let revisions = revisions_in(&served_from.join("bar-revisions-v1"));
         assert!(!revisions.is_empty(), "{origin}: revision 1 is on disk");
         let (intents, repairs) = (
             journal_lines(&served_from, "repairing").len(),
@@ -404,7 +409,7 @@ fn a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor() {
         // NOTHING EARLIER WAS REWRITTEN: the original month and revision 1
         // byte for byte; only the two successors were added.
         assert_eq!(tree(&served_from.join("bars")), originals, "{origin}");
-        let now = files_or_none(&served_from.join("bar-revisions-v1"));
+        let now = revisions_in(&served_from.join("bar-revisions-v1"));
         for (path, bytes) in &revisions {
             assert_eq!(now.get(path), Some(bytes), "{origin}: {}", path.display());
         }
@@ -440,7 +445,7 @@ fn a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor() {
         // THE WHOLE DAY AGAIN: held, nothing written, nothing journaled.
         let (bars_now, revisions_now) = (
             tree(&served_from.join("bars")),
-            files_or_none(&served_from.join("bar-revisions-v1")),
+            revisions_in(&served_from.join("bar-revisions-v1")),
         );
         let journal_now = journal_lines(&served_from, "repairing").len();
         assert_eq!(
@@ -450,7 +455,7 @@ fn a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor() {
         assert_eq!(generation(&served_from), 3, "{origin}: no generation spent");
         assert_eq!(tree(&served_from.join("bars")), bars_now, "{origin}");
         assert_eq!(
-            files_or_none(&served_from.join("bar-revisions-v1")),
+            revisions_in(&served_from.join("bar-revisions-v1")),
             revisions_now,
             "{origin}"
         );

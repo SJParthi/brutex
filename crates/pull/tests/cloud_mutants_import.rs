@@ -834,10 +834,23 @@ mod fold_paths {
 /// reachable from here. No short directory that takes the link is a panic
 /// naming each one tried and why, never a skip.
 fn socket_at(path: &std::path::Path, tag: &str) -> std::os::unix::net::UnixListener {
+    socket_at_in(
+        &[std::env::temp_dir(), std::path::PathBuf::from("/tmp")],
+        path,
+        tag,
+    )
+}
+
+/// [`socket_at`] over `bases`, tried in order.
+fn socket_at_in(
+    bases: &[std::path::PathBuf],
+    path: &std::path::Path,
+    tag: &str,
+) -> std::os::unix::net::UnixListener {
     let dir = path.parent().expect("a socket path inside a directory");
     let file = path.file_name().expect("a socket path naming a file");
     let mut tried = Vec::new();
-    for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+    for base in bases {
         let link = base.join(format!("bx-sock-{}-{tag}", std::process::id()));
         let _stale = std::fs::remove_file(&link);
         if let Err(why) = std::os::unix::fs::symlink(dir, &link) {
@@ -856,6 +869,36 @@ fn socket_at(path: &std::path::Path, tag: &str) -> std::os::unix::net::UnixListe
         path.display(),
         tried.join("; ")
     )
+}
+
+/// `socket_at_in` tries each base in turn (BASE-COV-PULL-PS2): a base that
+/// takes no link (it does not exist) and a base so long that no socket
+/// address holds a path through it are each passed over, and the next base
+/// makes the socket; no link is left at any of them.
+#[test]
+fn a_base_that_takes_no_link_or_holds_no_socket_address_is_passed_over() {
+    let root = scratch("SockBases");
+    let dir = root.join("target");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Day.bts");
+    let absent = root.join("absent");
+    let long = root.join("L".repeat(120));
+    std::fs::create_dir_all(&long).unwrap();
+    let bases = [absent.clone(), long, std::env::temp_dir()];
+    let listener = socket_at_in(&bases, &path, "SockBases");
+    assert!(std::os::unix::fs::FileTypeExt::is_socket(
+        &std::fs::symlink_metadata(&path).unwrap().file_type()
+    ));
+    for base in &bases {
+        let link = base.join(format!("bx-sock-{}-SockBases", std::process::id()));
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "no link is left at {}",
+            link.display()
+        );
+    }
+    assert!(!absent.exists(), "an absent base is not made");
+    drop(listener);
 }
 
 /// `socket_at` makes the socket at a path no socket address can hold, and
@@ -1453,6 +1496,15 @@ mod cm_scope_and_auction {
         }
         let scope = Bare.scope();
         assert!(Arc::ptr_eq(&scope, &CmScope::swept_shared()));
+        // Its own fetch answers as it was written, whatever it is asked.
+        let listing = DayListing::new(CmKind::Indices, day(2024, 4, 1));
+        let file = ListedFile {
+            entry: "ZQ.NSE_IDX.csv".into(),
+            len: 0,
+            crc32: 0,
+            locator: (),
+        };
+        assert_eq!(Bare.fetch(&listing, &file), Err(CmRefusal::NotSwept));
         assert!(!scope.is_stored());
         assert!(
             Bare.day(CmKind::Indices, day(2024, 4, 1))
