@@ -1850,3 +1850,23 @@ fn only_banknifty_absent(failures: &[crate::ingest::Failure]) -> bool {
         .iter()
         .all(|one| one.instrument.ends_with("BANKNIFTY") && one.why.contains("absent"))
 }
+
+/// The predicate the fixture days are judged by says no to anything but
+/// BANKNIFTY's absence: another index's failure, and a BANKNIFTY failure of
+/// another kind, each make it false; the absence alone, or nothing, is true.
+/// BASE-COV-PULL PS3.
+#[test]
+fn only_banknifty_absent_refuses_any_other_failure() {
+    use crate::ingest::Failure;
+    let absent = Failure::new("NSE-INDEX-BANKNIFTY", "absent_from_listing: no file");
+    assert!(only_banknifty_absent(&[]));
+    assert!(only_banknifty_absent(std::slice::from_ref(&absent)));
+    assert!(!only_banknifty_absent(&[
+        absent.clone(),
+        Failure::new("NSE-INDEX-NIFTY", "absent_from_listing: no file"),
+    ]));
+    assert!(!only_banknifty_absent(&[Failure::new(
+        "NSE-INDEX-BANKNIFTY",
+        "a row refused"
+    )]));
+}
