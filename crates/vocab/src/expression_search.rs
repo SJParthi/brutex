@@ -399,13 +399,11 @@ mod invariant_tests {
                     depth += 1;
                 }
                 Instruction::Not if depth > 0 => {}
+                // Indexed, not looked up: a join needs two operands on a stack
+                // the leaf arm above has already bounded, so these two lookups
+                // had `else` arms no prefix reached. BASE-COV-LIBS-LS3.
                 Instruction::And | Instruction::Or if depth >= 2 => {
-                    let Some(&left) = starts.get(depth - 2) else {
-                        return false;
-                    };
-                    let Some(&right) = starts.get(depth - 1) else {
-                        return false;
-                    };
+                    let (left, right) = (starts[depth - 2], starts[depth - 1]);
                     if code.get(left..right) > code.get(right..index) {
                         return false;
                     }
@@ -432,10 +430,10 @@ mod invariant_tests {
         let mut cursor = Cursor::new(&[0]).expect("live alphabet");
         cursor.length = length;
         for (at, &instruction) in code.iter().enumerate() {
-            let Some(slot) = cursor.code.get_mut(at) else {
-                return false;
-            };
-            *slot = instruction;
+            // Indexed like `starts` and `depths` below: `place` refuses a prefix
+            // that cannot finish inside the cursor long before its end, so a
+            // lookup's `else` had no run. BASE-COV-LIBS-LS3.
+            cursor.code[at] = instruction;
             let Some((start, depth)) = cursor.place(at) else {
                 return false;
             };
@@ -443,6 +441,28 @@ mod invariant_tests {
             cursor.depths[at] = depth;
         }
         !code.is_empty()
+    }
+
+    /// **BOTH REFERENCES REFUSE A PREFIX LONGER THAN ITS PROGRAM, AND THE
+    /// SEARCH A LENGTH ITS WIRE CANNOT CARRY.** BASE-COV-LIBS-LS3: the two
+    /// refusals of these helpers no generated prefix reached. Extremes: one
+    /// instruction too many, a length of `u16::MAX` (carried) and one past it
+    /// (not), and the empty prefix at the largest carried length.
+    #[test]
+    fn the_references_refuse_an_overlong_prefix_and_an_uncarried_length() {
+        let two = [Instruction::Bit(0), Instruction::Bit(0)];
+        assert_eq!((valid_prefix(&two, 1), admits(&two, 1)), (false, false));
+        let one = [Instruction::Bit(0)];
+        let carried = usize::from(u16::MAX);
+        assert_eq!(
+            (admits(&one, carried), admits(&one, carried + 1)),
+            (true, false)
+        );
+        assert!(valid_prefix(&one, carried + 1), "the re-walk has no wire");
+        assert_eq!(
+            (valid_prefix(&[], carried), admits(&[], carried)),
+            (false, false)
+        );
     }
 
     /// THE INCREMENTAL CHECK ADMITS EXACTLY THE PREFIXES THE FULL RE-WALK DID.

@@ -1889,19 +1889,41 @@ mod tests {
     #[test]
     #[expect(clippy::indexing_slicing, reason = "slots are masked into range")]
     fn a_name_held_by_two_rows_resolves_to_the_lower_row() {
-        let table = [plain(0, "twice"), plain(1, "between"), plain(2, "twice")];
+        // BASE-COV-LIBS-LS3: and a DIFFERENT name whose home is the same slot sits
+        // in the shared probe between them, to be stepped over rather than read
+        // as a hit (the walk below used to meet only "twice").
+        let collider: &'static str = Box::leak(
+            (0_u32..1_000_000)
+                .map(|i| format!("c{i}"))
+                .find(|name| home(fnv1a(name.as_bytes())) == home(fnv1a(b"twice")))
+                .expect("a name sharing the home slot of `twice`")
+                .into_boxed_str(),
+        );
+        let table = [
+            plain(0, "twice"),
+            plain(1, collider),
+            plain(2, "twice"),
+            plain(3, "between"),
+        ];
         let slots = name_index(&table);
-        assert_eq!(slots.iter().filter(|&&slot| slot != 0).count(), 3);
+        assert_eq!(slots.iter().filter(|&&slot| slot != 0).count(), 4);
         let mut at = home(fnv1a(b"twice"));
         let mut rows = Vec::new();
+        let mut others = Vec::new();
         while slots[at] != 0 {
             let row = usize::from(slots[at] - 1);
             if table[row].name == "twice" {
                 rows.push(row);
+            } else {
+                others.push(row);
             }
             at = (at + 1) & (NAME_SLOTS - 1);
         }
         assert_eq!(rows, [0, 2]);
+        assert!(
+            others.contains(&1),
+            "the colliding row is in the shared probe"
+        );
     }
 
     #[test]
@@ -1928,6 +1950,9 @@ mod tests {
             huge.as_str(),
         ] {
             assert_eq!(index_of(miss), None, "{miss:?}");
+            // BASE-COV-LIBS-LS3: the probe of a miss ends at an empty slot,
+            // within the bound every start slot is held to below.
+            assert!(probes(miss) <= 7, "{miss:?}: {}", probes(miss));
         }
         assert!(TABLE.iter().any(|r| r.name.len() == MAX_NAME_BYTES));
         assert!(TABLE.iter().all(|r| r.name.len() <= MAX_NAME_BYTES));
