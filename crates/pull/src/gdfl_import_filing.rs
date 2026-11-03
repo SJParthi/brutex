@@ -1651,3 +1651,9 @@ pub(super) mod inject {
         })
     }
 }
+
+// BASE-COV-PULL-PS2 (D-7336): the filing's arms a whole import day does not
+// reach on its own, each called with the input that reaches it.
+#[cfg(test)]
+#[path = "gdfl_import_filing_ps2_tests.rs"]
+mod ps2_tests;
