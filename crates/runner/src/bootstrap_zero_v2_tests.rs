@@ -70,6 +70,20 @@ fn cold_source_audit_reproduces_full_identity_and_statistics_without_resampling(
         ),
         Err(Refusal::Bound)
     );
+    // BASE-COV-LIBS-LS2: the work cap refuses on its own, with bytes to spare.
+    assert_eq!(
+        audit_sources(
+            &full,
+            37,
+            11,
+            2,
+            Bounds {
+                max_work: 1,
+                ..BOUNDS
+            }
+        ),
+        Err(Refusal::Bound)
+    );
 }
 
 #[test]

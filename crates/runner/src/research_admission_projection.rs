@@ -119,3 +119,100 @@ pub fn wilson_ppm(wins: u64, trades: u64, bits: u64) -> Option<u64> {
 pub fn hypothesis_decision(probability: AdmissionExactProbabilityV2) -> HypothesisDecisionV1 {
     hypothesis_decision_v2(probability)
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture policy that does not validate must fail the test loudly"
+)]
+mod tests {
+    use super::super::{AdmissionPolicyDraftV1, AdmissionPolicyV1};
+
+    /// A complete policy whose four family probability ceilings all differ.
+    fn policy() -> AdmissionPolicyV1 {
+        AdmissionPolicyV1::new(AdmissionPolicyDraftV1 {
+            min_support_hits: Some(100),
+            min_independent_sessions: Some(20),
+            min_trades: Some(30),
+            max_mae_paisa: Some(500),
+            min_worst_reward_risk_ppm: Some(2_000_000),
+            min_win_rate_ppm: Some(600_000),
+            min_wilson_win_rate_ppm: Some(550_000),
+            min_return_drawdown_ppm: Some(3_000_000),
+            min_weakest_period_return_paisa: Some(0),
+            max_pbo_ppm: Some(100_000),
+            max_fwer_p_value_ppm: Some(50_000),
+            max_spa_p_value_ppm: Some(40_000),
+            min_decided_folds: Some(10),
+            max_ambiguous_fill_rate_ppm: Some(100_000),
+            max_gap_affected_rate_ppm: Some(100_000),
+            max_session_concentration_ppm: Some(300_000),
+            max_largest_trade_profit_share_ppm: Some(200_000),
+            max_drawdown_paisa: Some(10_000),
+            max_worst_trade_loss_paisa: Some(2_000),
+            max_losing_trade_rate_ppm: Some(400_000),
+            max_losing_trades: Some(20),
+            min_pessimistic_profit_paisa: Some(1_000),
+            min_winning_trades: Some(30),
+            min_average_win_paisa: Some(300),
+            max_average_loss_paisa: Some(150),
+            min_profit_factor_ppm: Some(2_000_000),
+            max_consecutive_losing_streak: Some(3),
+            min_consecutive_winning_streak: Some(3),
+            min_bootstrap_draws: Some(1_000),
+            min_bootstrap_strategies: Some(100),
+            min_bootstrap_periods: Some(300),
+            min_pbo_contributing_folds: Some(10),
+            max_pbo_unrankable_folds: Some(2),
+            min_profitable_oos_folds: Some(8),
+            min_oos_pessimistic_return_paisa: Some(1_000),
+            max_white_reality_p_value_ppm: Some(30_000),
+            require_white_reality_rejection: Some(true),
+            max_romano_wolf_p_value_ppm: Some(20_000),
+            require_romano_wolf_rejection: Some(true),
+        })
+        .expect("a complete policy validates")
+    }
+
+    /// BASE-COV-LIBS-LS2: A SEARCH CEILING ONLY TIGHTENS, each family's
+    /// ceiling separately, and touches no other threshold: below every
+    /// ceiling, between them, at one exactly, above all, zero and the largest
+    /// allowance the type holds.
+    #[test]
+    fn a_search_ceiling_caps_each_family_probability_and_nothing_else() {
+        let original = policy().values();
+        for (cap, want) in [
+            (0, [0, 0, 0, 0]),
+            (10_000, [10_000, 10_000, 10_000, 10_000]),
+            (35_000, [35_000, 35_000, 30_000, 20_000]),
+            (40_000, [40_000, 40_000, 30_000, 20_000]),
+            (50_000, [50_000, 40_000, 30_000, 20_000]),
+            (u64::MAX, [50_000, 40_000, 30_000, 20_000]),
+        ] {
+            let capped = policy().with_search_probability_ceiling(cap).values();
+            assert_eq!(
+                [
+                    capped.max_fwer_p_value_ppm,
+                    capped.max_spa_p_value_ppm,
+                    capped.max_white_reality_p_value_ppm,
+                    capped.max_romano_wolf_p_value_ppm,
+                ],
+                want,
+                "{cap}"
+            );
+            let mut rest = capped;
+            rest.max_fwer_p_value_ppm = original.max_fwer_p_value_ppm;
+            rest.max_spa_p_value_ppm = original.max_spa_p_value_ppm;
+            rest.max_white_reality_p_value_ppm = original.max_white_reality_p_value_ppm;
+            rest.max_romano_wolf_p_value_ppm = original.max_romano_wolf_p_value_ppm;
+            assert_eq!(rest, original, "{cap}: no other threshold moves");
+        }
+        // Capping twice is capping once by the smaller allowance.
+        assert_eq!(
+            policy()
+                .with_search_probability_ceiling(35_000)
+                .with_search_probability_ceiling(25_000),
+            policy().with_search_probability_ceiling(25_000)
+        );
+    }
+}

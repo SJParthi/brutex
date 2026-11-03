@@ -831,9 +831,8 @@ mod tests {
         let mut words = [0_u64; 6];
         let word = usize::try_from(bit / 64).unwrap_or(0);
         let shift = bit % 64;
-        if let Some(slot) = words.get_mut(word) {
-            *slot = 1_u64.checked_shl(shift).unwrap_or(0);
-        }
+        *words.get_mut(word).expect("a fixture bit inside the mask") =
+            1_u64.checked_shl(shift).unwrap_or(0);
         Candidate {
             strategy_digest: StrategyDigest::new([u8::try_from(bit).unwrap_or(u8::MAX); 32]),
             mask_words: words,

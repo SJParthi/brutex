@@ -44,3 +44,21 @@ fn an_upper_tail_quantile_exists_only_strictly_inside_zero_and_one() {
     let tail = upper_tail_quantile(0.001);
     assert!((tail - 3.090_232_306_168).abs() < 1e-6, "{tail}");
 }
+
+/// BASE-COV-LIBS-LS2: A FRACTION THAT NEVER CONVERGES IS NOT A PROBABILITY.
+/// A non-finite parameter keeps every Lentz factor away from one, so the
+/// fraction exhausts its terms and answers NaN, which every caller reads as
+/// "does not clear"; the same parameters at their finite neighbours converge.
+#[test]
+fn a_fraction_that_never_converges_answers_nan_rather_than_a_number() {
+    for (a, b) in [
+        (f64::NAN, 3.0),
+        (2.0, f64::NAN),
+        (f64::INFINITY, 3.0),
+        (f64::NAN, f64::NAN),
+    ] {
+        assert!(beta_continued_fraction(a, b, 0.25).is_nan(), "{a} {b}");
+    }
+    let converged = beta_continued_fraction(2.0, 3.0, 0.25);
+    assert!(converged.is_finite() && converged > 0.0, "{converged}");
+}

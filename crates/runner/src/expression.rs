@@ -287,13 +287,19 @@ mod tests {
     fn malformed_columns_refuse_before_any_evidence_is_published() -> Result<(), ParseRefusal> {
         let expression = Expression::parse("0")?;
         let rows = [ConditionMask::ZERO; 2];
-        let mut calls = 0;
+        let calls = std::cell::Cell::new(0_u32);
         let mut visitor = |_, _| {
-            calls += 1;
+            calls.set(calls.get() + 1);
             Ok::<_, ()>(())
         };
         assert_eq!(
             evaluate_rows(&rows, &[], &[0, 1], &expression, &mut visitor),
+            Err(Refusal::Alignment)
+        );
+        // Truth and availability agree with each other, and not with the
+        // source map.
+        assert_eq!(
+            evaluate_rows(&rows, &rows, &[0], &expression, &mut visitor),
             Err(Refusal::Alignment)
         );
         assert_eq!(
@@ -308,7 +314,13 @@ mod tests {
             evaluate_rows(&[], &[], &[], &expression, &mut visitor),
             Ok(Summary::default())
         );
-        assert_eq!(calls, 0);
+        assert_eq!(calls.get(), 0);
+        // The same visitor is called once per row of well-formed columns.
+        assert_eq!(
+            evaluate_rows(&rows, &rows, &[0, 1], &expression, &mut visitor).map(|s| s.evaluated),
+            Ok(2)
+        );
+        assert_eq!(calls.get(), 2);
         assert!(
             !Summary {
                 evaluated: 0,

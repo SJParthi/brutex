@@ -12,12 +12,12 @@
               test that cannot panic cannot fail."
 )]
 
-use super::{names_from_words, render_ranked, render_ranked_findings};
+use super::{names_from_words, render, render_ranked, render_ranked_findings};
 use crate::identity::{Direction, Params, Run, data_digest, identity};
 use crate::rank::Lens;
 use crate::{RankedRun, Sweeper, synthetic};
 use brutex_core::instrument::{Exchange, InstrumentKey};
-use engine::{Breach, Ladder};
+use engine::{Breach, Excluded, Ladder, Why};
 use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
 use indicators::vwap::Availability;
@@ -242,4 +242,52 @@ fn a_prepared_streamed_run_and_a_refused_search_read_what_they_did() {
     assert_eq!(refused.min_hits, None);
     let breach = refused.outcome.sweep.halted.map(|halt| halt.breach);
     assert_eq!(breach, Some(Breach::Memory));
+}
+
+/// A plain (unranked) run of the same fixture.
+fn plain() -> crate::Outcome {
+    let mut evaluator = Evaluator::new(
+        Widths::pinned().expect("both pinned widths are valid"),
+        Availability::Absent,
+        Thresholds::CLASSICAL,
+    );
+    Sweeper::new(ladder()).run(&synthetic::sessions(8), &mut evaluator)
+}
+
+/// BASE-COV-LIBS-LS2: A POSITION THAT WAS NEVER MEASURED SAYS SO, and names
+/// why: a retired or void position beside the measured exclusions of a real
+/// run. A generated column measures everything it excludes, so the row is
+/// added.
+#[test]
+fn an_unmeasured_exclusion_says_not_measured_and_names_its_reason() {
+    let mut out = plain();
+    assert!(!render(&out, None).contains("not measured"));
+    out.sweep.excluded.push(Excluded {
+        position: 9_999,
+        support: None,
+        reason: Why::NotLive,
+    });
+    let text = render(&out, None);
+    let line = text
+        .lines()
+        .find(|line| line.contains("retired, void, or outside the table"))
+        .unwrap_or_else(|| panic!("no NotLive row: {text}"));
+    assert!(line.contains("not measured"), "{line}");
+    assert!(line.contains("9999") && line.contains(" ? "), "{line}");
+}
+
+/// A PLAIN RUN HALTED BY ITS WORKERS SAYS WORKERS, the one budget no caller
+/// set besides memory, and is not trusted as a whole answer.
+#[test]
+fn a_plain_run_halted_by_its_workers_names_them() {
+    let mut out = plain();
+    let halt = ladder().refused_on_memory(1).halted.expect("a halt");
+    out.sweep.halted = Some(engine::Halt {
+        breach: Breach::Workers,
+        ..halt
+    });
+    let text = render(&out, None);
+    assert!(cell(&text, "outcome").starts_with("REFUSED"), "{text}");
+    assert!(cell(&text, "budget spent").starts_with("WORKERS"), "{text}");
+    assert!(cell(&text, "trustworthy as a whole answer").starts_with("NO"));
 }
