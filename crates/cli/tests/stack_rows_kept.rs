@@ -634,10 +634,10 @@ fn a_main_that_does_not_hold_the_rows_fails_by_name() {
 }
 
 /// **ONLY A TREE WITH NO `.git` SKIPS, AND IT SAYS WHY.** A commit that cannot
-/// be shown there compares nothing, as `cargo-mutants`'s copy of the tree must.
-/// A `GIT_DIR` naming nothing changes that no more than it does for the two
-/// tests of the same rule in `store` and `core`. A row rewritten there passes,
-/// and D-7414 says so. Anywhere else a commit that cannot be shown fails.
+/// be shown there compares nothing, as `cargo-mutants`'s copy of the tree must,
+/// whatever `GIT_DIR` names, because the rule reads the tree's `.git` first. A
+/// row rewritten there passes, and L-STACK1028-12 says so. Anywhere else a commit
+/// that cannot be shown fails: the tests above this one drive each case.
 #[test]
 fn a_commit_that_cannot_be_shown_compares_nothing() {
     let nowhere = Tree {
