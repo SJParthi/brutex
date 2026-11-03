@@ -1829,3 +1829,41 @@ fn a_store_that_takes_no_writes_ends_the_run_once_the_day_is_closed() {
     assert!(!journal_text(&store).contains(&april(2).to_string()));
     std::fs::remove_dir_all(store).unwrap();
 }
+
+/// **A ROOT ANOTHER PROCESS MAKES BETWEEN THE CHECK AND THE MKDIR IS THE
+/// STORE, AND A NAME THAT SAYS IT EXISTS AND IS NO FOLDER IS NOT** (the mkdir
+/// seam, D-7335): a `mkdir` answering `AlreadyExists` beside a folder made a
+/// moment before begins the run on it; one answering `AlreadyExists` with no
+/// folder there refuses the run `store_lost` and makes nothing. Both sides on
+/// every host, where the dangling-link test above holds one of them on Linux
+/// alone. Extremes at once: the race lost and the race lied about.
+#[test]
+fn a_root_made_beside_the_runs_own_mkdir_is_the_store_and_a_false_one_is_lost() {
+    let base = scratch("ps1-root-raced");
+    let root = base.join("S");
+    let run = run_over(ImportKind::Stocks, &root, (april(1), april(1)));
+    let raced = |at: &Path| -> std::io::Result<()> {
+        std::fs::create_dir(at)?;
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+    };
+    assert_eq!(fresh_root_with(&run, &raced), Ok(()));
+    assert!(root.is_dir(), "the other process's folder is the store");
+    let elsewhere = base.join("T");
+    let run = run_over(ImportKind::Stocks, &elsewhere, (april(1), april(1)));
+    let lied = |_: &Path| -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+    };
+    let got = fresh_root_with(&run, &lied).unwrap_err();
+    let ImportRefusal::StoreLost { why, .. } = &got else {
+        panic!("{got:?}");
+    };
+    assert!(
+        why.starts_with(&format!(
+            "{} is not a store root a run can begin: ",
+            elsewhere.display()
+        )),
+        "{why}"
+    );
+    assert!(!elsewhere.exists(), "nothing was made");
+    std::fs::remove_dir_all(base).unwrap();
+}
