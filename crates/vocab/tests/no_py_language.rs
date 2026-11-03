@@ -52,6 +52,7 @@
               test that cannot panic cannot fail."
 )]
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -202,10 +203,15 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// `git -C root ARGS`, with the variables that would point it at another
+/// The program the gate runs to list the tracked set. A proof hands the same
+/// functions a program that cannot be run, which is the only way to reach the
+/// paths a host without `git` takes (BASE-COV-LIBS-LS3).
+const GIT: &str = "git";
+
+/// `program -C root ARGS`, with the variables that would point git at another
 /// repository removed.
-fn git(root: &Path, args: &[&str]) -> std::io::Result<Output> {
-    Command::new("git")
+fn git_as(program: &OsStr, root: &Path, args: &[&str]) -> std::io::Result<Output> {
+    Command::new(program)
         .arg("-C")
         .arg(root)
         .args(args)
@@ -249,8 +255,8 @@ fn walk(root: &Path) -> Vec<String> {
 }
 
 /// The files to read under `root`, and one sentence saying how they were
-/// found.
-fn files_to_read(root: &Path) -> (Vec<String>, String) {
+/// found, with `program` run as `git`.
+fn files_to_read(program: &OsStr, root: &Path) -> (Vec<String>, String) {
     if std::fs::symlink_metadata(root.join(".git")).is_err() {
         let how = format!(
             "WALKED AS A DIRECTORY: {} holds no `.git` (`cargo-mutants` copies the tree \
@@ -259,7 +265,7 @@ fn files_to_read(root: &Path) -> (Vec<String>, String) {
         );
         return (walk(root), how);
     }
-    let listed = match git(root, &["ls-files", "-z"]) {
+    let listed = match git_as(program, root, &["ls-files", "-z"]) {
         Ok(listed) => listed,
         Err(why) => {
             let how = format!(
@@ -333,7 +339,7 @@ struct Audit {
 
 /// Read every file `files_to_read` names under `root`, and scan each.
 fn audit(root: &Path) -> Audit {
-    let (files, how) = files_to_read(root);
+    let (files, how) = files_to_read(OsStr::new(GIT), root);
     let mut audit = Audit {
         how,
         read: 0,
@@ -395,6 +401,23 @@ fn verdict(found: &Audit) -> Result<(), String> {
     Ok(())
 }
 
+/// The line the gate prints about files listed and absent from the working
+/// tree: how many, and the first ten, masked. Printed whatever the count, so
+/// the gate holds no branch that only gate 1e's copy takes
+/// (BASE-COV-LIBS-LS3).
+fn absent_line(absent: &[String]) -> String {
+    format!(
+        "{} listed file(s) absent from the working tree, so nothing of theirs was \
+         read; the first ten: {:?}",
+        absent.len(),
+        absent
+            .iter()
+            .take(10)
+            .map(|path| masked(path.as_bytes()))
+            .collect::<Vec<_>>()
+    )
+}
+
 /// A fresh empty directory for one proof.
 fn scratch(tag: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -420,19 +443,7 @@ fn plant(dir: &Path, relative: &str, text: &[u8]) {
 fn no_tracked_file_is_runs_or_names_the_py_language() {
     let found = audit(&root());
     println!("{}", masked(found.how.as_bytes()));
-    if !found.absent.is_empty() {
-        println!(
-            "{} listed file(s) absent from the working tree, so nothing of theirs was \
-             read; the first ten: {:?}",
-            found.absent.len(),
-            found
-                .absent
-                .iter()
-                .take(10)
-                .map(|path| masked(path.as_bytes()))
-                .collect::<Vec<_>>()
-        );
-    }
+    println!("{}", absent_line(&found.absent));
     if let Err(why) = verdict(&found) {
         panic!("{why}");
     }
@@ -634,31 +645,40 @@ fn a_planted_tree_is_refused_through_the_same_walk_the_gate_takes() {
     );
     assert!(!names_it(found.refused[0].as_bytes()));
 
-    let repo = scratch("git");
-    if let Err(why) = git(&repo, &["--version"]) {
-        println!("SKIPPING the git half: `git` cannot be run here ({why}).");
-        return;
+    println!(
+        "{}",
+        the_git_half_of_the_walk(OsStr::new(GIT), &scratch("git"), &planted)
+    );
+}
+
+/// The half of the walk proof that needs `git`, run as `program` in the fresh
+/// directory `repo`: with a `.git`, only what `git ls-files` lists is read, so
+/// the staged plant is refused and the untracked one is never opened. Returns
+/// what it did; a host that cannot run `program` skips it, by name.
+fn the_git_half_of_the_walk(program: &OsStr, repo: &Path, planted: &[u8]) -> String {
+    if let Err(why) = git_as(program, repo, &["--version"]) {
+        return format!("SKIPPING the git half: `git` cannot be run here ({why}).");
     }
-    let init = git(&repo, &["init", "-q"]).expect("git ran a moment ago");
+    let init = git_as(program, repo, &["init", "-q"]).expect("git ran a moment ago");
     assert!(
         init.status.success(),
         "{}",
         String::from_utf8_lossy(&init.stderr)
     );
-    plant(&repo, "tracked.md", &planted);
+    plant(repo, "tracked.md", planted);
     plant(
-        &repo,
+        repo,
         "tools/run.py",
         b"clean, and still the language's own file\n",
     );
-    plant(&repo, "untracked.md", &planted);
-    let add = git(&repo, &["add", "tracked.md", "tools/run.py"]).expect("git ran");
+    plant(repo, "untracked.md", planted);
+    let add = git_as(program, repo, &["add", "tracked.md", "tools/run.py"]).expect("git ran");
     assert!(
         add.status.success(),
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let found = audit(&repo);
+    let found = audit(repo);
     assert!(found.how.contains("git ls-files"), "{}", found.how);
     assert_eq!(found.read, 2);
     assert_eq!(
@@ -669,9 +689,10 @@ fn a_planted_tree_is_refused_through_the_same_walk_the_gate_takes() {
         ]
     );
     std::fs::remove_file(repo.join("tracked.md")).expect("the plant is removable");
-    let found = audit(&repo);
+    let found = audit(repo);
     assert_eq!(found.absent, ["tracked.md"]);
     assert_eq!(found.read, 1);
+    "the git half ran".to_owned()
 }
 
 /// Each guard of the verdict refuses the walk it exists for, at its boundary:
@@ -742,12 +763,20 @@ fn each_guard_of_the_verdict_refuses_the_walk_it_exists_for() {
 /// which is what git stores (D-5258).
 #[test]
 fn extreme_inputs_are_read_whole_through_the_gates_own_walk() {
-    let repo = scratch("extreme");
-    if let Err(why) = git(&repo, &["--version"]) {
-        println!("SKIPPING: `git` cannot be run here ({why}).");
-        return;
+    println!(
+        "{}",
+        extreme_inputs_under(OsStr::new(GIT), &scratch("extreme"))
+    );
+}
+
+/// The extreme-input proof above, run as `program` in the fresh directory
+/// `repo`. Returns what it did; a host that cannot run `program` skips it, by
+/// name.
+fn extreme_inputs_under(program: &OsStr, repo: &Path) -> String {
+    if let Err(why) = git_as(program, repo, &["--version"]) {
+        return format!("SKIPPING: `git` cannot be run here ({why}).");
     }
-    let init = git(&repo, &["init", "-q"]).expect("git ran a moment ago");
+    let init = git_as(program, repo, &["init", "-q"]).expect("git ran a moment ago");
     assert!(
         init.status.success(),
         "{}",
@@ -756,15 +785,15 @@ fn extreme_inputs_are_read_whole_through_the_gates_own_walk() {
     let mut big = format!("{}\n", "a".repeat(63)).repeat(131_072).into_bytes();
     assert_eq!(big.len(), 8 * 1024 * 1024);
     big.extend_from_slice(format!("tail {NEEDLE}").as_bytes());
-    plant(&repo, "big.txt", &big);
-    plant(&repo, "empty.md", b"");
+    plant(repo, "big.txt", &big);
+    plant(repo, "empty.md", b"");
     plant(
-        &repo,
+        repo,
         "dir with space/\u{20b9}-\u{6570}.md",
         format!("x {NEEDLE}\n").as_bytes(),
     );
-    plant(&repo, "SETUP.PYW", b"clean\n");
-    plant(&repo, &format!("tools/{NEEDLE}/clean.md"), b"clean\n");
+    plant(repo, "SETUP.PYW", b"clean\n");
+    plant(repo, &format!("tools/{NEEDLE}/clean.md"), b"clean\n");
     let mut expected = vec![
         "SETUP.PYW: Extension(\"pyw\"): SETUP.PYW".to_owned(),
         "big.txt: Name(131073): tail [THE NAME]".to_owned(),
@@ -779,13 +808,13 @@ fn extreme_inputs_are_read_whole_through_the_gates_own_walk() {
         expected.push("link.md: Name(1): docs/[THE NAME].md".to_owned());
         files += 1;
     }
-    let add = git(&repo, &["add", "-A"]).expect("git ran");
+    let add = git_as(program, repo, &["add", "-A"]).expect("git ran");
     assert!(
         add.status.success(),
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let found = audit(&repo);
+    let found = audit(repo);
     assert!(found.how.contains("git ls-files"), "{}", found.how);
     assert_eq!(found.read, files);
     assert!(found.absent.is_empty(), "{:?}", found.absent);
@@ -798,4 +827,68 @@ fn extreme_inputs_are_read_whole_through_the_gates_own_walk() {
     }
     let why = verdict(&found).expect_err("a small tree is refused");
     assert!(!names_it(why.as_bytes()));
+    "the extreme inputs were read".to_owned()
+}
+
+/// **THE ABSENT-FILE LINE COUNTS EVERY ONE, SHOWS TEN, AND MASKS THEM.**
+/// BASE-COV-LIBS-LS3: this checkout has every listed file on disk, so the line
+/// gate 1e's copy prints had no run here. Extremes: none at all, and twelve
+/// with the name in the first path.
+#[test]
+fn the_absent_file_line_counts_every_one_shows_ten_and_masks_them() {
+    let lead = "listed file(s) absent from the working tree, so nothing of theirs was read; \
+                the first ten:";
+    assert_eq!(absent_line(&[]), format!("0 {lead} []"));
+    let absent: Vec<String> = std::iter::once(format!("docs/{NEEDLE}.md"))
+        .chain((1..12).map(|i| format!("web/src/f{i}.js")))
+        .collect();
+    let shown: Vec<String> = std::iter::once("docs/[THE NAME].md".to_owned())
+        .chain((1..10).map(|i| format!("web/src/f{i}.js")))
+        .collect();
+    let line = absent_line(&absent);
+    assert_eq!(line, format!("12 {lead} {shown:?}"));
+    assert!(!names_it(line.as_bytes()), "the absent line leaks the name");
+}
+
+/// **A LISTED PATH THAT CANNOT BE INSPECTED IS A FAILURE, NEVER AN ABSENCE.**
+/// BASE-COV-LIBS-LS3: only a missing file may be counted absent. A path whose
+/// metadata fails for any other reason -- here a path through a regular file,
+/// which is not a directory -- stops the walk rather than shrinking it.
+#[test]
+#[should_panic(expected = "a listed file's metadata is readable")]
+fn a_listed_path_that_cannot_be_inspected_is_a_failure_not_an_absence() {
+    let dir = scratch("uninspectable");
+    plant(&dir, "file.md", b"clean\n");
+    let _ = contents(&dir, "file.md/inside.md");
+}
+
+/// **A HOST THAT CANNOT RUN `git` WALKS THE TREE, AND EACH GIT PROOF SKIPS BY
+/// NAME.** BASE-COV-LIBS-LS3: every host this suite runs on has `git`, so those
+/// paths had no run. A program path inside a fresh directory, never created,
+/// cannot be run anywhere. The fallback walk still steps over `.git`, which only
+/// this fallback ever meets.
+#[test]
+fn a_host_that_cannot_run_git_walks_the_tree_and_the_git_proofs_skip_by_name() {
+    let dir = scratch("no-git");
+    let absent = dir.join("no-such-program");
+    let absent = absent.as_os_str();
+    plant(&dir, ".git/HEAD", b"ref: refs/heads/main\n");
+    plant(&dir, "keep.md", b"clean\n");
+    let (files, how) = files_to_read(absent, &dir);
+    assert_eq!(files, ["keep.md"]);
+    assert!(
+        how.starts_with("WALKED AS A DIRECTORY: `git` cannot be run here ("),
+        "{how}"
+    );
+    let skipped = the_git_half_of_the_walk(absent, &dir, b"");
+    assert!(
+        skipped.starts_with("SKIPPING the git half: `git` cannot be run here ("),
+        "{skipped}"
+    );
+    let skipped = extreme_inputs_under(absent, &dir);
+    assert!(
+        skipped.starts_with("SKIPPING: `git` cannot be run here ("),
+        "{skipped}"
+    );
+    assert_eq!(walk(&dir), ["keep.md"], "a skipped proof planted nothing");
 }
