@@ -1103,9 +1103,11 @@ mod tests {
                 .map_err(|e| match e {
                     LookupError::BeforeSeries { .. } => "before the series",
                     LookupError::Stale { .. } => "too old",
-                    // No gap row in this table, so nothing is carried.
-                    LookupError::CarriedTooLong { .. } => "carried too long",
-                    LookupError::HoleBeforeGap { .. } => "hole before a gap",
+                    // No gap row in this table, so nothing is carried: either
+                    // answer fails the test (BASE-COV-PULL-PS2).
+                    LookupError::CarriedTooLong { .. } | LookupError::HoleBeforeGap { .. } => {
+                        unreachable!("no gap row in this table, so nothing is carried")
+                    }
                 });
             assert_eq!(got, expected, "on {asked}");
             if let Ok(released) = got {
@@ -2063,5 +2065,22 @@ mod tests {
             .code(),
             "rate_hole_before_gap"
         );
+    }
+
+    /// PS2-RF-01 (BASE-COV-PULL-PS2): a result row read on its own refuses any
+    /// field count but eight by the count it found, as the entry door does;
+    /// `entry` checks the count first, so only a direct call reaches this one.
+    #[test]
+    fn a_result_row_of_any_other_width_is_refused_by_its_count() {
+        for (text, found) in [("", 1), ("a\tb", 2), ("1\t2\t3\t4\t5\t6\t7", 7)] {
+            assert_eq!(
+                row(text, None),
+                Err(RowFault::FieldCount { found }),
+                "{text:?}"
+            );
+        }
+        let nine = format!("{}\textra", line("2020-01-01", "98.5000", "6.1081"));
+        assert_eq!(row(&nine, None), Err(RowFault::FieldCount { found: 9 }));
+        assert!(row(&line("2020-01-01", "98.5000", "6.1081"), None).is_ok());
     }
 }

@@ -603,4 +603,23 @@ mod tests {
         let differs = compare(&minutes, std::slice::from_ref(&wide)).expect("folds");
         assert_eq!((differs.differed, differs.vendor_truncated), (1, 0));
     }
+
+    /// PS2-DC-01 (BASE-COV-PULL-PS2): a vendor that truncates on two days is
+    /// counted on both, and the first such day stays the one named.
+    #[test]
+    fn the_first_truncated_day_stays_named_when_another_follows() {
+        let minutes = [session(0), session(1)].concat();
+        let cut = |day: i64| {
+            let mut bar = served(day);
+            bar.high -= 1;
+            bar
+        };
+        let report = compare(&minutes, &[cut(0), cut(1)]).unwrap();
+        assert_eq!((report.differed, report.vendor_truncated), (2, 2));
+        let first = report.first_truncated.unwrap();
+        assert!(
+            first.starts_with(&format!("IST day {}: high", ist_day(&served(0)))),
+            "{first}"
+        );
+    }
 }
