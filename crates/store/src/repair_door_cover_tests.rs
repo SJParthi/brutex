@@ -218,7 +218,9 @@ fn a_correction_that_only_adds_bars_publishes_them_in_order() {
             assert!(restated_at.is_empty(), "{restated_at:?}");
             assert_eq!((*added, *held), (3, 5));
         }
-        other => panic!("the added bars are published: {other:?}"),
+        other @ MonthRestate::NothingNew { .. } => {
+            panic!("the added bars are published: {other:?}")
+        }
     }
     let mut expected = offered[..2].to_vec();
     expected.extend(&held);
@@ -241,7 +243,9 @@ fn an_empty_month_needs_no_basis_witness() {
     };
     match repair_month(&root.0, month(), SYMBOL, &bars(0..4), witness).unwrap() {
         MonthRepair::Repaired { held, added, .. } => assert_eq!((held, added), (0, 4)),
-        other => panic!("the empty month takes the bars: {other:?}"),
+        other @ MonthRepair::NothingNew { .. } => {
+            panic!("the empty month takes the bars: {other:?}")
+        }
     }
     // A month that holds bars and shares no stamp with the offer is refused.
     let held = Root::new("held-witness");

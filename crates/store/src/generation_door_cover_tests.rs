@@ -124,12 +124,12 @@ fn a_pointer_that_holds_its_last_record_refuses_the_next_promotion() {
         "nothing was written"
     );
     // The control: one record fewer leaves room for exactly one more.
-    let room = Pointer {
+    let spare = Pointer {
         record: MAX_RECORDS - 2,
         ..record0
     };
     let mut image = vec![0_u8; usize::try_from((MAX_RECORDS - 2) * RECORD_LEN).unwrap()];
-    image.extend_from_slice(&room.encode());
+    image.extend_from_slice(&spare.encode());
     fs::write(&pointer_file, &image).unwrap();
     assert!(matches!(
         promote(&root.0, month(), SYMBOL, second),
