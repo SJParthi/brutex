@@ -87671,3 +87671,103 @@ failing arm. A production refusal is never (F), and "needs a fault" is never
    `pull` at this tip. Limit L-BCP-1 stands, L-BCP-2 is closed by item 1, and
    L-BCP-3 names the real-data tests. Invariants BCP-04 to BCP-07. D-7334 to
    D-7339 are unused.
+
+### D-7334 — BASE-COV-PULL repair 2: tests for most of the second check's blocking 2 and all of blocking 4, written and NOT yet compiled or run; events built only under a sink read back in a process of their own, two seams, three arms no input reaches removed; the bar is still NOT held — 2026-11-03
+
+**Why.** The second check of repair 1 (`state/fix/round2/verify-BASE-COV-PULL-r2.json`;
+Route B on `c9d653d5f`, reading `whole:pull`: lines 151,638/158,587, 6,949
+uncovered; branches 11,522/14,216, 2,694 uncovered sides; 172 of 196 files
+with a gap; `state/fix/round2/deep-BASE-COV-PULL-c9d653d5f914-gaps.txt`) found
+the bar not held (blocking 1), gaps in production files this part changed
+(blocking 2), production files with no new test (blocking 3) and two sides of
+this part's own test files that were no failing arm (blocking 4).
+
+1. **Blocking 4.** `reference_data_cov_tests.rs`: `file()` lost its dead
+   `if !body.is_empty()` (every caller passes a header; the empty file is
+   `sealed("")`, read by its own test). `ssm_cov_tests.rs`: the environment
+   door is compared with the rule over the same variables through their
+   `Debug` (the secret redacted), so no side of the test depends on which
+   variables the process holds; the rule's present and absent sides have a
+   test of their own over an invented lookup.
+2. **A sink in a process of its own.** The lib test binary installs no sink
+   in its own process (`emit_sites` installs in a child), so every
+   `emit_if!` argument line was uncovered. Three tests run in a child of the
+   binary (`crate::support::where_permission_binds`), install a sink at
+   `Trace` there and read the events back (a tail answers newest first; a text
+   field is held to its source by prefix, the sink's 512-byte cut being a
+   plain prefix): `fnowork` (a rebuilt index, refused contracts),
+   `master_snapshots` (an unlisted directory, incomplete entries one past
+   `INCOMPLETE_NAMED`, every field of the outcome, a refused write, changes
+   one past `DIFF_NAMED`), `gdfl_run` (the sink's health in a progress record,
+   `LogState::of_process`). BCP-08.
+3. **Arms no input reaches, removed, not excused** (no behaviour changes; the
+   arm's tests still pass): `gdfl_import::cm_jobs`'s second
+   `if let Some(stem)` (the stem now rides with its filing, so the arm that
+   keeps it never asks again); `master_snapshots::Book::of`'s
+   `[older, newer]` match over `windows(2)` (a zip of each stamp with the
+   next); the warm-up's inline `begin` closure is the named
+   `gdfl_import::warm_up_begin`, which a test calls (no worker of a warm-up
+   asks the gate to begin).
+4. **Seams** (production passes what it passed before): `ssm::answer_of`, the
+   status and body half of `get_parameter` (the socket half stays there, and
+   it is the one part not driven); `reference_data::newest_within`, the bound
+   on a table directory's names as an argument (`newest` passes
+   `MAX_GENERATIONS`; a test reaches the bound with three names, not a
+   million).
+5. **Tests**, each with its extremes, a combination of them and something out
+   of the box: `gdfl_import_cov_tests.rs` (a store, source and meter lost each
+   report their days; a calendar window and a sidecar never close a day; a
+   refusal through a writer that refuses at its first byte, its last byte and
+   never; the warm-up's begin; a day ledger that will not take the rescan's
+   lines, read-only where the bits bind), `gdfl_import_tests.rs` (a file the
+   reader refuses is named and the day's other files are read),
+   `corporate_actions_cov_tests.rs` (a product below the step),
+   `gdfl_run_cov_tests.rs` (a changed layout, a bad clock and an unwritten
+   ledger; the claim's words and its refusals with a sidecar in the way; every
+   source's reader and a stopped claim through `execute_claimed`; a repair of
+   a closed month; a progress record over `/dev/null`, each end state, a torn
+   record read twice, a write past the record's end; the sink child),
+   `master_snapshots_cov_tests.rs` (the sink child; a record of four-byte
+   letters past `RECORD_LEN`; a dangling link at the diff's name; a day table
+   whose index runs past its stamps), `fnowork_futures_tests.rs` (the sink
+   child), `ssm_cov_tests.rs` (every answer by status and fault name; the
+   discovery doors in five children of their own environment and `HOME`),
+   `http_cov_tests.rs`, `masters_cov_tests.rs` (the public transport against
+   a loopback socket), `fno_membership_cov_tests.rs`,
+   `gdfl_run_locks_cov_tests.rs`, `gdfl_run_stop_cov_tests.rs`,
+   `gdfl_run_start_cov_tests.rs` (the api child's gate over a real stdin, in
+   four children), `reference_data_cov_tests.rs`, `census_store_cov_tests.rs`
+   (directories the host will not measure or list, where the bits bind),
+   `gdfl_dropbox_cov_tests.rs` (the token over an in-memory secret source,
+   `CLAUDE.md` §8), `zerodha_verify_cov_tests.rs`, `manifest_cov_tests.rs`
+   (the `const fn` layout builders at run time), `kite_cov_tests.rs`.
+   Invariants BCP-08 to BCP-12.
+6. **NOT VERIFIED: none of these tests has been compiled or run.** No cargo
+   slot came: one call that holds one slot for `fmt --check`, the whole
+   `pull` suite and clippy (pool-4 lock held, OPS-10 touch at the take) was
+   queued from 10:31 to 12:56 IST on 3 Nov 2026 while the four low slots stayed
+   held by runs of two to seven hours; the step then stopped it, released the
+   lock, and ended to spare the account's week (96% used). The code was
+   checked by reading only (lint allows, borrows, newest-first tails, cut
+   texts). The next attempt compiles, fixes what fails, and runs the gates
+   before anything here counts.
+7. **Figures**: NOT MEASURED on this tip (no Route B: no build slot, and all
+   six deep dirs held). BEFORE (the second check's measure of `c9d653d5f`,
+   instrument of D-7330, Route B): lines 151,638/158,587, branches
+   11,522/14,216. The (F)/(U) list, provisional from those figures:
+   `state/fix/round2/base-cov-pull-fu.txt` ((F) 1,116 rows by a pattern
+   classifier, not checked row by row; (U) 23 rows, each with its proof; the
+   rest GAP), round 1's kept as `base-cov-pull-fu.r1.txt`.
+8. **What is not done.** The bar, so D-7250's narrow reading does NOT end for
+   `pull` at this tip. Of the second check's blocking 2, not reached:
+   `gdfl_import` `cm_present`'s `Ok(None)`/`Err` arms and a seen member,
+   `lineage.day`'s `Err`, the warm-up's thread-spawn arm and its closure in
+   `nfo_day_with`; `gdfl_run` 1903-1904 (a census claim that will not write)
+   and 2795 (a positional write refused after the open); `master_snapshots`
+   797-801 and 2625-2629 (a rename refused after a create in the same folder).
+   L-BCP-4 names the arms that need a seam. Of blocking 3, most of
+   `zerodha_verify`, `gdfl_dropbox`, `census_store`, `gdfl_rekey`,
+   `tickstore_write`, `gdfl_import_day`, `response_keep`, `ingest`, `http`,
+   `cash_auction`, `gdfl_archive` and the socket half of `ssm::get_parameter`.
+   L-BCP-3 (the `#[ignore]` bodies) still needs the operator. D-7335 to
+   D-7339 are unused.
