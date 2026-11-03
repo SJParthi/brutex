@@ -367,3 +367,28 @@ fn unlinkable_body() {
         .count();
     assert_eq!(kept, 0, "nothing kept");
 }
+
+/// A REPLACEMENT WHOSE RENAME MEETS A DIRECTORY AT THE QUEUE'S NAME is
+/// refused by name: the alert is not said saved, and the temporary queue is
+/// left for the next replacement.
+#[test]
+fn a_replacement_whose_rename_is_refused_saves_nothing() {
+    let scratch = Scratch::new("RENAME");
+    raw_queue(&scratch, &[raw(TYPE_ALERT, "k1", 0, 1)]);
+    spoil_header(&scratch);
+    BEFORE_RENAME.with_borrow_mut(|held| {
+        *held = Some(Box::new(|names: &Names| {
+            fs::remove_file(&names.queue).unwrap();
+            fs::create_dir_all(names.queue.join("inside")).unwrap();
+        }));
+    });
+    let refused = replace_damaged_at(scratch.root(), NOW).expect_err("refused");
+    let AlertError::Io { op, .. } = refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(op, "put the new queue in place");
+    assert!(
+        scratch.names().queue.join("inside").is_dir(),
+        "nothing renamed over it"
+    );
+}
