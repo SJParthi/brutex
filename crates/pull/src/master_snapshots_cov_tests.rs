@@ -623,15 +623,22 @@ fn every_event_of_a_hook_call_reaches_a_sink_with_its_fields_body() {
             Some("an invented listing fault".to_owned())
         )
     );
+    // A tail answers newest first: the first event a call wrote is last.
     let named = of(INCOMPLETE_MESSAGE);
     assert_eq!(named.len(), INCOMPLETE_NAMED);
     assert_eq!(
+        text(named[0], "entry"),
+        Some("invented-2.partial".to_owned()),
+        "the 64th named is the second oldest entry"
+    );
+    let first = named[INCOMPLETE_NAMED - 1];
+    assert_eq!(
         (
-            text(named[0], "entry"),
-            text(named[0], "stamp"),
-            text(named[0], "day"),
-            text(named[0], "why"),
-            count(named[0], "held"),
+            text(first, "entry"),
+            text(first, "stamp"),
+            text(first, "day"),
+            text(first, "why"),
+            count(first, "held"),
         ),
         (
             Some(format!("invented-{held}.partial")),
@@ -640,7 +647,7 @@ fn every_event_of_a_hook_call_reaches_a_sink_with_its_fields_body() {
             Some("an invented cut".to_owned()),
             Some(u64::from(held)),
         ),
-        "newest first"
+        "the newest entry is named first"
     );
     let more = of("more incomplete master snapshot entries are held than one refresh names");
     assert_eq!(more.len(), 1);
@@ -700,19 +707,19 @@ fn every_event_of_a_hook_call_reaches_a_sink_with_its_fields_body() {
     let each = of("a master change between two snapshots");
     assert_eq!(each.len(), DIFF_NAMED);
     assert_eq!(
-        ["change", "exchange", "token", "symbol", "old", "new", "day",]
+        ["change", "exchange", "token", "symbol", "new", "day"]
             .iter()
-            .map(|key| text(each[0], key))
+            .map(|key| text(each[DIFF_NAMED - 1], key))
             .collect::<Vec<_>>(),
         [
             Some("listing".to_owned()),
             Some("NFO".to_owned()),
             Some("9100000".to_owned()),
             Some("ZQIDX0".to_owned()),
-            Some(String::new()),
             Some("ZQIDX0".to_owned()),
             Some(on.to_string()),
-        ]
+        ],
+        "the first change is named first"
     );
     let refused = of("no master snapshot was written");
     assert_eq!(refused.len(), 1);
@@ -720,13 +727,11 @@ fn every_event_of_a_hook_call_reaches_a_sink_with_its_fields_body() {
         (
             text(refused[0], "kind"),
             text(refused[0], "outcome"),
-            text(refused[0], "day"),
             text(refused[0], "detail"),
         ),
         (
             Some("nse_total_market".to_owned()),
             Some("refused".to_owned()),
-            Some(String::new()),
             Some("an invented refusal".to_owned()),
         )
     );

@@ -27,9 +27,15 @@ fn serve(answers: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<String>) {
     std::thread::spawn(move || {
         for answer in answers {
             let (mut stream, _) = socket.accept().expect("a connection");
-            let mut buf = [0_u8; 8192];
-            let read = stream.read(&mut buf).expect("the request");
-            tx.send(String::from_utf8_lossy(&buf[..read]).into_owned())
+            // The whole head of the request: a GET carries no body.
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                let read = stream.read(&mut buf).expect("the request");
+                assert!(read > 0, "the request ended before its head did");
+                request.extend_from_slice(&buf[..read]);
+            }
+            tx.send(String::from_utf8_lossy(&request).into_owned())
                 .expect("the test is listening");
             stream.write_all(&answer).expect("the answer is written");
             stream.flush().expect("flushed");

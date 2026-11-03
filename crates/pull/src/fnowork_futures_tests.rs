@@ -1628,17 +1628,30 @@ fn the_plans_warnings_reach_a_sink_with_their_fields_body() {
         })
         .map(|record| (text(record, "underlying"), text(record, "why")))
         .collect();
-    assert_eq!(
-        said_rebuilt,
-        [(Some("ZQIDX".to_owned()), rebuilt.plan.rebuilt.clone())]
+    // A text field is cut at the sink's ceiling as a plain prefix, so each
+    // is held to the plan's own words by `starts_with`.
+    assert_eq!(said_rebuilt.len(), 1, "{said_rebuilt:?}");
+    assert_eq!(said_rebuilt[0].0.as_deref(), Some("ZQIDX"));
+    let said_why = said_rebuilt[0].1.clone().unwrap_or_default();
+    let plan_why = rebuilt.plan.rebuilt.clone().unwrap_or_default();
+    assert!(
+        said_why.starts_with("generation g1 of the futures index"),
+        "{said_why}"
     );
-    let said_refused: Vec<String> = records
+    assert!(plan_why.starts_with(&said_why), "{plan_why} / {said_why}");
+    // A tail answers newest first; the plan names its refusals in order.
+    let mut said_refused: Vec<String> = records
         .iter()
         .filter(|record| record.message == "a futures contract or series was not asked for")
         .map(|record| text(record, "why").unwrap_or_default())
         .collect();
+    said_refused.reverse();
     assert_eq!(said_refused.len(), 2, "{said_refused:?}");
-    assert_eq!(said_refused, refused.refused);
+    assert_eq!(refused.refused.len(), 2, "{:?}", refused.refused);
+    for (said, planned) in said_refused.iter().zip(&refused.refused) {
+        assert!(said.starts_with("contract_duplicated"), "{said}");
+        assert!(planned.starts_with(said.as_str()), "{planned} / {said}");
+    }
     assert_eq!(
         records
             .iter()

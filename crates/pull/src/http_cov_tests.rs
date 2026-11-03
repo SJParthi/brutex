@@ -54,7 +54,7 @@ fn a_budget_no_governor_takes_is_refused_when_the_source_is_built() {
             ..spec_top(PriceScale::Paisa)
         };
         let refused = HttpSource::new(spec, Credential::token("zq".to_owned())).unwrap_err();
-        let FetchError::TransportFailed { detail } = refused else {
+        let FetchError::TransportFailed { detail } = &refused else {
             panic!("{refused:?}");
         };
         assert!(
@@ -118,9 +118,9 @@ fn a_discovery_field_in_a_bars_request_is_refused_by_name() {
         let refused = source
             .resolve_param(&param, &request, "2024-04-01", "2024-04-02")
             .unwrap_err();
-        let FetchError::NotABarsParam { field } = refused else {
+        let FetchError::NotABarsParam { field } = &refused else {
             panic!("{refused:?}");
         };
-        assert_eq!(field, name);
+        assert_eq!(*field, name);
     }
 }

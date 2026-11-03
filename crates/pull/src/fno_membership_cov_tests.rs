@@ -105,7 +105,7 @@ fn the_fold_says_its_span_and_counts_and_a_month_refuses_a_record_out_of_order()
         .unwrap();
     let mut april = MonthTable::begin(d(2024, 4, 1), &state);
     let refused = april.push(late.clone(), &state).unwrap_err();
-    let MembershipError::Corrupt { why, .. } = refused else {
+    let MembershipError::Corrupt { why, .. } = &refused else {
         panic!("{refused:?}");
     };
     assert_eq!(

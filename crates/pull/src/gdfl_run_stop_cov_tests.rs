@@ -89,10 +89,10 @@ fn a_stop_of_a_kind_whose_claim_is_being_written_is_refused_by_its_lock() {
     let garbled = locks::RunLocks::take(&store, "stocks", 0).unwrap();
     std::fs::write(store.join(locks::kind_lock("stocks")), b"not a claim").unwrap();
     let refused = request_stop(&store, StopTarget::Kind("indices"), "cli", 1).unwrap_err();
-    let StopRefusal::ClaimBeingWritten { lock } = refused else {
+    let StopRefusal::ClaimBeingWritten { lock } = &refused else {
         panic!("{refused:?}");
     };
-    assert_eq!(lock, locks::kind_lock("indices"));
+    assert_eq!(*lock, locks::kind_lock("indices"));
     let by_run = request_stop(&store, StopTarget::Run(7), "cli", 1).unwrap_err();
     assert!(matches!(by_run, StopRefusal::NotLive { .. }), "{by_run:?}");
     let of_stocks = request_stop(&store, StopTarget::Kind("stocks"), "cli", 1).unwrap_err();
