@@ -5521,3 +5521,111 @@ mod presize_tests {
         assert!(!empty.day_ended(0));
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod edge_guard_tests {
+    //! BASE-COV-LIBS-LS2: the guards of the three money ratios on samples no
+    //! fold produces but the public fields can hold, and `same_day` on two
+    //! bars that both exist.
+    use super::{Edge, SessionBounds};
+
+    /// A long-side edge (mean at or above zero) with its four extrema set.
+    fn long(min_win: f64, max_loss: f64) -> Edge {
+        Edge {
+            n: 2,
+            mean_paisa: 1.0,
+            min_win_paisa: min_win,
+            max_loss_paisa: max_loss,
+            ..Edge::default()
+        }
+    }
+
+    /// Two bars of one IST day share it; the last bar of one day and the first
+    /// of the next do not.
+    #[test]
+    fn same_day_answers_for_two_existing_bars() {
+        let bars = crate::synthetic::sessions(2);
+        let bounds = SessionBounds::with_step(&bars, crate::synthetic::MINUTE_MICROS, None);
+        let last = crate::synthetic::BARS_PER_SESSION - 1;
+        assert!(bounds.same_day(0, last));
+        assert!(bounds.same_day(last + 1, bars.len() - 1));
+        assert!(!bounds.same_day(last, last + 1));
+        assert!(!bounds.same_day(0, bars.len()));
+    }
+
+    /// WORST REWARD TO RISK: a ratio that is not finite or underflows to zero
+    /// answers 0, and one past `i64` saturates; an ordinary ratio is the plain
+    /// quotient in basis points.
+    #[test]
+    fn worst_reward_risk_answers_zero_for_a_ratio_it_cannot_state() {
+        assert_eq!(long(300.0, 100.0).worst_reward_risk_bp(), 300);
+        assert_eq!(long(f64::NAN, 100.0).worst_reward_risk_bp(), 0, "NaN");
+        assert_eq!(
+            long(f64::MAX, f64::MIN_POSITIVE).worst_reward_risk_bp(),
+            0,
+            "an overflowing quotient is not a number to rank on"
+        );
+        assert_eq!(
+            long(f64::from_bits(1), 1.0e300).worst_reward_risk_bp(),
+            0,
+            "an underflowing quotient"
+        );
+        assert_eq!(long(1.0e18, 1.0).worst_reward_risk_bp(), i64::MAX);
+        assert_eq!(long(0.0, 100.0).worst_reward_risk_bp(), 0, "no gain");
+        assert_eq!(long(1.0, 0.0).worst_reward_risk_bp(), i64::MAX, "no loss");
+    }
+
+    /// MEAN PAYOFF: losers that sum to nothing are unbounded; a mean that is
+    /// not finite or underflows to zero answers 0; a quotient that is not
+    /// finite or reaches the bound saturates.
+    #[test]
+    fn payoff_names_each_ratio_it_cannot_divide() {
+        let payoff = |win_sum: f64, loss_sum: f64| {
+            Edge {
+                n: 4,
+                mean_paisa: 1.0,
+                wins: 1,
+                win_sum,
+                losses: 3,
+                loss_sum,
+                ..Edge::default()
+            }
+            .payoff_bp()
+        };
+        assert_eq!(payoff(300.0, -300.0), 300, "a mean win 3x the mean loss");
+        assert_eq!(payoff(300.0, 0.0), i64::MAX, "losers that lost nothing");
+        assert_eq!(payoff(f64::INFINITY, -300.0), 0, "a gain mean past f64");
+        assert_eq!(payoff(300.0, f64::NEG_INFINITY), 0, "a loss mean past f64");
+        assert_eq!(
+            payoff(300.0, -f64::from_bits(1)),
+            0,
+            "a loss mean that underflows to zero"
+        );
+        assert_eq!(payoff(1.0e308, -1.0e-10), i64::MAX, "a quotient past f64");
+        assert_eq!(payoff(1.0e18, -3.0), i64::MAX, "a quotient past the bound");
+    }
+
+    /// PATH RATIO: no observation answers 0 before any division, and a
+    /// quotient that is not finite or reaches the bound saturates.
+    #[test]
+    fn path_ratio_answers_zero_with_no_hits_and_saturates_past_its_bound() {
+        let path = |n: u64, favourable_sum: f64, adverse_sum: f64| {
+            Edge {
+                n,
+                adverse_sum,
+                favourable_sum,
+                ..Edge::default()
+            }
+            .path_ratio_bp()
+        };
+        assert_eq!(path(0, 300.0, 100.0), 0, "no hit");
+        assert_eq!(path(1, 300.0, 100.0), 300);
+        assert_eq!(path(1, f64::NAN, 100.0), i64::MAX, "NaN");
+        assert_eq!(path(1, f64::MAX, f64::MIN_POSITIVE), i64::MAX);
+        assert_eq!(path(1, 1.0e18, 1.0), i64::MAX, "past the bound");
+    }
+}
