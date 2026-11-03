@@ -2800,3 +2800,8 @@ fn applies_of_disjoint_underlying_plans_do_not_refuse_each_other() {
     );
     assert_eq!(view(root).2.pending(), 0);
 }
+
+// BASE-COV-PULL-PS2: the re-key's arms the suite left unreached, built with
+// this module's fixtures.
+#[path = "gdfl_rekey_ps2_tests.rs"]
+mod ps2;
