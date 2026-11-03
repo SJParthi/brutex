@@ -87602,6 +87602,388 @@ unused.
 
 <!-- slot FNO-LAW -->
 
+### D-8100 — The F&O strategy path is a third engine surface: the operator's current F&O list as a data file, no leavers, point-in-time membership within it, ICICIPRULI joined to ICICILIFE at read time, and the survivorship label on every result (FNO-LAW) — 2026-11-03
+
+**Why this entry exists.** `CLAUDE.md` §3 rule 2: the engine surface does not
+widen without an entry. On 30 Oct 2026 at 21:19 IST the operator decided,
+relayed by the main session, that the F&O strategy backtest's universe is "the
+218 CURRENT F&O stocks only", listed one per line in `fno218.txt` (built from
+the 30 Oct data audit's `universe.json`); that stocks which left F&O since 2018
+are NOT added; that point-in-time membership still applies within the 218;
+that every result and page carries "current F&O members only (survivorship bias
+not removed)"; and that ICICIPRULI is joined to ICICILIFE as one stock. Until
+this entry `CLAUDE.md` §1 named the 208 shares of
+`core::universe::FNO_UNDERLYINGS` and nothing else (SPEC OP-01).
+
+**Decision.**
+
+1. **A third surface.** `CLAUDE.md` §1 item 3, `AGENTS.md` §1 and the
+   charter's scope lock (its fourth row) name the cash shares of the
+   operator's current F&O list, traded intraday on the F&O strategy path, from
+   2018-09-03 to the last day both feeds are proven and sealed (provisional
+   1day bars excluded; OP-45). The second surface, the 208 shares the
+   existing sweep reads, is unchanged, and neither list is ever read in place
+   of the other.
+2. **The list is data, never code.** The universe is the operator's file
+   `fno218.txt`, one NSE symbol a line: 218 names when it was fixed (`wc -l`
+   218 and `sort | uniq -d` empty on 30 Oct; the kit copy read on 3 Nov has
+   218 non-empty lines and no duplicate). The audit derived it from GDFL's
+   29 Oct option zip less the six indices, matching the Zerodha master name for
+   name. The blake3 digest of its bytes is a term of every run identity of the
+   path (`universe_digest`, FNO-SEC-WIRE), so a run over another list is
+   another run. Measured on 3 Nov 2026 with `comm` against
+   `FNO_UNDERLYINGS` less its five indices: 13 names of the file are not in
+   the code's list (ANANDRATHI, ATHERENERG, COROMANDEL, CUB, DATAPATTNS,
+   ENRIN, ICICILIFE, KARURVYSYA, MAHABANK, NAVINFLUOR, SAGILITY, SYRMA,
+   UJJIVANSFB) and 3 of the code's are not in the file (BAJAJHLDNG,
+   DALBHARAT, ICICIPRULI).
+3. **No leavers.** A stock that left F&O since 2018 is in neither the traded
+   set nor the rank pool. The rank pool on a day is the 218's members on that
+   day (OP-03), and the number of point-in-time members outside the 218 is
+   shown per day and per year, so the bias is a number on every report rather
+   than a sentence.
+4. **Point-in-time membership within the list.** A stock is traded only on a
+   day it was an F&O member (`pull::fno_membership::Membership::is_member`); a
+   day the membership refuses (`MembershipUnknown`) is not traded and is
+   counted by reason (FNO-DAYMASK's M3).
+5. **The ICICI join, at read time and as data.** One stock: the store key and
+   the membership of ICICIPRULI for every date before 2026-10-23, ICICILIFE's
+   from that day, and a member on a day it is a member under either spelling.
+   The join is a map the run reads (its digest a term of the identity), never
+   a branch in a code path, and it works whether or not the store has been
+   re-keyed by the rename `core::alias` still holds back (D-7311). ICICILIFE's
+   October 2026 is skipped until its data is complete.
+6. **The label.** Every result, record header, route and page of the path
+   carries "current F&O members only (survivorship bias not removed)", word for
+   word (FNO-RECORDS, FNO-API, FNO-RUN).
+7. **The twelve stocks with no Zerodha data are kept**, not dropped: until the
+   data fix pulls them their stock-days fail the mask's signal-data condition
+   and are counted, and nothing is filled from GDFL candles in their place,
+   because signals come from Zerodha only.
+
+**What it does not change.** `NSE-INDIAVIX` stays reference only: the
+operator's 31 Oct 2026 words admitting it as a tested filter are for the step
+after the first run, and that law change needs its own entry. BSE and MCX are
+not swept. Contracts are stored and never swept. The existing sweep's 208 and
+its labels are untouched.
+
+**Held by** `core::fno_law` (`docs/04-invariants.md` FNO-LAW-I01, FNO-LAW-I03).
+
+### D-8101 — One fill model on GDFL seconds, the worst price printed in the second, and the live-like fill rules of operator rule 6 (FNO-LAW) — 2026-11-03
+
+**Why.** The operator's requirement of 30 Oct 2026: signals from Zerodha
+candles on every applicable timeframe, every other decision (entry, exit, stop,
+target, time exit) on GDFL 1-second bars, and ONE fill model, "the worst price
+inside the GDFL second ... never a best-case price". Rule 6 of the same evening
+(~22:1x IST): "only the name is backtesting, everything should act like
+real-time live trading".
+
+**Decision.**
+
+1. **One price rule (SPEC FIB-I4).** Every fill — entry, exit, stop, target,
+   time exit, square-off — is at the worst price printed inside the GDFL second
+   it fills in: a buy at that second's high, a sell at its low
+   (`costs::fill::Anchor::PrintedExtreme`, read per second). No price is ever a
+   level, an open, a mid or a best case. Volume, latency, bands and broker
+   rules decide WHICH seconds may fill and HOW MUCH, never the price.
+   `runner::grid::level_fill`, which fills at a resting level or the bar's open,
+   is never used for the seconds walk.
+2. **The walk (rule 6).** An order starts in the first traded GDFL second at or
+   after its decision time plus the swept latency. In each traded second it
+   fills at most a swept share of that second's traded volume (100%, 50%, 25%,
+   10% and the rest of the range; `floor`, the worse rounding), shared with the
+   account's other orders on the stock and side in that second; the rest
+   carries to the next traded second, and the next, for entries and exits
+   alike. A second with no trade fills nothing, under every cap. While an entry
+   is still filling, a stop, a target, a cap or the session end acts on the
+   filled part and the unfilled part is cancelled; an exit keeps filling
+   second by second; whatever is open at the session end is closed at the worst
+   price available, as the broker's square-off would. A buy at the upper price
+   band or a sell at the lower band fills nothing until the other side trades.
+3. **The broker's and the exchange's rules apply as facts, not settings**
+   (the charter's F&O section): the 3% market protection (T10-05), the 15:08
+   rejection window (T03-04), the 15:10 square-off and its fee (T03-01,
+   T03-05), the order-rate ceilings (T09-07), the closing-auction session ends
+   (T11-09), the band rule (T06-03), and each stock's dated intraday leverage
+   from NSE's margin files (T02-02), so a stock allowed less than 5x gets a
+   smaller position.
+4. **The quote range (N4, the operator's yes of 31 Oct ~17:4x IST).** Adverse
+   triggers and fill prices use the worse of the second's traded range and its
+   quote range (the LTQ-0 rows, data part QRANGE-1), while volume caps use
+   traded volume only; until QRANGE-1 lands the walk records "quote range not
+   loaded" on every trade.
+5. **Levels cross feeds only inside one session (SPEC FIB-I8).** A Zerodha
+   (adjusted) level maps to a GDFL (raw) price by the session's own ratio (R1)
+   or as a percentage of the entry fill (R2), both run; the exact factor (R0)
+   is refused by name until the corporate-action table is live; a mapped price
+   is rounded against the position.
+6. **Recorded and stated.** Every partial fill is recorded with its second,
+   quantity and price; entry and exit prices are volume-weighted over their
+   fills, as exact rationals; each run reports how often and over how many
+   seconds fills spread; every report states that GDFL holds trades, not the
+   order book, so the worst printed price is the worst the data can show.
+
+The walk is FNO-SEC-EXEC's, the only seconds fill code; FNO-EXITS, FNO-BAND,
+FNO-CLOCK, FNO-LEVERAGE, FNO-PORTFOLIO and FNO-SEC-WIRE feed it.
+
+### D-8102 — Two cost clocks on every trade, the dated official rates and today's Dhan rates, and the worse of the two per trade is the headline (operator rule 7; FNO-LAW) — 2026-11-03
+
+**Why.** Rule 7 (operator, 30 Oct ~22:1x IST): charges "completely fully
+precisely exact to current day Dhan real time live trading", every charge
+dated and sourced. `CLAUDE.md` §1 bars every equity result from Selection V6
+and execution authority until a charter-sourced equity charge stack exists,
+and `costs::schedule::dated_card` refuses equity on every date.
+
+**Decision.**
+
+1. **Two clocks, both computed and labelled.** C-DAY: the official rates in
+   force on the trade's own date, each a row of the charter's F&O section
+   (`costs-table/2026-10-30/r1`, 25 rows) with its source and dates. C-TODAY:
+   Dhan's rates as if the trade were placed live today. The headline net and
+   every pick use the worse (higher) charge for each trade; both columns are
+   shown. The same holds for leverage: the day's NSE margin file and today's,
+   with a third reading that counts the file's additional margin, the quantity
+   taken under the smallest and each single walk shown (OP-16, OP-17).
+2. **Every open reading computed, the worse used** (OP-27): brokerage per
+   executed order or per fill second (RD-BRK), the STT base (RD-STT-BASE), the
+   rounding levels of STT, stamp, exchange charges and GST (RD-ROUND-TAX,
+   RD-ROUND-EX, RD-GST), a DP charge on an intraday day (RD-DP), the
+   square-off fee on top of brokerage (RD-SQ), the state stamp duty before
+   2020-07-01 at the worst listed state (RD-STATE; the operator's decision of
+   30 Oct on PARTS 9.5), the NSE top slab before 2024-10-01 (RD-SLAB), until a
+   Dhan contract note or written statement settles each.
+3. **Fixed items.** An exit that spills past 15:10 pays Dhan's Rs 20 + GST an
+   order and fills at the worst price after 15:10. The Dhan data API (Rs 499 +
+   taxes a month) is charged in the account replay once per month with a
+   trade, labelled (OP-28). A quantity tie at exactly n + 0.5 takes the lower
+   quantity (OP-14), and COSTS's vectors CN22 and CN23 price both.
+4. **Two scores on one trade list.** NET, the headline, under the worse clock;
+   and "signal only, before charges", the same trades and the same worst-price
+   fills re-scored with no charge (OP-26). A trade is a win only if its net
+   under the worse clock is above zero.
+5. **The stack.** It is FNO-COSTS's: the dated cash-equity intraday clock in
+   `crates/costs`, exact rationals, every reading, both clocks per trade with
+   the headline the larger worst total; FNO-NET prices each trade through it;
+   the table version joins the run identity. This is the charter-sourced equity
+   charge stack `CLAUDE.md` §1 names. A result it has not priced is gross, and
+   carries the gross labels word for word (D-0509, D-0525, D-0681, D-0696).
+
+### D-8103 — The ladder rules 2 and 3 are law on every anchor and every timeframe; vocabulary bits 121 to 131 stay as they are, and `TOL_FIB_MILLI` stays one point of the tolerance sweep (FNO-LAW) — 2026-11-03
+
+**Rule 2, a ladder never judges its own candles** (operator, 30 Oct
+~21:5x IST). A ladder's known-at time is the later of the close of its last
+defining candle and the close of any candle that confirms an anchor; it is
+tested only against candles that open at or after that time and seconds at or
+after it. The running day ladder for candle i is the ladder of the session's
+candles 0..i-1: candle i is judged first and only then joins the range, so a
+candle that sets a new extreme, or engulfs the range, is judged against the
+ladder as it stood before it. A ladder from the 1-minute candles 09:15..10:04 is
+first used on the 10:05 candle. The same holds for every anchor (A1 to A9: the
+running day, frozen at the pause start, the push leg, a confirmed swing leg,
+the opening range of any N minutes, yesterday, the last k sessions, the gap
+leg, the measured move) and every timeframe, and the seconds walk uses only
+ladders whose known-at time has passed.
+
+**Rule 3, same-candle extremes** (operator, 30 Oct ~22:0x IST). When the high
+and the low so far sit in one candle the order is unknown, so the day ladder
+has no direction (`indicators::Leg::Undetermined`) until a later candle makes
+a new extreme on one side only, and that ladder is first used on the candle
+after it. Two labelled variants are swept beside it, never silently: V-SEC (the
+GDFL seconds give the order inside the candle, only where both feeds agree on
+its high and low; with the 1-minute sub-variant) and V-BOTH (the both-ways
+ladder).
+
+**Rungs** (operator, 31 Oct ~08:4x IST): 0, 0.236, 0.382, 0.5, 0.618, 0.786 and
+1, the extensions in the move's direction (1.272, 1.618, 2, 2.618, 3) and the
+continuous position on the leg; 0.31 (0.312) and 0.65 were typed by mistake and
+are not rungs.
+
+**Append-only vocabulary.** `CurDayFib` places rung p at hi - p·R on an up leg,
+so bit 128 (`near_fib_curday_1272`) sits below the low and cannot serve a long's
+target; the direction-aware ladder is new code (FNO-LADDER) and bits 121 to 131
+are not renumbered, reused or changed (`CLAUDE.md` §3 rule 8; OP-35).
+`vocab::tolerance::TOL_FIB_MILLI` (10, the 1% of range of D-0076) stays as it
+is and is one point of the generated tolerance sweep on the new path, where no
+fixed tolerance is used (OP-36). Every part that touches a ladder proves both
+rules with tests (FNO-LADDER, FNO-PAUSE, FNO-STRAT).
+
+### D-8104 — No vocabulary widening for the first run: typed feature rows and a run-local clause alphabet, with the existing vocabulary only as filters (FNO-LAW) — 2026-11-03
+
+**Why.** `vocab::ConditionMask` is six words with 14 free positions
+(`vocab::table::NEXT_FREE` is 370), and the condition kit's strategy blocks
+(K06, K07, K16) need about 1,209. Widening the mask is five serial waves of
+large packages (SPEC OP-37).
+
+**Decision.** The first run does not widen the mask and `vocab::VOCAB_VERSION`
+does not move. The strategy blocks (the cross-section rank, the ladders, the
+pause machine) are typed state machines in `runner` and `indicators` that emit
+typed feature rows, one candle at a time (`CLAUDE.md` §3 rule 7's fold shape).
+Every entry setting is a clause (dial, value) over that row, its values
+generated in each learning window, so the clause alphabet is local to the run.
+The search over clauses is level-wise with extinction, never a typed depth
+(`CLAUDE.md` §6): its floor is the requirement's trade count, pair-aware (the
+main session's decision of 1 Nov 2026: a one-side mix is pruned only when its
+pro-rated yearly count plus the largest count of any mix of the other side is
+below 500), so a mix never enumerated provably cannot pass. The 370 existing
+conditions enter only as filters, through the existing `engine` Apriori on the
+signal candles (FNO-FILTER, in F3 by the operator's yes of 30 Oct to lever 1,
+so the first run is labelled "price-action blocks only, filters follow"). There
+are no named-pattern blocks (the operator's correction of 31 Oct ~13:0x IST):
+a pattern is a mix of the common candle and level dials that the search finds.
+The kit's K06, K07 and K16 packages later become adapters over the same state
+machines, never a second copy, and widening the mask, when it comes, is its
+own entry (the build refuses a table that outgrows the mask rather than drop a
+bit).
+
+### D-8105 — Walk-forward always, and the one goal: a recipe counts only on walk-forward results net of every dated charge, and "nothing passed" is reported as plainly as a pass (operator rules 4 and 5; FNO-LAW) — 2026-11-03
+
+**Rule 4** (operator, 30 Oct ~22:0x IST: "always with walk forward testing it
+should match our requirement"). A recipe is picked only on a learning window
+and judged on the next window it never saw; the windows roll forward across
+3 Sep 2018 to the proven end; every generated setting is re-derived inside each
+learning window from that window's past only; the learning and test lengths
+are generated (doubling, then midpoints where verdicts differ), over a family
+of anchored and rolling schemes. A recipe passes only if, under EVERY scheme,
+its forward windows together meet the whole requirement, net of every dated
+charge (D-8102) with worst-price fills (D-8101); each forward window is
+reported, and the whole. A forward window where a recipe was not picked has
+zero trades and counts as not positive (OP-25).
+
+**Rule 5** (operator, 30 Oct ~22:0x IST). The one goal is the strategies that
+make a massive profit after every dated charge, with worst-price fills,
+proven by walk-forward. No recipe is preferred by opinion, and an honest
+"nothing passed" is reported as plainly as a pass.
+
+**The requirement and what is reported.** The Winner Gate is the operator's
+(SPEC §1.5 and §13.3) and its thresholds are the only fixed numbers on the
+path besides the money rules and sourced facts (SPEC FIB-I6); with the five
+downside checks per direction and for the pair it is 38 checks (the main
+session's decision of 1 Nov 2026, from the operator's words of 18 Oct). When
+nothing passes, the closest recipes are reported, labelled "did not pass:
+closest to the requirement" and never called winners, ranked by checks passed,
+then the total relative shortfall, then the walk-forward net (operator, 31 Oct
+~12:4x IST). Every scheme, recipe, setting and tie-break order tried is a
+trial, and deflation and the reality-check family run on all of them. The
+newest forward windows are reported apart, as "newest, never seen at pick
+time" (OP-23). FNO-WFT, FNO-RECORDS and FNO-RUN own it.
+
+### D-8106 — On the F&O strategy path a 1 day signal is decided on D and traded on D+1; the existing sweep's refusal of the 1day rung is unchanged (FNO-LAW) — 2026-11-03
+
+**Why.** The existing sweep refuses `1day` as a signal rung: `cli::EVERY_RUNG`
+holds eight rungs and `swept_rung` refuses `1day`, because a daily signal bar
+acts on a condition not knowable until its session has closed (`CLAUDE.md` §3
+rule 7). The operator's requirement of 30 Oct 2026 names the 1 day timeframe
+with its rule: "decide on day D's daily bar, trade D+1" (SPEC OP-44).
+
+**Decision.** On the F&O strategy path only, a daily candle for D is known
+after D's session closes, and a signal on it is traded on the next session of
+the calendar of record, D+1, which must itself be tradable for the stock. The
+order starts at the first traded continuous-session second at or after
+09:15:00 plus the latency on D+1, a later start being swept; the pre-open
+auction is not modelled (OP-40); the rank on this timeframe is computed from
+daily closes, D against D-1, and is known after D's close. The 2018-11-07
+Muhurat daily bar and any provisional daily bar are never signal candles. No
+decision on D reads D+1, so look-ahead stays impossible. `EVERY_RUNG` and
+`swept_rung` are not changed by this entry. FNO-DAILY (the strategy-mvp
+"FNO-1DAY") builds it.
+
+### D-8107 — The F&O parts' slot and family process: one slot line per part in the four ledger documents, other work's entries above the section, D-8100 to D-8339 in blocks of ten (FNO-LAW) — 2026-11-03
+
+1. **Slots.** FNO-SEAM placed, at the end of `docs/04-invariants.md`,
+   `docs/05-decisions.md`, `docs/06-limits.md` and `docs/07-plan.md`, one
+   section "F&O strategy path: part blocks (D-8100..D-8339)" holding one
+   comment slot line per F&O part, in the part order of the design's §7, and
+   one slot per part in the shared code registries (`runner`, `indicators` and
+   `cli`: `src/lib.rs` and `benches/ratio.rs`). Each part inserts its own rows
+   directly under its own slot line and edits no other line of those files: a
+   scratch git repository showed that insertions under different existing
+   lines merge cleanly and two end-of-file appends conflict.
+2. **The end-of-file rule**, recorded here as the main session decided on
+   check-FNO-SEAM-r3 §7.5 (a): entries of other work go above that section's
+   heading, never below its last slot, and other work takes its decision
+   numbers from `state/decision-blocks.json`, never from the largest number in
+   a file plus one, because the section's blocks are reserved.
+3. **Numbers.** D-8100 to D-8339: 24 blocks of ten, one per part in §7 order
+   (FNO-SEAM has none; FNO-LAW D-8100 to D-8109, FNO-COSTS D-8110 to D-8119,
+   and so on to FNO-BAND-FILES D-8330 to D-8339). A part takes ids only from
+   its own block, in order. Invariant ids are `FNO-<CODE>-Inn` and bench ids
+   `C-FNO-<CODE>-nn`. FNO-LAW uses D-8100 to D-8108; D-8109 is unused.
+4. **One owner for an unslotted file.** `CLAUDE.md`, `AGENTS.md` and
+   `docs/00-charter.md` are FNO-LAW's; `crates/costs` is FNO-COSTS's, and
+   every other file of the design has one owning part. A part that must edit a
+   file another work edits, at no slot or named anchor, stops and asks the
+   main session for an anchor.
+5. **Families.** F1 (FNO-SEAM and sixteen parts), F2 and F3 (the design's
+   §7, with FNO-FILTER and the API page moved to F3 by the operator's yes of
+   30 Oct to lever 1) are each assembled from passed tips and landed by the
+   main session as one merge into `feat/db-fix`, after BASE-REDS-1023. A
+   part's branch is cut from the seam, or from the tip of the part it calls
+   (its built tip under the speculative cut, checked only against the passed
+   one). A builder lands nothing: the only merges on a part's branch are the
+   base merges the speculative cut and its catch-up allow, and a conflict
+   there in the five append-only ledgers (`docs/00`, `04`, `05`, `06`, `07`)
+   is resolved by the append rule: both sides whole, in id order, each part's
+   rows under its own slot line. Gate 14's cover table in
+   `.github/workflows/ci.yml` is edited once by the main session at F1's
+   assembly, never by a part (§7.5 (b)).
+
+**Held by** `core::fno_law` (`docs/04-invariants.md` FNO-LAW-I02, FNO-LAW-I04).
+
+### D-8108 — SPEC's open points OP-01 to OP-46: the choice that keeps the bar, one line each (FNO-LAW) — 2026-11-03
+
+Each line is the choice of SPEC §18, as later binding decisions left it; the
+entry named in brackets carries it where one does.
+
+- OP-01: the law named the 208; the universe is the operator's list, as data, its digest in the run identity [D-8100].
+- OP-02: ICICIPRULI to ICICILIFE before the store's rename ships: a read-time join map as data, a member under either spelling, ICICILIFE's October 2026 skipped until complete [D-8100].
+- OP-03: the rank pool is the 218's members on the day; the point-in-time members outside it are counted per day [D-8100].
+- OP-04: the % move's basis is both the previous session's daily close and its last 1-minute close, labelled, because which equals NSE's official close is UNVERIFIED.
+- OP-05: rank ties use competition ranking, so a tie at the top-N edge takes every tied stock.
+- OP-06: a stale price is carried forward and flagged, its staleness a measured feature and the stale limit swept.
+- OP-07: until the per-stock clock calibration exists, the headline uses only latencies at or above the measured backward step of GDFL's clock; smaller ones are labelled "uncalibrated clock".
+- OP-08: a Zerodha level maps to a GDFL price by the session's ratio and by a percentage of the entry fill, both run; the exact factor is refused until the corporate-action table is live [D-8101].
+- OP-09: V-SEC's feed agreement is a tolerance generated from the stock's own minute disagreements, zero included; the finer-Zerodha sub-variant is labelled [D-8103].
+- OP-10: a target fills at the second's worst price, labelled "harsher than a resting limit" [D-8101].
+- OP-11: a stop in the entry's own second starts the exit in that second, sharing the one per-second volume budget [D-8101].
+- OP-12: a band before 2024-02-05 is computed from the base price and the flex rule, labelled "band computed" (T06-03).
+- OP-13: a second whose worst print crosses the market protection limit fills nothing for that order, which rests (T10-05).
+- OP-14: a quantity tie at exactly n + 0.5 takes the lower quantity; COSTS's vectors price both [D-8102].
+- OP-15: the sizing price is the GDFL last traded price at or before the order's start second, raw.
+- OP-16: the quantity uses the smaller of the day's and today's leverage; both single walks are shown [D-8102].
+- OP-17: NSE's additional margin is a third leverage reading inside the minimum, because Dhan's use of it is UNVERIFIED [D-8102].
+- OP-18: each entry order sent counts as one of the 100 trades a day, filled or not.
+- OP-19: a position slot is taken at the order's send and freed at its last exit fill or a zero-fill cancel.
+- OP-20: when a cap binds, the earlier start second wins, then the tie-break order picked in learning only; the seeded spread is reported.
+- OP-21: equity is carried from each window's start (every window starts at Rs 20 lakh), the headline; a daily reset is shown beside it.
+- OP-22: the minimum-returns base is Rs 20 lakh; the 19 Oct base is shown beside it.
+- OP-23: walk-forward runs over the whole span, the newest forward windows reported apart; no year is held back unless the operator re-affirms the sealed exam [D-8105].
+- OP-24: both a recipe and a procedure are walked forward; a recipe counts only on its own walk [D-8105].
+- OP-25: a forward window where a recipe was not picked has zero trades and counts as not positive [D-8105].
+- OP-26: the signal-only score re-scores the one trade list; it has no path of its own [D-8102].
+- OP-27: each of Dhan's open readings is computed and the worse used per trade until a contract note settles it [D-8102].
+- OP-28: the Dhan data API's monthly fee is charged in the account replay per month with a trade, labelled [D-8102].
+- OP-29: Muhurat and other special sessions are masked and counted until Dhan's square-off for them is sourced.
+- OP-30: on 2021-02-24 decisions stop at Zerodha's 11:39, and an open position closes at the worst GDFL price from 15:45 to the session end.
+- OP-31: on 2019-05-30 an order whose start second is before GDFL's 11:57:47 is refused, never delayed.
+- OP-32: trade-for-trade (BE, BZ) stock-days are masked, from the table built from NSE's bhavcopies; a run without the table says "T2T unchecked" (T01-18).
+- OP-33: the MTM 80% rule is read as 80% of the position's margin, the stricter of the two named bases.
+- OP-34: an exit order whose start is at or after 15:08:00 is treated as rejected and left to the broker (T03-04).
+- OP-35: the current-day ladder's extensions lie on the wrong side for a target, so a direction-aware ladder is new code and bits 121 to 131 are untouched [D-8103].
+- OP-36: tolerances on the new path are generated, and the pinned 1% of range stays one point of that sweep [D-8103].
+- OP-37: no mask widening for the first run; typed feature rows and a run-local clause alphabet [D-8104].
+- OP-38: volume features use Zerodha candle volume as the headline; the GDFL-summed volume is a labelled variant.
+- OP-39: a tick-denominated setting uses the stock's measured raw price step in the learning window, never the fixed `costs::rate::TICK`.
+- OP-40: a 1 day entry starts at the first continuous second plus the latency on D+1, later starts swept; the pre-open is not modelled [D-8106].
+- OP-41: no decision is made on a candle holding a Kite-hole minute; a ladder whose defining candles hold one is tainted for the session; the GDFL-filled variant is labelled.
+- OP-42: order flow delta's variants are refused by name until its source exists, never set to zero.
+- OP-43: over the order-rate ceiling, exits go before entries within a second, then the tie-break order, and the rest waits for the next allowed second (T09-07).
+- OP-44: a 1 day signal is decided on D and traded on D+1 on this path only; the existing sweep's refusal stands [D-8106].
+- OP-45: the end date is the last day both feeds are proven and sealed; provisional daily bars are excluded [D-8100].
+- OP-46: every report states that GDFL seconds are about one price each (98.2% single-price) and that GDFL holds trades, not the order book [D-8101].
+
+**Held by** `core::fno_law` (`docs/04-invariants.md` FNO-LAW-I02), which
+counts these 46 lines.
+
 <!-- slot FNO-COSTS -->
 
 <!-- slot FNO-SEC-EXEC -->

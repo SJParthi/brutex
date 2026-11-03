@@ -1126,6 +1126,10 @@ the first was closed in code afterwards.
 
 <!-- slot FNO-LAW -->
 
+| Item | State |
+|---|---|
+| FNO-LAW: the law brought to the operator's 30 Oct 2026 decisions — `CLAUDE.md` §1 item 3 and §3 rule 3, `AGENTS.md`, the charter's scope lock and its F&O sources section, D-8100 to D-8108, FNO-LAW-I01 to FNO-LAW-I04, and `crates/core/tests/fno_law.rs` | Built on 3 Nov 2026 in a cloud session; its independent check (coverage by Route B, gates 12 and 14, the decision-citation test) is owed before it counts, and it lands with family F1 |
+
 <!-- slot FNO-COSTS -->
 
 <!-- slot FNO-SEC-EXEC -->
