@@ -3,29 +3,29 @@
 BASE-COV-LIBS-LS1 (crate `store`): Route B figures and every uncovered line and branch side, written by the session from its own measurement. One fenced block.
 
 `````text
-BASELINE: Route B (d3-route-b-cloud.sh, sha256 f032b525...) on tip c7ccb0f7f7e2109329d640455d23d151613852da (START bd04fb299d23 plus the seven root re-runs), set 'reading whole:store' (104 .rs files), pinned rustc 1.99.0-nightly (1a98b1e13 2026-08-07) installed as nightly-2026-08-08, LLVM 23.1.0-rust-1.99.0-nightly, Linux x86_64 root host, profiles under /home/user (mode 755) so the nobody re-runs (D-0995) write theirs. Run 2026-11-03 15:47:42-16:15:48 IST (tests 26 min).
+FINAL: Route B (d3-route-b-cloud.sh, sha256 f032b525...) on tip fc9b489f0e3ca9207a3f1fe045d913adfa1429fa (the code tip), set 'reading whole:store' (113 .rs files: the 104 of START and 9 new test files), pinned rustc 1.99.0-nightly (1a98b1e13 2026-08-07) installed as nightly-2026-08-08, LLVM 23.1.0-rust-1.99.0-nightly, Linux x86_64 root host, profiles under /home/user (mode 755) so the nobody re-runs (D-0995) write theirs. Run 2026-11-03 17:06:02-17:34:14 IST (tests 25 min). BASELINE for comparison: tip c7ccb0f7f7e2 (START plus the seven root re-runs), 15:47:42-16:15:48 IST: lines 50,033/51,607 (1,574 uncovered), branches 3,291/3,868 (577 uncovered).
 Classes: F? = a failing arm inside test code by pattern (panic!/unreachable!/assert macro condition or message) -- an (F) candidate of recipe step 4, each to be confirmed by hand (fu-LS1.txt.md holds the confirmed (F) and the proved (U) items); GAP = every other uncovered line or side.
 
 ROUTE B LOG (result lines)
-  ROUTE-B START 2026-11-03 15:47:42 IST tree /home/user/ls1-deep tip c7ccb0f7f7e2109329d640455d23d151613852da packages store K /home/user/brutex/target P /home/user/ls1-prof/c7ccb0f7f7e2-2-B (entries before: 0)
+  ROUTE-B START 2026-11-03 17:06:02 IST tree /home/user/ls1-deep tip fc9b489f0e3ca9207a3f1fe045d913adfa1429fa packages store K /home/user/brutex/target P /home/user/ls1-prof/fc9b489f0e3c-1-B (entries before: 0)
   versions: rustc 1.99.0-nightly (1a98b1e13 2026-08-07) | llvm-cov  LLVM version 23.1.0-rust-1.99.0-nightly | llvm-profdata  LLVM version 23.1.0-rust-1.99.0-nightly
-  == build START 2026-11-03 15:47:42 IST: cargo test -p store --locked --no-run --message-format=json (RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch', opt-level 0, CARGO_TARGET_DIR=/home/user/brutex/target/cov)
-  == build rc=0 END 2026-11-03 15:48:11 IST (0 min); 45 artifacts, 0 reused
-  objects: 42 (/home/user/ls1-prof/c7ccb0f7f7e2-2-B/objects.txt, from this build's own report)
-  == test store START 2026-11-03 15:48:11 IST
-  == test store rc=0 END 2026-11-03 16:14:20 IST (26 min); tests passed 992 failed 0 ignored 8
-  profraw files: 69
-  merged /home/user/ls1-prof/c7ccb0f7f7e2-2-B/store/merged.profdata
-  ROUTE-B NOT PROVED: crates/store/benches/ratio.rs: not read (<scratchpad>/routeb-logs/c7ccb0f7f7e2-2-cov/show-store-crates_store_benches_ratio.rs.err)
-  ROUTE-B NOT PROVED: crates/store/benches/ratio/months.rs: not read (<scratchpad>/routeb-logs/c7ccb0f7f7e2-2-cov/show-store-crates_store_benches_ratio_months.rs.err)
-  ROUTE-B NOT PROVED: crates/store/benches/ratio/quarantine.rs: not read (<scratchpad>/routeb-logs/c7ccb0f7f7e2-2-cov/show-store-crates_store_benches_ratio_quarantine.rs.err)
-  ROUTE-B NOT PROVED: crates/store/benches/ratio/safe_files.rs: not read (<scratchpad>/routeb-logs/c7ccb0f7f7e2-2-cov/show-store-crates_store_benches_ratio_safe_files.rs.err)
-  ROUTE-B NOT PROVED: crates/store/src/lib.rs: not read (<scratchpad>/routeb-logs/c7ccb0f7f7e2-2-cov/show-store-crates_store_src_lib.rs.err)
-  ROUTE-B DONE 2026-11-03 16:15:48 IST WITH NOT PROVED lines above
+  == build START 2026-11-03 17:06:02 IST: cargo test -p store --locked --no-run --message-format=json (RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch', opt-level 0, CARGO_TARGET_DIR=/home/user/brutex/target/cov)
+  == build rc=0 END 2026-11-03 17:06:40 IST (0 min); 45 artifacts, 0 reused
+  objects: 42 (/home/user/ls1-prof/fc9b489f0e3c-1-B/objects.txt, from this build's own report)
+  == test store START 2026-11-03 17:06:40 IST
+  == test store rc=0 END 2026-11-03 17:32:38 IST (25 min); tests passed 1028 failed 0 ignored 8
+  profraw files: 77
+  merged /home/user/ls1-prof/fc9b489f0e3c-1-B/store/merged.profdata
+  ROUTE-B NOT PROVED: crates/store/benches/ratio.rs: not read (<scratchpad>/routeb-logs/fc9b489f0e3c-cov/show-store-crates_store_benches_ratio.rs.err)
+  ROUTE-B NOT PROVED: crates/store/benches/ratio/months.rs: not read (<scratchpad>/routeb-logs/fc9b489f0e3c-cov/show-store-crates_store_benches_ratio_months.rs.err)
+  ROUTE-B NOT PROVED: crates/store/benches/ratio/quarantine.rs: not read (<scratchpad>/routeb-logs/fc9b489f0e3c-cov/show-store-crates_store_benches_ratio_quarantine.rs.err)
+  ROUTE-B NOT PROVED: crates/store/benches/ratio/safe_files.rs: not read (<scratchpad>/routeb-logs/fc9b489f0e3c-cov/show-store-crates_store_benches_ratio_safe_files.rs.err)
+  ROUTE-B NOT PROVED: crates/store/src/lib.rs: not read (<scratchpad>/routeb-logs/fc9b489f0e3c-cov/show-store-crates_store_src_lib.rs.err)
+  ROUTE-B DONE 2026-11-03 17:34:14 IST WITH NOT PROVED lines above
 
 TOTALS AND PER FILE (lines covered/counted, branches covered/counted; GAP and F? row counts)
-  TOTAL store: lines 50033/51607 (uncovered 1574), branches 3291/3868 (uncovered 577), files 99
-  rows: 2151 (F? 618: lines 354, sides 264; GAP 1533: lines 1220, sides 313; GAP in test code 1204)
+  TOTAL store: lines 51094/52629 (uncovered 1535), branches 3351/3916 (uncovered 565), files 108
+  rows: 2100 (F? 653: lines 370, sides 283; GAP 1447: lines 1165, sides 282; GAP in test code 1208)
   crates/store/src/block.rs lines 115/115 branches 10/10
   crates/store/src/catalog.rs lines 189/189 branches 50/50
   crates/store/src/catalog_cover_tests.rs lines 49/49 branches 0/0
@@ -34,33 +34,40 @@ TOTALS AND PER FILE (lines covered/counted, branches covered/counted; GAP and F?
   crates/store/src/checksum_audit_tests.rs lines 400/403 branches 11/12  GAP 4 F? 0
   crates/store/src/crc.rs lines 90/90 branches 8/8
   crates/store/src/emits.rs lines 300/306 branches 3/4  GAP 1 F? 6
-  crates/store/src/file.rs lines 4558/4662 branches 362/382  GAP 101 F? 23
+  crates/store/src/file.rs lines 4564/4662 branches 362/382  GAP 95 F? 23
+  crates/store/src/file_cover_tests.rs lines 64/64 branches 6/10  GAP 0 F? 4
   crates/store/src/file_fault_tests.rs lines 571/575 branches 25/40  GAP 2 F? 17
-  crates/store/src/file_sealed.rs lines 255/271 branches 42/58  GAP 32 F? 0
+  crates/store/src/file_sealed.rs lines 255/271 branches 46/58  GAP 28 F? 0
+  crates/store/src/file_sealed_cover_tests.rs lines 59/59 branches 10/20  GAP 0 F? 10
   crates/store/src/file_sealed_tests.rs lines 584/617 branches 25/36  GAP 25 F? 19
   crates/store/src/file_write_door_tests.rs lines 726/744 branches 24/30  GAP 7 F? 17
   crates/store/src/flock.rs lines 446/454 branches 40/48  GAP 16 F? 0
   crates/store/src/flock_patient_tests.rs lines 495/506 branches 23/36  GAP 10 F? 14
   crates/store/src/flock_tests.rs lines 563/570 branches 18/26  GAP 1 F? 14
   crates/store/src/format.rs lines 278/278 branches 42/42
-  crates/store/src/generation.rs lines 313/325 branches 58/60  GAP 14 F? 0
+  crates/store/src/generation.rs lines 315/325 branches 59/60  GAP 11 F? 0
   crates/store/src/generation_cover_tests.rs lines 118/118 branches 3/6  GAP 0 F? 3
+  crates/store/src/generation_door_cover_tests.rs lines 92/94 branches 2/4  GAP 1 F? 3
   crates/store/src/generation_tests.rs lines 37/37 branches 0/0
   crates/store/src/header.rs lines 524/524 branches 76/76
   crates/store/src/header_audit_tests.rs lines 49/49 branches 0/0
   crates/store/src/layout.rs lines 186/186 branches 40/40
-  crates/store/src/month_summary.rs lines 677/683 branches 182/194  GAP 18 F? 0
+  crates/store/src/month_summary.rs lines 682/683 branches 189/194  GAP 6 F? 0
   crates/store/src/month_summary_cover_tests.rs lines 147/147 branches 0/0
+  crates/store/src/month_summary_decode_cover_tests.rs lines 93/94 branches 0/0  GAP 0 F? 1
   crates/store/src/month_summary_tests.rs lines 559/562 branches 32/52  GAP 2 F? 21
-  crates/store/src/month_summary_writer.rs lines 146/165 branches 25/34  GAP 28 F? 0
+  crates/store/src/month_summary_writer.rs lines 165/165 branches 34/34
+  crates/store/src/month_summary_writer_cover_tests.rs lines 175/175 branches 2/4  GAP 0 F? 2
   crates/store/src/open_flags.rs lines 6/6 branches 0/0
   crates/store/src/path.rs lines 206/206 branches 30/30
-  crates/store/src/provenance.rs lines 742/765 branches 144/152  GAP 31 F? 0
-  crates/store/src/quarantine.rs lines 1460/1483 branches 184/188  GAP 27 F? 0
+  crates/store/src/provenance.rs lines 756/765 branches 150/152  GAP 11 F? 0
+  crates/store/src/provenance_cover_tests.rs lines 181/187 branches 2/4  GAP 2 F? 6
+  crates/store/src/quarantine.rs lines 1460/1483 branches 185/188  GAP 26 F? 0
   crates/store/src/quarantine_cover_tests.rs lines 516/520 branches 1/2  GAP 0 F? 5
-  crates/store/src/quarantine_tests.rs lines 1522/1531 branches 50/82  GAP 4 F? 37
-  crates/store/src/repair.rs lines 715/741 branches 122/132  GAP 36 F? 0
+  crates/store/src/quarantine_tests.rs lines 1548/1557 branches 50/82  GAP 4 F? 37
+  crates/store/src/repair.rs lines 727/741 branches 128/132  GAP 18 F? 0
   crates/store/src/repair_cover_tests.rs lines 67/67 branches 3/4  GAP 0 F? 1
+  crates/store/src/repair_door_cover_tests.rs lines 190/195 branches 2/2  GAP 1 F? 4
   crates/store/src/repair_tests.rs lines 639/643 branches 15/18  GAP 3 F? 4
   crates/store/src/safe_open.rs lines 169/177 branches 20/22  GAP 10 F? 0
   crates/store/src/safe_open_tests.rs lines 283/298 branches 9/18  GAP 12 F? 12
@@ -68,8 +75,9 @@ TOTALS AND PER FILE (lines covered/counted, branches covered/counted; GAP and F?
   crates/store/src/sealed_codec.rs lines 646/646 branches 90/90
   crates/store/src/sealed_codec_tests.rs lines 996/1000 branches 30/34  GAP 0 F? 8
   crates/store/src/sealed_tests.rs lines 1719/1740 branches 34/40  GAP 5 F? 22
-  crates/store/src/settings.rs lines 726/743 branches 144/150  GAP 23 F? 0
+  crates/store/src/settings.rs lines 724/743 branches 144/150  GAP 25 F? 0
   crates/store/src/settings_cover_tests.rs lines 187/187 branches 1/2  GAP 0 F? 1
+  crates/store/src/settings_door_cover_tests.rs lines 99/100 branches 2/4  GAP 0 F? 3
   crates/store/src/settings_tests.rs lines 832/844 branches 16/28  GAP 10 F? 14
   crates/store/src/sidecar_checksum_tests.rs lines 391/391 branches 10/10
   crates/store/src/small_month_tests.rs lines 106/106 branches 1/2  GAP 0 F? 1
@@ -79,6 +87,7 @@ TOTALS AND PER FILE (lines covered/counted, branches covered/counted; GAP and F?
   crates/store/src/sort_index_writer.rs lines 388/388 branches 62/62
   crates/store/src/sort_index_writer_tests.rs lines 114/114 branches 0/0
   crates/store/src/staging.rs lines 109/109 branches 14/14
+  crates/store/src/staging_cover_tests.rs lines 26/28 branches 0/0  GAP 0 F? 2
   crates/store/src/staging_tests.rs lines 222/223 branches 8/16  GAP 4 F? 5
   crates/store/src/time_index.rs lines 744/744 branches 71/80  GAP 0 F? 9
   crates/store/src/verdict.rs lines 2679/2685 branches 296/310  GAP 18 F? 2
@@ -126,7 +135,7 @@ TOTALS AND PER FILE (lines covered/counted, branches covered/counted; GAP and F?
   crates/store/tests/verdict.rs lines 1989/2007 branches 28/44  GAP 3 F? 31
   crates/store/tests/write.rs lines 1199/1203 branches 5/8  GAP 0 F? 7
 
-ROWS (2151)
+ROWS (2100)
   F? LINE   crates/store/src/catalog_tests.rs:268 [panic] (test): panic!("a dangling `bars` link is refused");
   F? LINE   crates/store/src/catalog_tests.rs:282 [panic] (test): panic!("an unsearchable root is refused, not empty: {locked:?}");
   F? LINE   crates/store/src/catalog_tests.rs:460 [assert] (test): path.display()
@@ -153,12 +162,6 @@ ROWS (2151)
   F? LINE   crates/store/src/emits.rs:839 [assert_eq] (test): .collect::<Vec<_>>()
   F? LINE   crates/store/src/emits.rs:848 [panic] (test): panic!(
   GAP BRANCH crates/store/src/emits.rs:311:12 False (test): if let Some(byte) = region.get_mut(16_384 + 56) {
-  GAP LINE   crates/store/src/file.rs:944: match self {
-  GAP LINE   crates/store/src/file.rs:946: Self::Disagrees(Conflict::Restated) => "restated",
-  GAP LINE   crates/store/src/file.rs:947: Self::Disagrees(Conflict::NotHeld) => "not_held",
-  GAP LINE   crates/store/src/file.rs:948: Self::Disagrees(Conflict::Skipped) => "skipped",
-  GAP LINE   crates/store/src/file.rs:1385: )?;
-  GAP LINE   crates/store/src/file.rs:1388: SealedOffer::Disagrees(conflict) => write!(f, "{conflict} {ts_micros}")?,
   GAP LINE   crates/store/src/file.rs:2885: )?;
   GAP LINE   crates/store/src/file.rs:2891: )?;
   GAP LINE   crates/store/src/file.rs:3167: Some(other) => return Err(other),
@@ -276,7 +279,11 @@ ROWS (2151)
   F? BRANCH crates/store/src/file.rs:9103:13 False [assert] (test): shown.contains("start: 100") && shown.contains("len: 8") && !shown.contains("bytes"),
   F? BRANCH crates/store/src/file.rs:9103:45 False [assert] (test): shown.contains("start: 100") && shown.contains("len: 8") && !shown.contains("bytes"),
   F? BRANCH crates/store/src/file.rs:9103:73 False [assert] (test): shown.contains("start: 100") && shown.contains("len: 8") && !shown.contains("bytes"),
-  GAP BRANCH crates/store/src/file.rs:10715:24 False (test): if *ts_micros == bar(10).ts_micros
+  GAP BRANCH crates/store/src/file.rs:10721:24 False (test): if *ts_micros == bar(10).ts_micros
+  F? BRANCH crates/store/src/file_cover_tests.rs:91:9 False [assert] (test): follows.contains("at 1927000001000000 follows them") && !follows.contains("restates"),
+  F? BRANCH crates/store/src/file_cover_tests.rs:91:65 False [assert] (test): follows.contains("at 1927000001000000 follows them") && !follows.contains("restates"),
+  F? BRANCH crates/store/src/file_cover_tests.rs:118:9 False [assert] (test): whole.starts_with(&last.took) && last.took.len() < whole.len(),
+  F? BRANCH crates/store/src/file_cover_tests.rs:118:42 False [assert] (test): whole.starts_with(&last.took) && last.took.len() < whole.len(),
   F? LINE   crates/store/src/file_fault_tests.rs:320 [panic] (test): other => panic!("read {skip}: {other:?}"),
   F? LINE   crates/store/src/file_fault_tests.rs:657 [panic] (test): Err(other) => panic!("read {skip}: {other:?}"),
   F? LINE   crates/store/src/file_fault_tests.rs:696 [panic] (test): other => panic!("{}: {other:?}", looked.display()),
@@ -322,12 +329,18 @@ ROWS (2151)
   GAP BRANCH crates/store/src/file_sealed.rs:379:24 False: if let Some(slot) = out.get_mut(asked) {
   GAP BRANCH crates/store/src/file_sealed.rs:417:9 False: let Some(sealed) = file.sealed.as_ref() else {
   GAP BRANCH crates/store/src/file_sealed.rs:425:21 False: Err(why) if why.kind() == ErrorKind::NotFound => Err(format!(
-  GAP BRANCH crates/store/src/file_sealed.rs:456:16 False: let same = header.n_valid == sealed.header.n_valid
-  GAP BRANCH crates/store/src/file_sealed.rs:457:12 False: && header.generation == sealed.header.generation
-  GAP BRANCH crates/store/src/file_sealed.rs:458:12 False: && header.first_ts_micros == sealed.header.first_ts_micros
-  GAP BRANCH crates/store/src/file_sealed.rs:459:12 False: && header.last_ts_micros == sealed.header.last_ts_micros
   GAP BRANCH crates/store/src/file_sealed.rs:460:12 False: && header.symbol_id == sealed.header.symbol_id
   GAP BRANCH crates/store/src/file_sealed.rs:461:12 False: && header.timeframe_secs == sealed.header.timeframe_secs
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:67:9 False [assert] (test): fewer.contains("rows 899 against 900") && fewer.contains("disagree"),
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:67:51 False [assert] (test): fewer.contains("rows 899 against 900") && fewer.contains("disagree"),
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:74:9 False [assert] (test): twice.contains("rows 900 against 900")
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:75:16 False [assert] (test): && twice.contains("generation 2 against 1")
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:76:16 False [assert] (test): && twice.contains("records BLAKE3 equal: true"),
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:90:9 False [assert] (test): shifted.contains("rows 900 against 900")
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:91:16 False [assert] (test): && shifted.contains("generation 1 against 1")
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:92:16 False [assert] (test): && shifted.contains("records BLAKE3 equal: false"),
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:100:9 False [assert] (test): late.contains("rows 900 against 900") && late.contains("generation 1 against 1"),
+  F? BRANCH crates/store/src/file_sealed_cover_tests.rs:100:50 False [assert] (test): late.contains("rows 900 against 900") && late.contains("generation 1 against 1"),
   F? LINE   crates/store/src/file_sealed_tests.rs:321 [panic] (test): other => panic!("expected Missing naming the .bin, got {other:?}"),
   F? LINE   crates/store/src/file_sealed_tests.rs:419 [panic] (test): other => panic!("a damaged frame must be refused by name, got {other:?}"),
   F? LINE   crates/store/src/file_sealed_tests.rs:439 [panic] (test): other => panic!("a damaged head must be refused, got {other:?}"),
@@ -455,8 +468,6 @@ ROWS (2151)
   GAP LINE   crates/store/src/generation.rs:473: )?;
   GAP LINE   crates/store/src/generation.rs:480: Err(std::fs::TryLockError::Error(why)) => {
   GAP LINE   crates/store/src/generation.rs:481: return io_at(Err(why), &pointer_file, "lock pointer", false);
-  GAP LINE   crates/store/src/generation.rs:500: release(lock, &pointer_file, false)?;
-  GAP LINE   crates/store/src/generation.rs:501: return Err(RepairError::RevisionLimit);
   GAP LINE   crates/store/src/generation.rs:519: )?;
   GAP LINE   crates/store/src/generation.rs:607: path: path.to_path_buf(),
   GAP LINE   crates/store/src/generation.rs:608: operation,
@@ -464,28 +475,20 @@ ROWS (2151)
   GAP LINE   crates/store/src/generation.rs:610: publication_may_be_visible: visible,
   GAP LINE   crates/store/src/generation.rs:611: })
   GAP BRANCH crates/store/src/generation.rs:307:21 False: Err(why) if why.kind() == ErrorKind::NotADirectory && !root.is_dir() => {
-  GAP BRANCH crates/store/src/generation.rs:499:8 True: if record >= MAX_RECORDS {
   F? BRANCH crates/store/src/generation_cover_tests.rs:125:55 False [assert] (test): Err(StoreError::Generation { reason, .. }) if reason == "it is not a regular file"
   F? BRANCH crates/store/src/generation_cover_tests.rs:132:55 False [assert] (test): Err(StoreError::Generation { reason, .. }) if reason.contains("past the")
   F? BRANCH crates/store/src/generation_cover_tests.rs:138:55 True [assert] (test): Err(StoreError::Generation { reason, .. }) if reason.contains("past the")
-  GAP LINE   crates/store/src/month_summary.rs:1076: return Err(Refused::Shape("a day's first and last second disagree"));
+  F? LINE   crates/store/src/generation_door_cover_tests.rs:99 [panic] (test): panic!("revision 1 is served");
+  F? LINE   crates/store/src/generation_door_cover_tests.rs:155 [panic] (test): other => panic!("the pointer read is refused: {other:?}"),
+  GAP BRANCH crates/store/src/generation_door_cover_tests.rs:98:9 False (test): let Served::Revision(record0) = served(&root.0, month()).unwrap() else {
+  F? BRANCH crates/store/src/generation_door_cover_tests.rs:136:59 False [assert] (test): Ok(Promoted::Promoted(Pointer { record, .. })) if record == MAX_RECORDS - 1
   GAP LINE   crates/store/src/month_summary.rs:1087: }
-  GAP LINE   crates/store/src/month_summary.rs:1128: return Err(Refused::Version(version));
-  GAP LINE   crates/store/src/month_summary.rs:1226: None => self.short = true,
-  GAP LINE   crates/store/src/month_summary.rs:1337: }
-  GAP LINE   crates/store/src/month_summary.rs:1338: return Err(Refused::Unreadable(format!("{}: {why}", path.display())));
   GAP BRANCH crates/store/src/month_summary.rs:239:12 False: if let Some(slot) = words.get_mut(word) {
-  GAP BRANCH crates/store/src/month_summary.rs:850:39 True: if self.counts.invalid > 0 || self.counts.decreasing > 0 {
   GAP BRANCH crates/store/src/month_summary.rs:939:24 False: if let Some(words) = entry.seconds.as_deref() {
-  GAP BRANCH crates/store/src/month_summary.rs:991:40 True: if payload.len() < HEAD_LEN || payload.len() > MAX_PAYLOAD_LEN {
   GAP BRANCH crates/store/src/month_summary.rs:1055:12 True: if at.short || at.at != payload.len() {
-  GAP BRANCH crates/store/src/month_summary.rs:1074:24 False: let some = entry.first <= entry.last && entry.last < 86_400 && entry.bars > 0;
-  GAP BRANCH crates/store/src/month_summary.rs:1075:27 False: if !(some || (none && entry.bars == 0)) {
-  GAP BRANCH crates/store/src/month_summary.rs:1075:35 False: if !(some || (none && entry.bars == 0)) {
   GAP BRANCH crates/store/src/month_summary.rs:1085:24 False: if let Some(words) = entry.seconds.as_deref_mut() {
-  GAP BRANCH crates/store/src/month_summary.rs:1127:12 True: if body.get(2..4) != Some([0, 0].as_slice()) {
   GAP BRANCH crates/store/src/month_summary.rs:1195:12 False: if let Some(slot) = words.get_mut(word) {
-  GAP BRANCH crates/store/src/month_summary.rs:1332:16 False: if why.raw_os_error() == Some(crate::open_flags::ELOOP) {
+  F? LINE   crates/store/src/month_summary_decode_cover_tests.rs:171 [panic] (test): other => panic!("the open is refused in the host's words: {other:?}"),
   GAP LINE   crates/store/src/month_summary_tests.rs:294 (test): let _release = fs::OpenOptions::new().write(true).open(pipe);
   F? LINE   crates/store/src/month_summary_tests.rs:295 [panic] (test): panic!("a read of {} waited for a writer", pipe.display());
   F? LINE   crates/store/src/month_summary_tests.rs:791 [panic] (test): other => panic!("{other:?}"),
@@ -509,65 +512,27 @@ ROWS (2151)
   F? BRANCH crates/store/src/month_summary_tests.rs:739:37 False [assert] (test): Err(Refused::Shape(why)) if why.contains("not a held minute")
   F? BRANCH crates/store/src/month_summary_tests.rs:757:13 False [assert] (test): assert!(!read.tracks_carries() && read.wants_carries());
   F? BRANCH crates/store/src/month_summary_tests.rs:757:39 False [assert] (test): assert!(!read.tracks_carries() && read.wants_carries());
-  GAP LINE   crates/store/src/month_summary_writer.rs:165: return Plan::Whole(refused.to_string());
-  GAP LINE   crates/store/src/month_summary_writer.rs:188: Plan::Whole(refused.to_string())
-  GAP LINE   crates/store/src/month_summary_writer.rs:256: return Ok(Summarized::Empty);
-  GAP LINE   crates/store/src/month_summary_writer.rs:268: Err(Refused::BelowThreshold) => return Ok(Summarized::BelowThreshold),
-  GAP LINE   crates/store/src/month_summary_writer.rs:295: return Err(StoreError::Io {
-  GAP LINE   crates/store/src/month_summary_writer.rs:296: path: sidecar.path.clone(),
-  GAP LINE   crates/store/src/month_summary_writer.rs:297: action: Action::Write,
-  GAP LINE   crates/store/src/month_summary_writer.rs:298: kind: std::io::ErrorKind::AlreadyExists,
-  GAP LINE   crates/store/src/month_summary_writer.rs:299: code: None,
-  GAP LINE   crates/store/src/month_summary_writer.rs:300: });
-  GAP LINE   crates/store/src/month_summary_writer.rs:303: crate::staging::StagingError::Io { source, .. } => {
-  GAP LINE   crates/store/src/month_summary_writer.rs:304: classify(&staging, Action::Open, &source)
-  GAP LINE   crates/store/src/month_summary_writer.rs:309: _ => StoreError::Io {
-  GAP LINE   crates/store/src/month_summary_writer.rs:310: path: staging.clone(),
-  GAP LINE   crates/store/src/month_summary_writer.rs:311: action: Action::Open,
-  GAP LINE   crates/store/src/month_summary_writer.rs:312: kind: std::io::ErrorKind::AlreadyExists,
-  GAP LINE   crates/store/src/month_summary_writer.rs:313: code: None,
-  GAP LINE   crates/store/src/month_summary_writer.rs:314: },
-  GAP LINE   crates/store/src/month_summary_writer.rs:315: })?;
-  GAP BRANCH crates/store/src/month_summary_writer.rs:164:13 False: let Refused::Stale { .. } = refused else {
-  GAP BRANCH crates/store/src/month_summary_writer.rs:176:22 False: let prefix = summary.generation < header.generation
-  GAP BRANCH crates/store/src/month_summary_writer.rs:177:16 False: && summary.n_valid > 0
-  GAP BRANCH crates/store/src/month_summary_writer.rs:178:16 False: && summary.n_valid < header.n_valid
-  GAP BRANCH crates/store/src/month_summary_writer.rs:179:16 False: && summary.counts.folded == summary.n_valid
-  GAP BRANCH crates/store/src/month_summary_writer.rs:180:16 False: && summary.first_ts_micros == header.first_ts_micros
-  GAP BRANCH crates/store/src/month_summary_writer.rs:184:12 False: if prefix {
-  GAP BRANCH crates/store/src/month_summary_writer.rs:255:12 True: if file.header.n_valid == 0 {
-  GAP BRANCH crates/store/src/month_summary_writer.rs:293:12 True: && !meta.is_file()
-  GAP LINE   crates/store/src/provenance.rs:1105: ProvenanceError::Io {
-  GAP LINE   crates/store/src/provenance.rs:1106: path: crate::generation::pointer_path(root, path),
-  GAP LINE   crates/store/src/provenance.rs:1107: action: "resolving the month's served generation",
-  GAP LINE   crates/store/src/provenance.rs:1108: source: io::Error::other(why.to_string()),
-  GAP LINE   crates/store/src/provenance.rs:1109: }
-  GAP LINE   crates/store/src/provenance.rs:1110: })?;
+  F? BRANCH crates/store/src/month_summary_writer_cover_tests.rs:250:13 False [assert] (test): assert!(staging.is_dir() && !root.sum().exists());
+  F? BRANCH crates/store/src/month_summary_writer_cover_tests.rs:250:33 False [assert] (test): assert!(staging.is_dir() && !root.sum().exists());
   GAP LINE   crates/store/src/provenance.rs:1170: io_error(
   GAP LINE   crates/store/src/provenance.rs:1171: &at,
   GAP LINE   crates/store/src/provenance.rs:1173: io::Error::other(why.to_string()),
   GAP LINE   crates/store/src/provenance.rs:1175: };
-  GAP LINE   crates/store/src/provenance.rs:1189: Scan::Born(sidecar) => Found::Present(sidecar),
   GAP LINE   crates/store/src/provenance.rs:1271: fs::TryLockError::Error(why) => io_error(&at, "lock", why),
   GAP LINE   crates/store/src/provenance.rs:1282: )?;
-  GAP LINE   crates/store/src/provenance.rs:1566: let deferred = batch
-  GAP LINE   crates/store/src/provenance.rs:1567: .defer_file(file, at)
-  GAP LINE   crates/store/src/provenance.rs:1568: .map_err(|why| ProvenanceError::Io {
   GAP LINE   crates/store/src/provenance.rs:1569: path: at.to_path_buf(),
   GAP LINE   crates/store/src/provenance.rs:1571: source: io::Error::other(why.to_string()),
   GAP LINE   crates/store/src/provenance.rs:1572: })?;
-  GAP LINE   crates/store/src/provenance.rs:1573: if deferred {
-  GAP LINE   crates/store/src/provenance.rs:1574: return Ok(());
-  GAP LINE   crates/store/src/provenance.rs:1575: }
-  GAP LINE   crates/store/src/provenance.rs:1588: return Ok(());
-  GAP BRANCH crates/store/src/provenance.rs:615:19 True: } else if self.year != expected.year || self.month != expected.month {
-  GAP BRANCH crates/store/src/provenance.rs:1069:8 True: if !file.metadata().is_ok_and(|meta| meta.is_file())
-  GAP BRANCH crates/store/src/provenance.rs:1565:12 True: if let Some(batch) = batch {
-  GAP BRANCH crates/store/src/provenance.rs:1573:12 True: if deferred {
-  GAP BRANCH crates/store/src/provenance.rs:1573:12 False: if deferred {
-  GAP BRANCH crates/store/src/provenance.rs:1587:8 True: if batch.is_some_and(|batch| batch.defer_directory(dir)) {
   GAP BRANCH crates/store/src/provenance.rs:1658:12 False: if let Some(dst) = out.get_mut(at..at.saturating_add(bytes.len())) {
   GAP BRANCH crates/store/src/provenance.rs:1666:12 False: if let Some(run) = bytes.get(at..at.saturating_add(N)) {
+  F? LINE   crates/store/src/provenance_cover_tests.rs:166 [panic] (test): other => panic!("the pointer refuses the read: {other:?}"),
+  F? LINE   crates/store/src/provenance_cover_tests.rs:186 [panic] (test): other => panic!("the sealed form refuses the read: {other:?}"),
+  F? LINE   crates/store/src/provenance_cover_tests.rs:204 [panic] (test): panic!("the raw sidecar holds a record");
+  F? LINE   crates/store/src/provenance_cover_tests.rs:218 [panic] (test): other => panic!("the sealed image's record is served: {other:?}"),
+  F? LINE   crates/store/src/provenance_cover_tests.rs:252 [panic] (test): other => panic!("the open is refused by name: {other:?}"),
+  F? LINE   crates/store/src/provenance_cover_tests.rs:276 [panic] (test): panic!("the batch's record is on disk");
+  GAP BRANCH crates/store/src/provenance_cover_tests.rs:203:9 False (test): let Found::Present(raw) = read(&root.0, june).unwrap() else {
+  GAP BRANCH crates/store/src/provenance_cover_tests.rs:275:9 False (test): let Found::Present(sidecar) = read(&root.0, june).unwrap() else {
   GAP LINE   crates/store/src/quarantine.rs:831: )?;
   GAP LINE   crates/store/src/quarantine.rs:861: )?;
   GAP LINE   crates/store/src/quarantine.rs:1032: Err(std::fs::TryLockError::Error(_)) => false,
@@ -593,7 +558,6 @@ ROWS (2151)
   GAP LINE   crates/store/src/quarantine.rs:2708: Some(Applied::Resumed { bars, .. }) => bars.saturating_add(intent.bars),
   GAP BRANCH crates/store/src/quarantine.rs:1187:8 True: if image.len() as u64 != INDEX_LEN {
   GAP BRANCH crates/store/src/quarantine.rs:1439:25 False: Err(why) if why.kind() != io::ErrorKind::AlreadyExists => {
-  GAP BRANCH crates/store/src/quarantine.rs:1893:56 False: .filter(|line| scopes.contains(&line.scope) && line.key == key && line.month == month)
   GAP BRANCH crates/store/src/quarantine.rs:2054:35 False: } if held == *hash && was == month => return Ok((slot, Some(before))),
   F? LINE   crates/store/src/quarantine_cover_tests.rs:635 [panic] (test): Ok(Level::Current(_)) => panic!("a torn image is never current"),
   F? LINE   crates/store/src/quarantine_cover_tests.rs:636 [panic] (test): Err(refused) => panic!("a torn image is rebuilt, not refused: {refused}"),
@@ -641,43 +605,30 @@ ROWS (2151)
   F? BRANCH crates/store/src/quarantine_tests.rs:1747:58 False [assert] (test): matches!(after, Ok(Probe::Quarantined(entry)) if entry.scope == Scope::WholeMonth && entry.bars == 2),
   F? BRANCH crates/store/src/quarantine_tests.rs:1747:94 False [assert] (test): matches!(after, Ok(Probe::Quarantined(entry)) if entry.scope == Scope::WholeMonth && entry.bars == 2),
   F? BRANCH crates/store/src/quarantine_tests.rs:1865:77 False [assert] (test): matches!(probe(&store.root, path), Ok(Probe::Quarantined(e)) if e.bars == 2),
-  GAP LINE   crates/store/src/repair.rs:587: return Err(RepairError::Conflict);
   GAP LINE   crates/store/src/repair.rs:600: )?;
   GAP LINE   crates/store/src/repair.rs:643: return;
   GAP LINE   crates/store/src/repair.rs:851: rows: header.n_valid,
   GAP LINE   crates/store/src/repair.rs:852: ceiling,
   GAP LINE   crates/store/src/repair.rs:853: };
-  GAP LINE   crates/store/src/repair.rs:936: Err(why) => return Err(why),
-  GAP LINE   crates/store/src/repair.rs:939: Err(RepairError::RevisionLimit)
-  GAP LINE   crates/store/src/repair.rs:1024: Err(RepairError::RevisionLimit)
-  GAP LINE   crates/store/src/repair.rs:1031: return Err(RepairError::IndexedSibling(sibling));
-  GAP LINE   crates/store/src/repair.rs:1148: added += 1;
-  GAP LINE   crates/store/src/repair.rs:1149: merged.push(*early);
-  GAP LINE   crates/store/src/repair.rs:1150: }
   GAP LINE   crates/store/src/repair.rs:1184: return Err(RepairError::ReadBack {
   GAP LINE   crates/store/src/repair.rs:1185: index: index as u64,
   GAP LINE   crates/store/src/repair.rs:1186: });
-  GAP LINE   crates/store/src/repair.rs:1206: why @ (RepairError::Conflict
-  GAP LINE   crates/store/src/repair.rs:1209: ) => skipped.push((ordinal, why.to_string())),
-  GAP LINE   crates/store/src/repair.rs:1210: Err(why) => return Err(why),
-  GAP LINE   crates/store/src/repair.rs:1213: Err(RepairError::RevisionLimit)
   GAP LINE   crates/store/src/repair.rs:1228: return;
   GAP LINE   crates/store/src/repair.rs:1342: )?;
   GAP LINE   crates/store/src/repair.rs:1374: return Err(RepairError::Conflict);
   GAP LINE   crates/store/src/repair.rs:1392: )?;
   GAP LINE   crates/store/src/repair.rs:1398: )?;
   GAP LINE   crates/store/src/repair.rs:1458: Err(TryLockError::Error(error)) => io_at(Err(error), &path, "lock shared", false),
-  GAP BRANCH crates/store/src/repair.rs:581:12 True: if reader.source_header() != expected_source || reader.header().n_valid != kept.len() as u64
-  GAP BRANCH crates/store/src/repair.rs:586:16 True: if reader.read_record(index as u64)? != *bar {
   GAP BRANCH crates/store/src/repair.rs:642:9 False: let (Some(first), Some(last)) = (held_back.first(), held_back.last()) else {
-  GAP BRANCH crates/store/src/repair.rs:898:32 False: if policy.basis_witness && header.n_valid > 0 && witnessed == 0 {
-  GAP BRANCH crates/store/src/repair.rs:1030:12 True: if exists(&sibling)? {
-  GAP BRANCH crates/store/src/repair.rs:1147:23 True: while let Some(early) = offer.next_if(|o| o.ts_micros < bar.ts_micros) {
-  GAP BRANCH crates/store/src/repair.rs:1165:34 False: if restated_at.is_empty() && added == 0 {
   GAP BRANCH crates/store/src/repair.rs:1183:24 True: if reader.read_record(index as u64)? != *bar {
   GAP BRANCH crates/store/src/repair.rs:1219:9 False: let MonthRestate::Restated {
   GAP BRANCH crates/store/src/repair.rs:1373:12 True: if writer.read_record(index as u64)? != *offered {
   F? BRANCH crates/store/src/repair_cover_tests.rs:62:41 False [assert] (test): text.contains("refused") || text.contains("drop names"),
+  GAP LINE   crates/store/src/repair_door_cover_tests.rs:221 (test): other @ MonthRestate::NothingNew { .. } => {
+  F? LINE   crates/store/src/repair_door_cover_tests.rs:222 [panic] (test): panic!("the added bars are published: {other:?}")
+  F? LINE   crates/store/src/repair_door_cover_tests.rs:246 [assert_eq] (test): other @ MonthRepair::NothingNew { .. } => {
+  F? LINE   crates/store/src/repair_door_cover_tests.rs:247 [panic] (test): panic!("the empty month takes the bars: {other:?}")
+  F? LINE   crates/store/src/repair_door_cover_tests.rs:323 [assert] (test): matches!(
   F? LINE   crates/store/src/repair_tests.rs:116 [panic] (test): Err(TryLockError::Error(why)) => panic!("the probe could not ask: {why}"),
   F? LINE   crates/store/src/repair_tests.rs:630 [assert_eq] (test): timeframe.as_str()
   GAP LINE   crates/store/src/repair_tests.rs:700 (test): }
@@ -758,30 +709,35 @@ ROWS (2151)
   F? BRANCH crates/store/src/sealed_tests.rs:1822:105 False [assert] (test): matches!(refusal(open(path, bytes).first_at_or_after(ts)), SealedError::TableOrder { index } if index == s)
   F? BRANCH crates/store/src/sealed_tests.rs:1828:105 False [assert] (test): matches!(refusal(open(path, bytes).first_at_or_after(ts)), SealedError::TableOrder { index } if index == s + 1)
   F? BRANCH crates/store/src/sealed_tests.rs:1836:105 False [assert] (test): matches!(refusal(open(path, bytes).first_at_or_after(ts)), SealedError::TableOrder { index } if index == s)
-  GAP LINE   crates/store/src/settings.rs:873: None => refusal.to_string(),
   GAP LINE   crates/store/src/settings.rs:886: return Err(fault(format!(
   GAP LINE   crates/store/src/settings.rs:887: "it grew past the {MAX_FILE_BYTES} bytes a settings file may hold while it was read"
   GAP LINE   crates/store/src/settings.rs:888: )));
   GAP LINE   crates/store/src/settings.rs:1227: _ => ErrorKind::AlreadyExists,
   GAP LINE   crates/store/src/settings.rs:1235: let _ = std::fs::remove_file(&temp);
   GAP LINE   crates/store/src/settings.rs:1236: return Err(io_refusal(&temp, &why));
-  GAP LINE   crates/store/src/settings.rs:1314: path: fault.path,
-  GAP LINE   crates/store/src/settings.rs:1315: kind: ErrorKind::Other,
-  GAP LINE   crates/store/src/settings.rs:1316: why: format!("the settings directory cannot be listed: {}", fault.why),
-  GAP LINE   crates/store/src/settings.rs:1317: })?;
   GAP LINE   crates/store/src/settings.rs:1321: path: fault.path,
   GAP LINE   crates/store/src/settings.rs:1322: kind: ErrorKind::Other,
   GAP LINE   crates/store/src/settings.rs:1323: why: format!("the settings directory cannot be read: {}", fault.why),
   GAP LINE   crates/store/src/settings.rs:1324: })?;
+  GAP LINE   crates/store/src/settings.rs:1367: match linked {
+  GAP LINE   crates/store/src/settings.rs:1369: Err(why) if why.kind() == ErrorKind::AlreadyExists => {
+  GAP LINE   crates/store/src/settings.rs:1370: let _ = reader.refresh();
+  GAP LINE   crates/store/src/settings.rs:1371: return Err(Refusal::Stale {
+  GAP LINE   crates/store/src/settings.rs:1372: expected: change.expected,
+  GAP LINE   crates/store/src/settings.rs:1373: newest: reader.highest().max(number),
+  GAP LINE   crates/store/src/settings.rs:1374: });
   GAP LINE   crates/store/src/settings.rs:1376: Err(why) => return Err(io_refusal(&target, &why)),
   GAP LINE   crates/store/src/settings.rs:1445: Ok(_) => "it reads when read again, and the refresh did not step to it".to_owned(),
   GAP BRANCH crates/store/src/settings.rs:220:16 False: if let Some(slot) = self.values.get_mut(key.slot()) {
   GAP BRANCH crates/store/src/settings.rs:688:30 False: let percent_too = if unit.is_empty() && matches!(amount, 1..=95) {
   GAP BRANCH crates/store/src/settings.rs:885:8 True: if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
   GAP BRANCH crates/store/src/settings.rs:1234:12 True: if let Err(why) = written {
+  GAP BRANCH crates/store/src/settings.rs:1369:21 True: Err(why) if why.kind() == ErrorKind::AlreadyExists => {
   GAP BRANCH crates/store/src/settings.rs:1369:21 False: Err(why) if why.kind() == ErrorKind::AlreadyExists => {
-  GAP BRANCH crates/store/src/settings.rs:1409:16 False: if let Ok(handle) = std::fs::File::open(synced) {
   F? BRANCH crates/store/src/settings_cover_tests.rs:198:57 False [assert] (test): Err(Refusal::Invalid { key: None, why }) if why.contains("1 to 240 bytes")
+  F? LINE   crates/store/src/settings_door_cover_tests.rs:116 [panic] (test): other => panic!("the listing refuses the save: {other:?}"),
+  F? BRANCH crates/store/src/settings_door_cover_tests.rs:150:9 False [assert] (test): fault.why.contains("ermission denied") && !fault.why.contains("not a regular file"),
+  F? BRANCH crates/store/src/settings_door_cover_tests.rs:150:51 False [assert] (test): fault.why.contains("ermission denied") && !fault.why.contains("not a regular file"),
   F? LINE   crates/store/src/settings_tests.rs:152 [panic] (test): other => panic!("{bad:?} for {key:?}: {other:?}"),
   F? LINE   crates/store/src/settings_tests.rs:228 [assert] (test): matches!(
   GAP LINE   crates/store/src/settings_tests.rs:261 (test): Ok(())
@@ -813,6 +769,8 @@ ROWS (2151)
   F? BRANCH crates/store/src/sort_index_cover_tests.rs:312:38 False [assert] (test): Err(Why::Unreadable(why)) if why.contains("is a symbolic link")
   F? BRANCH crates/store/src/sort_index_cover_tests.rs:318:38 False [assert] (test): Err(Why::Unreadable(why)) if why.starts_with(&under.display().to_string())
   F? BRANCH crates/store/src/sort_index_tests.rs:324:41 False [assert] (test): assert!(why.contains("kind") || why.contains("reserved"), "{why}");
+  F? LINE   crates/store/src/staging_cover_tests.rs:56 [panic] (test): Err(other) => panic!("the removal is refused by name: {other:?}"),
+  F? LINE   crates/store/src/staging_cover_tests.rs:57 [panic] (test): Ok(_) => panic!("the removal is refused by name, not staged"),
   F? LINE   crates/store/src/staging_tests.rs:421 [assert_eq] (test): within.display()
   GAP BRANCH crates/store/src/staging_tests.rs:143:16 False (test): if source.kind() == ErrorKind::PermissionDenied && *p == path),
   GAP BRANCH crates/store/src/staging_tests.rs:143:64 False (test): if source.kind() == ErrorKind::PermissionDenied && *p == path),
