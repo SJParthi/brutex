@@ -403,6 +403,9 @@ pub mod vix_reference;
 // ---- part; each part inserts its `pub mod` line (with its doc lines) directly
 // ---- under its slot.
 // slot FNO-CLOCK (fno_clock)
+/// The per-stock-day GDFL clock calibration and its `fno-clock-v1` table
+/// (FNO-CLOCK, D-8220 to D-8226).
+pub mod fno_clock;
 
 // slot FNO-DAYMASK (fno_daymask)
 
