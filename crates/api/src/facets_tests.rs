@@ -1649,6 +1649,10 @@ fn spot_on(
 /// the rows; an underlying no exchange holds; and, at once, both exchanges
 /// and a rows encoding; out of the box, the exchange named in lower case.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one census, both answers, every extreme beside the others it is read against"
+)]
 fn an_underlying_held_on_two_exchanges_is_refused_until_one_is_named() {
     let (march, april) = (month(2019, 3), month(2019, 4));
     let rows = vec![

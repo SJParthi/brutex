@@ -2645,6 +2645,10 @@ fn the_day_band_timing_runs_at_a_small_size() {
 /// `histories` x 1,000 lines no page reads, one store each; `counts` is the
 /// cold samples, the warm samples a page and the clients at once; the warm
 /// p50 at the last history stays within `ceiling` hundredths of the first's.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one timing of one store per history: cold, warm, per page and at once, each answer checked beside its sample"
+)]
 fn day_band_timed(histories: [u32; 3], counts: [usize; 3], ceiling: u128) {
     let [cold_samples, warm_samples, client_count] = counts;
     let mut warm_p50 = Vec::new();

@@ -2232,6 +2232,14 @@ mod tod_index_tests {
         agree(&index, &file, held, &[2, 4, 5, 11], &WINDOWS);
     }
 
+    /// One changed field of a kept summary: its name, the change, and the words its
+    /// refusal must say.
+    type Change = (
+        &'static str,
+        fn(&mut store::month_summary::MonthSummary),
+        &'static str,
+    );
+
     /// **A SUMMARY THAT DOES NOT DESCRIBE ITS FILE IS REFUSED BY NAME, FIELD BY
     /// FIELD** (BASE-COV-API, D-7346). A minute month's own kept summary
     /// indexes it; that same summary with one field changed is refused in the
@@ -2254,7 +2262,7 @@ mod tod_index_tests {
         assert!(index.is_ok(), "the premise: its own summary indexes it");
         let summary = store::month_summary::read_kept(&bars, held.n_valid).expect("a kept summary");
         let january = YearMonth::new(2024, 1).expect("a month");
-        let changed: [(&str, fn(&mut store::month_summary::MonthSummary), &str); 10] = [
+        let changed: [Change; 10] = [
             (
                 "month",
                 |s| s.month = YearMonth::new(2024, 2).expect("a month"),

@@ -1134,20 +1134,22 @@ mod tests {
             "{mode}: {body}"
         );
         // THE CREDENTIAL READ'S OWN WORDS, and no ledger: no host was asked.
-        let credentialed = parsed["landed"]
-            .as_array()
+        let credentialed = parsed
+            .get("landed")
+            .and_then(serde_json::Value::as_array)
             .expect("the rows")
             .iter()
-            .find(|row| row["needs_token"] == true)
+            .find(|row| row.get("needs_token") == Some(&serde_json::json!(true)))
             .expect("the credentialed source's row")
             .clone();
         assert_eq!(
-            credentialed["attempts"],
-            serde_json::json!([]),
+            credentialed.get("attempts"),
+            Some(&serde_json::json!([])),
             "{mode}: {credentialed}"
         );
-        let refusal = credentialed["refusal"]
-            .as_str()
+        let refusal = credentialed
+            .get("refusal")
+            .and_then(serde_json::Value::as_str)
             .expect("the refusal's words");
         assert!(refusal.contains(&said), "{mode}: no {said:?} in {refusal}");
         // WITH NO USABLE HOME AND NO BRUTEX_MASTERS THE DOORS THAT FIND THE
@@ -1189,7 +1191,9 @@ mod tests {
             assert_eq!(status, axum::http::StatusCode::OK, "{mode}: {body}");
             let rows: serde_json::Value = serde_json::from_str(&body).expect("the status JSON");
             assert_eq!(
-                rows["masters"].as_array().map(Vec::len),
+                rows.get("masters")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len),
                 Some(masters::SOURCES.len()),
                 "{mode}: one row a source: {body}"
             );

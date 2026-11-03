@@ -89,6 +89,10 @@ async fn status_of(site: &Loaded, target: &str) -> (StatusCode, Value) {
 }
 
 /// The child: every accepted press over the empty store.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one child, one sink and one slot: every press and every edge read back in the order the slot moves"
+)]
 async fn every_press_accepted(root: &Path) {
     telemetry::install(&telemetry::Config::new(root.join("logs"))).expect("this child's sink");
     let store = root.join("store");
