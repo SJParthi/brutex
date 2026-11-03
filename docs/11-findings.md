@@ -1405,6 +1405,32 @@ confirmed by two skeptics; their corrections are applied.
   BRED23-F59 among them, had no entry. FIXED for repair 8's tip: its list
   names every uncovered item by that tip's own figure text
   (`state/fix/round2/deep-BASE-REDS-1023-<tip>-fu.txt`).
+- **BRED23-F63: a command's stop missed a process forked as its group was
+  signalled** (check r9, the D1 landing gate of 3 Nov 2026, blocking 2: the
+  r10 test read `# Speed sheet — FAIL`, "the --writer command's process group
+  was sent SIGTERM and, still running 5000 ms later, SIGKILL"). On this Mac a
+  signal to a process group does not reach a child its parent is still
+  forking; the `--writer`'s shell forked its `sleep 30` as the SIGTERM went
+  out. Probed: 3 of 300 such stops at load 23 to 36, 3 of 400 through the
+  tip's `run()` at load about 100, 0 of 400 through the repair's. FIXED
+  (D-7152 addendum 25): the stop lists the group and asks each process once,
+  again while it waits (BRED-61; cost L-BRED23-24).
+- **BRED23-F64: a real browser's row judged the 30 s settle cap as the page's
+  fault on a page its server had answered in full** (check r9, the D1 landing
+  gate, blocking 1: "/speed/ warm: 1 loads still had a request in flight
+  after 30 s" at load 36/58/54, the test before it 30 s longer than on X), and
+  the harness's failure named no request. Not reproduced in about 2,140 loads
+  at load 82 to 112. FIXED (D-7152 addendum 26): the failure names what was in
+  flight, and the row check takes a cap as the machine's only when the
+  stand-in answered every request it names at once (BRED-62); the harness's
+  other 30 s bounds stay named in L-BRED23-25.
+- **BRED23-F65: the Speed page's own-line test read its figures at the end of
+  the harness's waits instead of waiting for them** (this repair's own run of
+  `web/tests/speed.test.js` at load 21 to 57: "Chrome reports first content",
+  no first-contentful-paint entry yet; it passed in the landing gate on M and
+  on X). FIXED (D-7152 addendum 27): the test waits, bounded at 30 s in the
+  page, for the paint and for the line drawn after the fetch past the load,
+  then compares exactly as before.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

@@ -85044,6 +85044,91 @@ nothing above is edited.
     had cut from its test in `speed_tests.rs` (check r8, follow-up 2) is back
     on `two_freezes_at_once_never_count_backwards`.
 
+**Addenda, 4 Nov 2026 (BASE-REDS-1023 repair 9; check r9 of 3 Nov 2026, the
+D1 landing gate, `state/fix/ci-gates-logs/land-BASE-REDS-1023-20261103T1911Z-g2`:
+web `npm test` red on the merged tree M = 83f46245d on two items, green on
+feat/db-fix X = f01d7a0e4).** The block is still used, so each is an addendum
+to the entry it extends; nothing above is edited.
+
+25. **D-7152: a command's stop asks every process of its group once, a fork
+    the group's signal missed included (check r9, blocking 2: "the sheet is
+    still on stdout").** The speed sheet's `run().stop()` sent SIGTERM to the
+    command's process group once. On this Mac a signal sent to a process
+    group misses a process whose parent is forking it at that instant: the
+    parent is signalled, the child is not in the group yet, and nothing sends
+    the signal again (Linux restarts such a fork). On M the `--writer`
+    `echo the-writer-printed; sleep 30` was stopped as its shell forked the
+    `sleep`; the sleep ran on, was killed 5 s later, and the sheet said
+    FAILED ("was sent SIGTERM and, still running 5000 ms later, SIGKILL"), so
+    its stdout began `# Speed sheet — FAIL`. Probed on 4 Nov
+    (`scratch/repair-BASE-REDS-1023-r9`, `forkrace.mjs`): 3 of 300 such stops
+    at load 23 to 36 left the `sleep 30` running in the group, its parent now
+    launchd, each signalled 2 to 8 ms after the start; through the tip's
+    `run()` 3 of 400 at load about 100, through the repair's 0 of 400 at load
+    about 117 (`before-after.mjs`). Chosen: `asker` lists the group (POSIX
+    `ps -A -o pid= -o pgid=`, `groupMembers`) and sends SIGTERM to each
+    process itself, and the stop lists the group again every `LIST_POLL_MS`
+    (100 ms) while it waits, so a process that joined the group after a list
+    is asked as soon as it is seen; the SIGKILL that follows a group still
+    there after `COMMAND_STOP_MS` goes to the group again at every look. Each
+    process is sent SIGTERM once and never twice: a second SIGTERM ends at
+    once a program the first asked to stop in its own time (Chrome's handler
+    goes back to the default after the first). A list that fails is said in
+    the stop's words, never hidden: after a first failed list the group is
+    signalled as one, which can miss a fork, and no list is tried after a
+    failed one. The proof needs no race: a command whose TERM trap starts a
+    process and leaves puts that process in the group after the signal went
+    out, the very state a missed fork leaves; the tip's stop said KILLED at
+    5,024 ms, the repair's "was sent SIGTERM and left" at 158 ms (BRED-61).
+    `COMMAND_STOP_MS`, `KILLED` and every bound are unchanged. Refused: a
+    second SIGTERM to the whole group, which reaches again every process the
+    first one reached; a longer wait, which the 30 s sleep outlasts; a test
+    that slows the writer's pass until its shell has forked. Cost and what
+    stays outside: L-BRED23-24.
+26. **D-7152: a real browser's row takes the 30 s settle cap as the
+    machine's only when its server answered at once every request still in
+    flight (check r9, blocking 1: "/speed/ warm: 1 loads still had a request
+    in flight after 30 s").** In the route test `/speed/` is the stand-in's
+    fallback shell, and every request it makes (`/feeds.json`, the reporter,
+    the app entry) the stand-in answers in full the moment it is asked. On M
+    a warm load of it still had a request in flight at the settle's 30 s cap,
+    at load 36/58/54, and the test before it in that run took 40.9 s against
+    10.6 s on X, one of the harness's 30 s bounds more: the browser was
+    starved in that window. Not reproduced on demand, with scratch
+    diagnostics that print every unanswered request of a false settle: the
+    route test alone 36 of 36 at load 40 to 52; 42 runs of 25 cold and 26
+    warm loads, about 2,140 loads at load 82 to 112, 18 runs of them beside
+    20 busy processes; three whole web suites at once at load 52 to 78: no
+    load ran out the cap. The cause recorded is the test's: it judged the
+    cap as the page's fault although nothing the page asked was left
+    unanswered by its server, and nothing in the failure said what was in
+    flight. Chosen: the harness names what held the cap (`tab.unanswered`,
+    the load's `pending`, `inFlightNames`, "... after 30 s: GET /feeds.json"),
+    which the operator's sheet says too, and `measuredRow` takes a capped
+    load as the machine's clock only when the stand-in (`browserStandIn`'s
+    `answers`) answers every request it names at once; one it holds open
+    (`/hang`, `/stall`, the never-loading entry, `/later` past its first
+    asks, `/sources.json` under `hangSources`), or a cap that names none, is
+    the page's and refused as before. Four tests fail on the tip's harness,
+    the row check with the landing gate's own message, and pass after
+    (BRED-62). The 30 s cap and every other judgement are unchanged. Not
+    changed, and stated in L-BRED23-25: a load that does not end within the
+    30 s load bound, or whose renderer answers no command within 30 s, is
+    still NOT MEASURED and fails a real-browser test by name; neither
+    happened in the landing gate. Refused: a longer cap; running the test
+    again until a run settles; taking every cap as the machine's.
+27. **D-7152: the Speed page's own-line test waits for what it compares
+    (this repair's own run of `web/tests/speed.test.js` at load 21 to 57:
+    "Chrome reports first content", no first-contentful-paint entry yet).**
+    The test read the browser's paint entry and the line's figures as soon as
+    the harness's load returned, whose waits (a paint within 2 s, a 300 ms
+    quiet) a renderer slowed by the machine runs past; the page's fetch 100 ms
+    after its load can start after that quiet too. It now waits in the page,
+    at most 30 s, for the first-contentful-paint entry and for the line drawn
+    after that fetch, then makes every comparison it made before; a page that
+    never paints or never draws its line fails at the wait by name. No bound
+    of the harness is changed (BRED-63).
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store

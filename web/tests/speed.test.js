@@ -1747,6 +1747,21 @@ test('the Speed page\'s own line in a real browser: the tab\'s own first content
       const { browserContextId } = await b.cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
       const tab = await harness.openTab(b.cdp, browserContextId, { readOnly: true, base: site.base });
       await harness.loadOnce(tab, b.cdp, `${site.base}/self`, 300);
+      // WHAT THIS TEST COMPARES IS WAITED FOR, BOUNDED (BASE-REDS-1023 repair 9): the browser's first paint and the
+      // line's figures after the fetch the page makes 100 ms past its load. The load's own waits are the harness's
+      // (2 s for a paint, a 300 ms quiet), and a renderer slowed by the machine ran past them: this repair's run at
+      // load 21 to 57 read no first-contentful-paint entry yet ("Chrome reports first content", 'object' !== 'number').
+      // Every comparison below is unchanged; a page that never paints or never draws its line fails here by name.
+      const ready = await tab.evaluate(`new Promise((resolve) => {
+        const until = Date.now() + 30000;
+        const ready = () => {
+          const line = document.querySelector('[data-speed-self]');
+          return performance.getEntriesByType('paint').some((e) => e.name === 'first-contentful-paint') && line !== null && line.dataset.firstContentMs !== undefined && line.dataset.firstContentMs !== '' && Number(line.dataset.wireBytes) > 450000;
+        };
+        const look = () => (ready() || Date.now() > until ? resolve(ready()) : setTimeout(look, 50));
+        look();
+      })`, 40_000);
+      assert.equal(ready, true, 'within 30 s the tab painted, and its line was drawn after the fetch past its load');
       const v = await tab.evaluate(`(() => {
         const fcp = performance.getEntriesByType('paint').find((e) => e.name === 'first-contentful-paint');
         const loads = [...performance.getEntriesByType('navigation'), ...performance.getEntriesByType('resource')];
