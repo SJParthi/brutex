@@ -1968,20 +1968,9 @@ fn install_with(
         why: why.to_string(),
     })?;
     let cleared = staged.cleared;
-    let published = publish(staged.file, &bytes, &temporary, &path);
-    // Linked or not, the temporary is this writer's and goes: after a link
-    // it is a second name of the final file, before one it is all that
-    // would be left of a refused write.
-    let unlinked = fs::remove_file(&temporary);
-    if let Err(why) = published {
-        return Err(match unlinked {
-            Ok(()) => why,
-            Err(left) => MembershipError::Io {
-                path: temporary,
-                why: format!("{why}; and its temporary could not be unlinked: {left}"),
-            },
-        });
-    }
+    let unlinked = publish_then_unlink(staged.file, &bytes, (&temporary, &path), &|left| {
+        fs::remove_file(left)
+    })?;
     // The final name exists from here: the directory is flushed whether or
     // not the temporary's second name could be unlinked, and a failed unlink
     // is still refused by name.
@@ -1994,6 +1983,36 @@ fn install_with(
         generation: next,
         cleared,
     })
+}
+
+/// [`publish`] `bytes` through the staged `file` at `temporary` to `path`
+/// (`names` is the two), then unlink the temporary with `unlink`. Linked or
+/// not, the temporary is this writer's and goes: after a link it is a second
+/// name of the final file, before one it is all that would be left of a
+/// refused write. A refused publish is answered with the unlink's own fault
+/// beside it; a publish that landed answers the unlink's result, for the
+/// caller to refuse once the directory is flushed. The unlink is an argument
+/// (BASE-COV-PULL-PS1, D-7335): [`install_with`] unlinks, and a test hands an
+/// unlink the host refuses, which nothing a caller of `install` hands it makes
+/// happen between the temporary's create and its unlink.
+fn publish_then_unlink(
+    file: fs::File,
+    bytes: &[u8],
+    (temporary, path): (&Path, &Path),
+    unlink: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> Result<std::io::Result<()>, MembershipError> {
+    let published = publish(file, bytes, temporary, path);
+    let unlinked = unlink(temporary);
+    if let Err(why) = published {
+        return Err(match unlinked {
+            Ok(()) => why,
+            Err(left) => MembershipError::Io {
+                path: temporary.to_path_buf(),
+                why: format!("{why}; and its temporary could not be unlinked: {left}"),
+            },
+        });
+    }
+    Ok(unlinked)
 }
 
 /// Temporaries made by this process: the last part of each one's name.
