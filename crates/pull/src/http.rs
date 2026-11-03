@@ -516,6 +516,18 @@ impl HttpSource {
     /// [`FetchError::CredentialMismatch`] if the credential does not match the
     /// scheme — see [`Self::header_value`].
     pub fn new(spec: HttpSpec, credential: Credential) -> Result<Self, FetchError> {
+        Self::built_with(&spec, credential, pooled_client)
+    }
+
+    /// [`Self::new`] with the client's builder named: [`pooled_client`] on
+    /// the live path. A test hands it a builder that fails, which the TLS
+    /// backend this build links never does in a test process, so the refusal
+    /// naming the client is driven.
+    fn built_with(
+        spec: &HttpSpec,
+        credential: Credential,
+        client: fn() -> Result<reqwest::Client, String>,
+    ) -> Result<Self, FetchError> {
         // BEFORE THE CLIENT, deliberately. A mismatch is a wiring fault and
         // costs nothing to find; building a TLS client first would spend that
         // work to throw it away.
@@ -524,7 +536,7 @@ impl HttpSource {
         // `Credential::print`.
         let print = credential.print();
         let header_value = Self::header_value(spec.auth.scheme, credential)?;
-        let client = pooled_client().map_err(|why| FetchError::TransportFailed {
+        let client = client().map_err(|why| FetchError::TransportFailed {
             detail: format!("the HTTPS client could not be built: {why}"),
         })?;
         // THE GOVERNOR IS BUILT FROM THE DESCRIPTOR'S OWN BUDGET, so a feed
@@ -561,7 +573,7 @@ impl HttpSource {
             )
         });
         Ok(Self {
-            spec,
+            spec: *spec,
             feed,
             header_value,
             client,
@@ -5970,10 +5982,20 @@ mod tests {
             .enable_all()
             .build()
             .expect("a runtime");
+        // DHAN'S CONTRACT AND BUDGET, AND AN INVENTED BASE URL. The requests go
+        // to the loopback URL either way; the shipped base URL only made this
+        // source name its feed, so every clean answer was kept by
+        // `keep_first` under the operator's folder root (`~/.brutex/
+        // vendor-data/captures/`), a test writing outside its scratch.
+        let shipped = HttpSpec {
+            base_url: "https://vendor.invalid",
+            ..shipped
+        };
         for post in [true, false] {
             for (body, refused, credential_dead, moves) in rows {
                 let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
                     .expect("a client for the shipped Dhan row");
+                assert_eq!(source.feed, None, "no feed, so nothing is kept");
                 {
                     let mut g = source
                         .governor
@@ -6512,14 +6534,46 @@ mod tests {
         // So the assertion is that the two encodings DISAGREE, by either route.
         // Requiring one specific route would make this test pass or fail on the
         // window it happens to use rather than on the pairing it exists to pin.
-        assert!(
-            zoneless.bars.len() != landed.bars.len()
-                || zoneless.bars.first().map(|b| b.ts_micros)
-                    != landed.bars.first().map(|b| b.ts_micros),
-            "the two encodings must not agree, or this proves nothing: \
-             zoneless landed {} bar(s), zone-carrying landed {}",
-            zoneless.bars.len(),
-            landed.bars.len()
+        let disagree = |zoneless: &crate::fetch::Landed, landed: &crate::fetch::Landed| {
+            assert!(
+                zoneless.bars.len() != landed.bars.len()
+                    || zoneless.bars.first().map(|b| b.ts_micros)
+                        != landed.bars.first().map(|b| b.ts_micros),
+                "the two encodings must not agree, or this proves nothing: \
+                 zoneless landed {} bar(s), zone-carrying landed {}",
+                zoneless.bars.len(),
+                landed.bars.len()
+            );
+        };
+        disagree(&zoneless, &landed);
+
+        // AND THE SILENT ROUTE ITSELF, so both routes of that assertion are
+        // driven. A bar stamped 15:00 IST, shifted a second time, is 09:30
+        // IST: inside the session, so it lands, at the wrong instant. The
+        // counts agree and the instants do not.
+        let late = r#"{"status":"success","data":{"candles":[
+            ["2017-12-15T15:00:00+0530",1704.5,1705,1699.25,1702.8,2499]]}}"#;
+        let raw = decode_body(late, &zerodha, crate::vendor::Listing::Equity)
+            .expect("a later bar of the same shape decodes");
+        let landed = crate::fetch::land(&raw, &request, zerodha.timestamps, PriceScale::Paisa)
+            .expect("the bar lands");
+        let zoneless = crate::fetch::land(
+            &raw,
+            &request,
+            crate::vendor::TimestampEncoding::IsoDateTimeText,
+            PriceScale::Paisa,
+        )
+        .expect("it lands, wrongly");
+        assert_eq!(
+            (zoneless.bars.len(), landed.bars.len()),
+            (1, 1),
+            "the silent case: both land"
+        );
+        disagree(&zoneless, &landed);
+        assert_eq!(
+            landed.bars[0].ts_micros - zoneless.bars[0].ts_micros,
+            19_800 * 1_000_000,
+            "shifted once more by the IST offset"
         );
     }
 
@@ -6628,10 +6682,7 @@ mod tests {
             "key first, one colon, one trailing space in the prefix"
         );
         assert!(
-            zerodha
-                .extra_headers
-                .iter()
-                .any(|(h, v)| *h == "X-Kite-Version" && *v == "3"),
+            zerodha.extra_headers.contains(&("X-Kite-Version", "3")),
             "every Kite curl example carries it beside the credential"
         );
     }
@@ -6709,9 +6760,7 @@ mod tests {
         let addr = socket.local_addr().expect("an address");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = socket.accept() else {
-                return;
-            };
+            let (mut stream, _) = socket.accept().expect("a client connects");
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).unwrap_or(0);
             let seen = String::from_utf8_lossy(buf.get(..n).unwrap_or(&[])).into_owned();
@@ -6764,50 +6813,82 @@ mod tests {
         frame: usize,
         chunks: usize,
     ) -> (String, std::sync::mpsc::Receiver<Flooded>) {
-        use std::io::{ErrorKind, Read as _, Write as _};
+        use std::io::{Read as _, Write as _};
         let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let addr = socket.local_addr().expect("an address");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = socket.accept() else {
-                return;
-            };
+            let (mut stream, _) = socket.accept().expect("a client connects");
             let mut buf = [0u8; 4096];
             let _request = stream.read(&mut buf);
-            let mut sent: usize = 0;
-            let mut finished = stream.write_all(header.as_bytes()).is_ok();
+            let wrote_header = stream.write_all(header.as_bytes());
             let filler = vec![b'x'; frame];
-            'frames: for _ in 0..chunks {
-                if !finished {
-                    break;
-                }
-                let mut rest = filler.as_slice();
-                while !rest.is_empty() {
-                    // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
-                    // Once it has seen more than it will hold it drops the
-                    // response, the connection resets, and this write fails —
-                    // which is the signal to stop and report how far it got.
-                    // Rust ignores SIGPIPE at startup, so this is an `Err` and
-                    // not a killed test process. Every byte the socket accepts
-                    // is counted, not every whole frame.
-                    match stream.write(rest) {
-                        Ok(n) if n > 0 => {
-                            sent = sent.saturating_add(n);
-                            rest = rest.get(n..).unwrap_or_default();
-                        }
-                        Err(why) if why.kind() == ErrorKind::Interrupted => {}
-                        Ok(_) | Err(_) => {
-                            finished = false;
-                            break 'frames;
-                        }
-                    }
-                }
-            }
-            let _flushed = stream.flush();
+            // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE. Once
+            // it has seen more than it will hold it drops the response, the
+            // connection resets, and a write fails — which is the signal to
+            // stop and report how far it got. Rust ignores SIGPIPE at startup,
+            // so this is an `Err` and not a killed test process. `write_all`
+            // retries an interrupted write and refuses a write of nothing, and
+            // `Counted` counts every byte the socket accepts, not every whole
+            // frame.
+            let mut counted = Counted {
+                stream: &mut stream,
+                sent: 0,
+            };
+            let finished = wrote_header
+                .and_then(|()| (0..chunks).try_for_each(|_| counted.write_all(&filler)))
+                .is_ok();
+            let _flushed = counted.flush();
+            let sent = counted.sent;
             drop(stream);
             let _reported = tx.send(Flooded { sent, finished });
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// A [`counted_flood`]'s socket, counting the body bytes it accepted.
+    struct Counted<'a> {
+        stream: &'a mut std::net::TcpStream,
+        sent: usize,
+    }
+
+    impl std::io::Write for Counted<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let n = std::io::Write::write(self.stream, buf)?;
+            self.sent = self.sent.saturating_add(n);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::io::Write::flush(self.stream)
+        }
+    }
+
+    /// **A VENDOR THAT HANGS UP WITHOUT ANSWERING IS A NAMED TRANSPORT
+    /// FAILURE.** The request reached the socket (the listener read it, the
+    /// credential header with it, as it must go to the vendor itself) and
+    /// the connection closed with no byte back: the window is refused as not
+    /// reached, naming the URL, and the refusal never carries the token.
+    #[test]
+    fn a_vendor_that_hangs_up_without_answering_is_a_named_transport_failure() {
+        let (url, seen, _) = listener(None);
+        let spec = HttpSpec {
+            base_url: Box::leak(url.clone().into_boxed_str()),
+            ..spec(PriceScale::Rupees)
+        };
+        let refused = source_of(spec, "SUPERSECRET").block_on_window();
+        let request = seen
+            .recv_timeout(core::time::Duration::from_secs(5))
+            .expect("the vendor was asked");
+        assert!(request.contains("x-token: SUPERSECRET"), "{request}");
+        let Err(FetchError::TransportFailed { detail }) = &refused else {
+            panic!("{refused:?}")
+        };
+        assert!(
+            detail.starts_with(&format!("{url}/bars was not reached: ")),
+            "{detail}"
+        );
+        assert!(!detail.contains("SUPERSECRET"), "{detail}");
     }
 
     /// **THE CREDENTIAL MUST NOT FOLLOW A REDIRECT.**
@@ -7157,9 +7238,7 @@ mod tests {
         let addr = socket.local_addr().expect("an address");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = socket.accept() else {
-                return;
-            };
+            let (mut stream, _) = socket.accept().expect("a client connects");
             let mut request = [0u8; 4096];
             let received = stream.read(&mut request).unwrap_or(0);
             let _written = stream.write_all(
@@ -7202,9 +7281,7 @@ mod tests {
         let addr = socket.local_addr().expect("an address");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = socket.accept() else {
-                return;
-            };
+            let (mut stream, _) = socket.accept().expect("a client connects");
             let mut request = [0u8; 4096];
             let received = stream.read(&mut request).unwrap_or(0);
             let _written = stream.write_all(&answer);
@@ -7286,8 +7363,6 @@ mod tests {
             .build()
             .expect("a runtime");
         let past_the_cap = MAX_RESPONSE_BYTES.saturating_add(1);
-        let mut credited = Vec::new();
-        let mut returned = Vec::new();
         for (what, answer) in [
             (
                 "a body the socket cuts short",
@@ -7311,19 +7386,13 @@ mod tests {
             let outcome = runtime.block_on(source.post_json(&url, "{}".to_owned()));
             reached(what, &report);
             let now = allowance(&held);
-            if now != lowered {
-                credited.push(format!("{what} ({lowered} to {now})"));
-            }
-            if outcome.is_ok() {
-                returned.push(what);
-            }
+            assert_eq!(
+                now, lowered,
+                "a refused answer earned the governor a success it did not deliver: \
+                 {what} ({lowered} to {now})"
+            );
+            assert!(outcome.is_err(), "{what} is refused: {outcome:?}");
         }
-        assert!(
-            credited.is_empty(),
-            "a refused answer earned the governor a success it did not deliver: {}",
-            credited.join("; ")
-        );
-        assert!(returned.is_empty(), "each is refused: {returned:?}");
 
         // THE OTHER HALF, WHICH KEEPS THE ABOVE FROM BEING VACUOUS: a source
         // that never credited anything would also leave the allowance alone.
@@ -7826,9 +7895,10 @@ mod tests {
         let sent = seen
             .recv_timeout(core::time::Duration::from_secs(5))
             .expect("the vendor was contacted");
-        assert!(
-            sent.contains("access-token: SUPERSECRET") || sent.contains("x-token: SUPERSECRET")
-        );
+        // The descriptor's own header, `x-token` (the fixture's `auth.header`):
+        // this asserted `access-token` OR `x-token`, and the first could never
+        // hold for this descriptor, so it only widened what passed.
+        assert!(sent.contains("x-token: SUPERSECRET"), "{sent}");
         assert!(sent.contains("2025-07-01"), "fromDate: {sent}");
         assert!(sent.contains("2025-07-02"), "toDate is exclusive: {sent}");
     }
@@ -8556,6 +8626,18 @@ mod tests {
             joined(minute),
             "v2/charts/intraday",
             "the vendor's intraday page"
+        );
+        // THE WALK READS A VALUE SEGMENT BY ITS PLACEHOLDER: Dhan's two paths
+        // are all literals, so the one shipped path that carries values (the
+        // instrument and the rung in Zerodha's path, D-0133) is joined too.
+        let crate::vendor::Transport::Http(zerodha) =
+            crate::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP broker");
+        };
+        assert_eq!(
+            joined(zerodha.path_for(crate::vendor::Granularity::Minute1)),
+            "instruments/historical/instrument_token/interval"
         );
 
         // THE INTERVAL TRAVELS WITH THE MINUTE RUNG AND NOWHERE ELSE. In the

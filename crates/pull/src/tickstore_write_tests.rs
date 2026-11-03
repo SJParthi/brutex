@@ -1838,3 +1838,872 @@ fn a_tick_store_folder_that_is_a_link_is_never_written_through() {
     let run = write_day(&zip, &via, &options("linked-root"));
     assert!(matches!(run.result, Ok(Outcome::Written(_))), "{run:?}");
 }
+
+// ── BASE-COV-PULL-PS3: the arms no test reached (Route B on 2e7a0b6d) ─────
+
+/// The zip's central records, read as the writer reads them.
+fn entries_of(zip: &Path) -> Vec<ZipEntry> {
+    let source = File::open(zip).unwrap();
+    let len = source.metadata().unwrap().len();
+    zip_entries(&source, 0, len).unwrap()
+}
+
+/// A day file of `items` for `entries`, laid out as §3 states: the magic,
+/// the blocks in order, the index frame and the footer.
+fn bts_of(entries: &[ZipEntry], items: &[Item]) -> Vec<u8> {
+    let (index, index_off) = index_bytes(entries, items);
+    let frame = zstd(&index).unwrap();
+    let mut file = MAGIC.to_vec();
+    for it in items {
+        file.extend_from_slice(&it.block);
+    }
+    file.extend_from_slice(&frame);
+    file.extend_from_slice(&footer(
+        index_off,
+        frame.len() as u64,
+        &index,
+        entries.len(),
+    ));
+    file
+}
+
+/// A raw block (§4, kind 2) of `bytes`.
+fn raw_block(bytes: &[u8]) -> Vec<u8> {
+    let mut block = vec![KIND_RAW];
+    block.extend_from_slice(&zstd(bytes).unwrap());
+    block
+}
+
+/// Where the 25 September index day lies under `root`.
+fn idx_day(root: &Path) -> PathBuf {
+    TickStore::new(root).day_path(CmKind::Indices, day(2026, 9, 25))
+}
+
+/// [`Refusal::door_words`] as a `Display`, so its last arm is driven:
+/// `Display` hands it only the five refusals it words.
+struct DoorWords<'a>(&'a Refusal);
+
+impl core::fmt::Display for DoorWords<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.door_words(self.0.code(), f)
+    }
+}
+
+/// **A REFUSAL THE DOOR DOES NOT WORD IS ITS CODE ALONE, AND A RUN NAMES ITS
+/// ID.** `door_words` words the five refusals about the names the writer
+/// opens; handed any other it writes the bare code, never a door's sentence.
+/// `run_id` answers the id the run was built with, whatever `with_commit` and
+/// `with_workers` changed after, and no worker count goes below one.
+#[test]
+fn a_refusal_the_door_does_not_word_is_its_code_and_a_run_names_its_id() {
+    for why in [
+        Refusal::DayLocked { lock: "l".into() },
+        Refusal::DayTooLarge { bytes: u64::MAX },
+        Refusal::NameNotCanonical {
+            name: String::new(),
+        },
+        Refusal::StaleTemp {
+            leftovers: Vec::new(),
+        },
+    ] {
+        assert_eq!(DoorWords(&why).to_string(), why.code(), "{why:?}");
+    }
+    let door = Refusal::LinkedFolder { path: "/x".into() };
+    assert_eq!(DoorWords(&door).to_string(), door.to_string());
+    let longest = "z".repeat(64);
+    for id in ["r", longest.as_str()] {
+        let options = WriteOptions::new(id).with_commit(STAMP).with_workers(0);
+        assert_eq!(options.run_id(), id);
+        assert_eq!(options.commit(), STAMP);
+        assert_eq!(options.workers, 1, "at least one worker");
+    }
+}
+
+/// **A TIME WITH A LETTER FIRST IN A PAIR, AND A FIELD OF SIXTEEN DECIMALS,
+/// ARE TEXT.** Each pair of a time is held digit by digit, its first digit
+/// as well as its second; and seventeen characters can carry sixteen
+/// decimals behind a bare point, one past the fifteen a shape holds. One
+/// decimal fewer is a number of shape fifteen, on either sign.
+#[test]
+fn a_time_with_a_letter_first_and_sixteen_decimals_are_text() {
+    for field in [
+        &b"x9:00:00"[..],
+        b"09:x0:00",
+        b"09:00:x0",
+        b".1234567890123456",
+        b"-.1234567890123456",
+    ] {
+        assert_eq!(
+            parse_field(field),
+            None,
+            "{:?}",
+            String::from_utf8_lossy(field)
+        );
+    }
+    assert_eq!(
+        parse_field(b".123456789012345"),
+        Some((15, 123_456_789_012_345))
+    );
+    assert_eq!(
+        parse_field(b"-.123456789012345"),
+        Some((15 | SHAPE_NEG, -123_456_789_012_345))
+    );
+}
+
+/// **A MEMBER READ BACK AT ANOTHER LENGTH THAN ITS RECORD STATES IS REFUSED,
+/// EITHER WAY ROUND, AND NOTHING IS WRITTEN.** A stored member of `n` bytes
+/// recorded as `n + 5` reads back short; one recorded as `n - 5` reads back
+/// one byte past its record, which is as far as the reader ever reads. Each
+/// is `member_corrupt` naming both lengths before any block is built.
+#[test]
+fn a_member_read_back_at_another_length_than_its_record_is_refused() {
+    let name = format!("{IDX}/ZZIDX.NSE_IDX.csv");
+    let data = csv("ZZIDX", 3, "\n", true);
+    let n = data.len();
+    for (stated, read) in [(n + 5, n), (n - 5, n - 4)] {
+        let mut members = vec![member(&format!("{IDX}/"), b""), member(&name, &data)];
+        members[1].len = Some(stated as u64);
+        let (zip, root) = staged("tsw-len", &format!("{IDX}.zip"), &members);
+        let run = write_day(&zip, &root, &options("len"));
+        assert_eq!(
+            run.result,
+            Err(Refusal::MemberCorrupt {
+                name: name.clone(),
+                why: format!("{read} bytes, the record states {stated}"),
+            })
+        );
+        assert!(!root.join("cm").exists(), "nothing written");
+    }
+}
+
+/// An encoder that fails, as `ruzstd` panicking inside [`zstd`] would.
+fn failing_encoder(_: &[u8]) -> Result<Encoded, String> {
+    Err("an invented encoder fault".to_owned())
+}
+
+/// An encoder whose raw block holds the member with its first byte changed:
+/// the same length, so the frame decodes, and not the member.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "its type is the seam's, `fn(&[u8]) -> Result<Encoded, String>`"
+)]
+fn lying_encoder(data: &[u8]) -> Result<Encoded, String> {
+    let mut lie = data.to_vec();
+    lie[0] ^= 0x01;
+    Ok(Encoded {
+        block: raw_block(&lie),
+        kind: KIND_RAW,
+        rows: 0,
+    })
+}
+
+/// An encoder whose block is raw while it states columnar.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "its type is the seam's, `fn(&[u8]) -> Result<Encoded, String>`"
+)]
+fn mislabelling_encoder(data: &[u8]) -> Result<Encoded, String> {
+    Ok(Encoded {
+        block: raw_block(data),
+        kind: KIND_COLUMNAR,
+        rows: 0,
+    })
+}
+
+/// **A BLOCK IS KEPT ONLY WHEN IT REBUILDS TO ITS MEMBER.** Every block is
+/// rebuilt through the reader before it is held, so an encoder that fails,
+/// one whose block decodes to other bytes of the same length, and one whose
+/// block is not of the kind it states are each refused `encode_failed`
+/// naming the member; the live encoder's block is kept, and a folder needs
+/// no encoder at all.
+#[test]
+fn a_block_that_does_not_rebuild_to_its_member_is_never_kept() {
+    let name = format!("{IDX}/ZZIDX.NSE_IDX.csv");
+    let members = vec![
+        member(&format!("{IDX}/"), b""),
+        member(&name, &csv("ZZIDX", 20, "\n", true)),
+    ];
+    let (zip, _root) = staged("tsw-item", &format!("{IDX}.zip"), &members);
+    let entries = entries_of(&zip);
+    let source = File::open(&zip).unwrap();
+    let refused = |encoder: fn(&[u8]) -> Result<Encoded, String>| {
+        item_by(&source, &entries[1], encoder).err()
+    };
+    let failed = |why: &str| {
+        Some(Refusal::EncodeFailed {
+            name: name.clone(),
+            why: why.to_owned(),
+        })
+    };
+    assert_eq!(
+        refused(failing_encoder),
+        failed("an invented encoder fault")
+    );
+    assert_eq!(
+        refused(lying_encoder),
+        failed("the block does not rebuild to the member")
+    );
+    assert_eq!(
+        refused(mislabelling_encoder),
+        failed("tick store malformed: a block's first byte is not its entry's kind")
+    );
+    let kept = item_by(&source, &entries[1], encode).unwrap();
+    assert_eq!((kept.kind, kept.rows), (KIND_COLUMNAR, 20));
+    let folder = item_by(&source, &entries[0], failing_encoder).unwrap();
+    assert_eq!((folder.kind, folder.block.len()), (KIND_DIR, 0));
+}
+
+/// **A WRITE THE HOST REFUSES FOR ANOTHER REASON THAN A FULL DISK IS
+/// `write_failed` AT `write`, NOT `disk_full`.** A file-size limit refusing
+/// the very first byte, and a quota refusing the 21st, each leave the
+/// temporary at the bytes that landed, named with the step, the day not
+/// held; the next run refuses that temporary by name and leaves it.
+#[test]
+fn a_write_refused_for_another_reason_than_a_full_disk_is_named_write() {
+    for (after, kind) in [
+        (0, std::io::ErrorKind::FileTooLarge),
+        (20, std::io::ErrorKind::QuotaExceeded),
+    ] {
+        let (zip, root) = staged("tsw-refused", &format!("{IDX}.zip"), &nifty_spot_members());
+        let faults = Faults {
+            full_after: Some(after),
+            refused_with: Some(kind),
+            ..Faults::default()
+        };
+        let run = write_day(&zip, &root, &options("refused").with_faults(faults));
+        let path = idx_day(&root);
+        let temp = path.with_file_name(format!("{IDX}.bts.tmp.refused"));
+        assert_eq!(
+            run.result,
+            Err(Refusal::WriteFailed {
+                path: temp.clone(),
+                step: "write",
+                kind
+            })
+        );
+        assert_eq!(std::fs::metadata(&temp).unwrap().len(), after);
+        assert!(!path.exists(), "not held");
+        assert!(log_of(&root).contains("code=write_failed"));
+        let next = write_day(&zip, &root, &options("next"));
+        assert_eq!(
+            next.result,
+            Err(Refusal::StaleTemp {
+                leftovers: vec![(format!("{IDX}.bts.tmp.refused"), after)]
+            })
+        );
+    }
+}
+
+/// **EVERY HELPER ON THE WAY TO A HELD DAY NAMES THE STEP THE HOST REFUSED.**
+/// A temporary in a folder that is not there is refused at `create`; an
+/// index the encoder refuses is `encode_failed` naming the index, its empty
+/// temporary left; the race hook into a missing folder is refused at `race
+/// hook`; and the disk-full writer flushes through and refuses `StorageFull`
+/// at its limit, having taken only the bytes below it.
+#[test]
+fn every_helper_on_the_way_to_a_held_day_names_its_step() {
+    let (zip, root) = staged("tsw-steps", &format!("{IDX}.zip"), &nifty_spot_members());
+    let entries = entries_of(&zip);
+    let source = File::open(&zip).unwrap();
+    let items = encode_all(&source, &entries, 2).unwrap();
+    let nowhere = root.join("nowhere");
+    let temp = nowhere.join(format!("{IDX}.bts.tmp.steps"));
+    let not_found = std::io::ErrorKind::NotFound;
+    assert_eq!(
+        write_temp(&temp, &entries, &items, Faults::default(), zstd),
+        Err(Refusal::WriteFailed {
+            path: temp.clone(),
+            step: "create",
+            kind: not_found
+        })
+    );
+    let here = root.join(format!("{IDX}.bts.tmp.index"));
+    assert_eq!(
+        write_temp(&here, &entries, &items, Faults::default(), |_| Err(
+            "an invented index fault".to_owned()
+        )),
+        Err(Refusal::EncodeFailed {
+            name: "the index".to_owned(),
+            why: "an invented index fault".to_owned()
+        })
+    );
+    assert_eq!(std::fs::metadata(&here).unwrap().len(), 0, "left, empty");
+    assert_eq!(
+        plant_at(&temp, &root, Plant::File(3)),
+        Err(Refusal::WriteFailed {
+            path: temp.clone(),
+            step: "race hook",
+            kind: not_found
+        })
+    );
+    let file = File::create(root.join("limited")).unwrap();
+    let mut out = Limited {
+        file: &file,
+        written: 0,
+        limit: Some(1),
+        kind: std::io::ErrorKind::StorageFull,
+    };
+    assert_eq!(
+        out.write(b"ab").unwrap(),
+        1,
+        "only the byte below the limit"
+    );
+    assert_eq!(
+        out.write(b"b").unwrap_err().kind(),
+        std::io::ErrorKind::StorageFull
+    );
+    out.flush().unwrap();
+    assert_eq!(std::fs::read(root.join("limited")).unwrap(), b"a");
+}
+
+/// **THE PUBLISH AND THE FAULT HOOK NAME THE STEP THE HOST REFUSED.** A
+/// rename of a temporary that is not there is refused at `rename`; a rename
+/// that lands with no folder to fsync is refused at `fsync the folder`
+/// naming the folder (the renamed file is there); and the fault hook on a
+/// missing temporary, or past a temporary's end, is refused at `fault hook`,
+/// while inside it the byte is inverted in place.
+#[test]
+fn the_publish_and_the_fault_hook_name_their_steps() {
+    let base = scratch("tsw-publish");
+    let missing = base.join("missing.bts.tmp");
+    let held = base.join("held.bts");
+    let nowhere = base.join("nowhere");
+    assert_eq!(
+        publish(&missing, &held, &base),
+        Err(Refusal::WriteFailed {
+            path: missing.clone(),
+            step: "rename",
+            kind: std::io::ErrorKind::NotFound
+        })
+    );
+    let staged_temp = base.join("staged.bts.tmp");
+    std::fs::write(&staged_temp, b"abc").unwrap();
+    assert_eq!(
+        publish(&staged_temp, &held, &nowhere),
+        Err(Refusal::WriteFailed {
+            path: nowhere.clone(),
+            step: "fsync the folder",
+            kind: std::io::ErrorKind::NotFound
+        })
+    );
+    assert_eq!(std::fs::read(&held).unwrap(), b"abc", "the rename landed");
+    for (path, at, kind) in [
+        (&missing, 0, std::io::ErrorKind::NotFound),
+        (&held, 3, std::io::ErrorKind::UnexpectedEof),
+    ] {
+        assert_eq!(
+            flip(path, at),
+            Err(Refusal::WriteFailed {
+                path: path.clone(),
+                step: "fault hook",
+                kind
+            })
+        );
+    }
+    flip(&held, 2).unwrap();
+    assert_eq!(std::fs::read(&held).unwrap(), [b'a', b'b', !b'c']);
+}
+
+/// **A LOCK THE HOST WILL NOT TAKE IS `lock_failed` WITH THE HOST'S KIND.**
+/// A filesystem with no `flock` answers `try_lock` with an error, not "held
+/// elsewhere"; that answer, handed in, is refused naming the lock and the
+/// kind, while "would block" is `day_locked` and a taken lock is held.
+#[test]
+fn a_lock_the_host_will_not_take_is_named_with_its_kind() {
+    let lock_path = scratch("tsw-lockheld").join(LOCK_NAME);
+    let open = || {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&lock_path)
+            .unwrap()
+    };
+    for kind in [
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        let tried = Err(std::fs::TryLockError::Error(kind.into()));
+        assert_eq!(
+            lock_held(open(), lock_path.clone(), tried).err(),
+            Some(Refusal::LockFailed {
+                lock: lock_path.clone(),
+                kind
+            })
+        );
+    }
+    let tried = Err(std::fs::TryLockError::WouldBlock);
+    assert_eq!(
+        lock_held(open(), lock_path.clone(), tried).err(),
+        Some(Refusal::DayLocked {
+            lock: lock_path.clone()
+        })
+    );
+    let held = lock_held(open(), lock_path.clone(), Ok(())).unwrap();
+    assert!(held.file.metadata().unwrap().is_file());
+}
+
+/// **THE ENTRY BOUND AND THE DAY'S BLOCK CAP REFUSE ONE PAST AND HOLD AT THE
+/// BOUND.** A day of eight entries is `too_many_entries` under a bound of
+/// seven (and of none) and passes at eight. Its blocks, encoded on one
+/// worker, are `day_too_large` one byte under their sum, naming the sum
+/// reached, and pass at exactly it; under a cap of zero the folder's empty
+/// block passes and the first file's block is refused with its own length.
+#[test]
+fn the_entry_bound_and_the_block_cap_refuse_one_past_and_hold_at_it() {
+    let identity = DayIdentity::of_zip_name(&format!("{IDX}.zip")).unwrap();
+    let (zip, _root) = staged("tsw-caps", &format!("{IDX}.zip"), &nifty_spot_members());
+    let entries = entries_of(&zip);
+    let n = entries.len();
+    let most = u32::try_from(n).unwrap();
+    for under in [0, most - 1] {
+        assert_eq!(
+            preflight_under(&identity, &entries, under),
+            Err(Refusal::TooManyEntries { entries: n })
+        );
+    }
+    assert_eq!(preflight_under(&identity, &entries, most), Ok(1));
+    let source = File::open(&zip).unwrap();
+    let blocks: Vec<u64> = encode_all(&source, &entries, 1)
+        .unwrap()
+        .iter()
+        .map(|it| it.block.len() as u64)
+        .collect();
+    let total: u64 = blocks.iter().sum();
+    assert_eq!(
+        encode_all_under(&source, &entries, 1, total).unwrap().len(),
+        n
+    );
+    assert_eq!(
+        encode_all_under(&source, &entries, 1, total - 1).err(),
+        Some(Refusal::DayTooLarge { bytes: total })
+    );
+    assert_eq!(blocks[0], 0, "the folder");
+    assert_eq!(
+        encode_all_under(&source, &entries, 1, 0).err(),
+        Some(Refusal::DayTooLarge { bytes: blocks[1] })
+    );
+}
+
+/// **A HELD DAY IS HELD TO ITS ZIP FIELD BY FIELD, AND EACH DIFFERENCE IS
+/// NAMED.** After a day is written its zip is re-delivered three ways, each
+/// refused `held_day_differs` with the old file untouched: one entry more
+/// (both counts named), one entry renamed (the zip's name named), and one
+/// entry's bytes changed at the same length, so only its CRC-32 differs.
+#[test]
+fn a_held_day_differing_in_count_name_or_crc_alone_is_named() {
+    let a = format!("{IDX}/A.NSE_IDX.csv");
+    let base = vec![
+        member(&format!("{IDX}/"), b""),
+        member(&a, &csv("ZZIDX", 30, "\r\n", true)),
+    ];
+    let mut more = base.clone();
+    more.push(member(&format!("{IDX}/B.NSE_IDX.csv"), b"b\n"));
+    let mut renamed = base.clone();
+    renamed[1].name = format!("{IDX}/C.NSE_IDX.csv").into_bytes();
+    let mut flipped = base.clone();
+    let middle = flipped[1].data.len() / 2;
+    flipped[1].data[middle] ^= 0x01;
+    let differs = |name: &str| format!("`{name}`: name, size, CRC-32 or DOS time is not the zip's");
+    for (members, why) in [
+        (more, "2 entries, the zip holds 3".to_owned()),
+        (renamed, differs(&format!("{IDX}/C.NSE_IDX.csv"))),
+        (flipped, differs(&a)),
+    ] {
+        let (zip, root) = staged("tsw-differs", &format!("{IDX}.zip"), &base);
+        let first = write_day(&zip, &root, &options("first")).result.unwrap();
+        assert_eq!(first.verdict(), "written");
+        let path = first.report().path.clone();
+        let before = std::fs::read(&path).unwrap();
+        std::fs::write(&zip, zip_of(&members)).unwrap();
+        assert_eq!(
+            write_day(&zip, &root, &options("again")).result,
+            Err(Refusal::HeldDayDiffers {
+                path: path.clone(),
+                why
+            })
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "untouched");
+    }
+}
+
+/// **A HELD DAY THAT STORES A FOLDER AS A FILE, OR A FILE AS A FOLDER, IS
+/// NAMED BY THE ENTRY AND ITS KIND.** Name, size, CRC-32 and DOS time agree
+/// in both: an empty file is a folder only by its trailing slash, so the
+/// kind is the one field left to differ, and it is held too. The day file
+/// is left as it is either way.
+#[test]
+fn a_held_day_storing_a_folder_as_a_file_or_a_file_as_a_folder_is_named() {
+    let folder = format!("{IDX}/");
+    let empty = format!("{IDX}/EMPTY.NSE_IDX.csv");
+    let members = vec![member(&folder, b""), member(&empty, b"")];
+    let dir = || Item {
+        kind: KIND_DIR,
+        block: Vec::new(),
+        rows: 0,
+    };
+    let raw = || Item {
+        kind: KIND_RAW,
+        block: raw_block(b""),
+        rows: 0,
+    };
+    for (items, why) in [
+        (
+            vec![raw(), raw()],
+            format!("`{folder}`: kind 2 for this entry"),
+        ),
+        (
+            vec![dir(), dir()],
+            format!("`{empty}`: kind 0 for this entry"),
+        ),
+    ] {
+        let (zip, root) = staged("tsw-kind", &format!("{IDX}.zip"), &members);
+        let path = idx_day(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = bts_of(&entries_of(&zip), &items);
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(
+            write_day(&zip, &root, &options("kind")).result,
+            Err(Refusal::HeldDayDiffers {
+                path: path.clone(),
+                why
+            })
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), file, "left as it is");
+    }
+}
+
+/// A zip source whose every read panics: a reader fault inside a verify
+/// worker.
+struct PanickingZip;
+
+impl ReadAt for PanickingZip {
+    fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> std::io::Result<()> {
+        panic!("an invented reader fault")
+    }
+}
+
+/// **`verify_file` NAMES THE SIDE THAT FAILED.** Against a copy of the zip
+/// whose member was damaged after its records were read, the difference is
+/// the zip's (`the zip: member_corrupt`), not the day file's; the undamaged
+/// copy verifies; and a zip reader that panics inside a verify worker is
+/// the worker's named refusal, not a dead process.
+#[test]
+fn verify_file_names_the_zip_when_the_zip_is_the_damaged_side() {
+    let members = nifty_spot_members();
+    let (zip, root) = staged("tsw-verify", &format!("{IDX}.zip"), &members);
+    let written = write_day(&zip, &root, &options("verify")).result.unwrap();
+    let path = written.report().path.clone();
+    let entries = entries_of(&zip);
+    let intact = std::fs::read(&zip).unwrap();
+    assert_eq!(
+        verify_file(&path, &intact, &entries, 2).map(|report| report.entries),
+        Ok(8)
+    );
+    let mut damaged = intact.clone();
+    let data = &members[1].data;
+    let at = damaged
+        .windows(data.len())
+        .position(|window| window == data.as_slice())
+        .unwrap()
+        + 7;
+    damaged[at] ^= 0x01;
+    let why = verify_file(&path, &damaged, &entries, 2).unwrap_err();
+    assert!(why.starts_with("the zip: member_corrupt: "), "{why}");
+    assert!(why.contains("NIFTY.NSE_IDX.csv"), "{why}");
+    assert!(why.contains("CRC-32"), "{why}");
+    let why = verify_file(&path, &PanickingZip, &entries, 1).unwrap_err();
+    assert_eq!(why, "encode_failed: ``: a worker panicked");
+}
+
+/// **A FILE WHERE A FOLDER OF THE DAY'S PATH SHOULD BE IS REFUSED BEFORE
+/// ANYTHING IS ENCODED OR MADE.** A regular file at `<root>/cm` makes the
+/// held day's name unopenable (`NotADirectory`), which is not "no day": the
+/// run is refused at `open the held day` naming the day's path, the file is
+/// left as it is and no folder is made.
+#[test]
+fn a_file_where_a_folder_of_the_days_path_should_be_is_refused() {
+    let (zip, root) = staged("tsw-notdir", &format!("{IDX}.zip"), &nifty_spot_members());
+    std::fs::write(root.join("cm"), b"not a folder").unwrap();
+    let run = write_day(&zip, &root, &options("notdir"));
+    assert_eq!(
+        run.result,
+        Err(Refusal::WriteFailed {
+            path: idx_day(&root),
+            step: "open the held day",
+            kind: std::io::ErrorKind::NotADirectory
+        })
+    );
+    assert_eq!(std::fs::read(root.join("cm")).unwrap(), b"not a folder");
+    assert_eq!(
+        names_in(&root),
+        vec![LOCK_NAME.to_owned(), "cm".to_owned(), LOG_NAME.to_owned()]
+    );
+}
+
+/// **ANOTHER DAY'S FILES IN THE MONTH FOLDER ARE NOT THIS DAY'S.** The 25th
+/// is written; the 26th, written into the same `SEP_2026` folder, is stopped
+/// neither by the 25th's day file nor by a temporary a crash of the 25th
+/// left there (another day's leftover is not this one's), and the reader
+/// then opens the 26th beside the 25th.
+#[test]
+fn another_days_files_in_the_month_folder_do_not_stop_this_day() {
+    let (zip25, root) = staged("tsw-month", &format!("{IDX}.zip"), &nifty_spot_members());
+    let first = write_day(&zip25, &root, &options("d25")).result.unwrap();
+    assert_eq!(first.verdict(), "written");
+    let month = idx_day(&root).parent().unwrap().to_path_buf();
+    std::fs::write(month.join(format!("{IDX}.bts.tmp.crashed")), b"x").unwrap();
+    let idx26 = "GFDLCM_INDICES_TICK_26092026";
+    let members26 = vec![
+        member(&format!("{idx26}/"), b""),
+        member(
+            &format!("{idx26}/ZZIDX.NSE_IDX.csv"),
+            &csv("ZZIDX", 12, "\n", true),
+        ),
+    ];
+    let zip26 = zip25.with_file_name(format!("{idx26}.zip"));
+    std::fs::write(&zip26, zip_of(&members26)).unwrap();
+    let second = write_day(&zip26, &root, &options("d26")).result.unwrap();
+    assert_eq!(second.verdict(), "written");
+    assert_eq!(second.report().path, month.join(format!("{idx26}.bts")));
+    assert_eq!(
+        names_in(&month),
+        vec![
+            format!("{IDX}.bts"),
+            format!("{IDX}.bts.tmp.crashed"),
+            format!("{idx26}.bts")
+        ]
+    );
+    let listing = TickStore::new(&root)
+        .day(CmKind::Indices, day(2026, 9, 26))
+        .unwrap()
+        .expect("the reader opens the 26th");
+    assert_eq!(listing.entries().len(), 2);
+}
+
+/// **A FOLDER PATH THE HOST CANNOT MAKE, OR NO PATH AT ALL, IS REFUSED BY
+/// STEP.** Under a regular file the walk stops at the first look that is
+/// not "missing", and the make is refused at `create the day's folder`; an
+/// empty path is missing all the way up and has no parent to fsync, so it
+/// is refused at the fsync rather than reported made.
+#[test]
+fn a_folder_path_the_host_cannot_make_or_no_path_at_all_is_refused() {
+    let base = scratch("tsw-mkdirs");
+    let file = base.join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let under = file.join("SEP_2026");
+    assert_eq!(
+        make_dirs(&under),
+        Err(Refusal::WriteFailed {
+            path: under.clone(),
+            step: "create the day's folder",
+            kind: std::io::ErrorKind::NotADirectory
+        })
+    );
+    assert_eq!(
+        make_dirs(Path::new("")),
+        Err(Refusal::WriteFailed {
+            path: PathBuf::new(),
+            step: "fsync a new folder's parent",
+            kind: std::io::ErrorKind::NotFound
+        })
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"x");
+}
+
+/// **A MONTH FOLDER THE HOST WILL NOT LIST, AND A ROOT IT WILL NOT WRITE,
+/// ARE REFUSED BY STEP, AND NOTHING IS MADE.** Run where the permission bits
+/// bind (D-0995). A month folder that can be searched and not read (0o300)
+/// cannot be checked for leftovers, so the day is refused at `list`, never
+/// written blind; a root the writer may not create its lock in (0o555) is
+/// `lock_failed` with the host's kind, and its log line cannot be written
+/// either, which the run says.
+#[test]
+fn a_folder_the_host_will_not_list_or_a_root_it_will_not_write_is_refused() {
+    crate::support::where_permission_binds(
+        "tickstore_write::tests::\
+         a_folder_the_host_will_not_list_or_a_root_it_will_not_write_is_refused",
+        || {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |path: &Path, bits: u32| {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).unwrap();
+            };
+            let denied = std::io::ErrorKind::PermissionDenied;
+            let (zip, root) = staged("tsw-nolist", &format!("{IDX}.zip"), &nifty_spot_members());
+            let month = idx_day(&root).parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&month).unwrap();
+            mode(&month, 0o300);
+            let run = write_day(&zip, &root, &options("nolist"));
+            mode(&month, 0o755);
+            assert_eq!(
+                run.result,
+                Err(Refusal::WriteFailed {
+                    path: month.clone(),
+                    step: "list",
+                    kind: denied
+                })
+            );
+            assert_eq!(names_in(&month), Vec::<String>::new(), "nothing written");
+
+            let (zip, root) = staged("tsw-nowrite", &format!("{IDX}.zip"), &nifty_spot_members());
+            mode(&root, 0o555);
+            let run = write_day(&zip, &root, &options("nowrite"));
+            mode(&root, 0o755);
+            assert_eq!(
+                run.result,
+                Err(Refusal::LockFailed {
+                    lock: root.join(LOCK_NAME),
+                    kind: denied
+                })
+            );
+            assert!(run.log_error.is_some(), "{run:?}");
+            assert_eq!(names_in(&root), Vec::<String>::new(), "nothing made");
+        },
+    );
+}
+
+/// A zstd frame written by hand (RFC 8878 §3.1.1): the magic, `head` (the
+/// descriptor, the window byte when there is one, the content-size field at
+/// its width), then each block as its three-byte header and its content.
+fn frame_by_hand(head: &[u8], blocks: &[(u32, &[u8])]) -> Vec<u8> {
+    let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD];
+    frame.extend_from_slice(head);
+    for (header, content) in blocks {
+        frame.extend_from_slice(&header.to_le_bytes()[..3]);
+        frame.extend_from_slice(content);
+    }
+    frame
+}
+
+/// **THE FRAME WALK READS EVERY CONTENT-SIZE WIDTH RFC 8878 ALLOWS.**
+/// `ruzstd`'s `Fastest` writes no content-size field, so the walk
+/// `no_block_is_stored_larger_than_the_bytes_it_holds` relies on never met
+/// the two-, four- and eight-byte ones. Frames written here by hand carry
+/// each (with and without a window byte, one with an RLE block after a raw
+/// one), and every walk agrees with what `ruzstd`'s decoder makes of it.
+#[test]
+fn the_frame_walk_reads_every_content_size_width() {
+    let content = invented_noise(300, 77);
+    let body = content.as_slice();
+    let raw = |last: u32| (300 << 3) | last;
+    let rle_last: u32 = (5 << 3) | (1 << 1) | 1;
+    let mut with_rle = content.clone();
+    with_rle.extend_from_slice(b"zzzzz");
+    let head = |first: &[u8], size: &[u8]| [first, size].concat();
+    let cases: Vec<(Vec<u8>, usize, Vec<u8>)> = vec![
+        // Two bytes of content size (the size less 256), and a window byte.
+        (
+            frame_by_hand(&head(&[0x40, 0x00], &[44, 0]), &[(raw(1), body)]),
+            300,
+            content.clone(),
+        ),
+        // Four bytes, single segment: no window byte.
+        (
+            frame_by_hand(&head(&[0xA0], &300_u32.to_le_bytes()), &[(raw(1), body)]),
+            300,
+            content.clone(),
+        ),
+        // Eight bytes, and a window byte.
+        (
+            frame_by_hand(
+                &head(&[0xC0, 0x00], &300_u64.to_le_bytes()),
+                &[(raw(1), body)],
+            ),
+            300,
+            content.clone(),
+        ),
+        // A raw block, then an RLE block of five, which stores one byte.
+        (
+            frame_by_hand(
+                &head(&[0xA0], &305_u32.to_le_bytes()),
+                &[(raw(0), body), (rle_last, &b"z"[..])],
+            ),
+            301,
+            with_rle,
+        ),
+    ];
+    for (frame, stored, decoded) in cases {
+        assert_eq!(stored_block_bytes(&frame), stored, "{:02x?}", &frame[..6]);
+        let mut back = Vec::new();
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(frame.as_slice()).unwrap();
+        std::io::Read::read_to_end(&mut decoder, &mut back).unwrap();
+        assert_eq!(back, decoded);
+    }
+}
+
+/// **THE MEASUREMENTS' OWN HELPERS ANSWER BY THEIR RULES.** Both serve the
+/// `#[ignore]`d measurements on real days, which run by hand, so they are
+/// driven here where the suite runs: `quantiles` picks p50, p99 and the
+/// maximum of an unsorted list (zeros for none), and `refuse_the_real_store`
+/// passes a scratch root and refuses each of the operator's stores and any
+/// path under them.
+#[test]
+fn the_measurement_helpers_answer_by_their_rules() {
+    assert_eq!(quantiles(vec![5, 1, 4, 2, 3]), (3, 4, 5));
+    assert_eq!(quantiles((1..=100).rev().collect()), (50, 99, 100));
+    assert_eq!(quantiles(vec![9]), (9, 9, 9));
+    assert_eq!(quantiles(Vec::new()), (0, 0, 0));
+    refuse_the_real_store(&scratch("tsw-measure"));
+    for operators in [
+        "/Volumes/WD_BLACK/brutex/fresh-20260919/runtime",
+        "/Volumes/WD_BLACK/brutex/tickstore-data/2026",
+    ] {
+        let refused = std::panic::catch_unwind(|| refuse_the_real_store(Path::new(operators)));
+        assert!(refused.is_err(), "{operators} is refused");
+    }
+}
+
+/// **A HEADER LONGER, OR WITH MORE COLUMNS, THAN A BLOCK'S `u32` FIELDS CAN
+/// RECORD IS NOT COLUMNAR.** §4 writes a columnar block's header length and
+/// column count as `u32`s, so a member whose first line runs past them is
+/// stored raw rather than given a number the field cannot hold. The writer
+/// never hands `encode` such a member (its cap is 2 GiB), so the bound is
+/// driven at a cap of 4 through `columnar_under`, the live path's own code
+/// at `u32::MAX` (BASE-COV-PULL PS3: no 4 GiB member is built): a 5-byte
+/// header, and 5 columns in a 4-byte header, are each refused; the same
+/// lines at the live cap are columnar.
+#[test]
+fn a_header_past_what_the_fields_record_is_not_columnar() {
+    assert!(
+        columnar_under(b"a,b\n1,2\n", 4).unwrap().is_some(),
+        "inside the cap"
+    );
+    assert_eq!(
+        columnar_under(b"abcde\n1\n", 4),
+        Ok(None),
+        "a 5-byte header"
+    );
+    assert_eq!(columnar_under(b",,,,\n,,,,\n", 4), Ok(None), "5 columns");
+    assert!(
+        columnar(b"abcde\n1\n").unwrap().is_some(),
+        "the live cap takes it"
+    );
+    assert!(columnar(b",,,,\n,,,,\n").unwrap().is_some(), "and these");
+}
+
+/// **THE DAY LOCK IS RELEASED BY ITS RUN, NOT BY THE LAST COPY OF ITS FILE.**
+/// `flock` belongs to the open file description, and a child process forked
+/// while the lock is held (any `Command` this process spawns, the
+/// `where_permission_binds` children among them) holds a copy of that
+/// description until its exec. A lock released only by closing this run's
+/// copy stays held through the child's, and the next run is refused
+/// `day_locked` by a writer that has finished. A duplicate of the locked
+/// file, standing in for the child's copy, is kept alive past the run's
+/// lock: the next take succeeds; and a take while the lock is held is
+/// refused naming the lock.
+#[test]
+fn the_day_lock_is_released_by_its_run_not_by_the_last_copy_of_its_file() {
+    let root = scratch("tsw-lockcopy");
+    let held = lock_root(&root).unwrap();
+    assert_eq!(
+        lock_root(&root).err(),
+        Some(Refusal::DayLocked {
+            lock: root.join(LOCK_NAME)
+        }),
+        "held, so refused naming the lock"
+    );
+    let childs_copy = held.file.try_clone().unwrap();
+    drop(held);
+    let again = lock_root(&root);
+    assert!(again.is_ok(), "the next run is refused: {:?}", again.err());
+    drop(childs_copy);
+}
