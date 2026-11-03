@@ -4068,7 +4068,7 @@ fn found(scan: &FileScan) -> Vec<(usize, Option<&str>, &str)> {
 #[test]
 fn the_lexer_reads_the_rarer_spellings_as_rustc_does() {
     let end = |src: &str| shebang_end(&src.chars().collect::<Vec<_>>());
-    assert_eq!(end("#!//! doc\nfn"), 9);
+    assert_eq!(end("#!//! doc\n[a]"), 9);
     assert_eq!(end("#!/// doc\n["), 9);
     assert_eq!(end("#!//// plain\n[a]"), 0);
     assert_eq!(end("#!// plain\n[a]"), 0);
