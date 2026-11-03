@@ -2,7 +2,9 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "bounded test fixtures must encode and decode"
+    clippy::panic,
+    reason = "bounded test fixtures must encode and decode, and a callback that a \
+              refused resume must never reach panics if it is reached"
 )]
 
 use std::collections::BTreeMap;
@@ -260,9 +262,13 @@ fn resumed_identity_column_offers_and_every_configuration_term_must_match() {
         ladder.with_pair_budget(ladder.pair_budget() - 1),
     ] {
         assert!(matches!(
-            other.resume_checkpointed(&column, &POSITIONS, IDENTITY, decode(&bytes), &mut |_| Ok(
-                ()
-            )),
+            other.resume_checkpointed(
+                &column,
+                &POSITIONS,
+                IDENTITY,
+                decode(&bytes),
+                &mut |_| panic!("a refused resume reaches no checkpoint")
+            ),
             Err(Error::Invalid(_))
         ));
     }
@@ -273,7 +279,7 @@ fn resumed_identity_column_offers_and_every_configuration_term_must_match() {
                 &POSITIONS,
                 [0; 32],
                 decode(&bytes),
-                &mut |_| Ok(())
+                &mut |_| panic!("a refused resume reaches no checkpoint")
             )
             .is_err()
     );
@@ -285,7 +291,7 @@ fn resumed_identity_column_offers_and_every_configuration_term_must_match() {
                 &POSITIONS,
                 IDENTITY,
                 decode(&bytes),
-                &mut |_| Ok(())
+                &mut |_| panic!("a refused resume reaches no checkpoint")
             )
             .is_err()
     );
@@ -293,7 +299,9 @@ fn resumed_identity_column_offers_and_every_configuration_term_must_match() {
     other.reverse();
     assert!(
         ladder
-            .resume_checkpointed(&column, &other, IDENTITY, decode(&bytes), &mut |_| Ok(()))
+            .resume_checkpointed(&column, &other, IDENTITY, decode(&bytes), &mut |_| panic!(
+                "a refused resume reaches no checkpoint"
+            ))
             .is_err()
     );
 }
@@ -1050,4 +1058,47 @@ fn a_boundary_prefix_and_every_level_saved_so_far_are_write_to_byte_for_byte() {
         survivors > 8,
         "levels past the first hold survivors: {survivors}"
     );
+}
+
+/// BASE-COV-LIBS-LS4: the oracle's own eligibility rule at its edges. A
+/// position on no bar, one on every bar and one under the threshold is no
+/// candidate, so only positions a ladder can keep are combined; with no rows
+/// at all, nothing is.
+#[test]
+fn the_oracle_combines_only_positions_a_ladder_can_keep() {
+    let at = |bits: &[u32]| {
+        bits.iter()
+            .fold(ConditionMask::ZERO, |mask, &bit| mask.with_bit(bit))
+    };
+    // 0 on every bar, 63 on one, 64 on two, every other position on none.
+    let rows = [at(&[0, 63, 64]), at(&[0, 64]), at(&[0])];
+    let expected = oracle(&rows, 1);
+    assert_eq!(expected.len(), 3, "{{63}}, {{64}} and {{63, 64}}");
+    assert_eq!(expected.get(&at(&[63]).words()), Some(&1));
+    assert_eq!(expected.get(&at(&[64]).words()), Some(&2));
+    assert_eq!(expected.get(&at(&[63, 64]).words()), Some(&1));
+    assert_eq!(expected.get(&at(&[0]).words()), None, "always true");
+    // COMBINED: the threshold raised past 63's one hit leaves 64 alone.
+    let strict = oracle(&rows, 2);
+    assert_eq!(strict.len(), 1);
+    assert_eq!(strict.get(&at(&[64]).words()), Some(&2));
+    // OUT OF THE BOX: no rows, no candidates.
+    assert!(oracle(&[], 1).is_empty());
+}
+
+/// BASE-COV-LIBS-LS4: the failure-injecting wrapper forwards a flush to what
+/// it wraps, so a buffered writer's bytes reach their sink; no other test
+/// flushes through it.
+#[test]
+fn the_failing_wrapper_forwards_a_flush() {
+    use std::io::Write as _;
+    let mut io = FailingIo {
+        inner: std::io::BufWriter::new(Vec::new()),
+        remaining: 8,
+    };
+    io.write_all(b"abc").expect("inside the budget");
+    assert!(io.inner.get_ref().is_empty(), "buffered until the flush");
+    io.flush().expect("a Vec takes the flush");
+    assert_eq!(io.inner.get_ref().as_slice(), b"abc");
+    assert_eq!(io.remaining, 5);
 }
