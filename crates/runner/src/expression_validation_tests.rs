@@ -646,3 +646,182 @@ fn one_fold_map_binds_every_program_exactly_as_bind_does() -> Result<(), String>
     }
     Ok(())
 }
+
+/// BASE-COV-LIBS-LS2: EVERY AUTHORITY REFUSAL OF THE FIXED-TRAINING PATH NAMES
+/// ITS CAUSE: a plan over another resolution, a fold map over an identical
+/// copy of the later column, a selection carrying another run, resolution or
+/// evaluation, and a later evaluation of the other side.
+#[test]
+fn every_fixed_training_authority_refusal_names_its_cause() -> Result<(), String> {
+    let (bars, column) = fixture(0, false)?;
+    let (later, later_column) = fixture(16 * DAY, true)?;
+    let key = InstrumentKey::index(Exchange::Nse, "NIFTY").map_err(display)?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_research_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let program = Expression::parse("30").map_err(|e| format!("{e:?}"))?;
+    let training = resolved.evaluate_expression_with_attested(
+        &attested,
+        &run(&key, &bars, &program, Direction::Long)?,
+    )?;
+    let validated = resolved.validate_expression_evaluation(&training)?;
+    let anchor = validated.later_period_anchor();
+    let later_run = run(&key, &later, &program, Direction::Long)?;
+    let mut observed = resolved.evaluate_expression_oos(
+        &anchor,
+        series(&key, &later)?,
+        &later_column,
+        &later_run,
+    )?;
+    let (requested, parts) = windows(&later)?;
+    let short = policy(crate::excursion::Side::Short)?
+        .resolve_research_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    assert_eq!(
+        FixedTrainingFoldPlanV1::new(&short, &anchor, requested, &parts, 2).map(|_| ()),
+        Err("fixed-training plan has foreign training authority".to_owned())
+    );
+    let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
+    let copy = later_column.try_clone_exact().map_err(display)?;
+    let foreign_map = LaterFoldMapV1::new(&parts, &later, &copy, 100_000)?;
+    assert_eq!(
+        plan.bind_with(&observed, &foreign_map, 100_000).map(|_| ()),
+        Err("fixed-training fold map belongs to another later run or partition".to_owned())
+    );
+    let map = LaterFoldMapV1::new(&parts, &later, &later_column, 100_000)?;
+    assert!(plan.bind_with(&observed, &map, 100_000).is_ok());
+    let mut chosen = None;
+    for (ordinal, cell) in training.grid().cells.iter().enumerate() {
+        let disposition =
+            resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell))?;
+        if let Some(selected) = disposition.selected() {
+            chosen = Some((ordinal, selected.clone()));
+            break;
+        }
+    }
+    let (ordinal, selected) = chosen.ok_or("fixture has no authorized original coordinate")?;
+    {
+        let bound = plan.bind(&observed, 100_000)?;
+        assert!(bound.materialize_coordinate(&selected, ordinal).is_ok());
+        let differs = Err("fixed-training original selected authority differs".to_owned());
+        let mut other = selected.clone();
+        other.run = later_run.run_id();
+        assert_eq!(
+            bound.materialize_coordinate(&other, ordinal).map(|_| ()),
+            differs,
+            "run"
+        );
+        let mut other = selected.clone();
+        other.resolution = short.digest();
+        assert_eq!(
+            bound.materialize_coordinate(&other, ordinal).map(|_| ()),
+            differs,
+            "resolution"
+        );
+        let mut other = selected.clone();
+        other.evaluation = [0; 32];
+        assert_eq!(
+            bound.materialize_coordinate(&other, ordinal).map(|_| ()),
+            differs,
+            "evaluation"
+        );
+    }
+    observed.side = crate::excursion::Side::Short;
+    assert_eq!(
+        plan.bind(&observed, 100_000).map(|_| ()),
+        Err("fixed-training folds have foreign later authority".to_owned())
+    );
+    Ok(())
+}
+
+/// A LATER DAY WHOSE EVERY BAR IS REFUSED IS NOT AN ACTUAL SESSION: its fold
+/// counts one session fewer, and every bar keeps its fold.
+#[test]
+fn a_later_day_whose_every_bar_is_refused_is_not_an_actual_session() -> Result<(), String> {
+    let (later, later_column) = fixture(16 * DAY, true)?;
+    let (_, parts) = windows(&later)?;
+    let (clean_mapping, clean_sessions) =
+        LaterFoldMapV1::new(&parts, &later, &later_column, 100_000)?
+            .indexed
+            .clone()?;
+    let mut refused = later.clone();
+    let first = day(refused.first().ok_or("later empty")?.ts_micros);
+    for bar in refused.iter_mut().filter(|bar| day(bar.ts_micros) == first) {
+        bar.high = bar.low - 1;
+    }
+    let column = Column::build(
+        &refused,
+        &mut Evaluator::with_calendar(
+            Widths::pinned().map_err(display)?,
+            indicators::vwap::Availability::Absent,
+            indicators::pattern::Thresholds::CLASSICAL,
+            Calendar::all_regular(),
+        ),
+    );
+    let (mapping, sessions) = LaterFoldMapV1::new(&parts, &refused, &column, 100_000)?
+        .indexed
+        .clone()?;
+    assert_eq!(mapping, clean_mapping);
+    assert_eq!(
+        sessions.first().copied(),
+        clean_sessions.first().map(|n| n - 1)
+    );
+    assert_eq!(sessions.get(1), clean_sessions.get(1));
+    Ok(())
+}
+
+/// A PROJECTION WHOSE FOLDS BREAK THE COUNT HIERARCHY OR ITS WINDOW ORDER IS
+/// REFUSED: no session, more wins than trades, a profit with no win, all
+/// wins and no profit, and a fold window that ends before it starts.
+#[test]
+fn a_projection_whose_folds_break_the_count_hierarchy_is_refused() -> Result<(), String> {
+    type Edit = fn(&mut FixedTrainingFoldV1);
+    with_projection(|proof, _| {
+        let hierarchy = Err("fixed-training fold count/return hierarchy differs".to_owned());
+        let edits: [(&str, Edit); 4] = [
+            ("no session", |fold| fold.sessions = 0),
+            ("more wins than trades", |fold| {
+                fold.trades = 1;
+                fold.wins = 2;
+                fold.return_paisa = 5;
+            }),
+            ("a profit with no win", |fold| {
+                fold.trades = 2;
+                fold.wins = 0;
+                fold.return_paisa = 5;
+            }),
+            ("all wins and no profit", |fold| {
+                fold.trades = 2;
+                fold.wins = 2;
+                fold.return_paisa = 0;
+            }),
+        ];
+        for (what, edit) in edits {
+            let mut changed = proof.clone();
+            edit(changed.data.folds.first_mut().ok_or("fold")?);
+            assert_eq!(changed.aggregate_oos_paisa(), hierarchy, "{what}");
+        }
+        let mut changed = proof.clone();
+        let fold = changed.data.folds.first_mut().ok_or("fold")?;
+        fold.window = LaterSessionWindowV1 {
+            first: fold.window.first,
+            last: fold.window.first - 1,
+        };
+        assert_eq!(
+            changed.aggregate_oos_paisa(),
+            Err(
+                "fixed-training windows overlap training or fail exact contiguous coverage"
+                    .to_owned()
+            )
+        );
+        assert_eq!(display(7_u8), "7");
+        Ok(())
+    })
+}
