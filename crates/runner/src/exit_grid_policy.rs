@@ -8232,6 +8232,159 @@ mod tests {
             })
         ));
     }
+    /// BASE-COV-LIBS-LS2: A RESOLVED GRID VIEW REFUSES A GRID, A SERIES OR A
+    /// COORDINATE THAT IS NOT ITS OWN POPULATION: ladders of another grid, a
+    /// grid with refused paths, a resolution whose stored cell count is not its
+    /// enumeration, a series of another commit, every axis past its ladder, a
+    /// trailing take-profit armed outside its own rungs, and a cell off the
+    /// required forced stop.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one refusal per foreign input of the view, read as one list"
+    )]
+    fn a_grid_view_refuses_what_is_not_its_population() {
+        let input = bars(100);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let view = resolved.view();
+        let evaluated = canonical_evaluation(&resolved, &input);
+        assert_eq!(view.validate_complete_grid(&evaluated.grid), Ok(()));
+        let other = crate::excursion::Ladder::new(vec![1, 2, 3, 4, 5]).expect("a ladder");
+        let mut targets = evaluated.grid.clone();
+        targets.targets = other.clone();
+        let mut trails = evaluated.grid.clone();
+        trails.trails = other;
+        for grid in [&targets, &trails] {
+            assert_eq!(
+                view.validate_complete_grid(grid),
+                Err(ExitGridErrorV1::ReplayLadderMismatch)
+            );
+        }
+        let mut refused = evaluated.grid.clone();
+        refused.refused_paths = 1;
+        assert_eq!(
+            view.validate_complete_grid(&refused),
+            Err(ExitGridErrorV1::RefusedExecutionPaths { paths: 1 })
+        );
+        let mut miscounted = resolved.clone();
+        miscounted.cell_count += 1;
+        assert!(matches!(
+            miscounted.view().coordinate_row_offsets(),
+            Err(ExitGridErrorV1::ReplayCellCountMismatch { .. })
+        ));
+        let series = ExecutionSeriesV1::new(
+            &instrument,
+            "test-feed",
+            "another-commit",
+            [0xA5; 32],
+            &input,
+        )
+        .expect("complete identity");
+        assert_eq!(
+            view.require_matching_series(series),
+            Err(ExitGridErrorV1::SeriesIdentityMismatch("commit"))
+        );
+        let bank = bank_nifty();
+        let series = ExecutionSeriesV1::new(&bank, "test-feed", "test-commit", [0xA5; 32], &input)
+            .expect("complete identity");
+        assert_eq!(
+            view.require_matching_series(series),
+            Err(ExitGridErrorV1::SeriesIdentityMismatch("instrument"))
+        );
+        let (stops, targets, trails) = (
+            resolved.stop_levels_ppm.len(),
+            resolved.target_levels_ppm.len(),
+            resolved.trail_levels_ppm.len(),
+        );
+        let ttp = |arm, trail| Some(crate::grid::Ttp { arm, trail });
+        for (what, chosen) in [
+            (
+                "a stop past its ladder",
+                Chosen {
+                    stop: Some(stops),
+                    ..Chosen::default()
+                },
+            ),
+            (
+                "a target past its ladder",
+                Chosen {
+                    target: Some(targets),
+                    ..Chosen::default()
+                },
+            ),
+            (
+                "a trail past its ladder",
+                Chosen {
+                    tsl: Some(trails),
+                    ..Chosen::default()
+                },
+            ),
+            (
+                "an arm past the target ladder",
+                Chosen {
+                    ttp: ttp(targets, 0),
+                    ..Chosen::default()
+                },
+            ),
+            (
+                "a trail past the trail ladder",
+                Chosen {
+                    ttp: ttp(0, trails),
+                    ..Chosen::default()
+                },
+            ),
+            (
+                "an arm at or past its own target",
+                Chosen {
+                    target: Some(0),
+                    ttp: ttp(0, 0),
+                    ..Chosen::default()
+                },
+            ),
+            (
+                "an armed trail at or past its own stop trail",
+                Chosen {
+                    tsl: Some(0),
+                    ttp: ttp(0, 0),
+                    ..Chosen::default()
+                },
+            ),
+        ] {
+            assert!(!view.chosen_axes_are_in_bounds(chosen), "{what}");
+            assert!(!view.chosen_is_in_bounds(chosen), "{what}");
+        }
+        let mut forced = policy();
+        forced.forced_stop = ForcedStopV1::RequireExactObserved(25);
+        let forced = forced
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        assert_eq!(forced.forced_stop_index(), Some(0));
+        let off = Cell {
+            stop: Some(1),
+            target: Some(0),
+            trades: 1,
+            ..Cell::default()
+        };
+        assert!(
+            forced
+                .view()
+                .execution_refusal_bits(&off)
+                .contains(ExecutionRefusalBitsV1::FORCED_STOP_MISMATCH)
+        );
+        let on = Cell {
+            stop: Some(0),
+            ..off
+        };
+        assert!(
+            !forced
+                .view()
+                .execution_refusal_bits(&on)
+                .contains(ExecutionRefusalBitsV1::FORCED_STOP_MISMATCH)
+        );
+    }
 }
 
 #[cfg(test)]
