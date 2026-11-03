@@ -213,11 +213,9 @@ fn phase_bands_hold_only_what_they_were_given() {
     assert_eq!(phases.bands().len(), MAX_BANDS);
     let full = phases;
     let last = phases.bands().last().copied().unwrap();
-    let other = if last.phase == Phase::Break {
-        Phase::PostClose
-    } else {
-        Phase::Break
-    };
+    // The sixteenth band (at = 15, odd) is a break; a close follows it.
+    assert_eq!(last.phase, Phase::Break);
+    let other = Phase::PostClose;
     phases.push(other, minute, minute + 9);
     assert_eq!(phases, full, "a band past the room is not written");
     assert_eq!(phases.phase_at(minute + 5), Phase::Unverified);
