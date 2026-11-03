@@ -29,7 +29,7 @@ use super::{
     Ask, Begun, Entry, How, Journal, KEY_CAP, Kind, Lacks, Lines, MAX_WORKERS, Month, Outcome,
     SYNC_EVERY, Scope, State, Status, TAIL_BYTES, VOID, WHY_CAP, drive, journal_name, key_refused,
     months, nothing_beside, one_line, one_word, parse, plan_digest, request_stop, run, status,
-    stop_name, whole_lines,
+    stop_name, summary_owed_by_len, whole_lines,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -1335,16 +1335,20 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
         .iter()
         .map(|month| (month.key.as_str(), month.lacks.kinds().collect()))
         .collect();
+    // The three small months owe no `.sum` by their length (D-4933), so the
+    // walk counts them apart instead of listing them as lacking one, and a
+    // step's plan can read zero (D-7430). They still lack `.tix` and `.srt`:
+    // a run names them `small`.
     assert_eq!(
         listed,
         [
             (
                 "bars/gdfl/NSE/FNO/NIFTY/2019-03-28-1150000-CE/1s/2019-03.bin",
-                vec![Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary]
+                vec![Kind::DayIndex, Kind::SortIndex]
             ),
             (
                 "bars/gdfl/NSE/INDEX/NIFTY/1min/2019-04.bin",
-                vec![Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary]
+                vec![Kind::DayIndex, Kind::SortIndex]
             ),
             (
                 "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin",
@@ -1352,10 +1356,11 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
             ),
             (
                 "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-04.bin",
-                vec![Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary]
+                vec![Kind::DayIndex, Kind::SortIndex]
             ),
         ]
     );
+    assert_eq!(walked.sum_small, 3, "{walked:?}");
     assert_eq!(walked.links, 4, "{walked:?}");
     assert_eq!(walked.strays, 11, "{walked:?}");
     assert_eq!(walked.strays_named.len(), 11);
@@ -1538,7 +1543,16 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
 fn a_sidecar_name_held_by_anything_is_not_lacking() {
     let root = Root::new();
     let at = store_path("INDEX", "NIFTY", None, Timeframe::SECOND_1, ym(2020, 1));
-    put(&root.0, at, "NIFTY", 10, false);
+    // A month that owes all three, so the one name left absent is lacking:
+    // a small month owes no `.sum` and is counted apart (D-7430).
+    put(&root.0, at, "NIFTY", 1_100, false);
+    for kind in [
+        FileKind::TimeIndex,
+        FileKind::SortIndex,
+        FileKind::MonthSummary,
+    ] {
+        fs::remove_file(at.with_file(kind).to_path_buf(&root.0)).unwrap();
+    }
     fs::create_dir_all(at.with_file(FileKind::TimeIndex).to_path_buf(&root.0)).unwrap();
     std::os::unix::fs::symlink(
         "nowhere",
@@ -1547,6 +1561,7 @@ fn a_sidecar_name_held_by_anything_is_not_lacking() {
     .unwrap();
     let walked = months(&root.0, Vendor::Gdfl, &Scope::default()).unwrap();
     assert_eq!(walked.months.len(), 1);
+    assert_eq!(walked.sum_small, 0, "{walked:?}");
     let lacks = walked.months[0].lacks;
     assert_eq!(lacks.kinds().collect::<Vec<_>>(), [Kind::MonthSummary]);
     assert!(
@@ -2144,4 +2159,49 @@ fn a_set_of_lacks_without_a_kind_keeps_the_rest() {
         [Kind::DayIndex, Kind::SortIndex]
     );
     assert_eq!(all.without(Kind::Recount), all);
+}
+
+/// **A MONTH TOO SHORT TO OWE A `.sum` IS COUNTED APART, NEVER LISTED AS
+/// LACKING ONE (D-7430).** One row short of the threshold owes none, so the
+/// walk counts it in `sum_small` and lists it lacking only the `.tix` and
+/// `.srt` a run names `small`; at the threshold a missing `.sum` is lacking;
+/// a zero-length bar file proves nothing by its length and stays owed, so a
+/// run meets it and refuses it by name. Before, the small month was listed as
+/// lacking a `.sum` forever and a step's plan could never read zero.
+#[test]
+fn the_walk_counts_a_month_too_short_to_owe_a_summary_apart() {
+    let root = Root::new();
+    let one = Timeframe::SECOND_1;
+    let rows = i64::try_from(store::time_index::INDEX_MIN_ROWS).unwrap();
+    let small = store_path("INDEX", "NIFTY", None, one, ym(2021, 1));
+    let owed = store_path("INDEX", "NIFTY", None, one, ym(2021, 2));
+    let zero = store_path("INDEX", "NIFTY", None, one, ym(2021, 3));
+    put(&root.0, small, "NIFTY", rows - 1, false);
+    put(&root.0, owed, "NIFTY", rows, false);
+    fs::remove_file(owed.with_file(FileKind::MonthSummary).to_path_buf(&root.0)).unwrap();
+    fs::write(zero.to_path_buf(&root.0), b"").unwrap();
+    let walked = months(&root.0, Vendor::Gdfl, &Scope::default()).unwrap();
+    let listed: Vec<(&str, Vec<Kind>)> = walked
+        .months
+        .iter()
+        .map(|month| (month.key.as_str(), month.lacks.kinds().collect()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (
+                "bars/gdfl/NSE/INDEX/NIFTY/1s/2021-01.bin",
+                vec![Kind::DayIndex, Kind::SortIndex]
+            ),
+            (
+                "bars/gdfl/NSE/INDEX/NIFTY/1s/2021-02.bin",
+                vec![Kind::MonthSummary]
+            ),
+            (
+                "bars/gdfl/NSE/INDEX/NIFTY/1s/2021-03.bin",
+                vec![Kind::DayIndex, Kind::SortIndex, Kind::MonthSummary]
+            ),
+        ]
+    );
+    assert_eq!(walked.sum_small, 1, "{walked:?}");
 }

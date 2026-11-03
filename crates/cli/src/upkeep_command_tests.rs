@@ -803,10 +803,14 @@ fn a_whole_feed_gets_its_sort_index_in_one_run() {
     month(&root.0, small, "NIFTY", 40, true);
     let (code, out) = plain(&root.0, &["plan", "gdfl"]);
     assert_eq!(code, OK, "{out}");
+    // The small month owes no `.sum` by its length, so it is counted apart
+    // and not among the months lacking one (D-7430); it still lacks a
+    // `.tix` and a `.srt`, and a run names it `small`.
     assert!(
-        out.contains("TOTAL lacks .tix 7, .srt 7, .sum 7 of 7 month(s)"),
+        out.contains("TOTAL lacks .tix 7, .srt 7, .sum 6 of 7 month(s)"),
         "{out}"
     );
+    assert!(out.contains("SMALL: 1 month(s) with no .sum"), "{out}");
     let (code, out) = plain(&root.0, &["run", "srt", "gdfl", "--workers", "4"]);
     assert_eq!(code, OK, "{out}");
     assert!(
@@ -836,7 +840,7 @@ fn a_whole_feed_gets_its_sort_index_in_one_run() {
     let (code, out) = plain(&root.0, &["plan", "gdfl"]);
     assert_eq!(code, OK, "{out}");
     assert!(
-        out.contains("TOTAL lacks .tix 7, .srt 1, .sum 7 of 7 month(s)"),
+        out.contains("TOTAL lacks .tix 7, .srt 1, .sum 6 of 7 month(s)"),
         "{out}"
     );
     assert!(
@@ -2802,9 +2806,12 @@ fn a_refused_month_then_a_resume_at_another_worker_count_builds_only_it() {
         "no name for a refused file"
     );
     fs::remove_dir(&staging).unwrap();
+    // `--all` puts the two months run 1000 closed clean back in the plan, so
+    // their skip shows the resume read run 1000's lines; the walk alone
+    // leaves a month with a `.sum` out.
     let (code, out) = plain(
         &root.0,
-        &["resume", "msum", "gdfl", "1000", "--workers", "8"],
+        &["resume", "msum", "gdfl", "1000", "--all", "--workers", "8"],
     );
     assert_eq!(code, OK, "{out}");
     assert!(
@@ -2858,8 +2865,15 @@ fn a_clock_stepped_back_gives_a_resume_its_own_id() {
         after_item: &noop,
     };
     let mut out = String::new();
+    // `--all` puts the month run 5000 closed clean back in the plan, so its
+    // skip shows the resume read run 5000's own lines: the walk alone leaves
+    // a month with a `.sum` out, and would skip nothing either way.
     assert_eq!(
-        command_with(&["resume", "msum", "gdfl", "5000"], &back, &mut out),
+        command_with(
+            &["resume", "msum", "gdfl", "5000", "--all"],
+            &back,
+            &mut out
+        ),
         OK,
         "{out}"
     );

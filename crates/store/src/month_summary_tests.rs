@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use brutex_core::vendor::Vendor;
 
 use super::*;
-use crate::file::{Appended, BarFile, Summarized};
+use crate::file::{Appended, BarFile, StoreError, Summarized};
 use crate::format::{Bar, OI_NULL};
 use crate::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use crate::time_index::INDEX_MIN_ROWS;
