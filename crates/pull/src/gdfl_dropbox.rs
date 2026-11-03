@@ -578,12 +578,20 @@ impl Endpoints {
     /// The proxy the environment names for this client, by host only, or
     /// `None` when there is none or the client uses none.
     fn proxy_in_use(&self) -> Option<String> {
+        self.proxy_named_by(|name| std::env::var(name).ok())
+    }
+
+    /// [`Endpoints::proxy_in_use`] over the variables `var` answers, so a
+    /// test can name them without touching this process's environment: the
+    /// first of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY` and `all_proxy`
+    /// that is set, by host only.
+    fn proxy_named_by(&self, var: impl Fn(&str) -> Option<String>) -> Option<String> {
         if !self.proxy {
             return None;
         }
         ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
             .iter()
-            .find_map(|name| std::env::var(name).ok())
+            .find_map(|name| var(name))
             .and_then(|value| proxy_host_of(&value))
     }
 
@@ -1693,13 +1701,13 @@ pub fn status(store_root: &Path) -> Result<Option<Fields>, String> {
             Some(at) => tail.get(..at).unwrap_or_default(),
             None => &[][..],
         };
-        let mut lines: Vec<&[u8]> = whole.split(|&b| b == b'\n').collect();
-        if from > 0 && !lines.is_empty() {
-            // The window's first line may begin before it: never read.
-            lines.remove(0);
-        }
+        let lines: Vec<&[u8]> = whole.split(|&b| b == b'\n').collect();
+        // The window's first line may begin before it: never read. (`split`
+        // yields at least one slice, so there is always a first to pass.)
+        let cut = usize::from(from > 0);
         if let Some(fields) = lines
             .iter()
+            .skip(cut)
             .rev()
             .find_map(|line| std::str::from_utf8(line).ok().and_then(parse_line))
         {
@@ -2005,7 +2013,8 @@ async fn press(
     let print = config.print();
     let staging = staging_root(fetch.store_root);
     check_roots(fetch, &staging)?;
-    // Held until the press returns: a second press is `run_busy`.
+    // Held until the press returns, then released by name: a second press
+    // meanwhile is `run_busy`.
     let _lock = lock_staging(fetch.store_root, &staging, &journal.run)?;
     let memory =
         Memory::load(&journal.path).map_err(|why| RunRefusal::new("journal_unreadable", why))?;
@@ -2058,11 +2067,29 @@ async fn press(
     fetch_all(&ctx, &mut wire, &picked.wanted, handoff, journal, report).await
 }
 
+/// A press's staging lock, released BY NAME when the press ends, never only
+/// by closing its file. The lock belongs to the open file description, and
+/// any process this one starts meanwhile (another thread's spawn, until the
+/// child's exec) holds a copy of that description: closing ours alone left
+/// the lock held while the copy lived, and the next press was `run_busy`,
+/// naming a press that had ended (measured: 103 of 300 second presses while
+/// another thread spawned children).
+struct StagingLock(std::fs::File);
+
+impl Drop for StagingLock {
+    fn drop(&mut self) {
+        // Released on the description itself, so every copy is released
+        // with it. An unlock of a lock this file holds has no failure to
+        // name: the close that follows ends ours either way.
+        let _ = self.0.unlock();
+    }
+}
+
 /// The staging root made under the store root ONE FOLDER AT A TIME, never
 /// a chain (a store root that is gone, the drive unplugged, is refused and
 /// never made again under `/Volumes`), and its lock taken: `run_busy` names
 /// the holder.
-fn lock_staging(store_root: &Path, staging: &Path, run: &str) -> Result<std::fs::File, Stop> {
+fn lock_staging(store_root: &Path, staging: &Path, run: &str) -> Result<StagingLock, Stop> {
     // A store root that is there but may not be written is its own code:
     // the drive is not lost, its permissions refuse the press.
     let lost = |path: &Path, why: std::io::Error| {
@@ -2108,7 +2135,7 @@ fn lock_staging(store_root: &Path, staging: &Path, run: &str) -> Result<std::fs:
         .into());
     }
     let _ = writeln!(&lock, "run={run} pid={}", std::process::id());
-    Ok(lock)
+    Ok(StagingLock(lock))
 }
 
 /// Lists the link to its end, refuses a shrunken listing and sorts it,
@@ -3208,8 +3235,7 @@ async fn write_body(
         .map_err(|why| {
             RunRefusal::new("staging_write_failed", format!("{}: {why}", path.display()))
         })?;
-    let mut have = out
-        .metadata()
+    let mut have = at_step("metadata", out.metadata())
         .map_err(|why| {
             RunRefusal::new("staging_write_failed", format!("{}: {why}", path.display()))
         })?
@@ -3241,7 +3267,7 @@ async fn write_body(
         }
         have += len;
     }
-    out.sync_data().map_err(|why| {
+    at_step("sync", out.sync_data()).map_err(|why| {
         RunRefusal::new("staging_write_failed", format!("{}: {why}", path.display()))
     })?;
     if have < size {
@@ -3273,6 +3299,27 @@ thread_local! {
     /// A test's full disk: the first chunk that would take a part past this
     /// many bytes fails with `StorageFull`, as `ENOSPC` does.
     pub(crate) static FULL_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's failing drive: the step of `write_body` named here
+    /// (`"metadata"`, the part's status read, or `"sync"`, its last sync)
+    /// fails as a device error does. Neither fails on a sound drive, so no
+    /// file a test can make reaches those refusals.
+    pub(crate) static PART_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// `result`, unless a test made `step` fail (`PART_FAULT`, test builds only).
+fn at_step<T>(step: &'static str, result: std::io::Result<T>) -> std::io::Result<T> {
+    #[cfg(test)]
+    if PART_FAULT.with(std::cell::Cell::get) == Some(step) {
+        return Err(std::io::Error::other(format!(
+            "{step} failed (a test's fault)"
+        )));
+    }
+    let _ = step;
+    result
 }
 
 /// One chunk appended to a part.
