@@ -7,15 +7,18 @@ because a prohibition survives a rewrite better than a goal does.
 
 ## 1. Scope lock
 
-**The engine sweeps two shapes, both on NSE.** Narrowed from three
+**The engine sweeps three shapes, all on NSE.** Narrowed from three
 instruments by D-0017 (`BSE-SENSEX` is no longer swept and BSE is no longer
-pulled), then widened by D-0506 to the cash equities of the F&O universe.
+pulled), then widened by D-0506 to the cash equities of the F&O universe, and
+by D-8100 to the cash shares of the operator's current F&O list on the F&O
+strategy path.
 
 | Symbol | Exchange | Segment | Since |
 |---|---|---|---|
 | `NSE-NIFTY` | NSE | INDEX | — |
 | `NSE-BANKNIFTY` | NSE | INDEX | — |
 | the 208 F&O underlyings that are shares, e.g. `NSE-HINDALCO` | NSE | CASH | D-0506, D-0682 |
+| the cash shares of the operator's current F&O list, on the F&O strategy path: a data file, never a list here | NSE | CASH | D-8100 |
 
 The third row is not a list here and must not become one: the names are
 `core::universe::FNO_UNDERLYINGS`, derived from NSE's own F&O list with an
@@ -26,12 +29,29 @@ cash equity (D-0682). NIFTY and BANKNIFTY are swept as the indices above.
 The cash equity is the stock's own price series — what the spot level is for an
 index. It does not expire.
 
+**The fourth row is not a list here either, and it is not the third row's
+list.** It is the operator's file `fno218.txt` (D-8100): one NSE symbol a line,
+218 names when the operator fixed it on 30 Oct 2026, held as data, with the
+blake3 digest of its bytes in every run identity of the F&O strategy path.
+Measured on 3 Nov 2026 with `comm` against `core::universe::FNO_UNDERLYINGS`
+less the five indices, on FNO-SEAM's tree: 13 of its names are not in that list
+(ANANDRATHI, ATHERENERG, COROMANDEL, CUB, DATAPATTNS, ENRIN, ICICILIFE,
+KARURVYSYA, MAHABANK, NAVINFLUOR, SAGILITY, SYRMA, UJJIVANSFB) and 3 of that
+list's names are not in it (BAJAJHLDNG, DALBHARAT, and ICICIPRULI, which is
+joined to ICICILIFE at read time). Stocks that left F&O since 2018 are not
+added; within the list a stock is traded only on its point-in-time F&O member
+days (`pull::fno_membership::Membership`). Every result and page of the path
+carries **"current F&O members only (survivorship bias not removed)"**. The
+rates and the exchange and broker facts the path rests on are the section
+*F&O strategy path: dated cash-equity charges and execution facts* below.
+
 `NSE-INDIAVIX` is **reference only** — stored, stamped onto observable trades
 as `vix_at_entry` / `vix_at_exit`, and never in the condition vocabulary, the
 ranking inputs, or run identity.
 
 The store may hold futures, options and single-stock series. Nothing outside
-the two symbols above is ever swept.
+the rows above is ever swept. (This said "the two symbols above" from before
+D-0506 until D-8100 added the fourth row.)
 
 Widening this list requires an entry in `docs/05-decisions.md`. It does not
 happen because a task seemed to need it.
@@ -1405,6 +1425,84 @@ STT and stamp duty for the cash market, and nothing read states them for F&O or
 states the level at which the exchange charge, the SEBI fee and the GST are
 rounded on a note. Each is recorded as UNVERIFIED in `docs/06-limits.md`
 §CHG-1 (D-5113, D-5121, D-5122).
+
+## F&O strategy path: dated cash-equity charges and execution facts — read 30 Oct 2026 (FNO-LAW, D-8100 to D-8108)
+
+`CLAUDE.md` §3 rule 1, for the F&O strategy path of `CLAUDE.md` §1 item 3
+(D-8100). Every rate the path's two cost clocks apply (D-8102) and every
+exchange or broker fact its fill walk and money rules apply (D-8101) traces to
+a row here. Nothing here is a backtest result; a result priced with these rows
+carries "current F&O members only (survivorship bias not removed)".
+
+**How the cost rows were obtained, stated first because it bounds every row
+below.** The costs step of 30 Oct 2026 wrote `state/fib-strategy-20261030/COSTS.md`
+and its machine-readable twin `costs-table.json`, version
+`costs-table/2026-10-30/r1`. It downloaded every official document named below
+on 2026-10-30 with curl and read it with pdftotext, with bsdtar (zips), as HTML,
+or visually (the two image PDFs, NSE/FA/50832 and NSE/FA/53913), and it
+recorded the sha256 of each document in
+`state/fib-strategy-20261030/costs-evidence/sha256-official.txt`, the text
+extracts beside it. **No digest is copied here.** The session that wrote this
+section read COSTS.md and the table, not that file, so a row cites the file
+and never a hash this section did not see. Dhan's own fees carry no date on
+Dhan's page, so the table applies each on every date; for the brokerage that
+is the operator's decision of 13 Oct 2026. The table holds 25 rows and each is
+one row below, by its id, in the table's order. Its ten readings (`RD-*`:
+every choice the sources leave open, the worse one used) and its 24
+contract-note vectors (`CN01` to `CN24`) are COSTS.md §6 and §9; D-8102
+records how both clocks use them, and the dated clock is FNO-COSTS's to build.
+A row whose `From` is before 3 Sep 2018 is listed because it is the rate in
+force on that day.
+
+| Id | Component | Rate | Base; side | From | To | Clocks | Source (document; URL; quote) | Read | Status |
+|---|---|---|---|---|---|---|---|---|---|
+| BRK-1 | Brokerage, Dhan, equity intraday | the lower of Rs 20 and 0.03% of the order value, per executed order | each executed order's value; buy and sell orders | UNVERIFIED: Dhan's page is undated (its archived page of 2023-02-01 shows the same rate; the operator applies it to every date) | open | dated, today | Dhan pricing page, Equity tab; `https://dhan.co/pricing/`; "₹20 or 0.03% of trade value per executed order, whichever is lower." | 2026-10-30 | PRIMARY (broker) |
+| BRK-SQ | Dhan auto square-off fee | Rs 20 per order + GST 18% | each order Dhan places to square off an open intraday position; the square-off order | UNVERIFIED (undated page) | open | dated, today | Dhan pricing page, Other Charges; `https://dhan.co/pricing/`; "₹ 20 / order + GST. For intraday order automatically squared by our team". Its time is row T03-01 below | 2026-10-30 | PRIMARY (broker) |
+| BRK-DP | DP transaction charge, Dhan | Rs 12.50 per instruction per ISIN + GST 18% = Rs 14.75 | each scrip-day with a delivery sell; sell | UNVERIFIED (undated page) | open | dated, today | Dhan pricing page, Demat Account Related Charges, and Dhan's DP-charge FAQ; `https://dhan.co/pricing/`; "₹ 12.50 / instruction / ISIN + GST." | 2026-10-30 | PRIMARY (broker); whether it applies to an intraday day is UNVERIFIED, and the worse reading (charged once per scrip-day with a sell) is used |
+| BRK-CT | Call & trade, Dhan | Rs 50 per order + GST | orders placed through the trade desk; either | — | — | dated, today | Dhan pricing page; `https://dhan.co/pricing/`; "₹ 50 / order + GST. For every order placed through our trade desk." | 2026-10-30 | PRIMARY (broker); never charged: the path places orders by API |
+| EX-2009 | NSE transaction charge, cash market | member monthly-turnover slabs Rs 3.25 / 3.20 / 3.15 / 3.10 / 3.05 / 3.00 per lakh each side; the top slab, Rs 325 per crore, is used (which slab a client was passed is not recorded) | traded value; each side | 2009-10-01 | 2020-12-31 | dated | NSE/F&A/13028 of 7 Sep 2009, the "Existing" column of NSE/FA/46730; `https://nsearchives.nseindia.com/content/circulars/faac13028.pdf`; "Up to First Rs. 1250 cores Rs. 3.25 each side" (the misspelling is NSE's) | 2026-10-30 | PRIMARY |
+| EX-2020C | NSE concession, EQ-series stocks outside NIFTY 50 and NIFTY Next 50 (not GSM) | Rs 2.75 per lakh each side up to Rs 7,500 crore a month (to 2022-03-31) or Rs 12,500 crore (from 2022-04-01); above it Rs 1.75 (to 2022-03-31) or Rs 2.25 | traded value of eligible securities; each side | 2020-08-01 | 2023-03-31 | dated | NSE/FA/45147, 46225, 47844, 49796, 50832, 51855 and 53913; `https://nsearchives.nseindia.com/content/circulars/FA53913.pdf`; "applicable for a period of six months from October 1, 2022 to March 31, 2023" | 2026-10-30 | PRIMARY; informational: lower than the regular slab, so never the worse reading; no extension after 2023-03-31 was found by a subject search of NSE's circular list (absence is not proof) |
+| EX-2021 | NSE transaction charge, cash market | slabs Rs 3.45 / 3.40 / 3.35 / 3.30 / 3.25 / 3.20 per lakh each side; the top slab, Rs 345 per crore, is used | traded value; each side | 2021-01-01 | 2023-03-31 | dated | NSE/FA/46730 of 18 Dec 2020; `https://nsearchives.nseindia.com/content/circulars/FA46730.pdf`; "will be applicable with effect from January 01, 2021." | 2026-10-30 | PRIMARY |
+| EX-2023 | NSE transaction charge, cash market | slabs Rs 3.25 to 3.00 per lakh each side; the top slab, Rs 325 per crore, is used | traded value; each side | 2023-04-01 | 2024-03-31 | dated | NSE/FA/56129 of 24 Mar 2023; `https://nsearchives.nseindia.com/content/circulars/FA56129.pdf`; "will be applicable with effect from April 01, 2023." | 2026-10-30 | PRIMARY |
+| EX-2024A | NSE transaction charge, cash market | slabs Rs 3.22 to 2.97 per lakh each side; the top slab, Rs 322 per crore, is used | traded value; each side | 2024-04-01 | 2024-09-30 | dated | NSE/FA/61137 of 14 Mar 2024; `https://nsearchives.nseindia.com/content/circulars/FA61137.pdf`; "will be applicable with effect from April 01, 2024." | 2026-10-30 | PRIMARY |
+| EX-2024B | NSE transaction charge, cash market | Rs 2.97 per lakh each side (Rs 297 per crore), the same for every member | traded value; each side | 2024-10-01 | 2026-02-28 | dated | NSE/FA/64232 of 27 Sep 2024 (SEBI/HO/MRD/TPD-1/P/CIR/2024/92); `https://nsearchives.nseindia.com/content/circulars/FA64232.pdf`; "Cash Market: Rs. 2.97 each side per lakh of traded value" | 2026-10-30 | PRIMARY |
+| EX-2026 | NSE transaction charge, cash market | Rs 306.99 per crore each side | traded value; each side | 2026-03-01 | open | dated, today | NSE/FA/73061 of 27 Feb 2026, and Dhan's page "NSE: 0.0030699%"; `https://nsearchives.nseindia.com/content/circulars/FA73061.pdf`; "The above revision will be applicable with effect from March 1, 2026." | 2026-10-30 | PRIMARY |
+| IP-OLD | Contribution to NSE IPFT, cash market | Rs 0.01 per crore each side | traded value; each side | UNVERIFIED: FA56129 calls Rs 0.01 the "existing" level on 24 Mar 2023 and FA73061 the level "levied prior to April 1, 2023"; no earlier circular was found by a subject search | 2023-03-31 | dated | NSE/FA/56129; `https://nsearchives.nseindia.com/content/circulars/FA56129.pdf`; "from existing Rs.0.01 per crore of the traded value to Rs.10" | 2026-10-30 | PRIMARY for the level, UNVERIFIED for the start; under one paisa on Rs 10 lakh of turnover, applied on every date in the worse reading |
+| IP-2023 | Contribution to NSE IPFT, cash market | Rs 10 per crore each side | traded value; each side | 2023-04-01 | 2026-02-28 | dated | NSE/FA/56129; `https://nsearchives.nseindia.com/content/circulars/FA56129.pdf`; "Rs.10 per crore of the traded value in Cash Equities Market Segment" | 2026-10-30 | PRIMARY |
+| IP-2026 | Contribution to NSE IPFT, cash market | Rs 0.01 per crore each side | traded value; each side | 2026-03-01 | open | dated, today | NSE/FA/73061, and Dhan's page "IPFT Contribution 0.0000001% of the turnover"; `https://nsearchives.nseindia.com/content/circulars/FA73061.pdf`; "Rs. 0.01 each side" | 2026-10-30 | PRIMARY |
+| SF-2017 | SEBI turnover fee, cash segment | 0.00015% of the price at which securities are bought or sold (Rs 15 per crore) | buy value and sell value; each side | 2017-03-06 (in force on its Gazette publication) | 2019-03-31 | dated | SEBI/LAD/NRO/GN/2016-17/037 of 6 Mar 2017, annexed to NSE/FA/34501; `https://nsearchives.nseindia.com/content/circulars/FA34501.zip`; "0.00015 per cent of the price at which the securities are purchased or sold" | 2026-10-30 | PRIMARY |
+| SF-2019 | SEBI turnover fee, cash segment | 0.00010% of turnover (Rs 10 per crore) | turnover; each side | 2019-04-01 | 2020-05-31 | dated | SEBI/L.A.D.-N.R.O./G.N./2019/03 of 22 Mar 2019, annexed to NSE/FA/40632; `https://nsearchives.nseindia.com/content/circulars/FA40632.pdf`; "They shall come into force with effect from April 01, 2019." | 2026-10-30 | PRIMARY |
+| SF-2020 | SEBI turnover fee, cash segment, the COVID relief | 50% of the fee: Rs 5 per crore | turnover; each side | 2020-06-01 | 2021-03-31 | dated | SEBI/LAD-NRO/GN/2020/011 of 8 May 2020, annexed to NSE/FA/44514; `https://nsearchives.nseindia.com/content/circulars/FA44514.pdf`; "pay only 50% (fifty percent) of fees as calculated therein" | 2026-10-30 | PRIMARY; the relief is the broker's, and whether a broker passed Rs 5 or Rs 10 to a client is not recorded: today's clock (Rs 10) is the worse and is the headline |
+| SF-2021 | SEBI turnover fee, cash segment | Rs 10 per crore | turnover; each side | 2021-04-01 | open | dated, today | SF-2019's rate after the relief lapsed; NSE's levies page (updated 17/04/2026) and Dhan's page "0.0001% of the turnover"; `https://www.nseindia.com/static/invest/first-time-investor-sebi-turnover-fees-stt-other-levies`; "0.0001 per cent of the price at which the securities are purchased or sold (Rs.10 per crore)" | 2026-10-30 | PRIMARY |
+| STT-ND | STT, equity sold otherwise than by delivery (intraday) | 0.025% | NSE's method: min(day buy quantity, day sell quantity) x the VWAP of all the client's trades in the security that day, the VWAP to 2 decimals; sell (the seller pays) | 2013-06-01 | open | dated, today | the Finance Act 2013 through NSE/FATAX/23500, unchanged in NSE/FATAX/56235 (2023), 63809 (2024) and 73524 (2026); the method NSE/CMTR/5588; `https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf`; "settled otherwise than by the actual delivery or transfer of such share or unit" | 2026-10-30 | PRIMARY; Dhan's page says "0.025% on sell transactions" and its calculator applies it to the sell value, so both bases are computed and the worse is used (RD-STT-BASE) |
+| SD-STATE | Stamp duty under each State's stamp law, on the contract note | state by state, e.g. Maharashtra 0.002%, Tamil Nadu 0.006%, Telangana 0.01% capped at Rs 100 a day (every listed state in COSTS.md §3) | the contract-note value, buy and sell; both sides | before the window | 2020-06-30 | dated | PIB release of 30 Jun 2020 (PRID 1635399) for the two-sided incidence; the rates from Zerodha's archived calculator script (snapshot of 2019-04-03), SECONDARY; `https://www.pib.gov.in/PressReleasePage.aspx?PRID=1635399`; "stamp duty was payable by both seller and buyer" | 2026-10-30 | UNVERIFIED: the rates are secondary and the client's state is unknown, so the highest listed state on the day's turnover is used (the operator's decision of 30 Oct 2026 on PARTS 9.5) |
+| SD-ND | Stamp duty, transfer of a security other than a debenture on a non-delivery basis | 0.003% | the FIFO buy value of the non-deliverable quantity (for a squared-off day, all the day's buys); buy (the buyer pays) | 2020-07-01 | open | dated, today | the Indian Stamp Act 1899 as amended by the Finance Act 2019; the Indian Stamp (Collection ...) Rules 2019 (G.S.R. 901(E)); NCL/CMPT/43115, its start moved to 1 Jul 2020 by the Gazette of 30 Mar 2020 (NCL/CMPT/44032); `https://nsearchives.nseindia.com/content/circulars/CMPT43115.zip`; "Transfer of Security other than debenture on non-delivery basis 0.003% Buyer" | 2026-10-30 | PRIMARY |
+| GST-1 | GST on broker and exchange services | 18% (CGST 9% + SGST 9%, or IGST 18%) | brokerage + the NSE transaction charge + IPFT (+ Dhan's square-off fee, and the DP charge when it is charged); both sides | 2017-07-01 | open | dated, today | Notification 11/2017-Central Tax (Rate), Sl. 15, heading 9971 (v): 9% central tax; NSE's levies page "Stock brokers Services 18.00% (GST)"; Dhan's page; `https://gstcouncil.gov.in/sites/default/files/2024-05/download_4.pdf`; "This notification shall come into force with effect from 1st day of July, 2017." | 2026-10-30 | PRIMARY; the SGST and IGST notifications were not read, and GST on the exchange charge rests on Dhan's statement |
+| GST-SEBI | GST on the SEBI turnover fee | 18% | the SEBI fee; both sides | 2022-07-18 | open | dated, today | NSE/FATAX/52993 of 18 Jul 2022 (Notification 04/2022-Central Tax (Rate) of 13 Jul 2022); `https://nsearchives.nseindia.com/content/circulars/FATAX52993.pdf`; "levy GST @ 18% on the fees payable to SEBI, from their clients from July 18, 2022" | 2026-10-30 | PRIMARY; before 2022-07-18 the dated clock puts no GST on the SEBI fee, and today's clock always does |
+| OT-CLR | Clearing charge | none found | — | — | — | dated, today | NSE/FA/64232 and NSE/FA/73061 list only transaction charges and IPFT, Dhan's page lists none, and a subject search of NSE's circulars from 2008 to 2026 found none; `https://nsearchives.nseindia.com/content/circulars/FA73061.pdf`; "levy the transaction charges and contribution to NSE IPFT" | 2026-10-30 | UNVERIFIED (absence is not proof) |
+| OT-INT | Interest on intraday leverage | none for a position squared off the same day (an inference) | — | — | — | today | Dhan's page lists interest only on a non-MTF debit and a 50:50 shortfall; `https://dhan.co/pricing/`; "0.0438% per day on outstanding non MTF debit" | 2026-10-30 | UNVERIFIED |
+
+**The exchange and broker facts the fill walk and the money rules apply.**
+These eight were read by the 13 Oct 2026 sources run and recorded, each with
+its source, in `state/fno-winners-20261013/sources-leverage-execution.md` under
+the ids below; SPEC (`state/fib-strategy-20261030/SPEC.md` §9 to §11) cites
+that file by line, and the lines are given here as SPEC gives them. **Where a
+URL is not written in a row, it is the one recorded at that line, and this
+section does not copy it**, for the reason the digests above are not copied:
+the session that wrote it did not read that file. The two Dhan pages of rows
+T03-01 and T03-05 were read again on 2026-10-30 by the costs step (row BRK-SQ).
+Each fact is the strict reading, applied as D-8101 says; none is a setting.
+
+| Id | Fact, as recorded | Source as recorded | Status | Applied by |
+|---|---|---|---|---|
+| T02-02 | NSE's daily margin file `C_VAR1_DDMMYYYY_1.DAT` (batch 1 of each trading day): a stock's VaR + ELM margin M (%) gives its intraday leverage L = min(5, 100 / max(20, M)), so a stock allowed less than 5x gets a smaller position; the file's additional margin (column 9) is a third reading, because whether Dhan counts it is UNVERIFIED (T01-22) | NSE's archive host `nsearchives.nseindia.com`, one file a session (about 2,010 from 3 Sep 2018); `sources-leverage-execution.md` lines 136 and 137 (T02-02, T02-03), the rule at lines 15, 30 and 117 (T01-10) | Cited as recorded; the operator said yes on 30 Oct 2026 to downloading every session's file into a reference folder, never the live store, and until a run reads them its leverage clock is UNVERIFIED and every result says so | FNO-LEVERAGE (the reader), FNO-NET (the quantity) |
+| T03-01 | Dhan squares off every open equity cash intraday position at 15:10:00 | Dhan's support page `https://dhan.co/support/general/market-session-status-and-timing/what-are-the-dhan-intraday-auto-square-off-timings/`, "Equity cash intraday positions: 3:10 PM." (read 2026-10-30, COSTS.md row BRK-SQ); `sources-leverage-execution.md` line 147 | Cited | FNO-DAYMASK (the session clock), FNO-SEC-EXEC (the square-off walk) |
+| T03-05 | each auto square-off order pays Rs 20 + GST 18%, charged on top of the order's brokerage in the worse reading (RD-SQ) | Dhan's pricing page `https://dhan.co/pricing/`, "₹ 20 / order + GST. For intraday order automatically squared by our team" (read 2026-10-30, row BRK-SQ); `sources-leverage-execution.md` line 151 | Cited for the amount; whether it replaces the brokerage is UNVERIFIED (D-5116), so the worse reading is used | FNO-COSTS, FNO-NET |
+| T03-04 | a self-exit order placed in the 2 minutes before the 15:10 square-off may be rejected, so an exit order whose start is at or after 15:08:00 is treated as rejected and the position is left to the broker (OP-34) | `sources-leverage-execution.md` line 150 | Cited as recorded; the strict reading of a warning | FNO-SEC-EXEC, FNO-EXITS |
+| T09-07 | Dhan's order API allows 10 orders a second, 250 a minute, 1,000 an hour and 7,000 a day, with 25 modifications per order | `sources-leverage-execution.md` line 234 | Cited as recorded | FNO-PORTFOLIO (the order-rate rings) |
+| T10-05 | NSE's market-order price protection: a market order carries a limit at LTP x (1 + 3%) for a buy and LTP x (1 - 3%) for a sell, or Rs 1.5 for an LTP at or below Rs 50, and the unfilled part rests at that limit as a Day order; a second whose worst print lies beyond the limit fills nothing for that order (OP-13) | `sources-leverage-execution.md` line 253 | Cited as recorded | FNO-SEC-EXEC |
+| T06-03 | F&O stocks have no fixed circuit: the operating range is 10% of the base price (the previous close), and it flexes in the move's direction after a cooling-off period. SPEC §10.2 reads the flex as 5% a step; the FNO-BAND design names 5%, then 3%, then 2%. Both are quoted as they stand, and the rule's own words are at the cited lines | `sources-leverage-execution.md` lines 21 and 189 | Cited as recorded; before 2024-02-05 the band is computed from this rule (OP-12), and from that date NSE's daily security file holds it (field PricRg, T06-10, a later part) | FNO-BAND |
+| T11-09 | the closing auction: from 2026-08-03 continuous trading ends at 15:15 for the F&O stocks eligible for the closing auction and the auction runs to 15:35, so their last continuous second is 15:14:59; every other stock-day, and every stock before 2026-08-03, ends at 15:29:59. The auction is never a fill and holds no stop order | `sources-leverage-execution.md` lines 20 and 276 | Cited as recorded; which stock is eligible on which day is §9 of this charter | FNO-DAYMASK (the session end per stock-day), FNO-SEC-EXEC |
 
 ## Zerodha and GDFL cash feeds per stock-day — measured 2026-10-18 (D-5170 to D-5177)
 
