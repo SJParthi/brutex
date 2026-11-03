@@ -2514,3 +2514,9 @@ fn note_applied(out: &Applied, plan: &Plan) {
 #[cfg(test)]
 #[path = "gdfl_rekey_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL repair 2 (D-7334): every census step said in the receipt's
+// words, with what it adds to the plan's pending count.
+#[cfg(test)]
+#[path = "gdfl_rekey_cov_tests.rs"]
+mod cov_tests;
