@@ -1822,12 +1822,7 @@ mod tests {
             .map(|(_, value)| *value)
             .collect();
         assert_eq!(targets, ["AmazonSSM.GetParameter"]);
-        assert!(
-            headers
-                .iter()
-                .any(|(name, value)| *name == "content-type"
-                    && *value == "application/x-amz-json-1.1")
-        );
+        assert!(headers.contains(&("content-type", "application/x-amz-json-1.1")));
         for (name, value) in headers {
             assert!(
                 !value.contains("Put") && !value.contains("Delete"),
@@ -1943,11 +1938,11 @@ mod tests {
             let _gone = tell.send(answer);
         });
         let answer = heard.recv_timeout(std::time::Duration::from_secs(5));
-        if answer.is_err() {
-            // Release the reader blocked in open(2) before failing.
-            let _writer = std::fs::OpenOptions::new().write(true).open(&path);
-        }
         let Ok(Err(SsmError { detail, kind })) = answer else {
+            if answer.is_err() {
+                // Release the reader blocked in open(2) before failing.
+                let _writer = std::fs::OpenOptions::new().write(true).open(&path);
+            }
             panic!("a FIFO credentials file must refuse promptly, got {answer:?}")
         };
         assert_eq!(kind, SecretError::Unreachable);
@@ -2084,3 +2079,9 @@ mod tests {
 #[cfg(test)]
 #[path = "ssm_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL-PS1 (D-7335): get_parameter's socket half, through a loopback
+// proxy that refuses the tunnel.
+#[cfg(test)]
+#[path = "ssm_ps1_tests.rs"]
+mod ps1_tests;
