@@ -102,6 +102,8 @@ use cli::results::{Record, Results, field};
 // ---- part; each part inserts its bench module (the path attribute naming
 // ---- benches/ratio/fno_<x>.rs and its mod line) directly under its slot.
 // slot bench-mod FNO-CLOCK
+#[path = "ratio/fno_clock.rs"]
+mod fno_clock;
 
 // slot bench-mod FNO-DAYMASK
 
@@ -581,6 +583,7 @@ fn main() {
     // the six base rows. The first cli part to land (FNO-DAYMASK, wave 1) makes the banner
     // count-free; no other part edits it.
     // slot bench-row FNO-CLOCK
+    let ok = ok & fno_clock::row(floor, &["C-FNO-CLOCK-01"]);
     // slot bench-row FNO-DAYMASK
     // slot bench-row FNO-RECORDS
     // slot bench-row FNO-RUN

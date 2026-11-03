@@ -1658,10 +1658,14 @@ impl Spread {
 
 /// One run of C-FNO-CLOCK-01 (D-8225): `samples` timings, in picoseconds per
 /// step, of `steps` minute-boundary steps each, on a grid of `seconds`
-/// invented seconds, one second in seven untraded. A step is the calibration's
-/// own: one minute's shifted window read and its four prices tallied
-/// ([`tally_minute`]). The windows open at invented seconds drawn before each
-/// timing, some before the grid and some across its end.
+/// invented seconds, one second in seven untraded.
+///
+/// A step is the calibration's own: one minute's shifted window read and its
+/// four prices tallied ([`tally_minute`]). Each sample reads consecutive
+/// minutes from an invented first second, wrapping inside the grid, which is
+/// the order a shift's sweep reads them in; reads scattered at random over a
+/// grid past the processor's caches are not what the calibration does, and
+/// are not measured here (`docs/06-limits.md` L-FNO-CLOCK-02).
 #[must_use]
 pub fn measure_minute_boundary(seconds: usize, samples: usize, steps: usize) -> Vec<u128> {
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
@@ -1683,32 +1687,28 @@ pub fn measure_minute_boundary(seconds: usize, samples: usize, steps: usize) -> 
         low: 99_900,
         close: 100_032,
     };
-    let span = u64::try_from(seconds)
-        .unwrap_or(u64::MAX)
-        .saturating_add(SPAN_PAD);
+    let len = i64::try_from(seconds.max(1)).unwrap_or(i64::MAX);
     let per = u128::try_from(steps.max(1)).unwrap_or(1);
     let mut tally: Tally = HashMap::with_capacity(steps.saturating_mul(4).max(4));
     let mut out = Vec::with_capacity(samples);
     for _ in 0..samples {
-        let starts: Vec<Minute> = (0..steps)
-            .map(|_| Minute {
-                start: i64::try_from(xorshift(&mut state) % span).unwrap_or(0) - SECS_PER_MINUTE,
-                prices,
-            })
-            .collect();
+        let first = i64::try_from(xorshift(&mut state) >> 1).unwrap_or(0) % len;
         tally.clear();
         let clock = Instant::now();
-        for (index, minute) in starts.iter().enumerate() {
-            black_box(tally_minute(&grid, &mut tally, index, minute, 0));
+        for index in 0..steps {
+            let step = i64::try_from(index)
+                .unwrap_or(0)
+                .saturating_mul(SECS_PER_MINUTE);
+            let minute = Minute {
+                start: first.saturating_add(step) % len,
+                prices,
+            };
+            black_box(tally_minute(&grid, &mut tally, index, &minute, 0));
         }
         out.push(clock.elapsed().as_nanos().saturating_mul(1_000) / per);
     }
     out
 }
-
-/// Seconds past the grid's two ends the bench's windows may open in: one
-/// minute before it and one across its end.
-const SPAN_PAD: u64 = 120;
 
 /// The next value of a xorshift64 sequence.
 fn xorshift(state: &mut u64) -> u64 {
