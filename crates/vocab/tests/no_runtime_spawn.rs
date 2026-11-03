@@ -4176,6 +4176,10 @@ fn items_and_macro_inputs_end_where_the_model_says() {
     assert_eq!(macro_input_end(&toks("pub(crate"), 0), 3);
     assert_eq!(macro_input_end(&toks("const fn f() {} x"), 0), 7);
     assert_eq!(macro_input_end(&toks("const { 1 } x"), 0), 4);
+    assert_eq!(
+        macro_input_end(&toks("const X: u8 = { 1 } + { 2 }; x"), 0),
+        13
+    );
     assert_eq!(macro_input_end(&toks("type T = S<{ 1 }>; x"), 0), 10);
     assert_eq!(macro_input_end(&toks("use a::{b, c}; x"), 0), 10);
     assert_eq!(macro_input_end(&toks("extern crate a; x"), 0), 4);
@@ -4335,7 +4339,7 @@ fn manifests_are_read_as_toml_reads_them() {
         [(1, word("k")), (1, eq.clone()), (1, Toml::Unread)]
     );
     assert_eq!(
-        toml_tokens("k = \"\"\"a\"b\"\"c\n\\x\\\n\"\"\"\nj = '''p\\q'''\n"),
+        toml_tokens("k = \"\"\"a\"b\"\"c\n\\x\\\n\"\"\"\nj = '''p\\'''\nm = 1\n"),
         [
             (1, word("k")),
             (1, eq.clone()),
@@ -4345,6 +4349,10 @@ fn manifests_are_read_as_toml_reads_them() {
             (4, eq.clone()),
             (4, Toml::Unread),
             (4, Toml::Newline),
+            (5, word("m")),
+            (5, eq.clone()),
+            (5, word("1")),
+            (5, Toml::Newline),
         ]
     );
     assert_eq!(
@@ -4387,7 +4395,7 @@ fn manifests_are_read_as_toml_reads_them() {
 
     let named = manifest_paths(
         "crates/x/Cargo.toml",
-        "[workspace]\nmembers = \"x\"\n[lib]\npath = 1\n",
+        "[workspace]\nmembers = \"x\"\nname = \"y\"\n[lib]\npath = 1\n",
     );
     assert!(named.targets.is_empty() && named.every.is_empty() && named.unread.is_empty());
     assert!(is_manifest("Cargo.toml") && is_manifest("crates/x/Cargo.toml"));
