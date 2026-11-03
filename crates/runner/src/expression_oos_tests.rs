@@ -1,4 +1,8 @@
 #![cfg(test)]
+#![allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a fixture step that fails must fail the test loudly"
+)]
 //! Generated, finite later-period authority and exact replay regressions.
 use super::*;
 use crate::exit_grid_policy::{
@@ -91,19 +95,23 @@ fn later_replays_every_frozen_coordinate_and_preserves_zero_unknown_programs() -
         let mut comparisons = std::collections::HashSet::new();
         for raw in ["30 | !30", "30 & !30", "146 | !146"] {
             let program = Expression::parse(raw).map_err(|e| format!("{e:?}"))?;
-            let training = resolved.evaluate_expression_with_attested(
-                &attested,
-                &run(&key, &bars, &program, direction)?,
-            )?;
+            let training = resolved
+                .evaluate_expression_with_attested(
+                    &attested,
+                    &run(&key, &bars, &program, direction)?,
+                )
+                .expect("a fixture step that must succeed");
             let anchor = resolved
                 .validate_expression_evaluation(&training)?
                 .later_period_anchor();
-            let observed = resolved.evaluate_expression_oos(
-                &anchor,
-                series(&key, &later)?,
-                &later_column,
-                &run(&key, &later, &program, direction)?,
-            )?;
+            let observed = resolved
+                .evaluate_expression_oos(
+                    &anchor,
+                    series(&key, &later)?,
+                    &later_column,
+                    &run(&key, &later, &program, direction)?,
+                )
+                .expect("a fixture step that must succeed");
             assert_eq!(anchor.run_id(), training.run_id());
             assert_eq!(anchor.horizon().as_bars(), 5);
             assert!(anchors.insert(anchor.digest()));
@@ -176,10 +184,9 @@ fn later_refuses_overlap_program_substitution_foreign_series_and_changed_anchor(
             Horizon::bars(5).ok_or("horizon")?,
         )
         .map_err(super::super::display)?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("a fixture step that must succeed");
     let anchor = resolved
         .validate_expression_evaluation(&training)?
         .later_period_anchor();
@@ -265,19 +272,20 @@ fn later_prices_cannot_reresolve_training_levels() -> Result<(), String> {
             Horizon::bars(5).ok_or("horizon")?,
         )
         .map_err(super::super::display)?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("a fixture step that must succeed");
     let anchor = resolved
         .validate_expression_evaluation(&training)?
         .later_period_anchor();
-    let observed = resolved.evaluate_expression_oos(
-        &anchor,
-        series(&key, &later)?,
-        &later_column,
-        &run(&key, &later, &program, Direction::Long)?,
-    )?;
+    let observed = resolved
+        .evaluate_expression_oos(
+            &anchor,
+            series(&key, &later)?,
+            &later_column,
+            &run(&key, &later, &program, Direction::Long)?,
+        )
+        .expect("a fixture step that must succeed");
     assert_eq!(observed.grid().stops.rungs(), resolved.stop_levels_ppm());
     assert_eq!(
         observed.grid().targets.rungs(),
@@ -311,10 +319,9 @@ fn a_later_timestamp_in_the_same_ist_session_is_not_an_oos_period() -> Result<()
             Horizon::bars(5).ok_or("horizon")?,
         )
         .map_err(super::super::display)?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("a fixture step that must succeed");
     let anchor = resolved
         .validate_expression_evaluation(&training)?
         .later_period_anchor();
@@ -348,10 +355,9 @@ fn later_refuses_foreign_frozen_resolution_changed_evaluator_and_entirely_cold_d
             Horizon::bars(5).ok_or("horizon")?,
         )
         .map_err(super::super::display)?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("a fixture step that must succeed");
     let anchor = resolved
         .validate_expression_evaluation(&training)?
         .later_period_anchor();
@@ -429,20 +435,19 @@ fn one_later_slice_prices_every_program_as_the_per_call_path_does() -> Result<()
             .map_err(super::super::display)?;
         for raw in ["30 | !30", "30 & !30", "146 | !146"] {
             let program = Expression::parse(raw).map_err(|e| format!("{e:?}"))?;
-            let training = resolved.evaluate_expression_with_attested(
-                &attested,
-                &run(&key, &bars, &program, direction)?,
-            )?;
+            let training = resolved
+                .evaluate_expression_with_attested(
+                    &attested,
+                    &run(&key, &bars, &program, direction)?,
+                )
+                .expect("a fixture step that must succeed");
             let anchor = resolved
                 .validate_expression_evaluation(&training)?
                 .later_period_anchor();
             let later_run = run(&key, &later, &program, direction)?;
-            let own = resolved.evaluate_expression_oos(
-                &anchor,
-                series(&key, &later)?,
-                &later_column,
-                &later_run,
-            )?;
+            let own = resolved
+                .evaluate_expression_oos(&anchor, series(&key, &later)?, &later_column, &later_run)
+                .expect("a fixture step that must succeed");
             let reused = resolved.evaluate_expression_oos_on(&anchor, &shared, &later_run)?;
             assert_eq!(own.digest(), reused.digest());
             assert_eq!(own.grid(), reused.grid());
