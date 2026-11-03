@@ -300,23 +300,38 @@ fn the_first_fault_of_each_kind_is_the_one_the_day_keeps() {
 }
 
 /// THE TEST DOOR'S OWN UNTAKEN ANSWERS (`inject`, D-7336): a file with no
-/// planted swap or answer is left alone, and a swap planted for a root that is
-/// not there moves nothing and makes nothing.
+/// swap or answer planted under its root is left alone, whatever another
+/// root holds in the same lists; and a swap planted for a root that is not
+/// there moves nothing and makes nothing.
 #[test]
 fn the_inject_door_leaves_an_unplanted_file_and_a_missing_root_alone() {
     let root = scratch("INJECT-NONE");
-    inject::after_landed(&root, "none.zip");
-    assert!(root.is_dir(), "no swap planted: the root stays");
+    let missing = root.join("not-there");
     let file = crate::gdfl_import::TickFile {
         symbol: "INVENTED".to_owned(),
         contract: None,
         name: "none.zip".to_owned(),
         ticks: Vec::new(),
     };
-    assert!(inject::answer(&root, &file).is_none(), "no answer planted");
-    let missing = root.join("not-there");
-    inject::plant_swap_after(&missing, "gone.zip");
-    inject::after_landed(&missing, "gone.zip");
+    // ANOTHER ROOT'S PLANTINGS, passed over by this root's asks.
+    inject::plant_swap_after(&missing, "none.zip");
+    inject::plant(
+        &missing,
+        "none.zip",
+        crate::ingest::FailKind::DiskFull,
+        false,
+    );
+    inject::after_landed(&root, "none.zip");
+    assert!(root.is_dir(), "no swap planted for this root: it stays");
+    assert!(
+        inject::answer(&root, &file).is_none(),
+        "no answer planted for it"
+    );
+    // TAKEN BY THEIR OWN ROOT: the answer once, and a swap with no root to move.
+    let answered = inject::answer(&missing, &file).expect("planted for it");
+    assert_eq!(answered.door_kind, Some(crate::ingest::FailKind::DiskFull));
+    assert!(inject::answer(&missing, &file).is_none(), "taken once");
+    inject::after_landed(&missing, "none.zip");
     assert!(!missing.exists(), "a missing root is not made");
     assert!(!root.join("not-there.gone").exists(), "nor moved");
     std::fs::remove_dir_all(&root).unwrap();
