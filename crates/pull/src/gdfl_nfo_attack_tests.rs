@@ -1066,10 +1066,17 @@ fn dpn_09_a_million_random_names_never_panic_and_every_answer_is_exact_or_named(
     let lo = d(2015, 1, 1).days_from_epoch();
     let hi = d(2027, 12, 31).days_from_epoch();
     let (mut ok, mut err, mut monthly_ok) = (0_u64, 0_u64, 0_u64);
-    for _ in 0..1_000_000 {
+    // ONE KNOWN NAME FIRST (BASE-COV-PULL PS3): an index weekly read dated on
+    // the eve of the cutover, the case the million random names never drew,
+    // so the checks a dated reading before the cutover must pass do run.
+    let known = std::iter::once(("NIFTY07FEB1911000CE".to_owned(), d(2019, 1, 31)));
+    let random = std::iter::repeat_with(|| {
         let ticker = random_ticker(&mut rng);
         let on =
             Day::from_days(lo + u32::try_from(rng.below(u64::from(hi - lo + 1))).unwrap()).unwrap();
+        (ticker, on)
+    });
+    for (ticker, on) in known.chain(random.take(1_000_000)) {
         match decode_ticker(&ticker, on) {
             Ok(got)
                 if on < cutover()
@@ -1130,7 +1137,7 @@ fn dpn_09_a_million_random_names_never_panic_and_every_answer_is_exact_or_named(
             }
         }
     }
-    assert_eq!(ok + err, 1_000_000);
+    assert_eq!(ok + err, 1_000_001);
     assert!(ok > 5_000, "the fuzz reaches the accepting path: {ok}");
     eprintln!(
         "dpn_09: ok {ok} (of which {monthly_ok} monthly with the sourced day), refused {err}"
