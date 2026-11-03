@@ -1528,3 +1528,8 @@ mod tests;
 #[cfg(test)]
 #[path = "repair_cover_tests.rs"]
 mod cover_tests;
+
+/// The repair doors at the edges no other test reached (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "repair_door_cover_tests.rs"]
+mod door_cover_tests;
