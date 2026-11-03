@@ -2094,3 +2094,86 @@ fn a_signed_month_file_name_is_not_listed_as_a_held_month() {
         assert_eq!(month_of_text(bad), None, "{bad}");
     }
 }
+
+/// **A SOURCES QUESTION THAT CANNOT BE READ IS A 400 THAT NAMES THE FIELD,
+/// AND A FULL STORE-READ POOL IS A 429 THAT NAMES THE TABLE** (BASE-COV-API,
+/// D-7346). Extremes: an empty symbol, one of 25 bytes, a contract no store
+/// names, a cursor that is no whole number of seconds and one that overflows
+/// microseconds; and, at once, every slot of the store-read pool taken while
+/// the rung table, the timeline and the day table are each asked a good
+/// question, the timeline's a month with no end day.
+#[tokio::test]
+async fn a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let fx = Fixture::empty("unreadable-questions");
+    let long = "S".repeat(25);
+    for (route, query, said) in [
+        (
+            "/sources.json",
+            "exchange=NSE&segment=CASH&symbol=".to_owned(),
+            "1 to 24 bytes",
+        ),
+        (
+            "/sources.json",
+            format!("exchange=NSE&segment=CASH&symbol={long}"),
+            "1 to 24 bytes",
+        ),
+        (
+            "/sources.json",
+            "exchange=NSE&segment=FNO&symbol=NIFTY&contract=not-a-contract".to_owned(),
+            "is not a contract this store can name",
+        ),
+        (
+            "/sources/bars.json",
+            "exchange=NSE&segment=INDEX&symbol=NIFTY&rung=1min&from=2024-01&to=2024-01&cursor=soon"
+                .to_owned(),
+            "is not a whole number of unix seconds",
+        ),
+        (
+            "/sources/bars.json",
+            format!(
+                "exchange=NSE&segment=INDEX&symbol=NIFTY&rung=1min&from=2024-01&to=2024-01&cursor={}",
+                i64::MAX
+            ),
+            "is not a whole number of unix seconds",
+        ),
+    ] {
+        let (status, body) = fx.get(route, &query).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{route}?{query}: {body}"
+        );
+        assert!(
+            body["error"].as_str().is_some_and(|why| why.contains(said)),
+            "{route}?{query}: {body}"
+        );
+    }
+    let crowd = crate::detail::crowd(crate::detail::Named::StoreRead);
+    for (route, query, named) in [
+        (
+            "/sources.json",
+            "exchange=NSE&segment=INDEX&symbol=NIFTY",
+            "all sources rung table",
+        ),
+        (
+            "/sources/bars.json",
+            "exchange=NSE&segment=INDEX&symbol=NIFTY&rung=1min&from=2024-01",
+            "all sources timeline",
+        ),
+        (
+            "/sources/day.json",
+            "exchange=NSE&segment=INDEX&symbol=NIFTY&from=2024-01-02",
+            "all sources day table",
+        ),
+    ] {
+        let (status, body) = fx.get(route, query).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "{route}: {body}"
+        );
+        assert!(body.to_string().contains(named), "{route}: {body}");
+    }
+    drop(crowd);
+}

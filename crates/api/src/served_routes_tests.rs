@@ -129,6 +129,11 @@ fn pooled_doors() -> Vec<(Named, String)> {
                     .to_owned(),
                 "/pull/recovery.json".to_owned(),
                 "/audit.json?feed=zerodha".to_owned(),
+                // D-7346: the folder and provenance reads, each behind the
+                // store-read pool after a question it can read.
+                "/folder.json?feed=gdfl".to_owned(),
+                "/provenance.json?feed=zerodha&instrument=NSE-INDEX-NIFTY&timeframe=1min&month=2024-01"
+                    .to_owned(),
             ],
         ),
         (
@@ -137,7 +142,10 @@ fn pooled_doors() -> Vec<(Named, String)> {
         ),
         (
             Named::Calendar,
-            vec![format!("/gaps.json?{month}")],
+            vec![
+                format!("/gaps.json?{month}"),
+                "/calendar.json?feed=zerodha&span=held".to_owned(),
+            ],
         ),
         (
             Named::OpsRead,
@@ -172,6 +180,9 @@ fn pooled_doors() -> Vec<(Named, String)> {
                 "/selection-v6.json?family=NIFTY".to_owned(),
                 "/live.json".to_owned(),
                 "/backtest.json".to_owned(),
+                // D-7346: the engine's invocation audit, read through the
+                // detail pool.
+                "/backtest/audit.json?limit=1".to_owned(),
                 format!("/index-stop.json?{id}"),
                 format!("/index-stop-candles.json?{id}&pin={ID}&setting=0&kind=source"),
                 format!("/index-stop-qualification.json?{id}"),
