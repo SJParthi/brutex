@@ -1549,6 +1549,18 @@ where
 /// The `cli` verb refuses a missing root before this (its lock); this is the
 /// library's own door. One `metadata` call; one `mkdir` for a fresh store.
 fn fresh_root(run: &Run<'_>) -> Result<(), ImportRefusal> {
+    fresh_root_with(run, &|root| std::fs::create_dir(root))
+}
+
+/// [`fresh_root`] with its `mkdir` as an argument (BASE-COV-PULL-PS1, D-7335):
+/// production makes the folder, and a test hands one that answers
+/// `AlreadyExists` beside a folder another process just made (or beside none),
+/// the race between the existence check and the `mkdir` that no input of a run
+/// makes happen on demand.
+fn fresh_root_with(
+    run: &Run<'_>,
+    mkdir: &dyn Fn(&std::path::Path) -> std::io::Result<()>,
+) -> Result<(), ImportRefusal> {
     let root = run.store_root;
     // Only a path where NOTHING is is a fresh store. A directory is the
     // store; anything else there (a file, an unreadable entry) is left to
@@ -1561,7 +1573,7 @@ fn fresh_root(run: &Run<'_>) -> Result<(), ImportRefusal> {
         .parent()
         .is_some_and(|parent| parent.as_os_str().is_empty() || parent.is_dir());
     let made = if parent_there {
-        match std::fs::create_dir(root) {
+        match mkdir(root) {
             Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists && root.is_dir() => Ok(()),
             made => made.map_err(|why| why.to_string()),
         }
