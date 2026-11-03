@@ -5192,6 +5192,62 @@ mod tests {
         evaluated
     }
 
+    /// ATTESTATION IS OVER THE EXACT TRAINING SERIES: a series of the same
+    /// identity and one bar fewer is refused as another training series.
+    #[test]
+    fn a_training_series_of_another_length_cannot_be_attested() {
+        let input = bars(100);
+        let key = nifty();
+        let series = |bars| {
+            ExecutionSeriesV1::new(&key, "test-feed", "test-commit", [0xA5; 32], bars)
+                .expect("complete identity")
+        };
+        let resolved = policy()
+            .resolve_attested(series(&input))
+            .expect("the policy resolves");
+        let horizon = crate::outcome::Horizon::bars(5).expect("a non-zero horizon");
+        let shorter = input.get(..99).expect("a prefix");
+        assert_eq!(
+            resolved
+                .attest_training(series(shorter), &test_column(shorter), horizon)
+                .map(|_| ()),
+            Err(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+    }
+
+    /// THE COORDINATE VISIT STOPS WHERE ITS VISITOR DOES: a visitor that
+    /// answers no at the first take-profit coordinate ends the walk there, one
+    /// that answers no at once ends it after one coordinate, and the walk says
+    /// it did not complete.
+    #[test]
+    fn a_coordinate_visit_stops_where_its_visitor_refuses() {
+        let resolved = policy()
+            .resolve(&nifty(), &bars(100))
+            .expect("the policy resolves");
+        let mut all = Vec::new();
+        assert!(resolved.visit_coordinates(|coordinate| {
+            all.push(coordinate);
+            true
+        }));
+        assert_eq!(u64::try_from(all.len()).ok(), Some(resolved.cell_count()));
+        let first_ttp = all
+            .iter()
+            .position(|coordinate| coordinate.ttp.is_some())
+            .expect("the policy arms a take-profit");
+        let mut seen = 0_usize;
+        assert!(!resolved.visit_coordinates(|coordinate| {
+            seen += 1;
+            coordinate.ttp.is_none()
+        }));
+        assert_eq!(seen, first_ttp + 1);
+        let mut seen = 0_usize;
+        assert!(!resolved.visit_coordinates(|_| {
+            seen += 1;
+            false
+        }));
+        assert_eq!(seen, 1);
+    }
+
     #[test]
     fn identical_bytes_and_policy_are_byte_identical_and_any_bar_byte_rekeys() {
         let input = bars(100);
