@@ -35,12 +35,12 @@ not a backtest result.
 
 ## 2. What was built, file by file
 
-`git diff --stat 1ad6e24ef8e0..HEAD -- . ':(exclude)reports'`: 8 files, about
-2,390 insertions, no deletion. Every edit of a shared file is one pure insertion
+`git diff --shortstat 1ad6e24ef8e0..HEAD -- . ':(exclude)reports'`: 8 files,
+2,392 insertions, no deletion. Every edit of a shared file is one pure insertion
 under FNO-BAND's own slot line (`git diff -U0`: one hunk in `lib.rs` and in each
 of the four ledgers, two in `benches/ratio.rs`, no line removed anywhere).
 
-### `crates/runner/src/fno_band.rs` (new; library lines 1-879, tests 880-2122)
+### `crates/runner/src/fno_band.rs` (new; library lines 1-880, tests 881-2122)
 
 The price band of one stock-day (SPEC 10.2, OP-12), computed for every date and
 labelled "band computed". Pure: no I/O, no telemetry (gate 17), integers only
