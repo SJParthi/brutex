@@ -616,3 +616,35 @@ fn the_dated_lookups_cost_the_same_on_every_row_measured() {
     assert!(p99 < 10_000);
     assert_eq!(price(&trip).expect("verified").exchange().raw(), 510);
 }
+
+/// BASE-COV-LIBS-LS4: the measurement's own arithmetic, checked where the
+/// gate runs. `percentiles` and `time_per_call` serve only the ignored timing
+/// run above, so nothing checked that the figures it prints are the samples
+/// it says they are, or that every operation it times is called.
+#[test]
+fn the_timing_helpers_pick_the_named_samples_and_call_every_operation() {
+    // 1. One hundred samples, in reverse: p50 is the 50th smallest (index
+    //    49), p99 the 99th (index 98), max the largest.
+    assert_eq!(percentiles((1..=100).rev().collect()), (50, 99, 100));
+    // 2. One sample is every percentile.
+    assert_eq!(percentiles(vec![7]), (7, 7, 7));
+    // 3. Two samples: both percentiles are the smaller one, the max the other.
+    assert_eq!(percentiles(vec![9, 3]), (3, 3, 9));
+    // 4. COMBINED: both ends of the type at once.
+    assert_eq!(percentiles(vec![u128::MAX, 0]), (0, 0, u128::MAX));
+    // 5. Ties are kept, never collapsed.
+    assert_eq!(percentiles(vec![5; 1_000]), (5, 5, 5));
+    // 6. The timer calls its operation exactly batches x per_batch times, and
+    //    its three figures come out in order.
+    let mut calls = 0_u32;
+    let (p50, p99, max) = time_per_call(3, 4, || {
+        calls += 1;
+        calls
+    });
+    assert_eq!(calls, 12);
+    assert!(p50 <= p99);
+    assert!(p99 <= max);
+    // 7. COMBINED: one batch of one call is one sample, so all three agree.
+    let (one, again, most) = time_per_call(1, 1, || ());
+    assert_eq!((one, again), (most, most));
+}
