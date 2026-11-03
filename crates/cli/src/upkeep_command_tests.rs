@@ -2326,9 +2326,11 @@ fn step_running(command: &str) -> Option<&'static str> {
 /// run is the operator's (D-7430).
 ///
 /// Every part a row owes is listed at once, a missing row reading as an empty
-/// one, so the failure names all that is owed rather than the first.
+/// one, so the failure names all that is owed rather than the first. The list
+/// is printed and then answered as the test's result, so the test runs to its
+/// end whichever way it goes.
 #[test]
-fn the_msum_store_half_is_a_pending_step_for_each_feed() {
+fn the_msum_store_half_is_a_pending_step_for_each_feed() -> Result<(), String> {
     let mut owed: Vec<String> = Vec::new();
     for (feed, command) in [
         ("gdfl", "cli upkeep run msum gdfl NSE/INDEX --workers 8"),
@@ -2357,7 +2359,11 @@ fn the_msum_store_half_is_a_pending_step_for_each_feed() {
         let said = format!("{feed}: no step running `{command}` waits for no import or pull");
         owed.extend((!waits).then_some(said));
     }
-    assert!(owed.is_empty(), "{owed:#?}");
+    eprintln!("owed: {owed:#?}");
+    owed.is_empty().then_some(()).ok_or(format!(
+        "{} part(s) of the msum store steps owed, listed above",
+        owed.len()
+    ))
 }
 
 /// **A PLAN NAMES THE MONTHS LACKING A SUMMARY, AND NONE AFTER THE STEP.** A
