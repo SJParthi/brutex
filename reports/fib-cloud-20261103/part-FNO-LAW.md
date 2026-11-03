@@ -81,8 +81,9 @@ statement of Route B, and the Mac re-measures.
 - `cargo test -p core --locked`: green, every binary; also green under Route B.
 - Tests outside `core` that read an edited file: `vocab` all green; `store`'s
   readers green (`docs`, `libm_key`, `bisect_cost`, `sealed_codec_alloc`,
-  `tail_proof`); `runner`'s `d_0694_record` green; `pull` and `cli`: see
-  `report-FNO-LAW.md` §8.
+  `tail_proof`); `runner`'s `d_0694_record` green; `pull`'s charter checksum
+  test green; `cli`'s `crate_graph_claims` (2 of 2), `pool_and_escape_docs`
+  (11 of 11) and `c4_cli_02_limits` (3 of 3) green.
 - Gates 27 and 14: OK. Gates 27b, 10 and 12: red on the base and here with the
   same refusals, none of them this part's (D-6247 twice; R427-11 and
   STACK1028-03; 87 unproven claims elsewhere). Gate 10 checks 10 more named

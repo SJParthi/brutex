@@ -179,8 +179,8 @@ Route B (the build `docs/06-limits.md` names for the Mac's Route B).
 | `vocab` (reads `CLAUDE.md`, the charter, `AGENTS.md`, the ledger, the invariants) | `cargo test -p vocab --locked --no-fail-fast` | green, every binary |
 | `store` (reads the ledger, the invariants, the plan, `CLAUDE.md`) | `cargo test -p store --locked --no-fail-fast` | 39 of 40 integration binaries green, among them every one that reads an edited file (`docs`, `libm_key`, `bisect_cost`, `sealed_codec_alloc`, `tail_proof`), and the doc-tests; **two reds, the base's and the host's, not this part's** (§7) |
 | `runner` `d_0694_record` (reads the ledger and the invariants) | `cargo test -p runner --locked --test d_0694_record` | green, 3 of 3 |
-| `pull` charter checksum test | `cargo test -p pull --locked --lib the_sourced_expiry_rows_carry_the_charters_checksum` | see §4.1 |
-| `cli` doc readers | `cargo test -p cli --locked --no-fail-fast --test crate_graph_claims --test pool_and_escape_docs --test c4_cli_02_limits` | see §4.1 |
+| `pull` charter checksum test (reads the charter) | `cargo test -p pull --locked --lib the_sourced_expiry_rows_carry_the_charters_checksum` | green, 1 of 1 (`reference_data::tests::…`) |
+| `cli` doc readers | `cargo test -p cli --locked --no-fail-fast --test crate_graph_claims --test pool_and_escape_docs --test c4_cli_02_limits` | green: `crate_graph_claims` 2 of 2, `pool_and_escape_docs` 11 of 11 (reads the invariants and the ledger), `c4_cli_02_limits` 3 of 3 (reads the ledger) |
 | gate 27 | `.github/gates_ledger.rs invariant-ids` | OK: 3,483 ids unique (base 3,479) |
 | gate 27b | `.github/gates_ledger.rs decision-numbers` | rc 1 on the base and here, the same one refusal: D-6247 heads two entries (lines 81917 and 82161, not this part's); this part adds 9 headings, none doubled |
 | gate 10 | the workflow's commands, `invariant_paths.rs` then `invariant-tests` | rc 1 on the base and here, the same two rows: R427-11 (the base row the main session's §7.5 (c) names) and STACK1028-03; 4,054 named tests checked here against 4,044 at the base, so FNO-LAW's 10 citations all resolve |
@@ -196,7 +196,7 @@ in this session's scratchpad (not tracked); each gate was run at the base
 ### 4.1 The two late builds
 
 The `pull` and `cli` targets were still building when this report was first
-written; their results are in §8, written when they finished.
+written; both finished green and their rows above are the results.
 
 ## 5. Coverage (Route B, measured here)
 
@@ -260,8 +260,6 @@ None, by design (the part is documents and one test file).
 
 ## 8. Not done here, and why
 
-- **The `pull` and `cli` doc-reading tests:** results are appended below when
-  their builds finish.
 - **`cargo test --workspace --locked` in full** was not run: 4 cores and the
   size of `cli` and `api`. Run instead: the touched crate (`core`) whole, and
   every test outside it that reads a file this part edits (found by a grep of
