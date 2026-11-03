@@ -4660,9 +4660,7 @@ mod tests {
     }
 
     fn test_column_with_thresholds(bars: &[Candle], thresholds: Thresholds) -> Column {
-        let Ok(widths) = Widths::pinned() else {
-            return Column::default();
-        };
+        let widths = Widths::pinned().expect("pinned widths are valid");
         let mut evaluator = Evaluator::new(widths, Availability::Absent, thresholds);
         Column::build(bars, &mut evaluator)
     }
@@ -4709,27 +4707,15 @@ mod tests {
     }
 
     fn nifty() -> InstrumentKey {
-        InstrumentKey::index(Exchange::Nse, "NIFTY").unwrap_or_else(|_| unsupported_key())
+        InstrumentKey::index(Exchange::Nse, "NIFTY").expect("a structurally valid key")
     }
 
     fn bank_nifty() -> InstrumentKey {
-        InstrumentKey::index(Exchange::Nse, "BANKNIFTY").unwrap_or_else(|_| unsupported_key())
-    }
-
-    fn unsupported_key() -> InstrumentKey {
-        InstrumentKey {
-            exchange: Exchange::Nse,
-            segment: Segment::Cash,
-            underlying: symbol("X"),
-            kind: Kind::Equity,
-        }
+        InstrumentKey::index(Exchange::Nse, "BANKNIFTY").expect("a structurally valid key")
     }
 
     fn symbol(text: &str) -> Symbol {
-        let Ok(value) = Symbol::new(text) else {
-            return symbol("X");
-        };
-        value
+        Symbol::new(text).expect("a valid fixture symbol")
     }
 
     #[test]
@@ -4751,7 +4737,7 @@ mod tests {
             instrument_digest_v1(&same_symbol_equity)
         );
         let foreign_exchange =
-            InstrumentKey::index(Exchange::Bse, "NIFTY").unwrap_or_else(|_| unsupported_key());
+            InstrumentKey::index(Exchange::Bse, "NIFTY").expect("a structurally valid key");
         assert_ne!(
             instrument_digest_v1(&nifty),
             instrument_digest_v1(&foreign_exchange)
@@ -4766,10 +4752,8 @@ mod tests {
             instrument_digest_v1(&foreign_segment)
         );
 
-        let front_expiry = Expiry::new(2026, 8, 27)
-            .unwrap_or_else(|_| Expiry::new(2026, 8, 1).unwrap_or_else(|_| unreachable_expiry()));
-        let next_expiry = Expiry::new(2026, 9, 24)
-            .unwrap_or_else(|_| Expiry::new(2026, 9, 1).unwrap_or_else(|_| unreachable_expiry()));
+        let front_expiry = Expiry::new(2026, 8, 27).expect("a valid expiry");
+        let next_expiry = Expiry::new(2026, 9, 24).expect("a valid expiry");
         let future = |expiry| InstrumentKey {
             exchange: Exchange::Nse,
             segment: Segment::Fno,
@@ -4887,8 +4871,7 @@ mod tests {
             Ok(InstrumentFamilyV1::BankNifty)
         );
 
-        let expiry = Expiry::new(2026, 8, 27)
-            .unwrap_or_else(|_| Expiry::new(2026, 8, 1).unwrap_or_else(|_| unreachable_expiry()));
+        let expiry = Expiry::new(2026, 8, 27).expect("a valid expiry");
         let symbols = [
             InstrumentKey {
                 exchange: Exchange::Nse,
@@ -4912,8 +4895,8 @@ mod tests {
                     side: OptionSide::Call,
                 },
             },
-            InstrumentKey::index(Exchange::Nse, "SENSEX").unwrap_or_else(|_| unsupported_key()),
-            InstrumentKey::index(Exchange::Bse, "NIFTY").unwrap_or_else(|_| unsupported_key()),
+            InstrumentKey::index(Exchange::Nse, "SENSEX").expect("a structurally valid key"),
+            InstrumentKey::index(Exchange::Bse, "NIFTY").expect("a structurally valid key"),
         ];
         for instrument in symbols {
             assert_eq!(
@@ -5016,13 +4999,6 @@ mod tests {
         assert_ne!(changed.stop_levels_ppm(), baseline.stop_levels_ppm());
         assert_ne!(changed.target_levels_ppm(), baseline.target_levels_ppm());
         assert_ne!(changed.trail_levels_ppm(), baseline.trail_levels_ppm());
-    }
-
-    fn unreachable_expiry() -> Expiry {
-        match Expiry::new(2026, 1, 1) {
-            Ok(value) => value,
-            Err(_) => unreachable_expiry(),
-        }
     }
 
     #[test]
