@@ -1484,8 +1484,8 @@ mod tests {
     fn every_operator_of_a_ranking_wrapper_agrees_with_its_order() {
         let (low, high) = (scored(1.0, 1), scored(2.0, 2));
         let marked = |ranked, closed| super::Marked { ranked, closed };
-        assert!(marked(low, true) == marked(low, false));
-        assert!(marked(low, true) != marked(high, true));
+        assert_eq!(marked(low, true), marked(low, false));
+        assert_ne!(marked(low, true), marked(high, true));
         assert!(marked(low, true) < marked(high, false));
         let (one, other) = (super::ByPath(low), super::ByPath(high));
         assert_eq!(one.partial_cmp(&other), Some(one.cmp(&other)));
