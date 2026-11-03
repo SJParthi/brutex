@@ -152,11 +152,12 @@ fn fold(text: &str) -> String {
 }
 
 /// The text after the first `start` in `doc` up to the next `end`, or `None`
-/// when either is missing.
+/// when either is missing. Both splits fall on a char boundary, because each
+/// is the end of a match or the start of one.
 fn section<'a>(doc: &'a str, start: &str, end: &str) -> Option<&'a str> {
-    let from = doc.find(start)? + start.len();
-    let body = doc.get(from..)?;
-    body.get(..body.find(end)?)
+    let (_, body) = doc.split_at(doc.find(start)? + start.len());
+    let (body, _) = body.split_at(body.find(end)?);
+    Some(body)
 }
 
 /// The heading of the slot section, built from its two numbers.
@@ -221,7 +222,8 @@ fn heading(line: &str) -> Option<u16> {
     if !(2..=4).contains(&hashes) {
         return None;
     }
-    let rest = line.get(hashes..)?;
+    // The split falls on a char boundary: the hashes before it are ASCII.
+    let (_, rest) = line.split_at(hashes);
     let text = rest.trim_start_matches(' ');
     if text.len() == rest.len() {
         return None;
@@ -515,6 +517,8 @@ fn charter_text(costs: &[&str], facts: &[&str]) -> String {
             "| {id} | a charge | `https://nsearchives.nseindia.com/{id}.pdf` | 2026-10-30 | PRIMARY |"
         );
     }
+    // A line that opens a row and never closes its first cell is not a row.
+    text.push_str("| a line with no closing bar\n");
     text.push_str("\n| Id | Fact | Source |\n|---|---|---|\n");
     for id in facts {
         let _ = writeln!(
@@ -572,7 +576,7 @@ fn the_ledger_heads_d_8100_to_d_8108_under_the_law_slot_and_no_other_number_of_i
     // thousand others, so a reader that matched nothing could not pass.
     let all = entries(DECISIONS);
     assert_eq!(all.first().map(|&(number, _)| number), Some(1));
-    assert!(all.len() > 1_000, "{}", all.len());
+    assert!(all.len() > 1_000);
 }
 
 /// **The charter names each of the 25 cost rows and the eight execution facts
@@ -640,6 +644,10 @@ fn a_law_text_missing_any_one_phrase_or_misplacing_the_label_is_refused_by_name(
         assert_eq!(law_problems("x", &text), label);
     }
     assert_eq!(law_problems("x", "# law\n\n## 2. Next\n"), ["x has no §1"]);
+    assert_eq!(
+        law_problems("x", "# law\n\n## 1. What this is\n\nno second section\n"),
+        ["x has no §1"]
+    );
     let text = law_text(LABEL, &SURFACE, &IDENTITY).replace("3. **Reproducibility.**", "3. Other.");
     assert_eq!(law_problems("x", &text), ["x has no §3 rule 3"]);
 }
