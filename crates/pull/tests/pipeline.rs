@@ -1653,17 +1653,17 @@ fn a_member_whose_bars_cross_a_month_boundary_lands_in_both_months() {
     let mut found: Vec<String> = Vec::new();
     let mut stack = vec![store_of(&scratch)];
     while let Some(at) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&at) else {
-            continue;
-        };
+        // Every folder here is one the run just wrote and every name is a
+        // month: anything else is a broken store, so the walk fails loudly
+        // rather than skipping it.
+        let entries = std::fs::read_dir(&at).expect("a folder of the store just written");
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "bin")
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            {
-                found.push(stem.to_owned());
+            } else if path.extension().is_some_and(|e| e == "bin") {
+                let stem = path.file_stem().and_then(|s| s.to_str());
+                found.push(stem.expect("a month's file name is text").to_owned());
             }
         }
     }

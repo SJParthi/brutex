@@ -20,6 +20,9 @@
     clippy::indexing_slicing
 )]
 
+#[cfg(unix)]
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -300,19 +303,27 @@ fn the_internal_rungs_are_derived_for_spot_and_futures_but_never_for_options() {
 /// A silence that only breaks on failure is indistinguishable from a run that
 /// never happened. This test drives a CLEAN ingest — the case that was silent —
 /// and asserts the record lands at `Info` with the books on it.
+#[cfg(unix)]
 #[test]
 fn a_clean_run_writes_one_info_record_naming_what_it_did() {
+    support::where_permission_binds(
+        "a_clean_run_writes_one_info_record_naming_what_it_did",
+        a_clean_run_writes_one_info_record_naming_what_it_did_body,
+    );
+}
+
+#[cfg(unix)]
+fn a_clean_run_writes_one_info_record_naming_what_it_did_body() {
     let dir = std::env::temp_dir().join(format!("brutex-derive-log-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    // Install-or-adopt: `telemetry::install` is a process singleton, so a
-    // sibling test in this binary may already own it. Either way the sink
-    // returned is the one `emit` reaches, which is the only one an assertion
-    // about a production emit can be written against.
+    // `telemetry::install` is a process singleton, so the body runs in a
+    // process of its own (`where_permission_binds`): no sibling test can own
+    // the sink first, and the sink installed here is the one `emit` reaches,
+    // the only one an assertion about a production emit can be written
+    // against. BASE-COV-PULL PS3: it used to adopt a sibling's sink, an arm
+    // that ran only when another test happened to install first.
     let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
-    let sink = match telemetry::install(&config) {
-        Ok(installed) => installed,
-        Err(_already) => telemetry::global().expect("install named the sink that exists"),
-    };
+    let sink = telemetry::install(&config).expect("the only install in this process");
     let before = sink.health().written;
 
     let scratch = Scratch::new("runlog");
@@ -1967,13 +1978,10 @@ fn a_refused_month_is_that_months_alone_and_the_others_are_counted() {
     );
     assert_eq!(done.derived_files, 7, "and derives");
     assert_eq!(done.counted, 8, "and its eight files are counted");
-    let refused: Vec<_> = done
-        .failures
-        .iter()
-        .filter(|f| f.why.contains("NIFTY: 2020-12: ") && f.why.contains("this month only"))
-        .collect();
-    assert_eq!(refused.len(), 1, "{:?}", done.failures);
     assert_eq!(done.failures.len(), 1, "{:?}", done.failures);
+    let refused = &done.failures[0].why;
+    assert!(refused.contains("NIFTY: 2020-12: "), "{refused}");
+    assert!(refused.contains("this month only"), "{refused}");
     assert!(
         scratch
             .0
