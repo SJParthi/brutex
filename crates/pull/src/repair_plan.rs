@@ -1009,3 +1009,9 @@ mod tests {
 #[cfg(test)]
 #[path = "repair_plan_not_owed_tests.rs"]
 mod not_owed_tests;
+
+// BASE-COV-PULL-PS2 (3 Nov 2026): the plan's arms Route B found unreached on
+// START, each driven by a store fixture or a direct call and asserted.
+#[cfg(test)]
+#[path = "repair_plan_ps2_tests.rs"]
+mod ps2_tests;
