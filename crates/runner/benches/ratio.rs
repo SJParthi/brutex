@@ -76,6 +76,8 @@ use vocab::ConditionMask;
 // slot bench-mod FNO-NET
 
 // slot bench-mod FNO-PORTFOLIO
+#[path = "ratio/fno_portfolio.rs"]
+mod fno_portfolio;
 
 // slot bench-mod FNO-STRAT
 
@@ -607,6 +609,7 @@ fn main() {
         // slot bench-row FNO-FILTER
         // slot bench-row FNO-NET
         // slot bench-row FNO-PORTFOLIO
+        fno_portfolio::row(&["C-FNO-PORT-01"]),
         // slot bench-row FNO-STRAT
         // slot bench-row FNO-WFT
     ];

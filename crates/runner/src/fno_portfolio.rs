@@ -1459,53 +1459,84 @@ const CYCLE_SECONDS: i64 = 40;
 /// twenty, and the session ends at its 100-entry cap. The history is what the
 /// bench scales: a call's work must not grow with it.
 ///
+/// The sample buffers are written whole just before the first measured
+/// session. Measured in the cloud build session of 3 Nov 2026: with buffers
+/// written only as the samples arrived, about one release in eight took over
+/// 100 ns in the sessions that began each 4 KiB page of the buffer, at the same
+/// sessions in every process, after a long history or after a plain 40 ms busy
+/// wait alike; written just before, none did. One 64-byte line holds eight
+/// samples, so this reads as a store missing a cold buffer and stalling the
+/// release timed after it: the fixture's own cost, not the account's
+/// (an inference; the counts are the measurement).
+///
 /// # Errors
 ///
 /// Any [`Invalid`] a call returns, which a correct fixture never meets;
 /// [`Invalid::StaleSlot`] when an entry it offered was not admitted.
 pub fn measure_admit_release(history_days: u32, measured_days: u32) -> Result<Samples, Invalid> {
     let mut account = Account::new(Capital::Carried, TieBreak::Symbol);
-    let mut samples = Samples::default();
     let mut next: u8 = 0;
-    for day in 0..history_days.saturating_add(measured_days) {
-        let timed = day >= history_days;
-        let open = i64::from(day) * 86_400;
-        account.begin_day(open)?;
-        let mut held = [NO_SLOT; POSITION_SLOTS];
-        let mut at = open;
-        for cell in &mut held {
-            *cell = account
-                .admit(at, &bench_entry(next, at))?
-                .slot()
-                .unwrap_or(NO_SLOT);
-            next = next.wrapping_add(1);
-            at += 1;
-        }
-        for cycle in 0..CYCLES {
-            at = open + 20 + CYCLE_SECONDS * cycle;
-            let oldest = held[0];
-            let began = Instant::now();
-            let released = account.release(oldest, at - 1, 400 - 700 * (cycle % 2));
-            let release_ns = elapsed_ns(began);
-            released?;
-            let entry = bench_entry(next, at);
-            let began = Instant::now();
-            let admitted = account.admit(at, &entry);
-            let admit_ns = elapsed_ns(began);
-            held.rotate_left(1);
-            held[POSITION_SLOTS - 1] = admitted?.slot().unwrap_or(NO_SLOT);
-            next = next.wrapping_add(1);
-            if timed {
-                samples.release_ns.push(release_ns);
-                samples.admit_ns.push(admit_ns);
-            }
-        }
-        for slot in held {
-            account.release(slot, at, 0)?;
-        }
+    for day in 0..history_days {
+        bench_session(&mut account, day, &mut next, None)?;
+    }
+    let capacity = usize::try_from(i64::from(measured_days) * CYCLES).unwrap_or(0);
+    let mut samples = Samples {
+        admit_ns: vec![1; capacity],
+        release_ns: vec![1; capacity],
+        admitted: 0,
+    };
+    samples.admit_ns.clear();
+    samples.release_ns.clear();
+    for day in history_days..history_days.saturating_add(measured_days) {
+        bench_session(&mut account, day, &mut next, Some(&mut samples))?;
     }
     samples.admitted = account.tickets;
     Ok(samples)
+}
+
+/// One session of the fixture on `day`, its cycles timed into `samples` when
+/// one is given.
+fn bench_session(
+    account: &mut Account,
+    day: u32,
+    next: &mut u8,
+    mut samples: Option<&mut Samples>,
+) -> Result<(), Invalid> {
+    let open = i64::from(day) * 86_400;
+    account.begin_day(open)?;
+    let mut held = [NO_SLOT; POSITION_SLOTS];
+    let mut at = open;
+    for cell in &mut held {
+        *cell = account
+            .admit(at, &bench_entry(*next, at))?
+            .slot()
+            .unwrap_or(NO_SLOT);
+        *next = next.wrapping_add(1);
+        at += 1;
+    }
+    for cycle in 0..CYCLES {
+        at = open + 20 + CYCLE_SECONDS * cycle;
+        let oldest = held[0];
+        let began = Instant::now();
+        let released = account.release(oldest, at - 1, 400 - 700 * (cycle % 2));
+        let release_ns = elapsed_ns(began);
+        released?;
+        let entry = bench_entry(*next, at);
+        let began = Instant::now();
+        let admitted = account.admit(at, &entry);
+        let admit_ns = elapsed_ns(began);
+        held.rotate_left(1);
+        held[POSITION_SLOTS - 1] = admitted?.slot().unwrap_or(NO_SLOT);
+        *next = next.wrapping_add(1);
+        if let Some(samples) = samples.as_deref_mut() {
+            samples.release_ns.push(release_ns);
+            samples.admit_ns.push(admit_ns);
+        }
+    }
+    for slot in held {
+        account.release(slot, at, 0)?;
+    }
+    Ok(())
 }
 
 /// The bench's entry: Rs 1 lakh of a stock at Rs 1,000, at the margin floor.
