@@ -1132,12 +1132,12 @@ mod tests {
             assert_eq!(ledger.lost_minutes(), 0, "{door}: {:?}", ledger.gaps);
             assert_eq!(ledger.expected, owed, "{door}");
             assert!(
-                ledger
-                    .gaps
-                    .iter()
-                    .any(|gap| gap.reason == Reason::OutsideWindow
-                        && gap.from == halt.halted.from
-                        && gap.to == halt.halted.to),
+                ledger.gaps.contains(&Gap {
+                    day,
+                    from: halt.halted.from,
+                    to: halt.halted.to,
+                    reason: Reason::OutsideWindow,
+                }),
                 "{door}: the halt is one run outside the window: {:?}",
                 ledger.gaps
             );
@@ -1173,10 +1173,12 @@ mod tests {
             "15:30..=15:39 are owed by the venue and were not delivered"
         );
         assert!(
-            lost.gaps.iter().any(|gap| gap.day == day
-                && gap.from == 930
-                && gap.to == 939
-                && gap.reason == Reason::VendorHole),
+            lost.gaps.contains(&Gap {
+                day,
+                from: 930,
+                to: 939,
+                reason: Reason::VendorHole,
+            }),
             "the ten minutes are one vendor-hole run: {:?}",
             lost.gaps
         );
@@ -1237,10 +1239,12 @@ mod tests {
         assert_eq!(checked.held, 734);
         assert_eq!(checked.expected, 735);
         assert_eq!(checked.lost_minutes(), 1);
-        assert!(checked.gaps.iter().any(|gap| gap.day == last
-            && gap.from == 763
-            && gap.to == 763
-            && gap.reason == Reason::VendorHole));
+        assert!(checked.gaps.contains(&Gap {
+            day: last,
+            from: 763,
+            to: 763,
+            reason: Reason::VendorHole,
+        }));
         assert!(
             !checked
                 .gaps
@@ -1275,11 +1279,12 @@ mod tests {
         let tail = classify_cash(&prefix, day, day, Some(&schedule), &Key::NONE);
         assert_eq!(tail.expected, 375);
         assert_eq!(tail.lost_minutes(), 15);
-        assert!(
-            tail.gaps
-                .iter()
-                .any(|gap| gap.from == 915 && gap.to == 929 && gap.reason == Reason::VendorHole)
-        );
+        assert!(tail.gaps.contains(&Gap {
+            day,
+            from: 915,
+            to: 929,
+            reason: Reason::VendorHole,
+        }));
         let absent = classify_cash(&[], day, day, Some(&schedule), &Key::NONE);
         assert_eq!(absent.expected, 375);
         assert_eq!(absent.lost_minutes(), 375);
@@ -1422,10 +1427,12 @@ mod tests {
         assert_eq!(clean.expected, 105);
         assert_eq!(clean.lost_minutes(), 0, "the midday break is not a loss");
         assert!(
-            clean
-                .gaps
-                .iter()
-                .any(|g| g.reason == Reason::OutsideWindow && g.from == 600),
+            clean.gaps.contains(&Gap {
+                day,
+                from: 600,
+                to: 689,
+                reason: Reason::OutsideWindow,
+            }),
             "and it IS reported, as outside-window: {:?}",
             clean.gaps
         );
@@ -1684,6 +1691,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "gaps_cov_tests.rs"]
+mod cov_tests;
 #[cfg(test)]
 #[path = "gaps_not_owed_tests.rs"]
 mod not_owed_tests;

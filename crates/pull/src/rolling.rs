@@ -1900,4 +1900,306 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["securityId"], "13\u{1}\n\t\r\"\\x");
     }
+
+    /// **A DAY BEFORE THE VERIFIED REGIMES IS REFUSED, FOR EITHER CADENCE AND
+    /// EITHER QUESTION, AND SAYS SO.** `costs::expiry` records no weekday
+    /// before 2020-01-01, so neither which contract (`expiry_of`) nor whether
+    /// any is listed (`listing_of`) has an answer there: the day before the
+    /// floor and the first day `costs` can name are refused alike, and the
+    /// floor itself is the control.
+    #[test]
+    fn a_day_before_the_verified_regimes_is_refused_for_either_cadence() {
+        use crate::session::Day;
+        for on in [
+            Day::new(2019, 12, 31).expect("the day before the floor"),
+            Day::new(1990, 1, 1).expect("the first day costs names"),
+        ] {
+            for (flag, why) in [
+                (
+                    "WEEK",
+                    "the day is before this weekly regime was verified from",
+                ),
+                (
+                    "MONTH",
+                    "the day is before this monthly regime was verified from",
+                ),
+            ] {
+                assert_eq!(
+                    expiry_of("NIFTY", &spec(), flag, "1", on),
+                    Err(RollingError::NoExpiry { why }),
+                    "{on} {flag}"
+                );
+                assert_eq!(
+                    listing_of("NIFTY", &spec(), flag, on),
+                    Err(RollingError::NoExpiry { why }),
+                    "{on} {flag}"
+                );
+            }
+        }
+        let floor = Day::new(2020, 1, 1).expect("the floor");
+        for flag in ["WEEK", "MONTH"] {
+            assert!(
+                expiry_of("NIFTY", &spec(), flag, "1", floor).is_ok(),
+                "{flag}"
+            );
+            assert_eq!(
+                listing_of("NIFTY", &spec(), flag, floor),
+                Ok(Listing::Listed),
+                "{flag}"
+            );
+        }
+    }
+
+    /// **AN UNDERLYING THAT IS NO SYMBOL, AND A DAY NO TRADE DAY HOLDS, ARE
+    /// REFUSED BY THEIR OWN STEP.** A `Day` reaches 1970..=9999 and `costs`
+    /// 1990..=2100, so a real day outside the second is no trade day; a name
+    /// with a space, an empty one or one past 24 characters is no symbol. When
+    /// both are wrong the symbol is named first, which is the order the
+    /// question is asked in.
+    #[test]
+    fn an_unreal_underlying_or_trade_day_is_refused_by_its_own_step() {
+        use crate::session::Day;
+        let ordinary = Day::new(2025, 9, 1).expect("a real day");
+        let unsymbol = RollingError::NoExpiry {
+            why: "the underlying is not a symbol this build knows",
+        };
+        let unreal = RollingError::NoExpiry {
+            why: "the bar's own day is not a real date",
+        };
+        let long = "Z".repeat(25);
+        for name in ["", "ZZ IDX", long.as_str()] {
+            assert_eq!(
+                expiry_of(name, &spec(), "WEEK", "1", ordinary),
+                Err(unsymbol.clone()),
+                "{name:?}"
+            );
+            assert_eq!(
+                listing_of(name, &spec(), "MONTH", ordinary),
+                Err(unsymbol.clone()),
+                "{name:?}"
+            );
+        }
+        for on in [
+            Day::new(1989, 12, 31).expect("a real day costs cannot name"),
+            Day::new(2101, 1, 1).expect("and one past its last"),
+            Day::new(1970, 1, 1).expect("the first day a Day holds"),
+        ] {
+            assert_eq!(
+                expiry_of("NIFTY", &spec(), "WEEK", "1", on),
+                Err(unreal.clone()),
+                "{on}"
+            );
+            assert_eq!(
+                listing_of("BANKNIFTY", &spec(), "MONTH", on),
+                Err(unreal.clone()),
+                "{on}"
+            );
+        }
+        // BOTH WRONG AT ONCE: the symbol is the step that refuses.
+        assert_eq!(
+            expiry_of(
+                "ZZ IDX",
+                &spec(),
+                "WEEK",
+                "1",
+                Day::new(2101, 1, 1).expect("a day")
+            ),
+            Err(unsymbol)
+        );
+        assert!(unreal.to_string().contains("not a real date"));
+    }
+
+    /// **AN EXPIRY PAST THE CALENDAR'S LAST MEASURED DAY IS FILED UNCHECKED**,
+    /// as `docs/06-limits.md` names: `kind_of` cannot say whether that day
+    /// is open, so it is neither refused as closed nor as short. The last
+    /// Tuesday `costs` can name, 2100-12-28, is still a contract; the one
+    /// after it is not a day at all, and is refused rather than wrapped.
+    #[test]
+    fn an_expiry_past_the_last_measured_day_is_filed_unchecked() {
+        use crate::session::Day;
+        assert!(
+            i64::from(Day::new(2026, 10, 6).expect("a day").days_from_epoch())
+                > crate::calendar::LAST_DAY,
+            "the fixture is past the calendar"
+        );
+        let near = expiry_of(
+            "NIFTY",
+            &spec(),
+            "WEEK",
+            "1",
+            Day::new(2026, 10, 1).expect("a Thursday past the calendar"),
+        );
+        assert_eq!(
+            near,
+            Ok(brutex_core::instrument::Expiry::new(2026, 10, 6).expect("a Tuesday"))
+        );
+        let last = Day::new(2100, 12, 28).expect("the last Tuesday costs names");
+        assert_eq!(
+            expiry_of("NIFTY", &spec(), "WEEK", "1", last),
+            Ok(brutex_core::instrument::Expiry::new(2100, 12, 28).expect("an expiry"))
+        );
+        assert_eq!(
+            expiry_of("NIFTY", &spec(), "MONTH", "1", last),
+            Ok(brutex_core::instrument::Expiry::new(2100, 12, 28).expect("an expiry")),
+            "the last Tuesday of December 2100 is that month's too"
+        );
+        // ONE STEP PAST IT is 2101-01-04, which no trade day holds.
+        assert!(matches!(
+            expiry_of("NIFTY", &spec(), "WEEK", "2", last),
+            Err(RollingError::NoExpiry { .. })
+        ));
+        assert!(matches!(
+            expiry_of("NIFTY", &spec(), "MONTH", "2", last),
+            Err(RollingError::NoExpiry { .. })
+        ));
+    }
+
+    /// **A VALUE SEGMENT IN A ROLLING PATH IS WRITTEN AS ITS PLACEHOLDER**, never
+    /// a value invented for it: the feed that has a rolling path writes only
+    /// literals, and a placeholder left standing makes the vendor name the
+    /// segment rather than this build name nothing. Invented segments.
+    #[test]
+    fn a_value_segment_of_a_rolling_path_is_written_as_its_placeholder() {
+        use crate::vendor::{ParamValue, PathSegment};
+        const PATH: &[PathSegment] = &[
+            PathSegment::Literal("ZZ_ROLL"),
+            PathSegment::Value {
+                placeholder: "ZZ_PLACEHOLDER",
+                value: ParamValue::InstrumentId,
+            },
+            PathSegment::Literal("ZZ_TAIL"),
+        ];
+        let custom = RollingSpec {
+            path: PATH,
+            ..spec()
+        };
+        assert_eq!(
+            url(&custom, "https://zz.invalid"),
+            "https://zz.invalid/ZZ_ROLL/ZZ_PLACEHOLDER/ZZ_TAIL"
+        );
+        // NO SEGMENT AT ALL is the base alone.
+        let bare = RollingSpec {
+            path: &[],
+            ..spec()
+        };
+        assert_eq!(url(&bare, "https://zz.invalid"), "https://zz.invalid");
+    }
+
+    /// One rolling CALL body with one row: `open` and `strike` cells as
+    /// given, every other price `close`.
+    fn with_strike(open: &str, strike: &str, scale: PriceScale) -> Result<Vec<Row>, RollingError> {
+        let body = format!(
+            r#"{{"data":{{"ce":{{
+            "timestamp":[1700000000],
+            "open":[{open}],"high":[{open}],"low":[{open}],"close":[{open}],
+            "volume":[1],"strike":[{strike}]
+        }}}}}}"#
+        );
+        read(&body, &spec(), "CALL", scale)
+    }
+
+    /// **THE STRIKE AN OFFSET RESOLVED TO IS READ BESIDE EVERY ROW, AS A PRICE,
+    /// ON EITHER SCALE**: rupee text snapped to paisa, or whole paisa as sent.
+    /// A paisa-scale cell that is not a whole count, a strike below zero and a
+    /// strike that is no number are each refused by name; zero is a strike.
+    #[test]
+    fn a_strike_is_read_beside_every_row_on_either_scale() {
+        // Whole counts are spelled from integers at run time, so this file
+        // adds no digit-run literal to `crates/pull` (CI gate 1d).
+        let (open, strike) = (11_111_i64.to_string(), 1_111_100_i64.to_string());
+        let rupees = with_strike("111.11", "11111.0", PriceScale::Rupees).expect("reads");
+        assert_eq!(rupees[0].strike, Some(1_111_100));
+        assert_eq!(rupees[0].bar.close, 11_111);
+        let paisa = with_strike(&open, &strike, PriceScale::Paisa).expect("reads");
+        assert_eq!(paisa[0].strike, Some(1_111_100), "paisa as sent");
+        assert_eq!(paisa[0].bar.open, 11_111);
+        assert_eq!(
+            with_strike(&open, "0", PriceScale::Paisa).expect("reads")[0].strike,
+            Some(0),
+            "a zero strike is still a strike"
+        );
+        // EVERY REFUSAL NAMES ITS FIELD.
+        let below = (-111_i64).to_string();
+        for (open, strike, scale, want) in [
+            (
+                "111.5",
+                strike.as_str(),
+                PriceScale::Paisa,
+                RollingError::Unrepresentable { field: "open" },
+            ),
+            (
+                open.as_str(),
+                "1111100.5",
+                PriceScale::Paisa,
+                RollingError::Unrepresentable { field: "strike" },
+            ),
+            (
+                open.as_str(),
+                "-1",
+                PriceScale::Paisa,
+                RollingError::NotAPrice {
+                    field: "strike",
+                    text: "-1".to_owned(),
+                },
+            ),
+            (
+                "111.11",
+                "null",
+                PriceScale::Rupees,
+                RollingError::Unrepresentable { field: "strike" },
+            ),
+            (
+                below.as_str(),
+                open.as_str(),
+                PriceScale::Paisa,
+                RollingError::NotAPrice {
+                    field: "open",
+                    text: below.clone(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                with_strike(open, strike, scale).map(|rows| rows.len()),
+                Err(want),
+                "{open} {strike}"
+            );
+        }
+        // A WHOLE PAISA PAST i64 is no paisa either.
+        assert_eq!(
+            with_strike(&open, &u64::MAX.to_string(), PriceScale::Paisa).map(|rows| rows.len()),
+            Err(RollingError::Unrepresentable { field: "strike" })
+        );
+    }
+
+    /// **EVERY REFUSAL SENTENCE NAMES WHAT IT REFUSED**: the field, the key or
+    /// the cell, so a log line sends a reader to the right column.
+    #[test]
+    fn every_refusal_sentence_names_what_it_refused() {
+        for (refusal, needle) in [
+            (RollingError::NotJson, "not JSON"),
+            (
+                RollingError::UnknownSide,
+                "not a side this feed's descriptor names",
+            ),
+            (RollingError::NoSide { key: "pe" }, "no `pe` object"),
+            (
+                RollingError::NotAnArray { field: "close" },
+                "`close` is absent",
+            ),
+            (
+                RollingError::Unrepresentable { field: "strike" },
+                "a `strike` value does not fit paisa",
+            ),
+            (
+                RollingError::Undecimal {
+                    field: "iv",
+                    text: "\"ZZ\"".to_owned(),
+                },
+                "a `iv` cell holds \"ZZ\", which is not a decimal",
+            ),
+        ] {
+            let said = refusal.to_string();
+            assert!(said.contains(needle), "{needle} in {said}");
+        }
+    }
 }

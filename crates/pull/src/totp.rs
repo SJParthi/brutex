@@ -771,6 +771,13 @@ mod tests {
             .expect("crates/ sits under the workspace root");
         let this = workspace.join(file!());
         assert!(this.is_file(), "file!() resolves from the workspace root");
+        // The module's own text is the control: it must contain the needle,
+        // or the needle is wrong and the walk proves nothing.
+        let own = std::fs::read_to_string(&this).expect("this module is UTF-8");
+        assert!(
+            own.contains(&needle),
+            "the needle names this module's functions"
+        );
 
         let mut stack: Vec<PathBuf> = std::fs::read_dir(crates)
             .expect("crates/ is readable")
@@ -778,42 +785,124 @@ mod tests {
             .filter(|dir| dir.is_dir())
             .collect();
         let mut scanned = 0_usize;
-        let mut offenders = Vec::new();
+        let mut naming: Vec<PathBuf> = Vec::new();
         while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("a source directory is readable") {
-                let path = entry.expect("a directory entry").path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if !path
-                    .extension()
+            let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) = std::fs::read_dir(&dir)
+                .expect("a source directory is readable")
+                .map(|entry| entry.expect("a directory entry").path())
+                .partition(|path| path.is_dir());
+            stack.extend(dirs);
+            // RUST SOURCE ONLY, chosen by a filter rather than skipped by a
+            // branch: today every file under a `src` is one.
+            for path in files.into_iter().filter(|path| {
+                path.extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("RS"))
-                {
-                    continue;
-                }
+            }) {
                 let text = std::fs::read_to_string(&path).expect("a source file is UTF-8");
-                if path == this {
-                    // The module's own text is the control: it must contain the
-                    // needle, or the needle is wrong and the walk proves nothing.
-                    assert!(
-                        text.contains(&needle),
-                        "the needle names this module's functions"
-                    );
-                    continue;
-                }
                 scanned += 1;
-                if text.contains(&needle) || text.contains(&glob) {
-                    offenders.push(path.display().to_string());
+                if [&needle, &glob]
+                    .into_iter()
+                    .any(|word| text.contains(word.as_str()))
+                {
+                    naming.push(path);
                 }
             }
         }
         // Not vacuous: thirteen crates' sources were read, not an empty walk.
         assert!(scanned > 100, "only {scanned} source files were read");
-        assert!(
-            offenders.is_empty(),
+        // THIS MODULE, AND NO OTHER: the control is in the walk, and any other
+        // file naming a code function or glob-importing the module is named.
+        assert_eq!(
+            naming,
+            [this],
             "a TOTP code is computed outside pull::totp — CLAUDE.md section 8 \
-             forbids minting a token here, and nothing else needs one: {offenders:?}"
+             forbids minting a token here, and nothing else needs one"
         );
+    }
+
+    /// **EVERY REFUSAL REACHES THE LOG BY ITS WORD AND ITS LENGTH, AND THE
+    /// HMAC'S BLAMES THE BUILD.** Read back from a sink installed in a child
+    /// (one install per process): five refusals, five lines, each the kind
+    /// and the count and never a character of what arrived. The HMAC's word
+    /// is the one no input can produce through `code_at_counter`, so it is
+    /// asked of the one place a refusal becomes a line.
+    #[test]
+    fn every_refusal_reaches_the_log_by_its_word_and_never_its_secret() {
+        crate::support::where_permission_binds(
+            "totp::tests::every_refusal_reaches_the_log_by_its_word_and_never_its_secret",
+            every_refusal_reaches_the_log_body,
+        );
+    }
+
+    fn every_refusal_reaches_the_log_body() {
+        let home = std::env::temp_dir().join(format!("brutex-totp-sink-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("a sink folder");
+        let sink = telemetry::install(
+            &telemetry::Config::new(&home).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("the only install in this process");
+        let refusals = [
+            (TotpError::Empty, 0_usize),
+            (TotpError::TooLong { len: 129 }, 129),
+            (TotpError::NotBase32 { byte: b'0' }, 9),
+            (TotpError::TrailingBits { data_chars: 1 }, 1),
+            (TotpError::HmacRefusedTheKey, usize::MAX),
+        ];
+        for (why, len) in &refusals {
+            note_refusal(why, *len);
+        }
+        let records = telemetry::tail(
+            &home,
+            sink.keep_files(),
+            &telemetry::Query::last(telemetry::MAX_LIMIT).from_target("pull.totp"),
+        )
+        .records;
+        // `tail` answers newest first; read in the order they were written.
+        let read: Vec<(Option<&str>, Option<u64>, Option<u64>)> = records
+            .iter()
+            .rev()
+            .map(|record| {
+                (
+                    record
+                        .field("fault")
+                        .and_then(telemetry::OwnedValue::as_str),
+                    record
+                        .field("chars")
+                        .and_then(telemetry::OwnedValue::as_u64),
+                    record.field("max").and_then(telemetry::OwnedValue::as_u64),
+                )
+            })
+            .collect();
+        let cap = Some(u64::try_from(MAX_SECRET_LEN).expect("fits"));
+        assert_eq!(
+            read,
+            [
+                (Some("empty"), Some(0), cap),
+                (Some("too-long"), Some(129), cap),
+                (Some("not-base32"), Some(9), cap),
+                (Some("trailing-bits"), Some(1), cap),
+                (Some("hmac-refused"), Some(u64::MAX), cap),
+            ]
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record.level == telemetry::Level::Error),
+            "{records:?}"
+        );
+        // THE KIND, THE COUNT AND THE BOUND, AND NOTHING ELSE: no field can
+        // carry a character of what arrived.
+        let names: Vec<Vec<&str>> = records
+            .iter()
+            .map(|record| {
+                record
+                    .fields
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(names, vec![vec!["fault", "chars", "max"]; 5]);
+        let _best_effort = std::fs::remove_dir_all(&home);
     }
 }
