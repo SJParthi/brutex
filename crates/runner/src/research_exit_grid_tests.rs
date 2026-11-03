@@ -58,6 +58,9 @@ fn internally_corrupted_resolution_cannot_reach_ladders_or_training_attestation(
     }
     let mut foreign = original;
     foreign.family = ResearchFamilyV1::new(InstrumentKey::cash(Exchange::Nse, "ADANIENT")?)?;
+    // The resolution answers its own typed key, never its family's.
+    assert_eq!(foreign.instrument(), key);
+    assert_ne!(foreign.family().instrument(), key);
     // Even a recomputed checksum cannot repair a crosswired typed key.
     foreign.digest = digest_resolved(&foreign);
     assert!(!foreign.digest_is_valid());

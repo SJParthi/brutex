@@ -421,6 +421,23 @@ mod tests {
         probability_of_overfitting,
     };
 
+    /// A rank past the family's last place is malformed and has no relative
+    /// placement; the last place itself does.
+    #[test]
+    fn a_rank_past_the_last_place_has_no_relative_placement() {
+        let malformed = super::PlacementV1 {
+            candidates: 3,
+            winner_rank_twice: 5,
+        };
+        assert_eq!(malformed.relative_twice(), None);
+        assert_eq!(malformed.relative_ppm(), None);
+        let last = super::PlacementV1 {
+            candidates: 3,
+            winner_rank_twice: 4,
+        };
+        assert_eq!(last.relative_twice(), Some((4, 4)));
+    }
+
     #[test]
     fn exact_v1_uses_the_same_first_strict_maximum_as_validation() {
         // `validate` scans canonical order with strict `>`, so index 0 wins an
