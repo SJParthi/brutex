@@ -7290,22 +7290,7 @@ mod tests {
             !execution_column.bits().is_empty(),
             "the replay fixture must cross the evaluator's real warm-up boundary"
         );
-        let series = ExecutionSeriesV1::new(
-            &instrument,
-            "test-feed",
-            "test-commit",
-            [0xA5; 32],
-            &execution,
-        )
-        .expect("complete source identity");
-        let oos = OosExecutionSeriesV1::new(series, 0).expect("the first bar begins OOS");
-        let run = test_execution_run(
-            &instrument,
-            &ConditionMask::ZERO,
-            resolved.side(),
-            &execution,
-        )
-        .expect("the canonical OOS run");
+        let (oos, run) = oos_and_run(&instrument, &execution, resolved.side());
         crate::identity::DATA_DIGESTS.with(|count| count.set(0));
         let universe = resolved
             .replay_selected_universe(oos, &execution_column, &selected, run)
@@ -7726,6 +7711,308 @@ mod tests {
                 assert_ne!(one, other, "two selectors share a policy identity");
             }
         }
+    }
+    /// BASE-COV-LIBS-LS2: the OOS replay fixture of
+    /// `candidate_universe_digest_binds_every_path_and_legacy_replay_stays_strict`:
+    /// a resolved training grid, its selected coordinate, and flat OOS bars
+    /// eight days after the training span.
+    fn replay_fixture() -> (ResolvedExitGridV1, SelectedExitV1, Vec<Candle>) {
+        let training = crate::synthetic::sessions(6);
+        let resolved = policy()
+            .resolve(&nifty(), &training)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let selected = selected_for(&resolved, &training)
+            .expect("the fixture seals one policy-admitted training coordinate");
+        let mut execution = crate::synthetic::sessions(6);
+        for bar in &mut execution {
+            bar.ts_micros = bar
+                .ts_micros
+                .saturating_add(8_i64.saturating_mul(crate::synthetic::DAY_MICROS));
+            bar.high = bar.open;
+            bar.low = bar.open;
+            bar.close = bar.open;
+        }
+        (resolved, selected, execution)
+    }
+
+    /// The selection digest recomputed after a test moves a selected field,
+    /// so the door's own check and not the seal is what must refuse it.
+    fn reseal_selected(selected: &mut SelectedExitV1) {
+        selected.selection_digest = digest_selected(
+            selected.resolution_digest,
+            selected.run_id,
+            selected.mask,
+            selected.horizon,
+            selected.column_digest,
+            selected.evaluation_spec,
+            selected.side,
+            selected.coordinate,
+            &selected.training_cell,
+        );
+    }
+
+    /// One tear of a replayed candidate, with what it breaks.
+    type Tear = (&'static str, fn(&mut crate::grid::ReplayCandidateV1));
+
+    /// The priced path of a replay candidate the fixture priced.
+    fn price(candidate: &mut crate::grid::ReplayCandidateV1) -> &mut crate::grid::ReplayPriceV1 {
+        let crate::grid::ReplayPathV1::Priceable(price) = &mut candidate.path else {
+            unreachable!("the fixture prices every path")
+        };
+        price
+    }
+
+    /// A universe with its digest recomputed, so the ordered-evidence check
+    /// and not the digest is what refuses a tear.
+    fn resealed(mut universe: ReplayedCandidateUniverseV1) -> ReplayedCandidateUniverseV1 {
+        universe.digest = digest_replay_universe(
+            universe.run_id,
+            universe.selected_digest,
+            universe.oos_data_digest,
+            universe.column_digest,
+            universe.local_cell.as_ref(),
+            &universe.candidates,
+            universe.pricing_refused_paths,
+        );
+        universe
+    }
+
+    /// The OOS series of `bars` beginning at bar 0, and its canonical run.
+    fn oos_and_run<'a>(
+        instrument: &'a InstrumentKey,
+        bars: &'a [Candle],
+        side: crate::excursion::Side,
+    ) -> (OosExecutionSeriesV1<'a>, ExecutionRunV1) {
+        let series =
+            ExecutionSeriesV1::new(instrument, "test-feed", "test-commit", [0xA5; 32], bars)
+                .expect("complete source identity");
+        (
+            OosExecutionSeriesV1::new(series, 0).expect("the first bar begins OOS"),
+            test_execution_run(instrument, &ConditionMask::ZERO, side, bars)
+                .expect("the canonical OOS run"),
+        )
+    }
+
+    /// EVERY REPLAY DOOR REFUSAL NAMES ITS CAUSE: a foreign resolution, a run
+    /// of another combination, OOS bars that overlap training, a column under
+    /// another evaluator, a resealed coordinate outside the grid, and hoisted
+    /// slice facts of other bars. The universe's read faces answer what it
+    /// sealed.
+    #[test]
+    fn every_replay_door_refusal_names_its_cause() {
+        let (resolved, selected, execution) = replay_fixture();
+        let instrument = nifty();
+        let column = test_column(&execution);
+        let (oos, run) = oos_and_run(&instrument, &execution, resolved.side());
+        let universe = resolved
+            .replay_selected_universe(oos, &column, &selected, run)
+            .expect("the fixture replays");
+        assert_eq!(universe.run_id(), run.run_id());
+        assert_eq!(universe.selected_digest(), selected.selection_digest);
+        assert_eq!(universe.digest(), universe.digest);
+        assert_eq!(universe.local_cell(), universe.local_cell.as_ref());
+        assert_eq!(run.mask(), ConditionMask::ZERO);
+
+        let mut foreign = selected.clone();
+        foreign.resolution_digest[0] ^= 1;
+        assert_eq!(
+            resolved
+                .replay_selected_universe(oos, &column, &foreign, run)
+                .map(|_| ()),
+            Err(ExitGridErrorV1::SelectionDigestMismatch)
+        );
+
+        let other_run = test_execution_run(
+            &instrument,
+            &ConditionMask::ZERO.with_bit(0),
+            resolved.side(),
+            &execution,
+        )
+        .expect("a run of another combination");
+        assert_eq!(
+            resolved
+                .replay_selected_universe(oos, &column, &selected, other_run)
+                .map(|_| ()),
+            Err(ExitGridErrorV1::RunIdentityMismatch("mask"))
+        );
+
+        let training = crate::synthetic::sessions(6);
+        let (overlap, training_run) = oos_and_run(&instrument, &training, resolved.side());
+        assert!(matches!(
+            resolved.replay_selected_universe(
+                overlap,
+                &test_column(&training),
+                &selected,
+                training_run
+            ),
+            Err(ExitGridErrorV1::OosOverlapsTraining { .. })
+        ));
+
+        let mut evaluator = Evaluator::new(
+            Widths::pinned().expect("pinned widths"),
+            Availability::Present,
+            Thresholds::CLASSICAL,
+        );
+        let present = Column::build(&execution, &mut evaluator);
+        assert_eq!(
+            resolved
+                .replay_selected_universe(oos, &present, &selected, run)
+                .map(|_| ()),
+            Err(ExitGridErrorV1::EvaluationSpecMismatch)
+        );
+
+        let mut outside = selected.clone();
+        outside.coordinate.stop = Some(usize::MAX);
+        reseal_selected(&mut outside);
+        assert_eq!(
+            resolved
+                .replay_selected_universe(oos, &column, &outside, run)
+                .map(|_| ()),
+            Err(ExitGridErrorV1::InvalidChosenCoordinate)
+        );
+
+        let foreign_facts = crate::trade::SliceFacts::of(&execution[..10], &column);
+        assert_eq!(
+            resolved
+                .replay_selected_over(oos, &column, &selected, run, &foreign_facts)
+                .map(|_| ()),
+            Err(ExitGridErrorV1::RunIdentityMismatch(
+                "hoisted OOS slice facts do not cover the OOS series"
+            ))
+        );
+    }
+
+    /// A REPLAYED UNIVERSE WHOSE ORDERED EVIDENCE IS TORN FAILS ITS INTEGRITY
+    /// GATE, for each kind of tear; and a universe whose refused paths are
+    /// counted and resealed passes it, each refusal hashed under its own tag.
+    #[test]
+    fn every_tear_of_a_replayed_universe_fails_its_integrity_gate() {
+        let (resolved, selected, execution) = replay_fixture();
+        let instrument = nifty();
+        let column = test_column(&execution);
+        let (oos, run) = oos_and_run(&instrument, &execution, resolved.side());
+        let universe = resolved
+            .replay_selected_universe(oos, &column, &selected, run)
+            .expect("the fixture replays");
+        assert!(universe.digest_is_valid());
+        assert_eq!(universe.pricing_refused_paths, 0);
+        assert!(
+            universe.candidates.len() >= 3,
+            "{}",
+            universe.candidates.len()
+        );
+        let first = universe.candidates[0];
+        assert!(
+            first.entry_bar > 0 && matches!(first.path, crate::grid::ReplayPathV1::Priceable(_))
+        );
+        let tears: [Tear; 8] = [
+            ("held through a bar before its entry", |c| {
+                c.occupied_through_bar = c.entry_bar - 1;
+            }),
+            ("held until an instant before its entry", |c| {
+                c.occupied_through_micros = c.entry_micros - 1;
+            }),
+            ("a priced path with two ambiguous bars", |c| {
+                price(c).ambiguous_bars = 2;
+            }),
+            ("a priced path with two gap fills", |c| {
+                price(c).gap_fills = 2;
+            }),
+            ("a priced row from another signal", |c| {
+                price(c).row.signal_bar += 1;
+            }),
+            ("a priced row entered on another bar", |c| {
+                price(c).row.entry_bar += 1;
+            }),
+            ("a priced row exited on another bar", |c| {
+                price(c).row.exit_bar += 1;
+            }),
+            ("a priced row entered at another instant", |c| {
+                price(c).row.entry_micros += 1;
+            }),
+        ];
+        for (what, tear) in tears {
+            let mut torn = universe.clone();
+            tear(&mut torn.candidates[0]);
+            let torn = resealed(torn);
+            assert!(!torn.digest_is_valid(), "{what}");
+            assert_eq!(
+                torn.require_integrity(),
+                Err(ExitGridErrorV1::ReplayEvidenceDigestMismatch),
+                "{what}"
+            );
+        }
+        // A later candidate that does not start after the one before it.
+        let mut repeated = universe.clone();
+        repeated.candidates.push(first);
+        assert!(!resealed(repeated).digest_is_valid());
+        // A refused path the count does not hold.
+        let mut uncounted = universe.clone();
+        uncounted.candidates[0].path = crate::grid::ReplayPathV1::BlockOnly;
+        assert!(!resealed(uncounted).digest_is_valid());
+        // COMBINED: one path of each refusal kind, counted and resealed.
+        let mut refused = universe;
+        refused.candidates[0].path = crate::grid::ReplayPathV1::BlockOnly;
+        refused.candidates[1].path = crate::grid::ReplayPathV1::CrossingRefused;
+        refused.candidates[2].path = crate::grid::ReplayPathV1::BlockOnlyAndCrossingRefused;
+        refused.pricing_refused_paths = 3;
+        let refused = resealed(refused);
+        assert!(refused.digest_is_valid());
+        assert_eq!(refused.pricing_refused_paths(), 3);
+        let mut retagged = refused.clone();
+        // Same count, same order, one tag changed: only the digest can tell.
+        retagged.candidates[1].path = crate::grid::ReplayPathV1::BlockOnly;
+        assert!(
+            !retagged.digest_is_valid(),
+            "each refusal kind hashes its own tag"
+        );
+    }
+
+    /// THE EVALUATION AND ITS VALIDATION READ BACK WHAT THEY BIND: the
+    /// attested token's debug face names its parts, the evaluation its
+    /// resolution and column, and the validation the one evaluation it holds.
+    #[test]
+    fn an_evaluation_and_its_validation_read_back_what_they_bind() {
+        let input = bars(100);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let column = test_column(&input);
+        let series =
+            ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input)
+                .expect("the synthetic series is well formed");
+        let run = test_execution_run(&instrument, &ConditionMask::ZERO, resolved.side(), &input)
+            .expect("the synthetic run seals");
+        let attested = resolved
+            .attest_training(series, &column, Horizon::DEFAULT)
+            .expect("the exact training slice attests");
+        let shown = format!("{attested:?}");
+        for part in [
+            "AttestedTrainingV1",
+            "resolution_digest",
+            "column_digest",
+            "horizon",
+        ] {
+            assert!(shown.contains(part), "{part}: {shown}");
+        }
+        let evaluated = resolved
+            .evaluate_with_attested(&attested, run)
+            .expect("the attested grid evaluates");
+        assert_eq!(evaluated.resolution_digest(), resolved.digest());
+        assert_eq!(evaluated.column_digest(), digest_column(&column));
+        let other = resolved
+            .evaluate_with_attested(&attested, run)
+            .expect("the same grid evaluates again");
+        let validated = resolved
+            .validate_evaluation(&evaluated)
+            .expect("the complete evaluation validates");
+        assert_eq!(validated.resolution_digest(), resolved.digest());
+        assert!(validated.is_evaluation(&evaluated));
+        assert!(
+            !validated.is_evaluation(&other),
+            "another evaluation of the same grid"
+        );
     }
 }
 
