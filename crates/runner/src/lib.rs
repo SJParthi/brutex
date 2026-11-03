@@ -82,6 +82,7 @@ pub mod validate;
 // ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
 // ---- part; each part inserts its single `pub mod` line directly under its slot.
 // slot FNO-BAND (fno_band)
+pub mod fno_band;
 
 // slot FNO-RANK (fno_cross_section)
 
