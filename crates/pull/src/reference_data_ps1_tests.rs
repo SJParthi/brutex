@@ -740,3 +740,40 @@ fn an_unverified_compiled_row_seeds_unverified_in_its_own_words() {
         )
     );
 }
+
+/// **A LINK ANOTHER WRITER BEAT IS A RACE LOST, AND ONE THAT FAILS FOR ANY
+/// OTHER REASON IS AN I/O REFUSAL AT THE FINAL NAME** (the link seam,
+/// D-7335): a link answering `AlreadyExists` is `Raced` at the generation the
+/// write asked for; one answering another fault is `Io` naming the final path
+/// in the host's words; and neither leaves its staging name or a generation
+/// behind. Extremes at once: the first generation of an empty table, and the
+/// two faults on one table one after the other.
+#[test]
+fn a_link_another_writer_beat_is_a_race_lost_and_any_other_fault_is_io() {
+    let store = scratch("ps1-rd-link");
+    let table = Table::FnoList;
+    let fno = draft(table, vec![listed("ZQA")]);
+    let beaten = |_: &Path, _: &Path| -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+    };
+    let raced = write_linking(&store, &fno, &beaten).unwrap_err();
+    assert!(matches!(raced, WriteError::Raced(1)), "{raced:?}");
+    let gone = |_: &Path, _: &Path| -> std::io::Result<()> {
+        Err(std::io::Error::other("an invented staging name gone"))
+    };
+    let WriteError::Io(why) = write_linking(&store, &fno, &gone).unwrap_err() else {
+        panic!("another fault is Io");
+    };
+    assert_eq!(
+        why,
+        format!(
+            "{}: an invented staging name gone",
+            table.path(&store, 1).display()
+        )
+    );
+    assert_eq!(
+        std::fs::read_dir(table.dir(&store)).unwrap().count(),
+        0,
+        "no staging name and no generation are left"
+    );
+}
