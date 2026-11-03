@@ -7108,22 +7108,18 @@ mod tests {
             // The distinction that still binds, and the one this test exists
             // for: a POPULATED table missing the minute row is a number that
             // went missing, and that is refused.
-            if spec.window_caps.is_empty() {
-                assert!(
-                    spec.window_cap_days(Granularity::Minute1).is_none(),
-                    "{}: an empty cap table cannot answer for a rung",
-                    feed.display()
-                );
-            } else {
-                assert!(
-                    spec.window_cap_days(Granularity::Minute1)
-                        .is_some_and(|c| c > 0),
-                    "{}: this feed publishes caps and none at ONE MINUTE — \
-                     docs/00-charter.md §4 carries it for every broker that has \
-                     one, so a gap here is a number that went missing",
-                    feed.display()
-                );
-            }
+            // One comparison for both facts (BASE-COV-PULL-PS1): no feed of this
+            // build has an empty cap table, so an `if` on it held a side no row
+            // took. An empty table answers for no rung (`None`); a populated one
+            // answers a positive one-minute cap (`Some(true)`).
+            assert_eq!(
+                spec.window_cap_days(Granularity::Minute1).map(|c| c > 0),
+                (!spec.window_caps.is_empty()).then_some(true),
+                "{}: an empty cap table cannot answer for a rung, and a feed that \
+                 publishes caps and none at ONE MINUTE has lost a number — \
+                 docs/00-charter.md §4 carries it for every broker that has one",
+                feed.display()
+            );
             // AND THE DAY-LEVEL ONE IS A PER-FEED FACT NOW, NOT A BLANKET
             // ABSENCE.
             //
@@ -8334,6 +8330,29 @@ mod tests {
         }
     }
 
+    /// [`envelope_of`] reads the envelope of every shape, the object shape
+    /// included, which no feed of this build answers in (BASE-COV-PULL-PS1).
+    #[test]
+    fn envelope_of_reads_the_envelope_of_every_shape() {
+        assert_eq!(
+            envelope_of(ResponseShape::ArrayOfObjects {
+                envelope: Some("invented")
+            }),
+            Some("invented")
+        );
+        assert_eq!(
+            envelope_of(ResponseShape::ParallelArrays { envelope: None }),
+            None
+        );
+        assert_eq!(
+            envelope_of(ResponseShape::PositionalRows {
+                envelope: Some("rows"),
+                array: "candles"
+            }),
+            Some("rows")
+        );
+    }
+
     /// How an archive's file name renders its date, whichever pattern it uses.
     const fn archive_date(name: ArchiveName) -> DateFormat {
         match name {
@@ -8997,17 +9016,18 @@ mod tests {
             let Transport::Http(spec) = feed.descriptor().transport else {
                 continue;
             };
-            let Some(vendor_wide) = resolve_floor(spec.history_floor, today) else {
-                continue;
-            };
+            // A floor that names no day bounds nothing, so a pair with one is
+            // not compared; `zip` says so with no arm this build's rows never
+            // take (BASE-COV-PULL-PS1: every floor of every feed names a day).
+            let vendor_wide = resolve_floor(spec.history_floor, today);
             for row in feed.descriptor().history {
-                let Some(per_rung) = resolve_floor(row.binding.floor, today) else {
-                    continue;
-                };
+                let per_rung = resolve_floor(row.binding.floor, today);
                 assert!(
-                    vendor_wide <= per_rung,
-                    "{feed} at {}: the clamp would refuse {per_rung} back to \
-                     {vendor_wide}, which is later than the rung's own floor",
+                    vendor_wide
+                        .zip(per_rung)
+                        .is_none_or(|(wide, own)| wide <= own),
+                    "{feed} at {}: the clamp would refuse {per_rung:?} back to \
+                     {vendor_wide:?}, which is later than the rung's own floor",
                     row.granularity
                 );
             }
@@ -9038,50 +9058,87 @@ mod tests {
         // read from a clock: a test that reads the clock asserts a different
         // thing every day it runs.
         let today = day(2026, 8, 12);
-        // Both tiers must actually be EXERCISED by the rows in this build, or
-        // this test would keep passing while one of them rotted unreached.
-        let mut by_standing = 0;
-        let mut by_strictness = 0;
+        // Both tiers must actually be EXERCISED, or this test would keep
+        // passing while one of them rotted unreached: tier 1 by the rows in
+        // this build, tier 2 (which no row of this build reaches) by two
+        // invented rows below.
+        let mut tiers = [0; 2];
         for feed in Feed::ALL {
             for row in feed.descriptor().history {
-                let Some(other) = row.contested else {
-                    continue;
-                };
-                assert!(
-                    !other.standing.outranks(row.binding.standing),
-                    "{feed} at {}: a claim of lower standing was promoted over \
-                     {}",
-                    row.granularity,
-                    other.standing.label()
-                );
-                if row.binding.standing.outranks(other.standing) {
-                    // TIER 1. Strictness is not consulted, and that is the
-                    // point of the tier rather than a gap in the check.
-                    by_standing += 1;
-                    continue;
-                }
-                by_strictness += 1;
-                let bound =
-                    resolve_floor(row.binding.floor, today).expect("a binding floor names a day");
-                // A displaced claim that names NO day cannot narrow anything,
-                // so any real day beats it and there is nothing to compare.
-                // One that does name a day must be the earlier of the two: the
-                // later day refuses first, and that is what `stricter` means.
-                if let Some(loser) = resolve_floor(other.floor, today) {
-                    assert!(
-                        bound >= loser,
-                        "{feed} at {}: the looser claim of equal standing was \
-                         promoted",
-                        row.granularity
-                    );
-                }
+                judge_binding(&feed.to_string(), row, today, &mut tiers);
             }
         }
         assert!(
-            by_standing > 0,
+            tiers[0] > 0,
             "no row exercises tier 1, so the standing rule is unchecked"
         );
-        let _ = by_strictness;
+        // TIER 2 BY INVENTED ROWS (BASE-COV-PULL-PS1): two claims of one
+        // standing, the binding one the later day, against a displaced claim
+        // that names an earlier day and one that names none.
+        let invented = |contested: HistoryFloor| FloorRow {
+            granularity: Granularity::Minute1,
+            binding: FloorClaim {
+                floor: HistoryFloor::Fixed {
+                    year: 2020,
+                    month: 1,
+                    day: 1,
+                },
+                source: "an invented source",
+                standing: ClaimStanding::VendorDocument,
+            },
+            contested: Some(FloorClaim {
+                floor: contested,
+                source: "an invented rival",
+                standing: ClaimStanding::VendorDocument,
+            }),
+            binds_because: "an invented reason",
+        };
+        let before = tiers;
+        for contested in [
+            HistoryFloor::Fixed {
+                year: 2019,
+                month: 1,
+                day: 1,
+            },
+            HistoryFloor::Unstated,
+        ] {
+            judge_binding("invented", &invented(contested), today, &mut tiers);
+        }
+        assert_eq!(tiers, [before[0], before[1] + 2]);
+    }
+
+    /// One row of [`the_binding_floor_is_never_the_looser_of_the_two`], judged
+    /// by the tier that decides it, counted in `tiers` (`[standing,
+    /// strictness]`); `label` names the row in a failure.
+    fn judge_binding(label: &str, row: &FloorRow, today: Day, tiers: &mut [usize; 2]) {
+        let Some(other) = row.contested else {
+            return;
+        };
+        assert!(
+            !other.standing.outranks(row.binding.standing),
+            "{label} at {}: a claim of lower standing was promoted over {}",
+            row.granularity,
+            other.standing.label()
+        );
+        if row.binding.standing.outranks(other.standing) {
+            // TIER 1. Strictness is not consulted, and that is the point of the
+            // tier rather than a gap in the check.
+            tiers[0] += 1;
+            return;
+        }
+        tiers[1] += 1;
+        let bound = resolve_floor(row.binding.floor, today).expect("a binding floor names a day");
+        // A displaced claim that names NO day cannot narrow anything, so any
+        // real day beats it and there is nothing to compare. One that does
+        // name a day must be the earlier of the two: the later day refuses
+        // first, and that is what `stricter` means.
+        if let Some(loser) = resolve_floor(other.floor, today) {
+            assert!(
+                bound >= loser,
+                "{label} at {}: the looser claim of equal standing was promoted",
+                row.granularity
+            );
+        }
     }
 
     /// TIER 1 IS THE ONLY THING THAT LETS A FLOOR WIDEN, AND TWO ROWS USE IT.
