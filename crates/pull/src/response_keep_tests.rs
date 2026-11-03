@@ -1942,14 +1942,16 @@ fn only_an_abandoned_waiter_is_counted_as_parked() {
     });
     assert!(live.is_ok(), "{live:?}");
     drop(live);
+    // Polled every 10 ms until it leaves, for at most 30 s: no line here
+    // waits on how fast this host's waiter is (BASE-COV-PULL-PS2).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while parked_on(&lock_file) > 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the abandoned waiter left once the holder let go"
-        );
+    let left = std::iter::repeat_with(|| {
         std::thread::sleep(Duration::from_millis(10));
-    }
+        parked_on(&lock_file)
+    })
+    .take_while(|_| std::time::Instant::now() < deadline)
+    .any(|parked| parked == 0);
+    assert!(left, "the abandoned waiter left once the holder let go");
 }
 
 /// IA-RK-20 (follow-up of verify-IA-8-r2): a further month's `kept=0`

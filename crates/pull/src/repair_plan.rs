@@ -557,6 +557,8 @@ fn plan_month_for(
             if out.bars > 0 {
                 out.span = Some((file.header().first_ts_micros, file.header().last_ts_micros));
             }
+            #[cfg(test)]
+            seam::at("repair.opened", &path.to_path_buf(root));
             Some(file)
         }
         Err(StoreError::Missing { .. }) => None,
@@ -615,6 +617,8 @@ fn plan_month_for(
         let (Some(file), Some(span), true) = (&file, out.span, minutes) else {
             continue;
         };
+        #[cfg(test)]
+        seam::at("repair.counted", &path.to_path_buf(root));
         match owed(parts.segment, number) {
             Owes::Windows(windows) => match judge(file, out.bars, number, windows) {
                 Ok(Some(found)) => {
@@ -1015,3 +1019,36 @@ mod not_owed_tests;
 #[cfg(test)]
 #[path = "repair_plan_ps2_tests.rs"]
 mod ps2_tests;
+
+/// Test seams between two reads of one month that another process could
+/// split (D-7336, the pattern of `ingest::census_store::seam`): a test plants
+/// one step under a name, and the next pass of that name on this thread runs
+/// it, once, with the month file's path. Per thread, and absent from every
+/// build but this crate's own tests.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Step = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Plants `step` for the next pass of `name` on this thread.
+    pub(crate) fn plant(name: &'static str, step: impl FnOnce(&Path) + 'static) {
+        STEPS.with_borrow_mut(|held| held.push((name, Box::new(step))));
+    }
+
+    /// Runs the step planted for `name`, once.
+    pub(super) fn at(name: &'static str, path: &Path) {
+        let step = STEPS.with_borrow_mut(|held| {
+            let found = held.iter().position(|(at, _)| *at == name)?;
+            Some(held.remove(found).1)
+        });
+        if let Some(step) = step {
+            step(path);
+        }
+    }
+}
