@@ -1093,3 +1093,50 @@ fn a_row_with_no_listing_whose_counts_pass_the_field_is_refused_never_a_panic() 
         );
     }
 }
+
+/// **A REFUSED PUBLISH WHOSE TEMPORARY WILL NOT GO EITHER SAYS BOTH FAULTS,
+/// UNDER THE TEMPORARY'S NAME** (the unlink seam, D-7335): a link refused
+/// because the final name's folder is missing, beside an unlink the host
+/// refuses, is one `Io` naming the temporary with the link's words and the
+/// unlink's; with the unlink taken it is the link's refusal alone; and a
+/// publish that landed hands the unlink's own answer back. Extremes at once:
+/// both writes refused in one call, and a refused unlink after a link that
+/// landed.
+#[test]
+fn a_refused_publish_whose_temporary_will_not_go_says_both_faults() {
+    let dir = scratch("fnm-ps1-unlink");
+    let temporary = dir.join(".ZQ-temporary");
+    let nowhere = dir.join("ZQ-no-such-folder").join(file_name(2024, 3, 1));
+    let refuse = |_: &Path| Err(std::io::Error::other("an invented refusal"));
+    let staged = store::staging::create(&temporary).unwrap();
+    let MembershipError::Io { path, why } =
+        publish_then_unlink(staged.file, b"ZQ bytes", (&temporary, &nowhere), &refuse).unwrap_err()
+    else {
+        panic!("both faults are one Io");
+    };
+    assert_eq!(path, temporary);
+    assert!(
+        why.ends_with("; and its temporary could not be unlinked: an invented refusal"),
+        "{why}"
+    );
+    let staged = store::staging::create(&temporary).unwrap();
+    let alone = publish_then_unlink(
+        staged.file,
+        b"ZQ bytes",
+        (&temporary, &nowhere),
+        &|left: &Path| fs::remove_file(left),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&alone, MembershipError::Io { path, .. } if *path == nowhere),
+        "{alone:?}"
+    );
+    assert!(!temporary.exists(), "the unlink took it");
+    let landed = dir.join(file_name(2024, 3, 1));
+    let staged = store::staging::create(&temporary).unwrap();
+    let left = publish_then_unlink(staged.file, b"ZQ bytes", (&temporary, &landed), &refuse)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(left.to_string(), "an invented refusal");
+    assert_eq!(fs::read(&landed).unwrap(), b"ZQ bytes");
+}
