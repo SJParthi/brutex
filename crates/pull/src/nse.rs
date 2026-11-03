@@ -1322,3 +1322,9 @@ mod tests {
         }
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): the constituent link in each attribute spelling,
+// one that never closes, and a file over the row bound.
+#[cfg(test)]
+#[path = "nse_ps1_tests.rs"]
+mod ps1_tests;

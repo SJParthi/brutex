@@ -2460,3 +2460,9 @@ mod cloud_mutant_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): a stored answer's gap line that is not a repair,
+// and a named ledger handed no lines.
+#[cfg(test)]
+#[path = "request_minutes_ps1_tests.rs"]
+mod ps1_tests;

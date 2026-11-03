@@ -790,3 +790,9 @@ mod tests {
         );
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): a capture name the host will not make, and an
+// unreadable body whose folder cannot be made.
+#[cfg(test)]
+#[path = "capture_ps1_tests.rs"]
+mod ps1_tests;
