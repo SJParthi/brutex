@@ -1204,6 +1204,8 @@ export async function openTab(cdp, context, options = {}) {
     lastActive: () => lastActivity,
     /** Every request this tab made since its last `reset`, ended or not, with its bytes. */
     seen: () => [...done, ...[...inflight.values()].map((r) => ({ method: r.method, url: r.url, bytes: r.bytes, status: r.status, failed: null }))],
+    /** The requests this tab has seen asked and not yet answered: what holds a settle open (BASE-REDS-1023 repair 9). */
+    unanswered: () => [...inflight.values()].filter((r) => !r.answered).map((r) => ({ method: r.method, url: r.url })),
     /** A clean slate for the next load: a navigation ends the last page's requests. */
     reset: () => {
       inflight.clear();
@@ -1303,11 +1305,14 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
   }
   if (!ended) return unended(`the load did not end within ${loadWaitMs} ms${tab.doc.status === 0 ? ' (no answer to its document)' : ` (its document was answered HTTP ${tab.doc.status} and did not finish)`}`);
   let settled;
+  /** What still held the settle open at its cap, named in the row's failure (repair 9). @type {{method: string, url: string}[]} */
+  let pending = [];
   let h;
   let heap;
   const loadedAt = Date.now();
   try {
     settled = await tab.settle(settleMs);
+    if (!settled) pending = tab.unanswered();
     // At most PAINT_WAIT_MS by the page's clock, and FRAME_SLACK_MS more by this one (D-5915 item 9).
     await tab.within(AWAIT_PAINT, PAINT_WAIT_MS);
     waited = Date.now() - loadedAt;
@@ -1328,6 +1333,7 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
     heap: Number(heap.usedSize),
     wire: seen.reduce((s, r) => s + r.bytes, 0),
     settled,
+    pending,
     drew: tab.frames.drew === true,
     status: tab.doc.status,
     build: tab.doc.build,
@@ -1336,16 +1342,52 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
 }
 
 /**
+ * A request as the in-flight failure names it: `METHOD /path?query` on an
+ * http or https address, else its whole address cut to 200 characters.
+ *
+ * @param {{method: string, url: string}} r
+ */
+export function askedAs(r) {
+  try {
+    const u = new URL(r.url);
+    if (u.protocol === 'http:' || u.protocol === 'https:') return `${r.method} ${u.pathname}${u.search}`;
+  } catch {
+    // not an address: said as written, below
+  }
+  return `${r.method} ${r.url.slice(0, 200)}`;
+}
+
+/**
+ * WHAT HELD THE LOADS THAT DID NOT SETTLE, each request once and in order
+ * (BASE-REDS-1023 repair 9; the D1 landing gate of 3 Nov 2026: "/speed/ warm:
+ * 1 loads still had a request in flight after 30 s" named no request, so
+ * nothing told a page that waits on its server from a browser that had not
+ * reported an answer its server gave at once; the test before it in that run
+ * took 40.9 s against 10.6 s on the tree without the repair, one of the
+ * harness's 30 s bounds more). A load read from fixed figures names none.
+ *
+ * @param {{pending?: {method: string, url: string}[]}[]} loads
+ * @returns {string[]}
+ */
+export function inFlightNames(loads) {
+  /** @type {Set<string>} */
+  const names = new Set();
+  for (const l of loads) for (const r of l.pending ?? []) names.add(askedAs(r));
+  return [...names].sort();
+}
+
+/**
  * A page's figures against the targets: the lines to print and the
  * failures, each naming the figure.
  *
  * A load whose tab drew no frame within {@link FRAME_WAIT_MS} once settled
  * (`drew: false`; a hidden tab draws none) is not a settled load, said by
- * count (verify r4, 23 Oct).
+ * count (verify r4, 23 Oct). A load that did not settle names, after the
+ * count, the requests still in flight at its cap ({@link inFlightNames}).
  *
  * @param {string} page
  * @param {string} phase
- * @param {{fcp: number | null, longest: number, heap: number, wire: number, settled: boolean, status: number, drew?: boolean}[]} loads
+ * @param {{fcp: number | null, longest: number, heap: number, wire: number, settled: boolean, status: number, drew?: boolean, pending?: {method: string, url: string}[]}[]} loads
  */
 export function judge(page, phase, loads) {
   const fcp = summary(loads.map((l) => l.fcp).filter((v) => v !== null).map(Number));
@@ -1364,8 +1406,9 @@ export function judge(page, phase, loads) {
   if (longest.max > PAGE_TARGETS.longestPauseMs) failures.push(`${page} ${phase}: a pause of ${longest.max.toFixed(1)} ms, over ${PAGE_TARGETS.longestPauseMs} ms`);
   if (heap.max >= PAGE_TARGETS.heapBytes) failures.push(`${page} ${phase}: script heap ${(heap.max / 1e6).toFixed(1)} MB, not under ${PAGE_TARGETS.heapBytes / 1e6} MB`);
   if (wire.max >= PAGE_TARGETS.wireBytes) failures.push(`${page} ${phase}: ${(wire.max / 1e3).toFixed(1)} KB on the wire, not under ${PAGE_TARGETS.wireBytes / 1e3} KB`);
-  const unsettled = loads.filter((l) => !l.settled).length;
-  if (unsettled > 0) failures.push(`${page} ${phase}: ${unsettled} loads still had a request in flight after 30 s`);
+  const unsettled = loads.filter((l) => !l.settled);
+  const held = inFlightNames(unsettled);
+  if (unsettled.length > 0) failures.push(`${page} ${phase}: ${unsettled.length} loads still had a request in flight after 30 s${held.length > 0 ? `: ${held.join(', ')}` : ''}`);
   const undrawn = loads.filter((l) => l.drew === false).length;
   if (undrawn > 0) failures.push(`${page} ${phase}: ${undrawn} of ${loads.length} loads drew no frame within ${FRAME_WAIT_MS} ms of settling (a hidden tab draws none), so they are not settled loads`);
   const f = (/** @type {{n: number, p50: number, p99: number, max: number}} */ s, /** @type {(v: number) => string} */ t) => `${t(s.p50)} / ${t(s.p99)} / ${t(s.max)}`;

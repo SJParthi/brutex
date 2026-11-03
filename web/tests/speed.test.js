@@ -1042,6 +1042,17 @@ test('a page is judged against the four targets, each miss by name and figure', 
   assert.match(harness.judge('/x', 'cold', [load({ fcp: null })]).row, /\| not painted \|.*\| FAILS \|$/);
   assert.deepEqual(harness.judge('/x', 'cold', [load({ status: 300 })]).failures, ['/x cold: 1 of 1 loads were not the page (HTTP 300)'], 'a redirect is not the page');
   assert.deepEqual(harness.judge('/x', 'cold', [load({ status: 299, longest: 50, fcp: 299.9 })]).failures, [], 'a pause of exactly 50 ms is no pause over 50 ms; 299 is 2xx');
+  // BASE-REDS-1023 repair 9: a load that did not settle names what was still in flight at its cap, each request once,
+  // in order, as METHOD /path?query; an address that is not http is said as written, cut to 200 characters.
+  const held = harness.judge('/x', 'warm', [
+    load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json?a=1' }, { method: 'POST', url: 'https://h:1/page-report' }] }),
+    load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json?a=1' }] }),
+    load({ settled: true, pending: [{ method: 'GET', url: 'http://h:1/never-counted' }] })
+  ]);
+  assert.deepEqual(held.failures, ['/x warm: 2 loads still had a request in flight after 30 s: GET /feeds.json?a=1, POST /page-report'], 'a settled load\'s requests are not named');
+  assert.equal(harness.askedAs({ method: 'GET', url: `data:text/plain,${'x'.repeat(300)}` }), `GET data:text/plain,${'x'.repeat(184)}`);
+  assert.equal(harness.askedAs({ method: 'GET', url: 'not an address' }), 'GET not an address');
+  assert.deepEqual(harness.inFlightNames([load({ settled: false }), { pending: [] }]), [], 'a load that names nothing adds nothing');
 });
 
 test('a real browser\'s row is checked for what does not depend on the machine: measured, its verdict its failures\', and failed only on a timed judgement', () => {
@@ -1083,6 +1094,20 @@ test('a real browser\'s row is checked for what does not depend on the machine: 
   assert.equal(timedJudgement('/a warm: a pause of 60.0 ms, over 50 ms', '/a'), true);
   // Repair 8 (verify r8 follow-up): on a page that polls, a capped settle is the clock's too; on another page, refused (above).
   assert.deepEqual(measuredRow(run('/a', [load({ settled: false })]), '/a', 'cold', 1, { polls: true }), ['/a cold: 1 loads still had a request in flight after 30 s']);
+  // BASE-REDS-1023 repair 9 (the D1 landing gate, 3 Nov 2026): a cap that names only requests the stand-in answers at
+  // once is the clock of a browser that had not reported an answer: the machine's. One that names a request the
+  // stand-in holds open, or names none, is the page's, and refused. Before, every one of these was refused.
+  const atOnce = (/** @type {string} */ asked) => asked !== 'GET /hang';
+  const fed = run('/a', [load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }] })]);
+  assert.deepEqual(measuredRow(fed, '/a', 'cold', 1, { answers: atOnce }), ['/a cold: 1 loads still had a request in flight after 30 s: GET /feeds.json']);
+  const two = run('/a', [load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }, { method: 'POST', url: 'http://h:1/page-report' }] })]);
+  assert.deepEqual(measuredRow(two, '/a', 'cold', 1, { answers: atOnce }), ['/a cold: 1 loads still had a request in flight after 30 s: GET /feeds.json, POST /page-report'], 'every request it names, answered at once');
+  const hung = run('/a', [load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }, { method: 'GET', url: 'http://h:1/hang' }] })]);
+  assert.throws(() => measuredRow(hung, '/a', 'cold', 1, { answers: atOnce }), /never on: \/a cold: 1 loads still had a request in flight after 30 s: GET \/feeds\.json, GET \/hang/, 'one request the stand-in holds open is the page\'s');
+  assert.throws(() => measuredRow(run('/a', [load({ settled: false })]), '/a', 'cold', 1, { answers: atOnce }), /never on: \/a cold: 1 loads still had a request in flight after 30 s$/, 'a cap that names nothing is the page\'s');
+  assert.throws(() => measuredRow(fed, '/a', 'cold', 1), /never on: \/a cold: 1 loads still had a request in flight after 30 s: GET \/feeds\.json/, 'without the stand-in\'s word, refused');
+  assert.throws(() => measuredRow(run('/a', [load({ status: 404, settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }] })]), '/a', 'cold', 1, { answers: atOnce }), /never on: \/a cold: 1 of 1 loads were not the page/, 'the stand-in\'s word excuses the settle cap only');
+  assert.deepEqual(measuredRow(fed, '/a', 'cold', 1, { polls: true }), ['/a cold: 1 loads still had a request in flight after 30 s: GET /feeds.json'], 'a polling page\'s cap, named or not');
   assert.throws(() => measuredRow(run('/a', [load({ status: 404 })]), '/a', 'cold', 1, { polls: true }), /never on: \/a cold: 1 of 1 loads were not the page/, 'polling excuses the settle cap only');
   // An interaction: each click timed or named by the clock's two outcomes, a pause only as its judgement, never NOT MEASURED.
   const rowOf = (/** @type {string} */ line, /** @type {string[]} */ failures = []) => ({ lines: ['| interaction | n | ...', line], failures });
@@ -2181,7 +2206,25 @@ async function browserStandIn(o) {
     server.closeAllConnections();
     server.close();
   };
-  return { server, log, requests, stop, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
+  /**
+   * Whether this stand-in answers a request, named as the harness names one
+   * in flight (`METHOD /path?query`), in full and inside its own fixed time,
+   * well within the 30 s settle cap (repair 9): every route above but those
+   * it holds open — `/stall`, `/hang`, the never-loading entry, `/later`
+   * past its first asks, `/sources.json` under `hangSources` — and
+   * `/slow.css`, whose answer comes its `ms` late.
+   *
+   * @param {string} asked
+   */
+  const answers = (asked) => {
+    const m = /^[A-Z]+ (\/\S*)$/.exec(asked);
+    if (m === null) return false;
+    const u = new URL(m[1], 'http://x');
+    if (['/stall', '/hang', '/_app/immutable/entry/app.HANG.js', '/later'].includes(u.pathname)) return false;
+    if (o.hangSources && u.pathname === '/sources.json') return false;
+    return u.pathname !== '/slow.css' || Number(u.searchParams.get('ms')) < 30_000;
+  };
+  return { server, log, requests, stop, answers, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
 }
 
 /**
@@ -2235,11 +2278,22 @@ function timedJudgement(failure, page) {
  * throttled Chrome bunched its timers: 2 of 5 runs); on any other page it
  * is the page's own fault, and refused.
  *
+ * A REQUEST ITS SERVER ANSWERED AT ONCE (`answers`, BASE-REDS-1023 repair 9;
+ * the D1 landing gate of 3 Nov 2026 at load 36/58/54: "/speed/ warm: 1 loads
+ * still had a request in flight after 30 s", on a page whose every request
+ * this stand-in answers in full the moment it is asked, while the test
+ * before it took 30 s more than on the tree without the repair): the
+ * harness names what was in flight at the cap, and when the stand-in
+ * answers each one it names at once, nothing of the page or of its server
+ * held the load, so the cap is the clock of a browser that had not reported
+ * an answer, and it is taken as the machine's. A cap that names a request
+ * the stand-in holds open, or names none, is the page's, and refused.
+ *
  * @param {{lines: string[], failures: string[]}} r
  * @param {string} page
  * @param {'cold' | 'warm'} phase
  * @param {number} n
- * @param {{polls?: boolean}} [o]
+ * @param {{polls?: boolean, answers?: (asked: string) => boolean}} [o]
  * @returns {string[]}
  */
 function measuredRow(r, page, phase, n, o = {}) {
@@ -2249,7 +2303,13 @@ function measuredRow(r, page, phase, n, o = {}) {
   const m = new RegExp(`^\\| [^|]+ \\| ${phase} \\| ${n} \\| (?:${figure}|not painted) \\| ${figure} \\| ${figure} \\| ${figure} \\| (holds|FAILS) \\|$`).exec(rows[0]);
   assert.ok(m, `${page} ${phase} is measured over ${n} loads, each figure a reading: ${rows[0]}`);
   const own = r.failures.filter((f) => f.startsWith(`${page} ${phase}: `));
-  const capped = (/** @type {string} */ f) => o.polls === true && /^\d+ loads still had a request in flight after 30 s$/.test(f.slice(`${page} ${phase}: `.length));
+  const capped = (/** @type {string} */ f) => {
+    const said = /^\d+ loads still had a request in flight after 30 s(?:: (.+))?$/.exec(f.slice(`${page} ${phase}: `.length));
+    if (said === null) return false;
+    if (o.polls === true) return true;
+    const answers = o.answers;
+    return said[1] !== undefined && answers !== undefined && said[1].split(', ').every((asked) => answers(asked));
+  };
   for (const f of own) assert.ok(timedJudgement(f, page) || capped(f), `${page} ${phase} fails only on how fast the machine drew it, never on: ${f}`);
   assert.equal(m[1], own.length === 0 ? 'holds' : 'FAILS', `the targets cell agrees with the row's failures (${own.join('; ') || 'none'})`);
   return own;
@@ -3032,8 +3092,8 @@ test('a load that does not end within its bound fails its page by name, and the 
     assert.match(text, new RegExp(`^\\| /stall \\| cold \\| 0 \\| NOT MEASURED: ${stalled.replace(/[()]/g, '\\$&')} \\| — \\| — \\| — \\| FAILS \\|$`, 'm'), text);
     assert.match(text, new RegExp(`^\\| /hang \\| cold \\| 0 \\| NOT MEASURED: ${unanswered.replace(/[()]/g, '\\$&')} \\| — \\| — \\| — \\| FAILS \\|$`, 'm'), text);
     // The run goes on to the next page, and measures it: how its figures meet the targets is this machine's, not this test's.
-    measuredRow(r, '/speed', 'cold', 2);
-    measuredRow(r, '/speed', 'warm', 2);
+    measuredRow(r, '/speed', 'cold', 2, { answers: site.answers });
+    measuredRow(r, '/speed', 'warm', 2, { answers: site.answers });
     assert.deepEqual(r.failures.filter((f) => !f.startsWith('/speed ')), [`/stall cold: ${stalled}`, `/hang cold: ${unanswered}`]);
     assert.equal(r.ok, false);
     assert.ok(took < 2 * bound + 90_000, `bounded: two loads that never end, at ${bound} ms each, and five that end; the run took ${took.toFixed(0)} ms`);
@@ -3043,12 +3103,12 @@ test('a load that does not end within its bound fails its page by name, and the 
     // the stall is shown said beside a failing cold row, as verify r7's 1,628 ms paint made it in a full run.
     const later = await run('/later?paint=400', '1');
     const laterText = later.lines.join('\n');
-    assert.ok(measuredRow(later, '/later?paint=400', 'cold', 1).length > 0, 'a first content drawn no sooner than 400 ms fails its 300 ms target');
+    assert.ok(measuredRow(later, '/later?paint=400', 'cold', 1, { answers: site.answers }).length > 0, 'a first content drawn no sooner than 400 ms fails its 300 ms target');
     assert.ok(laterText.includes(`| /later?paint=400 | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), laterText);
     assert.deepEqual(later.failures.filter((f) => !f.startsWith('/later?paint=400 cold: ')), [`/later?paint=400 warm: ${stalled}`]);
     // A timed warm load that does not end, after the first warm load did: said the same way, whatever the cold row says.
     const second = await run('/later?after=2', '1');
-    measuredRow(second, '/later?after=2', 'cold', 1);
+    measuredRow(second, '/later?after=2', 'cold', 1, { answers: site.answers });
     assert.deepEqual(second.failures.filter((f) => !f.startsWith('/later?after=2 cold: ')), [`/later?after=2 warm: ${stalled}`]);
     assert.ok(second.lines.includes(`| /later?after=2 | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), second.lines.join('\n'));
     // As a command: the sheet is written and the exit is 1.
@@ -3175,8 +3235,8 @@ test('a page the app does not route fails by name and is never passed: the build
       assert.ok(r.failures.includes(`${p} cold: ${no(p)}`), r.failures.join('\n'));
     }
     // A page under a spelling the router takes is measured, cold and warm; its figures against the targets are this machine's (repair 7).
-    measuredRow(r, '/speed/', 'cold', 2);
-    measuredRow(r, '/speed/', 'warm', 2);
+    measuredRow(r, '/speed/', 'cold', 2, { answers: site.answers });
+    measuredRow(r, '/speed/', 'warm', 2, { answers: site.answers });
     assert.equal(r.ok, false);
     assert.match(harness.renderHarness(r, { n: 2, base: site.base }), /^# Browser harness — FAIL/, 'never a PASS sheet for a page the app does not have');
     const saved = JSON.parse(readFileSync(capture, 'utf8'));
@@ -3401,6 +3461,7 @@ test('a load whose navigation the browser does not answer, or whose page stops a
       frames: { drew: null },
       reset() { this.doc.status = 0; },
       seen: () => [{ method: 'GET', url: 'http://h:1/x', bytes: 7, status: 200, failed: null }],
+      unanswered: () => [{ method: 'GET', url: 'http://h:1/still' }],
       settle: o.settle ?? (async () => true),
       within: async () => ({ value: { fcp: 1 }, late: false }),
       evaluate: async () => ({ fcp: 1, longest: 0 })
@@ -3435,6 +3496,11 @@ test('a load whose navigation the browser does not answer, or whose page stops a
   fine.tab.frames.drew = true;
   const c = await harness.loadOnce(fine.tab, fine.cdp, 'http://h:1/x', 10, 5_000);
   assert.deepEqual([c.ended, c.why, c.fcp, c.drew, c.wire], [true, '', 1, true, 7]);
+  assert.deepEqual(c.pending, [], 'a settled load names nothing in flight (repair 9)');
+  // A load that ran out its settle cap keeps what was still in flight, for its row to name (repair 9).
+  const open = loadedThen(async () => false);
+  const o2 = await harness.loadOnce(open.tab, open.cdp, 'http://h:1/x', 10, 5_000);
+  assert.deepEqual([o2.ended, o2.settled, o2.pending], [true, false, [{ method: 'GET', url: 'http://h:1/still' }]]);
   // `waited` holds the settle and the paint wait, and only them: a command answered late after them is not in it.
   const slow = loadedThen(async () => { await new Promise((done) => setTimeout(done, 30)); return true; });
   const lateAnswer = slow.tab.evaluate;
@@ -3483,6 +3549,7 @@ test('a request that starts while a settle waits for its frames is waited for to
   };
   assert.equal(await tab.settle(5, 60_000, 50), true, 'the request ended inside the cap, so the load settled');
   assert.equal(frameWaits, 2, 'two frames were waited for again, after the request');
+  assert.deepEqual(tab.unanswered(), [], 'nothing is left unanswered (repair 9)');
   // One that never ends: the settle ends at its cap, and only then says so.
   frameWaits = 0;
   onFrames = () => {
@@ -3493,6 +3560,10 @@ test('a request that starts while a settle waits for its frames is waited for to
   assert.equal(await tab.settle(5, 100, 50), false, 'still waiting at the cap');
   assert.ok(performance.now() - t >= 99, 'at the cap, never before it');
   assert.ok(frameWaits >= 2, 'the frames waited for again before it said so');
+  // Repair 9: the request that held it open is named; one whose headers came is no longer what it waits on.
+  fire('Network.requestWillBeSent', { requestId: 'headed', request: { method: 'POST', url: 'http://h:1/page-report' } });
+  fire('Network.responseReceived', { requestId: 'headed', response: { status: 202, headers: {} } });
+  assert.deepEqual(tab.unanswered(), [{ method: 'GET', url: 'http://h:1/never' }]);
 });
 
 test('a sort edge the server does not answer is NOT MEASURED by name, within the load bound', { timeout: 120_000 }, async () => {
