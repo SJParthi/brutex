@@ -665,6 +665,10 @@ impl Outcome {
 pub(crate) struct Faults {
     /// Writing past this many bytes of the temporary fails `StorageFull`.
     pub(crate) full_after: Option<u64>,
+    /// The kind a write past `full_after` fails with instead of
+    /// `StorageFull`: a host refusing a write for another reason (a quota, a
+    /// file-size limit, an I/O error), which a test cannot provoke either.
+    pub(crate) refused_with: Option<std::io::ErrorKind>,
     /// The temporary's byte at this offset is inverted before the verify.
     pub(crate) flip_before_verify: Option<u64>,
     /// A file put at the temporary's name after the leftover check and before
@@ -818,6 +822,14 @@ pub fn encode(data: &[u8]) -> Result<Encoded, String> {
 /// CSV whose every line has the header's field count and one terminator:
 /// empty, mixed `\r\n` and `\n`, a stray `\r`, a ragged row.
 fn columnar(data: &[u8]) -> Result<Option<(Vec<u8>, u64)>, String> {
+    columnar_under(data, u32::MAX)
+}
+
+/// [`columnar`] with `most`, the longest header and the most columns a
+/// block's `u32` fields may record: `u32::MAX` on the live path, which is the
+/// width of those fields. A test names a small one, so a header past it is
+/// answered without building a 4 GiB member. BASE-COV-PULL PS3 (D-7337).
+fn columnar_under(data: &[u8], most: u32) -> Result<Option<(Vec<u8>, u64)>, String> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -843,11 +855,11 @@ fn columnar(data: &[u8]) -> Result<Option<(Vec<u8>, u64)>, String> {
     let Some((&header, body)) = lines.split_first() else {
         return Ok(None);
     };
-    let Ok(header_len) = u32::try_from(header.len()) else {
+    let Some(header_len) = u32::try_from(header.len()).ok().filter(|&len| len <= most) else {
         return Ok(None);
     };
     let ncols = header.split(|&b| b == b',').count();
-    let Ok(ncols32) = u32::try_from(ncols) else {
+    let Some(ncols32) = u32::try_from(ncols).ok().filter(|&n| n <= most) else {
         return Ok(None);
     };
     let mut columns: Vec<Vec<u8>> = vec![Vec::new(); ncols];
@@ -1061,7 +1073,20 @@ struct Item {
 /// enough and unique, the day folder the file name states, no member past
 /// [`MEMBER_CAP`].
 fn preflight(identity: &DayIdentity, entries: &[ZipEntry]) -> Result<u64, Refusal> {
-    if u32::try_from(entries.len()).is_err() {
+    preflight_under(identity, entries, u32::MAX)
+}
+
+/// [`preflight`] with the most entries one day may hold named: `u32::MAX` on
+/// the live path, the footer's count being a `u32`. A test names fewer: a
+/// slice of more than four billion entries cannot be built to drive the
+/// refusal, and `zip_entries` never returns one (its central directory is
+/// capped at 64 MiB, at least 46 bytes a record).
+fn preflight_under(
+    identity: &DayIdentity,
+    entries: &[ZipEntry],
+    most: u32,
+) -> Result<u64, Refusal> {
+    if wide(entries.len()) > u64::from(most) {
         return Err(Refusal::TooManyEntries {
             entries: entries.len(),
         });
@@ -1162,6 +1187,18 @@ fn member<B: ReadAt>(zip: &B, entry: &ZipEntry) -> Result<Vec<u8>, Refusal> {
 
 /// One member read, encoded and rebuilt from its block before it is kept.
 fn item<B: ReadAt>(zip: &B, entry: &ZipEntry) -> Result<Item, Refusal> {
+    item_by(zip, entry, encode)
+}
+
+/// [`item`] with its encoder named: [`encode`] on the live path. A test hands
+/// it an encoder that fails, or one whose block does not rebuild to the
+/// member, so the two refusals that hold every block are driven; [`encode`]
+/// itself does neither on any input found.
+fn item_by<B: ReadAt>(
+    zip: &B,
+    entry: &ZipEntry,
+    encode_member: fn(&[u8]) -> Result<Encoded, String>,
+) -> Result<Item, Refusal> {
     if is_directory(entry) {
         return Ok(Item {
             kind: KIND_DIR,
@@ -1174,7 +1211,7 @@ fn item<B: ReadAt>(zip: &B, entry: &ZipEntry) -> Result<Item, Refusal> {
         name: entry.name.clone(),
         why,
     };
-    let encoded = encode(&data).map_err(failed)?;
+    let encoded = encode_member(&data).map_err(failed)?;
     let probe = IndexEntry {
         name: entry.name.clone(),
         kind: encoded.kind,
@@ -1286,11 +1323,13 @@ fn footer(index_off: u64, frame_len: u64, index: &[u8], entries: usize) -> Vec<u
     out
 }
 
-/// A writer that fails `StorageFull` past `limit` bytes: the disk-full hook.
+/// A writer that fails `kind` (`StorageFull` unless a test names another)
+/// past `limit` bytes: the disk-full hook.
 struct Limited<'a> {
     file: &'a File,
     written: u64,
     limit: Option<u64>,
+    kind: std::io::ErrorKind,
 }
 
 impl Write for Limited<'_> {
@@ -1299,7 +1338,7 @@ impl Write for Limited<'_> {
             .limit
             .map_or(u64::MAX, |limit| limit.saturating_sub(self.written));
         if room == 0 {
-            return Err(std::io::ErrorKind::StorageFull.into());
+            return Err(self.kind.into());
         }
         let take = buf
             .get(..usize::try_from(room).unwrap_or(usize::MAX).min(buf.len()))
@@ -1317,11 +1356,16 @@ impl Write for Limited<'_> {
 }
 
 /// The temporary written: magic, blocks, index frame, footer; then fsynced.
+///
+/// `encode_index` is [`zstd`] on the live path; a test hands it an encoder
+/// that fails, which `ruzstd` never does on any input found, so the refusal
+/// naming the index is driven.
 fn write_temp(
     temp: &Path,
     entries: &[ZipEntry],
     items: &[Item],
     faults: Faults,
+    encode_index: fn(&[u8]) -> Result<Vec<u8>, String>,
 ) -> Result<u64, Refusal> {
     let failed = |step: &'static str, why: &std::io::Error| Refusal::WriteFailed {
         path: temp.to_path_buf(),
@@ -1348,7 +1392,7 @@ fn write_temp(
     }
     let file = staged.file;
     let (index, index_off) = index_bytes(entries, items);
-    let frame = zstd(&index).map_err(|why| Refusal::EncodeFailed {
+    let frame = encode_index(&index).map_err(|why| Refusal::EncodeFailed {
         name: "the index".to_owned(),
         why,
     })?;
@@ -1357,6 +1401,9 @@ fn write_temp(
         file: &file,
         written: 0,
         limit: faults.full_after,
+        kind: faults
+            .refused_with
+            .unwrap_or(std::io::ErrorKind::StorageFull),
     };
     let pieces = std::iter::once(MAGIC.as_slice())
         .chain(items.iter().map(|item| item.block.as_slice()))
@@ -1759,7 +1806,7 @@ fn write_day_inner(zip: &Path, root: &Path, options: &WriteOptions) -> Result<Ou
     if let Some(plant) = options.faults.plant_before_create {
         plant_at(&temp, root, plant)?;
     }
-    write_temp(&temp, &entries, &items, options.faults)?;
+    write_temp(&temp, &entries, &items, options.faults, zstd)?;
     drop(items);
     if let Some(at) = options.faults.flip_before_verify {
         flip(&temp, at)?;
@@ -1777,9 +1824,31 @@ fn write_day_inner(zip: &Path, root: &Path, options: &WriteOptions) -> Result<Ou
     Ok(Outcome::Written(report))
 }
 
+/// The root's [`LOCK_NAME`] held for one run, released when this is dropped.
+///
+/// RELEASED BY `unlock`, BEFORE ITS FILE IS CLOSED. `flock` belongs to the
+/// open file description, and a child process forked while the lock is held
+/// (any `Command` this process spawns, until the child's exec) holds a copy
+/// of that description. A lock released only by closing this copy stayed
+/// held while the child's lived, and the next run was refused `day_locked`
+/// naming a writer that had finished (measured: 149 of 300 second takes
+/// while another thread spawned children; none once released here).
+struct DayLock {
+    file: File,
+}
+
+impl Drop for DayLock {
+    fn drop(&mut self) {
+        // Released on the description itself, so every copy is released with
+        // it. An unlock of a lock this file holds has no failure to name: the
+        // close that follows ends this copy's hold either way.
+        let _released = self.file.unlock();
+    }
+}
+
 /// The root's [`LOCK_NAME`], opened (never removed) and locked for this run;
-/// released when the returned handle is dropped or the process dies.
-fn lock_root(root: &Path) -> Result<File, Refusal> {
+/// released when the returned guard is dropped or the process dies.
+fn lock_root(root: &Path) -> Result<DayLock, Refusal> {
     let lock_path = root.join(LOCK_NAME);
     if let Some(found) = not_regular(&lock_path) {
         return Err(Refusal::NotRegularFile {
@@ -1795,8 +1864,21 @@ fn lock_root(root: &Path) -> Result<File, Refusal> {
             lock: lock_path.clone(),
             kind: why.kind(),
         })?;
-    match lock.try_lock() {
-        Ok(()) => Ok(lock),
+    let tried = lock.try_lock();
+    lock_held(lock, lock_path, tried)
+}
+
+/// The root's lock once `try_lock` has answered: held, held by another
+/// writer, or refused by the host. The host's refusal (a filesystem with no
+/// `flock`) is one a test cannot provoke, so the answer is passed in here and
+/// a test hands it that one.
+fn lock_held(
+    lock: File,
+    lock_path: PathBuf,
+    tried: Result<(), std::fs::TryLockError>,
+) -> Result<DayLock, Refusal> {
+    match tried {
+        Ok(()) => Ok(DayLock { file: lock }),
         Err(std::fs::TryLockError::WouldBlock) => Err(Refusal::DayLocked { lock: lock_path }),
         Err(std::fs::TryLockError::Error(why)) => Err(Refusal::LockFailed {
             lock: lock_path,
@@ -1911,6 +1993,18 @@ fn encode_all<B: ReadAt + Sync>(
     entries: &[ZipEntry],
     workers: usize,
 ) -> Result<Vec<Item>, Refusal> {
+    encode_all_under(zip, entries, workers, DAY_BLOCKS_CAP)
+}
+
+/// [`encode_all`] held to `cap` compressed bytes: [`DAY_BLOCKS_CAP`] on the
+/// live path. A test names a small one, since a day of more than 4 GiB of
+/// compressed blocks cannot be built to drive the refusal.
+fn encode_all_under<B: ReadAt + Sync>(
+    zip: &B,
+    entries: &[ZipEntry],
+    workers: usize,
+    cap: u64,
+) -> Result<Vec<Item>, Refusal> {
     let held = std::sync::atomic::AtomicU64::new(0);
     parallel(entries.len(), workers, &|at| {
         let Some(entry) = entries.get(at) else {
@@ -1922,7 +2016,7 @@ fn encode_all<B: ReadAt + Sync>(
         let built = item(zip, entry)?;
         let bytes =
             held.fetch_add(wide(built.block.len()), Ordering::Relaxed) + wide(built.block.len());
-        if bytes > DAY_BLOCKS_CAP {
+        if bytes > cap {
             return Err(Refusal::DayTooLarge { bytes });
         }
         Ok(built)
