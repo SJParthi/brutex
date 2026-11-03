@@ -444,9 +444,7 @@ fn loopback(answer: &'static str) -> (String, std::sync::mpsc::Receiver<()>) {
     let addr = socket.local_addr().expect("an address");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let Ok((mut stream, _)) = socket.accept() else {
-            return;
-        };
+        let (mut stream, _) = socket.accept().expect("the client under test connects");
         let mut buf = [0u8; 4096];
         drop(stream.read(&mut buf));
         let _reached = tx.send(());
@@ -2169,14 +2167,13 @@ fn every_emit_site_in_this_crate_reaches_a_file_body() {
     for _ in 0..3 {
         crate::gdfl_run::ledger::allocate(&healthy.root, &runs_entry()).expect("an id");
     }
+    // NOTHING AT ALL, so neither warning: a healthy allocation writes no
+    // lifecycle line, and any it wrote is named.
+    let said = newer(home, sink, quiet, "gdfl.import.lifecycle");
     assert!(
-        newer(home, sink, quiet, "gdfl.import.lifecycle")
-            .iter()
-            .all(|record| {
-                record.message != "runs ledger behind its claims"
-                    && record.message != "runs claims tail damaged"
-            }),
-        "three ids from a healthy ledger and claims must say neither"
+        said.is_empty(),
+        "three ids from a healthy ledger and claims must say neither warning: {:?}",
+        said.iter().map(|record| &record.message).collect::<Vec<_>>()
     );
 }
 
@@ -2316,7 +2313,7 @@ fn drive_census_degraded(scratch: &Scratch) {
         after
             .failures
             .iter()
-            .any(|f| f.why.contains("DEGRADED") || f.why.contains("degraded")),
+            .any(|f| f.why.contains("DEGRADED")),
         "a census that stepped over a generation is a named failure, not a \
          silent one: {:?}",
         after.failures
@@ -2408,9 +2405,8 @@ fn block_the_two_minute_rung(store: &Path) {
     })
     .expect("a legal path")
     .to_path_buf(store);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("the rung's directory");
-    }
+    fs::create_dir_all(path.parent().expect("a month path has its rung above it"))
+        .expect("the rung's directory");
     fs::create_dir_all(&path).expect("a DIRECTORY where the bar file belongs");
 }
 
