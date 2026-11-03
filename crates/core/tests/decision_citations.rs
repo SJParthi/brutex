@@ -255,6 +255,16 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Each unresolved number on a line of its own, with where it is first cited:
+/// the body of the failure the ledger check prints.
+fn named(missing: &BTreeMap<String, (String, usize)>) -> String {
+    let mut said = String::new();
+    for (id, (path, line)) in missing {
+        let _ = writeln!(said, "  {id}  first cited at {path}:{line}");
+    }
+    said
+}
+
 /// Every walked file under `crates/`, as (path from the root, text).
 fn crate_sources() -> Vec<(String, String)> {
     let root = workspace_root();
@@ -303,10 +313,7 @@ fn every_cited_decision_heads_an_entry_or_is_named_pending() {
         cited.len()
     );
     let missing = unresolved(&ledger, &files);
-    let mut said = String::new();
-    for (id, (path, line)) in &missing {
-        let _ = writeln!(said, "  {id}  first cited at {path}:{line}");
-    }
+    let said = named(&missing);
     assert!(
         missing.is_empty(),
         "{} decision number(s) cited under crates/ head no entry of \
@@ -441,6 +448,68 @@ Text D-0007 in the note's body.
             ("D-0009", "crates/b.rs", 1),
         ]
     );
+    // The failure names each one where it is first cited, in number order
+    // (BASE-COV-LIBS-LS4: only a red ledger check ever printed this).
+    let said = named(&missing);
+    assert_eq!(said.lines().count(), 7);
+    assert!(said.starts_with("  D-0002  first cited at crates/a.rs:2\n"));
+    assert!(said.ends_with("  D-0009  first cited at crates/b.rs:1\n"));
+    assert_eq!(named(&BTreeMap::new()), "");
+}
+
+/// BASE-COV-LIBS-LS4: **THE WALK PASSES OVER `target` AND HIDDEN FOLDERS AND
+/// READS ONLY RUST, TOML AND MARKDOWN.** The real `crates/` holds neither
+/// kind of folder, so the walk's skip of them never ran there.
+#[test]
+fn the_walk_skips_build_output_and_hidden_folders() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("decision-citations-walk-{}", std::process::id()));
+    let _stale = std::fs::remove_dir_all(&root);
+    for dir in [
+        "src",
+        "target/debug",
+        ".hidden",
+        "src/.cache",
+        "src/targets",
+    ] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    for file in [
+        "src/lib.rs",
+        "src/targets/kept.rs",
+        "Cargo.toml",
+        "README.md",
+        "notes.txt",
+        "target/debug/built.rs",
+        ".hidden/secret.rs",
+        "src/.cache/cached.md",
+    ] {
+        std::fs::write(root.join(file), "// D-0001\n").unwrap();
+    }
+    let mut out = Vec::new();
+    walk(&root, &mut out);
+    let read: Vec<String> = out
+        .iter()
+        .map(|path| path.strip_prefix(&root).unwrap().display().to_string())
+        .collect();
+    // Sorted by path; `targets` is not `target`, and nothing hidden is read.
+    assert_eq!(
+        read,
+        [
+            "Cargo.toml",
+            "README.md",
+            "src/lib.rs",
+            "src/targets/kept.rs"
+        ]
+    );
+    std::fs::remove_dir_all(&root).expect("the scratch tree is removed");
+
+    // The figure reader at its two edges: a number that ends the text, and a
+    // separator straight after the marker, which is no part of a number.
+    assert_eq!(stated_figures("`X` = 30", "X"), [Ok(30)]);
+    assert_eq!(stated_figures("`X` = 1,000", "X"), [Ok(1_000)]);
+    assert!(stated_figures("`X` = ,5", "X")[0].is_err());
+    assert!(stated_figures("`X` = _5", "X")[0].is_err());
 }
 
 /// Days from 1970-01-01 to the civil date, the proleptic Gregorian count
