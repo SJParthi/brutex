@@ -638,3 +638,9 @@ fn maps_to(month: &str, entry: &str, path: &str) -> bool {
 #[cfg(test)]
 #[path = "gdfl_v3_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL-PS2: a missing capped read said in its words, and a
+// manifest path of another month or spelling that maps to no entry.
+#[cfg(test)]
+#[path = "gdfl_v3_ps2_tests.rs"]
+mod ps2_tests;
