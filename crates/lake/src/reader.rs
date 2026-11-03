@@ -32,7 +32,7 @@ use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 
 use crate::bar::{Greeks, OPEN_INTEREST_NULL, paisa_from_lake};
 use crate::batch::Batch;
-use crate::error::LakeError;
+use crate::error::{ColumnType, LakeError};
 use crate::page::{Codec, LakePageReader};
 use crate::schema::{Layout, detect};
 
@@ -724,7 +724,7 @@ impl<'a> Columns<'a> {
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
             ColumnReader::Int64ColumnReader(r) => Self::read_exactly(r, &stranded, name, self.rows),
-            _ => Err(self.mismatch(name)),
+            _ => Err(self.mismatch(name, i, ColumnType::Int64)),
         }
     }
 
@@ -734,7 +734,7 @@ impl<'a> Columns<'a> {
         let desc = self.file.meta.file_metadata().schema_descr().column(i);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
             ColumnReader::Int32ColumnReader(r) => Self::read_exactly(r, &stranded, name, self.rows),
-            _ => Err(self.mismatch(name)),
+            _ => Err(self.mismatch(name, i, ColumnType::Int32)),
         }
     }
 
@@ -746,27 +746,28 @@ impl<'a> Columns<'a> {
             ColumnReader::DoubleColumnReader(r) => {
                 Self::read_exactly(r, &stranded, name, self.rows)
             }
-            _ => Err(self.mismatch(name)),
+            _ => Err(self.mismatch(name, i, ColumnType::Double)),
         }
     }
 
-    /// The type this reader wanted against the type the file holds.
-    fn mismatch(&self, name: &'static str) -> LakeError {
-        let want = crate::schema::specs(self.file.layout)
-            .find(|s| s.name == name)
-            .map_or(crate::error::ColumnType::Other, |s| s.ty);
-        let got = self
-            .index_of(name)
-            .map_or(crate::error::ColumnType::Other, |i| {
-                crate::schema::physical(
-                    self.file
-                        .meta
-                        .file_metadata()
-                        .schema_descr()
-                        .column(i)
-                        .physical_type(),
-                )
-            });
+    /// The type this read asked for against the type the file holds at `leaf`.
+    ///
+    /// No FILE reaches this: `crate::schema::detect` held every column to its
+    /// spec's physical type at open. Only a read that asks for a column as the
+    /// wrong type does, and the refusal then names the type the read ASKED
+    /// for. It used to name the spec's type, which for the only call that can
+    /// reach it is the very type the file holds, so the refusal read "should be
+    /// DOUBLE but the file holds DOUBLE". D-8564;
+    /// `tests::a_column_read_as_the_wrong_type_names_the_type_asked_for_and_the_type_held`.
+    fn mismatch(&self, name: &'static str, leaf: usize, want: ColumnType) -> LakeError {
+        let got = crate::schema::physical(
+            self.file
+                .meta
+                .file_metadata()
+                .schema_descr()
+                .column(leaf)
+                .physical_type(),
+        );
         LakeError::ColumnTypeMismatch { name, want, got }
     }
 
@@ -1874,6 +1875,18 @@ mod tests {
     /// library's own tests drive `Columns::int32`: without it the only reader
     /// of an INT32 column was an integration test.
     fn fno_file_with_provenance(provenance: [i32; 2]) -> Vec<u8> {
+        fno_file_written(provenance, [Some(100.5), Some(0.25)])
+    }
+
+    /// The writer behind [`fno_file_with_provenance`] and
+    /// [`fno_file_with_spot`]: every DOUBLE column holds `100.5, 0.25` but
+    /// `spot_at_bar`, which holds `spot`, a `None` written as a null.
+    fn fno_file_written(provenance: [i32; 2], spot: [Option<f64>; 2]) -> Vec<u8> {
+        let spot_leaf = crate::schema::specs(crate::schema::Layout::Fno)
+            .position(|s| s.name == "spot_at_bar")
+            .expect("the F&O layout carries a spot");
+        let spot_values: Vec<f64> = spot.iter().flatten().copied().collect();
+        let spot_defs: Vec<i16> = spot.iter().map(|s| i16::from(s.is_some())).collect();
         let fields: Vec<Arc<Type>> = crate::schema::specs(crate::schema::Layout::Fno)
             .map(|s| {
                 let ty = match s.ty {
@@ -1906,6 +1919,7 @@ mod tests {
         {
             let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
             let mut group = writer.next_row_group().expect("row group");
+            let mut leaf = 0_usize;
             while let Some(mut column) = group.next_column().expect("column") {
                 match column.untyped() {
                     ColumnWriter::Int32ColumnWriter(typed) => {
@@ -1916,6 +1930,11 @@ mod tests {
                     ColumnWriter::Int64ColumnWriter(typed) => {
                         typed.write_batch(&[1, 2], Some(&defs), None).expect("i64");
                     }
+                    ColumnWriter::DoubleColumnWriter(typed) if leaf == spot_leaf => {
+                        typed
+                            .write_batch(&spot_values, Some(&spot_defs), None)
+                            .expect("the spot");
+                    }
                     ColumnWriter::DoubleColumnWriter(typed) => {
                         typed
                             .write_batch(&[100.5, 0.25], Some(&defs), None)
@@ -1923,6 +1942,7 @@ mod tests {
                     }
                     _ => panic!("the lake layouts are INT32, INT64 and DOUBLE only"),
                 }
+                leaf += 1;
                 column.close().expect("close column");
             }
             group.close().expect("close row group");
@@ -1940,6 +1960,238 @@ mod tests {
             .map(|i| batch.row(i).expect("a row").greeks_provenance_id)
             .collect();
         assert_eq!(ids, [Some(7), Some(-3)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // BASE-COV-LIBS-LS3 (attempt 5): the refusals of `read_row_group` and
+    // `Columns` that no fixture above reached, each driven by the input that
+    // reaches it. Extreme cases: a row count of -1, -4 and `i64::MIN`; a chunk
+    // ending exactly at the last byte of the file beside one byte past it and
+    // one `i64::MAX` long; a null spot on the first row, on the last row and on
+    // both; a wrong-type read of an empty group; and, out of the box, a wrong
+    // read followed by the right read of the same column through the same
+    // `Columns`.
+    // -----------------------------------------------------------------------
+
+    /// The `(name, want, got)` of a `ColumnTypeMismatch`, or a panic naming
+    /// what came back instead.
+    fn mismatch_of<T: core::fmt::Debug>(
+        read: Result<T, LakeError>,
+    ) -> (&'static str, ColumnType, ColumnType) {
+        match read {
+            Err(LakeError::ColumnTypeMismatch { name, want, got }) => (name, want, got),
+            other => panic!("expected ColumnTypeMismatch, got {other:?}"),
+        }
+    }
+
+    /// **A READ THAT ASKS FOR A COLUMN AS THE WRONG TYPE IS REFUSED, NAMING THE
+    /// TYPE IT ASKED FOR AND THE TYPE THE FILE HOLDS.** D-8564.
+    ///
+    /// No file reaches these three arms (`detect` holds every column to its
+    /// spec at open), so they are driven directly, all six wrong pairings of
+    /// the three readers over the three physical types the lake holds. Before
+    /// D-8564 `want` came from the spec, which for every one of these calls is
+    /// the type the file holds, so each refusal named one type twice.
+    #[test]
+    fn a_column_read_as_the_wrong_type_names_the_type_asked_for_and_the_type_held() {
+        use ColumnType::{Double, Int32, Int64};
+        let cash = LakeFile::from_bytes(cash_file(3)).expect("the cash fixture opens");
+        let fno =
+            LakeFile::from_bytes(fno_file_with_provenance([7, -3])).expect("the F&O fixture opens");
+
+        let mut c = Columns::new(&cash, 0, 3);
+        assert_eq!(mismatch_of(c.int64("open")), ("open", Int64, Double));
+        assert_eq!(
+            mismatch_of(c.int32("timestamp")),
+            ("timestamp", Int32, Int64)
+        );
+        assert_eq!(mismatch_of(c.double("volume")), ("volume", Double, Int64));
+        let mut f = Columns::new(&fno, 0, 2);
+        assert_eq!(
+            mismatch_of(f.int64("greeks_provenance_id")),
+            ("greeks_provenance_id", Int64, Int32)
+        );
+        assert_eq!(
+            mismatch_of(f.double("greeks_provenance_id")),
+            ("greeks_provenance_id", Double, Int32)
+        );
+        assert_eq!(mismatch_of(f.int32("iv")), ("iv", Int32, Double));
+
+        // The refusal reads as the two types, never one type twice.
+        let text = c.int64("high").expect_err("refused").to_string();
+        assert_eq!(
+            text,
+            "column `high` should be INT64 but the file holds DOUBLE"
+        );
+
+        // A wrong read refuses before any row is read: an empty group too.
+        let empty = LakeFile::from_bytes(cash_file(0)).expect("the empty fixture opens");
+        assert_eq!(
+            mismatch_of(Columns::new(&empty, 0, 0).double("timestamp")),
+            ("timestamp", Double, Int64)
+        );
+
+        // The sound half, through the same `Columns` after its refusals: the
+        // right reader of each column still reads it whole.
+        assert_eq!(
+            c.int64("timestamp").expect("INT64 as int64"),
+            [Some(0), Some(1), Some(2)]
+        );
+        assert_eq!(
+            f.int32("greeks_provenance_id").expect("INT32 as int32"),
+            [Some(7), Some(-3)]
+        );
+        assert_eq!(f.double("iv").expect("DOUBLE as double").len(), 2);
+    }
+
+    /// **A NEGATIVE ROW-GROUP COUNT IS REFUSED BY NAME, WITH THE NUMBER THE FILE
+    /// GAVE**, before the wider-than-the-file bound or any column is read.
+    #[test]
+    fn a_negative_row_group_count_is_refused_with_the_number_the_file_gave() {
+        let sound = cash_file(4);
+        for lie in [-1_i64, -4, i64::MIN] {
+            let lying = patch_footer(&sound, |meta| meta.row_groups[0].num_rows = lie);
+            let file = LakeFile::from_bytes(lying)
+                .expect("the footer still parses; it is the VALUE that is impossible");
+            match file.read_row_group(0) {
+                Err(LakeError::ImpossibleLength { what, value }) => {
+                    assert_eq!(what, "row group row count", "{lie}");
+                    assert_eq!(value, lie, "the refusal reports the number the file gave");
+                }
+                other => panic!("{lie}: expected ImpossibleLength, got {:?}", other.err()),
+            }
+        }
+        // The file-level count lying the same way at once changes nothing:
+        // the group's own count is refused first.
+        let both = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = -1;
+            meta.num_rows = -1;
+        });
+        let file = LakeFile::from_bytes(both).expect("parses");
+        assert_eq!(
+            file.num_rows(),
+            -1,
+            "the footer's claim is returned as written"
+        );
+        assert!(matches!(
+            file.read_row_group(0),
+            Err(LakeError::ImpossibleLength {
+                what: "row group row count",
+                value: -1
+            })
+        ));
+    }
+
+    /// The bytes of `sound` with the `timestamp` chunk's declared compressed
+    /// length set so that the chunk ends `past` bytes after the last byte of
+    /// the PATCHED file (0 = exactly at it). The patched footer's own length
+    /// depends on the varint width of the number written into it, so the
+    /// length is settled by iterating to a fixed point.
+    fn timestamp_chunk_ending_past_the_file(sound: &[u8], past: i64) -> Vec<u8> {
+        let mut start = 0_i64;
+        let _ = patch_footer(sound, |meta| {
+            let chunk = meta.row_groups[0].columns[0]
+                .meta_data
+                .as_ref()
+                .expect("the writer records chunk metadata");
+            start = chunk
+                .dictionary_page_offset
+                .unwrap_or(chunk.data_page_offset);
+        });
+        let mut len = i64::try_from(sound.len()).expect("fits");
+        for _ in 0..8 {
+            let size = len + past - start;
+            let patched = patch_footer(sound, |meta| {
+                meta.row_groups[0].columns[0]
+                    .meta_data
+                    .as_mut()
+                    .expect("metadata")
+                    .total_compressed_size = size;
+            });
+            let got = i64::try_from(patched.len()).expect("fits");
+            if got == len {
+                return patched;
+            }
+            len = got;
+        }
+        panic!("the patched length did not settle");
+    }
+
+    /// **A COLUMN CHUNK THAT RUNS PAST THE END OF THE FILE IS REFUSED BY NAME**,
+    /// naming the column and the extent; a chunk ending exactly at the file's
+    /// last byte is inside the file and is refused for what it then holds
+    /// (pages its count does not cover), never as running past the end.
+    #[test]
+    fn a_column_chunk_running_past_the_end_of_the_file_is_refused_by_name() {
+        let sound = cash_file(4);
+        for past in [1_i64, 2, 4_096] {
+            let cut = timestamp_chunk_ending_past_the_file(&sound, past);
+            let file = LakeFile::from_bytes(cut.clone()).expect("the footer parses");
+            match file.read_row_group(0) {
+                Err(LakeError::PageDecode { column, reason }) => {
+                    assert_eq!(column, "timestamp");
+                    let end = cut.len() + usize::try_from(past).expect("fits");
+                    assert!(
+                        reason.ends_with(&format!("..{end} runs past the end of the file")),
+                        "{reason}"
+                    );
+                }
+                other => panic!("{past} past: expected PageDecode, got {:?}", other.err()),
+            }
+        }
+
+        let at_end = timestamp_chunk_ending_past_the_file(&sound, 0);
+        let file = LakeFile::from_bytes(at_end).expect("the footer parses");
+        match file.read_row_group(0) {
+            Err(LakeError::UnreadChunkBytes { column, bytes }) => {
+                assert_eq!(column, "timestamp");
+                assert!(bytes > 0);
+            }
+            other => panic!("a chunk ending at the last byte: {:?}", other.err()),
+        }
+
+        // `i64::MAX` long: positive, a `usize` on every 64-bit target, and the
+        // extent does not overflow; it is past the end, and named as that.
+        let huge = patch_footer(&sound, |meta| {
+            meta.row_groups[0].columns[0]
+                .meta_data
+                .as_mut()
+                .expect("metadata")
+                .total_compressed_size = i64::MAX;
+        });
+        let file = LakeFile::from_bytes(huge).expect("the footer parses");
+        assert!(matches!(
+            file.read_row_group(0),
+            Err(LakeError::PageDecode { column, reason })
+                if column == "timestamp" && reason.ends_with("runs past the end of the file")
+        ));
+    }
+
+    /// An F&O file of two rows, every column present but `spot_at_bar`, which
+    /// holds `spot`: a `None` is written as a Parquet null.
+    fn fno_file_with_spot(spot: [Option<f64>; 2]) -> Vec<u8> {
+        fno_file_written([7, -3], spot)
+    }
+
+    /// **A NULL `spot_at_bar` READS AS `None` ON ITS OWN ROW, AND ONLY THERE.**
+    /// The spot is the one optional price; every other price refuses a null.
+    #[test]
+    fn a_null_spot_reads_as_none_on_its_own_row_and_the_present_one_as_paisa() {
+        let read = |spot: [Option<f64>; 2]| -> Vec<Option<i64>> {
+            let file = LakeFile::from_bytes(fno_file_with_spot(spot)).expect("open");
+            let batch = file.read_row_group(0).expect("decode");
+            (0..2)
+                .map(|i| batch.row(i).expect("a row").spot_at_bar.map(Paisa::raw))
+                .collect()
+        };
+        assert_eq!(read([Some(100.5), None]), [Some(10_050), None]);
+        assert_eq!(read([None, Some(0.25)]), [None, Some(25)]);
+        assert_eq!(read([None, None]), [None, None]);
+        assert_eq!(read([Some(100.5), Some(0.25)]), [Some(10_050), Some(25)]);
+        // A null spot leaves the row's greeks alone: they are present.
+        let file = LakeFile::from_bytes(fno_file_with_spot([None, None])).expect("open");
+        let batch = file.read_row_group(0).expect("decode");
+        assert!(batch.row(1).expect("a row").greeks.is_some());
     }
 }
 
