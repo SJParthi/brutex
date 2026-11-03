@@ -41,27 +41,30 @@ struct Source {
     text: String,
 }
 
-/// Every `.rs` file under `crates/*/src`, sorted by path, read.
-fn sources() -> Vec<Source> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                out.push(path);
-            }
+/// Every `.rs` file under `dir`, at any depth, into `out`, in the order the
+/// host lists them. A path that cannot be listed adds nothing.
+fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_files_under(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
         }
     }
+}
+
+/// Every `.rs` file under `crates/*/src`, sorted by path, read.
+fn sources() -> Vec<Source> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut found = Vec::new();
     for member in std::fs::read_dir(&crates).into_iter().flatten().flatten() {
         let krate = member.file_name().to_string_lossy().into_owned();
         let mut files = Vec::new();
-        walk(&member.path().join("src"), &mut files);
+        rust_files_under(&member.path().join("src"), &mut files);
         found.extend(files.into_iter().map(|path| {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("{}: {e}", path.display()))
@@ -167,41 +170,56 @@ fn nothing_after_an_engine_files_first_test_gate_ships() {
         if file.krate != "engine" {
             continue;
         }
-        let lines: Vec<&str> = file.text.lines().collect();
-        let Some(first) = lines.iter().position(|l| *l == TEST_GATE) else {
-            continue;
-        };
-        for (at, line) in lines.iter().enumerate().skip(first) {
-            let starts_item = !line.is_empty()
-                && !line.starts_with(char::is_whitespace)
-                && !["#", "/", "}", ")", "]"]
-                    .iter()
-                    .any(|p| line.starts_with(p));
-            if !starts_item {
-                continue;
-            }
-            let gated = lines
-                .get(..at)
-                .unwrap_or_default()
-                .iter()
-                .rev()
-                .take_while(|l| {
-                    !l.is_empty()
-                        && (l.starts_with(char::is_whitespace)
-                            || !(l.ends_with(';') || l.ends_with('}')))
-                })
-                .any(|l| *l == TEST_GATE);
-            assert!(
-                gated,
-                "{}:{}: `{line}` follows the first test gate without one of its own, \
-                 so the scan's cut would hide shipping code",
-                file.path.display(),
-                at + 1
-            );
-            checked = checked.saturating_add(1);
-        }
+        let (ungated, gated) = ungated_after_the_first_gate(&file.text);
+        assert!(
+            ungated.is_empty(),
+            "{}: these follow the first test gate without one of their own, so the \
+             scan's cut would hide shipping code: {ungated:?}",
+            file.path.display()
+        );
+        checked = checked.saturating_add(gated);
     }
     assert!(checked >= 4, "only {checked} gated items were checked");
+}
+
+/// Every top-level item after `text`'s first test gate that does not carry
+/// the gate in its own attribute block, as (line from 1, the line); and how
+/// many items after it do. A function of the text, so the refusal is checked
+/// on text that breaks the rule (BASE-COV-LIBS-LS4).
+fn ungated_after_the_first_gate(text: &str) -> (Vec<(usize, String)>, u32) {
+    let mut ungated = Vec::new();
+    let mut checked = 0_u32;
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(first) = lines.iter().position(|l| *l == TEST_GATE) else {
+        return (ungated, checked);
+    };
+    for (at, line) in lines.iter().enumerate().skip(first) {
+        let starts_item = !line.is_empty()
+            && !line.starts_with(char::is_whitespace)
+            && !["#", "/", "}", ")", "]"]
+                .iter()
+                .any(|p| line.starts_with(p));
+        if !starts_item {
+            continue;
+        }
+        let gated = lines
+            .get(..at)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .take_while(|l| {
+                !l.is_empty()
+                    && (l.starts_with(char::is_whitespace)
+                        || !(l.ends_with(';') || l.ends_with('}')))
+            })
+            .any(|l| *l == TEST_GATE);
+        if gated {
+            checked = checked.saturating_add(1);
+        } else {
+            ungated.push((at + 1, (*line).to_owned()));
+        }
+    }
+    (ungated, checked)
 }
 
 /// A comment is not a call, an engine test region is not read, another crate is
@@ -305,4 +323,73 @@ fn best_has_no_production_caller_and_says_so() {
         doc.contains("/// **No production path calls this.**"),
         "the doc must state that no production path constructs `Best`"
     );
+}
+
+/// BASE-COV-LIBS-LS4: **AN ITEM AFTER THE FIRST GATE WITHOUT ONE OF ITS OWN IS
+/// NAMED**, whether a blank line or the previous item's closing line stands
+/// between it and the gate; one whose attribute block holds the gate, over
+/// several lines or under a doc comment, is checked and passes.
+#[test]
+fn an_item_after_the_first_gate_without_its_own_is_named() {
+    let text = "fn shipped() {}\n\
+                #[cfg(test)]\n\
+                mod tests {\n\
+                }\n\
+                #[cfg(test)]\n\
+                \n\
+                fn after_a_blank() {}\n\
+                #[cfg(test)]\n\
+                /// A doc line.\n\
+                fn gated() {}\n\
+                const AFTER_A_BRACE: u8 = 1;\n\
+                #[cfg(test)]\n\
+                #[allow(\n    clippy::all,\n)]\n\
+                fn gated_over_lines() {}\n";
+    let (ungated, checked) = ungated_after_the_first_gate(text);
+    assert_eq!(
+        ungated,
+        [
+            (7, "fn after_a_blank() {}".to_owned()),
+            (11, "const AFTER_A_BRACE: u8 = 1;".to_owned()),
+        ]
+    );
+    assert_eq!(checked, 3, "mod tests, gated and gated_over_lines");
+    // COMBINED: no gate at all checks nothing and names nothing.
+    assert_eq!(
+        ungated_after_the_first_gate(
+            text.split_once("#[cfg(test)]")
+                .expect("the text holds a gate")
+                .0
+        ),
+        (Vec::new(), 0)
+    );
+    // OUT OF THE BOX: the gate on the last line.
+    assert_eq!(
+        ungated_after_the_first_gate("fn a() {}\n#[cfg(test)]"),
+        (Vec::new(), 0)
+    );
+}
+
+/// BASE-COV-LIBS-LS4: the source walk reads Rust at every depth, passes over
+/// what is not Rust, and a path that cannot be listed adds nothing.
+#[test]
+fn the_source_walk_reads_rust_at_every_depth_and_nothing_else() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("production-callers-walk-{}", std::process::id()));
+    let _stale = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("deep/deeper")).expect("a scratch tree");
+    for file in ["top.rs", "notes.txt", "deep/deeper/low.rs", "deep/README"] {
+        std::fs::write(root.join(file), "").expect("a scratch file");
+    }
+    let mut found = Vec::new();
+    rust_files_under(&root, &mut found);
+    found.sort();
+    assert_eq!(
+        found,
+        [root.join("deep/deeper/low.rs"), root.join("top.rs")]
+    );
+    let mut none = Vec::new();
+    rust_files_under(&root.join("no-such-folder"), &mut none);
+    assert!(none.is_empty());
+    std::fs::remove_dir_all(&root).expect("the scratch tree is removed");
 }

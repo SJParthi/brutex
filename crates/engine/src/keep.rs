@@ -586,6 +586,35 @@ mod tests {
         );
     }
 
+    /// BASE-COV-LIBS-LS4: **THE HEAP ORACLE CAN SAY NO.** Every other test asks
+    /// `is_a_min_heap` of a heap a sift built, so it only ever answered yes, and
+    /// an oracle that always says yes would pass every one of them. Broken at a
+    /// left child, at a right child, deep in the heap, and whole.
+    #[test]
+    fn the_heap_oracle_refuses_a_broken_heap() {
+        let mut best = Best::try_with_capacity(7).expect("a small cap reserves");
+        best.held = vec![item(1, 0), item(2, 1), item(3, 2)];
+        assert!(is_a_min_heap(&best), "1 above 2 and 3 is a heap");
+        best.held = vec![item(5, 0), item(2, 1), item(9, 2)];
+        assert!(!is_a_min_heap(&best), "a left child weaker than its parent");
+        best.held = vec![item(5, 0), item(9, 1), item(2, 2)];
+        assert!(
+            !is_a_min_heap(&best),
+            "a right child weaker than its parent"
+        );
+        // COMBINED: whole at the root, broken two levels down.
+        best.held = vec![item(1, 0), item(4, 1), item(2, 2), item(5, 3), item(3, 4)];
+        assert!(
+            !is_a_min_heap(&best),
+            "slot 4 is weaker than its parent, slot 1"
+        );
+        // OUT OF THE BOX: nothing held, and one held, are heaps.
+        best.held = Vec::new();
+        assert!(is_a_min_heap(&best));
+        best.held = vec![item(u64::MAX, 0)];
+        assert!(is_a_min_heap(&best));
+    }
+
     /// Offered = held + discarded, at every cap, with nothing unaccounted.
     ///
     /// `CLAUDE.md` §4 wants a narrowing stated rather than absorbed, and this is
