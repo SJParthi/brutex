@@ -634,3 +634,8 @@ mod tests;
 #[cfg(test)]
 #[path = "generation_cover_tests.rs"]
 mod cover_tests;
+
+/// The pointer at its two edges no other test reached (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "generation_door_cover_tests.rs"]
+mod door_cover_tests;
