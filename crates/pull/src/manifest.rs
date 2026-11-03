@@ -4576,3 +4576,9 @@ fn text_at(image: &[u8; IMAGE_LEN], start: usize, len: usize) -> Option<&str> {
     let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
     std::str::from_utf8(field.get(..end).unwrap_or(&[])).ok()
 }
+
+// BASE-COV-PULL repair 2 (D-7334): the `const fn` builders of the layout
+// table, run at run time.
+#[cfg(test)]
+#[path = "manifest_cov_tests.rs"]
+mod cov_tests;
