@@ -1458,7 +1458,9 @@ mod decode {
                 ));
             }
             let listed = matches!(row.status, DayStatus::Known | DayStatus::NoShareOptions);
-            if !listed && (row.evidence != [0; DIGEST_LEN] || row.names + row.refused > 0) {
+            // Each count asked on its own (D-7335): their sum overflowed on a
+            // row of the file's bytes and panicked the decoder.
+            if !listed && (row.evidence != [0; DIGEST_LEN] || row.names > 0 || row.refused > 0) {
                 return Err(format!("{} has no listing and holds its counts", label()));
             }
             let end = at
@@ -3061,3 +3063,9 @@ mod tests;
 #[cfg(test)]
 #[path = "fno_membership_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL-PS1 (D-7335): the fold's bounds, file checks, writer refusals
+// and a resume.
+#[cfg(test)]
+#[path = "fno_membership_ps1_tests.rs"]
+mod ps1_tests;
