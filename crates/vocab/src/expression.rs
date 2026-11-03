@@ -308,19 +308,20 @@ impl Expression {
                     *top = top.negate();
                 }
                 Instruction::And | Instruction::Or => {
-                    let Some(left_index) = used.checked_sub(2) else {
+                    // Both operands in one pattern: a stack of fewer than two is
+                    // refused here, and that is the only refusal there is. The
+                    // left operand used to be looked up again after the right one
+                    // was, with an `else` no stack could reach (D-8565).
+                    let Some([.., left, right]) = stack.get_mut(..used) else {
                         return Truth::Unknown;
                     };
-                    let right = stack.get(used - 1).copied().unwrap_or(Truth::Unknown);
-                    used -= 1;
-                    let Some(left) = stack.get_mut(left_index) else {
-                        return Truth::Unknown;
-                    };
+                    let right = *right;
                     *left = if *instruction == Instruction::And {
                         left.and(right)
                     } else {
                         left.or(right)
                     };
+                    used -= 1;
                 }
                 Instruction::Pad => return Truth::Unknown,
             }
@@ -353,15 +354,17 @@ impl Expression {
     pub fn encode(&self) -> [u8; ENCODED_LEN] {
         let mut result = [0_u8; ENCODED_LEN];
         let count = u16::try_from(self.len).unwrap_or(u16::MAX).to_le_bytes();
-        for (target, byte) in result
+        // The four header bytes and the body, split once: `ENCODED_LEN` is
+        // `4 + 3 * MAX_INSTRUCTIONS`, so the split is always inside the array.
+        // The body used to be `get_mut(4..)` with an `else` no array of this
+        // length could reach (D-8565).
+        let (head, body) = result.split_at_mut(4);
+        for (target, byte) in head
             .iter_mut()
             .zip(VERSION.to_le_bytes().into_iter().chain(count))
         {
             *target = byte;
         }
-        let Some(body) = result.get_mut(4..) else {
-            return result;
-        };
         for (chunk, instruction) in body.chunks_exact_mut(3).zip(self.code.iter()) {
             let bytes = match instruction {
                 Instruction::Pad => [0, 0, 0],
@@ -401,16 +404,13 @@ fn render_program(
     children: &[(u16, u16); MAX_INSTRUCTIONS],
     f: &mut impl std::fmt::Write,
 ) -> std::fmt::Result {
-    let mut work = [RenderToken::Text(Punctuation::Close); MAX_INSTRUCTIONS * 3];
-    let mut used = 0_usize;
-    push_render(
-        &mut work,
-        &mut used,
-        &[RenderToken::Node(
-            u16::try_from(expression.len.checked_sub(1).ok_or(std::fmt::Error)?)
-                .map_err(|_| std::fmt::Error)?,
-        )],
-    )?;
+    // The root is the work stack's one entry to begin with: every slot starts as
+    // it and `used` starts at one. (It was pushed onto an empty stack through
+    // `push_render`, whose overflow refusal no first push can reach; D-8565.)
+    let root = u16::try_from(expression.len.checked_sub(1).ok_or(std::fmt::Error)?)
+        .map_err(|_| std::fmt::Error)?;
+    let mut work = [RenderToken::Node(root); MAX_INSTRUCTIONS * 3];
+    let mut used = 1_usize;
     for _ in 0..MAX_INSTRUCTIONS * 3 {
         if used == 0 {
             return Ok(());
@@ -852,6 +852,67 @@ mod invariant_tests {
             assert_eq!(parser.expression, rotated);
             assert_eq!(parser.expression.encode(), rotated.encode());
             assert_eq!(Expression::decode(&rotated.encode()), Ok(rotated));
+        }
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    #![allow(
+        clippy::expect_used,
+        reason = "a test that cannot panic cannot fail; `.expect` panics inside core, \
+                  which leaves no uncoverable region behind"
+    )]
+    //! BASE-COV-LIBS-LS3 (attempt 5): the renderer's own bound, proved.
+    //!
+    //! `render_program` says it keeps "the 3N bound even if an internal child link
+    //! is corrupt; no malformed traversal can keep writing indefinitely". No
+    //! program `parse` or `decode` accepts has a corrupt link, so that claim had no
+    //! test: a child link pointing back at its own node is driven here directly,
+    //! for a negation and for a join, and the render ends in an error with its
+    //! work stack full rather than looping. Extreme cases: a one-node cycle under
+    //! `Not`, a one-node cycle under `And`, a join whose two children are the
+    //! same node, and (the sound half) the links `render_children` derives, which
+    //! render the program exactly.
+
+    use super::{Expression, Instruction, MAX_INSTRUCTIONS, render_children, render_program};
+
+    fn program(code: &[Instruction]) -> Expression {
+        let mut expression = Expression {
+            code: [Instruction::Pad; MAX_INSTRUCTIONS],
+            len: code.len(),
+        };
+        for (slot, instruction) in expression.code.iter_mut().zip(code) {
+            *slot = *instruction;
+        }
+        expression
+    }
+
+    /// The render of `expression` over `children`, or the error it ended in.
+    fn rendered(
+        expression: &Expression,
+        children: &[(u16, u16); MAX_INSTRUCTIONS],
+    ) -> Result<String, std::fmt::Error> {
+        let mut out = String::new();
+        render_program(expression, children, &mut out).map(|()| out)
+    }
+
+    #[test]
+    fn a_child_link_back_to_its_own_node_ends_the_render_in_an_error_not_a_loop() {
+        let negation = program(&[Instruction::Bit(7), Instruction::Not]);
+        let sound = render_children(&negation).expect("a sound program has sound links");
+        assert_eq!(rendered(&negation, &sound).as_deref(), Ok("!(7)"));
+        let mut looped = sound;
+        *looped.get_mut(1).expect("the Not node") = (1, 0);
+        assert_eq!(rendered(&negation, &looped), Err(std::fmt::Error));
+
+        let join = program(&[Instruction::Bit(7), Instruction::Bit(9), Instruction::And]);
+        let sound = render_children(&join).expect("a sound program has sound links");
+        assert_eq!(rendered(&join, &sound).as_deref(), Ok("(7 & 9)"));
+        for link in [(2, 2), (2, 0), (0, 2)] {
+            let mut looped = sound;
+            *looped.get_mut(2).expect("the And node") = link;
+            assert_eq!(rendered(&join, &looped), Err(std::fmt::Error), "{link:?}");
         }
     }
 }

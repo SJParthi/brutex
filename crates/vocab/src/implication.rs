@@ -371,3 +371,67 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cover_tests {
+    //! BASE-COV-LIBS-LS3 (attempt 5): the pivot-chain pair rules over every pair.
+    //!
+    //! No test handed `pair_is_informative` a pair one of which restates the
+    //! other, and none asked `compatible` about a `below` position before an
+    //! `above` one, so a rule could have been dropped from either without a red
+    //! test. Every ordered pair of the chain's twenty-two positions is checked
+    //! here against the chain itself: `compatible` is symmetric, it refuses
+    //! exactly the impossible bands, and a pair is informative exactly when
+    //! neither position restates the other and the two can hold at once.
+    //! Extremes: the lowest and highest rungs (s5, r5), the pivot itself, a rung
+    //! with itself, adjacent rungs, and the four orders of one band.
+
+    use super::{PIVOT_CHAIN, compatible, implies, pair_is_informative};
+
+    /// Every chain position with its rank (0 = s5 .. 10 = r5) and side.
+    fn chain() -> Vec<(u16, usize, bool)> {
+        PIVOT_CHAIN
+            .iter()
+            .enumerate()
+            .flat_map(|(rank, &(above, below))| [(above, rank, true), (below, rank, false)])
+            .collect()
+    }
+
+    #[test]
+    fn compatibility_is_symmetric_and_refuses_exactly_the_impossible_bands() {
+        for (a, rank_a, above_a) in chain() {
+            for (b, rank_b, above_b) in chain() {
+                assert_eq!(compatible(a, b), compatible(b, a), "{a} {b}");
+                // `above X` with `below Y` holds only when X is under Y.
+                let possible = match (above_a, above_b) {
+                    (true, false) => rank_a < rank_b,
+                    (false, true) => rank_b < rank_a,
+                    _ => true,
+                };
+                assert_eq!(compatible(a, b), possible, "{a} {b}");
+            }
+        }
+        // below s5 with above r5: the close under the lowest rung and over the
+        // highest at once. above s5 with below r5: the widest band.
+        assert!(!compatible(187, 184));
+        assert!(compatible(185, 186));
+    }
+
+    #[test]
+    fn a_pair_is_informative_exactly_when_neither_restates_the_other_and_both_can_hold() {
+        let mut restated = 0_u32;
+        for (a, _, _) in chain() {
+            for (b, _, _) in chain() {
+                let informative = !implies(a, b) && !implies(b, a) && compatible(a, b);
+                assert_eq!(pair_is_informative(a, b), informative, "{a} {b}");
+                restated += u32::from(implies(a, b));
+            }
+        }
+        // Eleven rungs a side: 55 implied ordered pairs on each side.
+        assert_eq!(restated, 110);
+        // above r2 restates above r1, in both orders of the pair.
+        for (a, b) in [(76, 74), (74, 76), (83, 81), (81, 83)] {
+            assert!(!pair_is_informative(a, b), "{a} {b}");
+        }
+    }
+}
