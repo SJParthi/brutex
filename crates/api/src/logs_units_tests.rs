@@ -232,3 +232,41 @@ fn the_doors_the_bench_times_answer_over_an_empty_store() {
     assert!(dayflags_json_over(&root, "nosuch=1").is_err());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A LOG DIRECTORY THAT IS A FILE IS UNREADABLE BY NAME, AND A MONTH IS
+/// SEVEN CHARACTERS OF A REAL MONTH** (BASE-COV-API, D-7346). Extremes: a
+/// plain file where a directory is named; a path that is not there; a real
+/// directory; a month one character short, one long, and a month that does
+/// not exist; and, at once, a short month beside a good day in one query.
+#[test]
+fn a_log_directory_that_is_a_file_is_unreadable_and_a_month_is_a_real_one() {
+    let root = crate::scratch::path("logs-dir-is-a-file");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let file = root.join("not-a-dir");
+    std::fs::write(&file, b"a file").expect("a file");
+    match DirState::of(&file) {
+        DirState::Unreadable(why) => assert!(why.contains("not a directory"), "{why}"),
+        other => panic!("a file is no log directory: {}", other.word()),
+    }
+    assert_eq!(DirState::of(&root.join("not-there")).word(), "absent");
+    assert_eq!(DirState::of(&root).word(), "read");
+    for (text, month) in [
+        ("2024-01", true),
+        ("2024-1", false),
+        ("2024-011", false),
+        ("2024-13", false),
+        ("", false),
+    ] {
+        assert_eq!(is_month(text), month, "{text:?}");
+    }
+    let mut ignored = Vec::new();
+    let keys = keys_of("month=2024-1&day=2024-01-02", &mut ignored);
+    assert!(keys.month.is_none(), "a short month is not read");
+    assert_eq!(
+        ignored.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        ["month"],
+        "the short month is named, the good day is not"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

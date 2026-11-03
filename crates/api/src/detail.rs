@@ -1983,6 +1983,25 @@ mod tests {
     /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
     /// SLOT.** W1-api2-11, D-1443. Driven on a pool of the test's own, so no
     /// route test sharing the real pools can see it.
+    /// **A POOL MADE AT RUN TIME IS THE POOL A STATIC IS** (BASE-COV-API,
+    /// D-7346): `Pool::new` is `const` so it backs every `static`, and a const
+    /// call runs in the compiler, never under a test; this one runs it here.
+    /// Extremes: no slot at all, one, and the core-sized bound of one.
+    #[test]
+    fn a_pool_made_at_run_time_is_the_pool_a_static_is() {
+        for (size, slots) in [
+            (Size::Fixed(0), 0),
+            (Size::Fixed(1), 1),
+            (Size::Cores { cap: 1 }, 1),
+        ] {
+            let pool = Pool::new("run-time", size);
+            assert_eq!(pool.name(), "run-time");
+            assert_eq!(pool.max(), slots);
+            assert_eq!(pool.active.load(Ordering::Acquire), 0);
+            assert_eq!(pool.waiting.load(Ordering::Acquire), 0);
+        }
+    }
+
     #[test]
     fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
         static POOL: Pool = Pool::new("test", Size::Fixed(2));

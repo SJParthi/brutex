@@ -1150,6 +1150,50 @@ mod tests {
             .as_str()
             .expect("the refusal's words");
         assert!(refusal.contains(&said), "{mode}: no {said:?} in {refusal}");
+        // WITH NO USABLE HOME AND NO BRUTEX_MASTERS THE DOORS THAT FIND THE
+        // MASTERS THEMSELVES SAY SO, before any fetch (D-7346): the status
+        // answer and the refresh's own work, both 503 in the same words. Only
+        // where no directory can be found (HOME unset, or empty): elsewhere the
+        // refresh's work would ask a host.
+        if said == "HOME is unset" || said == "cannot be located" {
+            assert!(
+                std::env::var_os("BRUTEX_MASTERS").is_none(),
+                "the premise: no masters directory is named"
+            );
+            for (door, (status, _, body)) in [
+                (
+                    "status",
+                    block_on(super::status_json(axum::extract::State(
+                        std::sync::Arc::clone(&site),
+                    ))),
+                ),
+                (
+                    "refresh",
+                    block_on(super::refresh_work(std::sync::Arc::clone(&site))),
+                ),
+            ] {
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "{door}: {body}"
+                );
+                assert!(
+                    body.contains("neither BRUTEX_MASTERS nor HOME is set"),
+                    "{door}: {body}"
+                );
+            }
+        } else {
+            let (status, _, body) = block_on(super::status_json(axum::extract::State(
+                std::sync::Arc::clone(&site),
+            )));
+            assert_eq!(status, axum::http::StatusCode::OK, "{mode}: {body}");
+            let rows: serde_json::Value = serde_json::from_str(&body).expect("the status JSON");
+            assert_eq!(
+                rows["masters"].as_array().map(Vec::len),
+                Some(masters::SOURCES.len()),
+                "{mode}: one row a source: {body}"
+            );
+        }
         std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
     }
 
@@ -2019,6 +2063,8 @@ mod tests {
         // An operator who follows the link lands somewhere with no way back and
         // no indication of where they are.
         let html = super::page_html();
+        // THE ROUTE SERVES THIS PAGE, byte for byte (BASE-COV-API, D-7346).
+        assert_eq!(block_on(super::page()).0, html, "the handler is the page");
 
         assert!(html.contains("<nav class=\"top\">"), "there is a nav bar");
         assert!(
