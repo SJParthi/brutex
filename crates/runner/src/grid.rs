@@ -7272,9 +7272,7 @@ mod tests {
         // two ever skip differently every figure after the hole diverges.
         let mut holed = clean.clone();
         for hole in [200_usize, 740] {
-            let Some(slot) = holed.get_mut(hole) else {
-                continue;
-            };
+            let slot = holed.get_mut(hole).expect("a hole inside the fixture");
             *slot = indicators::Candle::new(slot.ts_micros, 0, 0, 1, 0, 1, indicators::OI_NULL);
         }
         assert!(
@@ -8593,9 +8591,9 @@ mod tests {
         let prior = bars
             .get(victim.saturating_sub(1))
             .map_or(0, |bar| bar.ts_micros);
-        if let Some(bar) = bars.get_mut(victim) {
-            bar.ts_micros = prior;
-        }
+        bars.get_mut(victim)
+            .expect("a victim inside the fixture")
+            .ts_micros = prior;
         let column = Column::build(&bars, &mut evaluator());
         assert!(
             !column.accepts(victim),
@@ -10431,15 +10429,14 @@ mod arming_tests {
                     let prior = dirty
                         .get(victim.saturating_sub(1))
                         .map_or(0, |bar| bar.ts_micros);
-                    if let Some(bar) = dirty.get_mut(victim) {
-                        bar.ts_micros = prior;
-                        bar.high = bar.high.saturating_add(5_000_000);
-                    }
+                    let bar = dirty.get_mut(victim).expect("a victim inside the fixture");
+                    bar.ts_micros = prior;
+                    bar.high = bar.high.saturating_add(5_000_000);
                 }
                 Poison::Accumulator => {
                     let stamp = dirty.get(victim).map_or(0, |bar| bar.ts_micros);
-                    if let Some(bar) = dirty.get_mut(victim) {
-                        *bar = indicators::Candle::new(
+                    *dirty.get_mut(victim).expect("a victim inside the fixture") =
+                        indicators::Candle::new(
                             stamp,
                             5_000_000_000_000_000_000,
                             5_000_000_000_000_000_000,
@@ -10448,7 +10445,6 @@ mod arming_tests {
                             1,
                             indicators::OI_NULL,
                         );
-                    }
                 }
             }
             assert!(dirty.get(victim).is_some_and(|bar| bar.check().is_ok()));

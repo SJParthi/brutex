@@ -6244,10 +6244,7 @@ pub(crate) mod tests {
         assert_eq!(rolling.folds.len(), 3, "and the same for rolling");
 
         // ANCHORED GROWS.
-        for pair in anchored.folds.windows(2) {
-            let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
-                continue;
-            };
+        for (a, b) in anchored.folds.iter().zip(anchored.folds.iter().skip(1)) {
             assert!(
                 b.train_bars > a.train_bars,
                 "an anchored window must GROW: fold {} trained on {} bars and \
@@ -6260,10 +6257,7 @@ pub(crate) mod tests {
         }
 
         // ROLLING HOLDS ITS WIDTH.
-        for pair in rolling.folds.windows(2) {
-            let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
-                continue;
-            };
+        for (a, b) in rolling.folds.iter().zip(rolling.folds.iter().skip(1)) {
             assert_eq!(
                 a.train_bars, b.train_bars,
                 "a rolling window must hold its WIDTH: fold {} trained on {} \
@@ -6411,13 +6405,11 @@ pub(crate) mod tests {
             );
         }
         // Anchored: each fold trains on strictly more than the one before.
-        for pair in v.folds.windows(2) {
-            if let [a, b] = pair {
-                assert!(
-                    b.train_bars > a.train_bars,
-                    "an anchored walk must expand its training window"
-                );
-            }
+        for (a, b) in v.folds.iter().zip(v.folds.iter().skip(1)) {
+            assert!(
+                b.train_bars > a.train_bars,
+                "an anchored walk must expand its training window"
+            );
         }
     }
 
