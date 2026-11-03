@@ -800,19 +800,17 @@ fn a_path_that_is_not_a_regular_file_is_refused_by_name() {
     let rendered = ConfigError::NotARegularFile { path: dir }.to_string();
     assert!(rendered.contains("brutex-pull") && rendered.contains("not a regular file"));
 
-    // A character device, where the platform has one. `/dev/zero` measures
-    // `st_size == 0` and is an endless stream of NUL bytes, every one of which
-    // is valid UTF-8: under the old check it was an unbounded read of an
-    // infinite file.
+    // A character device: `/dev/zero` is on every unix this suite runs on. It
+    // measures `st_size == 0` and is an endless stream of NUL bytes, every
+    // one of which is valid UTF-8: under the old check it was an unbounded
+    // read of an infinite file.
     let zero = std::path::Path::new("/dev/zero");
-    if zero.exists() {
-        assert_eq!(
-            CredentialConfig::load(zero),
-            Err(ConfigError::NotARegularFile {
-                path: zero.to_path_buf()
-            })
-        );
-    }
+    assert_eq!(
+        CredentialConfig::load(zero),
+        Err(ConfigError::NotARegularFile {
+            path: zero.to_path_buf()
+        })
+    );
 }
 
 /// The configuration path is built under the home it is handed.
@@ -978,6 +976,15 @@ fn readonly_credentials() {
             "fn read(&self, path: &CredentialPath<'_>) -> Result<Secret, SecretError>;".to_owned()
         ],
         "the secret source is one read and nothing else"
+    );
+    // The reader passes over a line that declares no method and reads a
+    // qualified one, so a second method in either shape fails the two above.
+    assert_eq!(
+        trait_methods(
+            "\npub trait Invented {\n    #[must_use]\n    unsafe fn invented(&self);\n}\n",
+            "Invented"
+        ),
+        vec!["unsafe fn invented(&self);".to_owned()]
     );
 }
 
@@ -1289,10 +1296,8 @@ fn a_flipped_bit_in_any_entry_byte_is_detected() {
     for byte in 0..IMAGE_LEN {
         for bit in 0..8u8 {
             let mut damaged = image;
+            // Never the byte it was: `1 << bit` is never zero.
             damaged[byte] ^= 1 << bit;
-            if damaged == image {
-                continue;
-            }
             match Entry::decode(&damaged) {
                 Err(EntryFault::Checksum { .. }) => caught += 1,
                 other => panic!("byte {byte} bit {bit} was not caught: {other:?}"),
@@ -4284,7 +4289,9 @@ fn a_date_that_does_not_exist_is_refused_with_the_length_that_month_has() {
         for month in 0..=13_u8 {
             for day in 0..=32_u8 {
                 let got = Day::new(year, month, day);
-                if month == 0 || month > 12 {
+                // The table has no length for a month that does not exist.
+                let len = table(year, month);
+                if len == 0 {
                     assert_eq!(
                         got,
                         Err(SessionError::MonthOutOfRange { month }),
@@ -4292,7 +4299,6 @@ fn a_date_that_does_not_exist_is_refused_with_the_length_that_month_has() {
                     );
                     continue;
                 }
-                let len = table(year, month);
                 if day == 0 || day > len {
                     assert_eq!(
                         got,
@@ -8503,11 +8509,13 @@ fn a_reservation_with_the_cursor_ahead_and_no_shortfall_goes_now() {
             "the cursor never steps back"
         );
     }
-    // Spend what is left of the second, so the next has a shortfall.
-    while governor.credit_micro_permits(WindowSpan::Second) >= Some(MICROS_PER_SECOND) {
-        assert_eq!(governor.reserve(7), Some(7));
-    }
+    // The pin and the loop above spent the second's permits (the loop stops
+    // when none is left), so the next has a shortfall.
     let second = governor.credit_micro_permits(WindowSpan::Second);
+    assert!(
+        second < Some(MICROS_PER_SECOND),
+        "the second is spent: {second:?}"
+    );
     // A SHORTFALL FROM A CURSOR AT THE END OF THE CLOCK IS A REFUSAL, NOT A
     // SLEEP TOWARD `u64::MAX`, and charges nothing.
     for now in [0, 7, u64::MAX - 1, u64::MAX] {

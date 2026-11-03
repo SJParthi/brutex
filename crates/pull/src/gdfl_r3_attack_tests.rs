@@ -153,7 +153,9 @@ fn random_rows(rng: &mut Rng, overflow: bool, oi: bool) -> Vec<Row> {
     }
     if overflow {
         let at = OPEN + 600 + u32::try_from(rng.below(600)).unwrap();
-        let big = u64::try_from(i64::MAX).unwrap() - rng.below(2);
+        // One past `i64::MAX` is past it alone; `i64::MAX` and one less fit
+        // alone, and their sum with the 2 below does not.
+        let big = u64::try_from(i64::MAX).unwrap() + 1 - rng.below(3);
         for ltq in [big, 2] {
             out.push(Row {
                 sod: at,
@@ -187,9 +189,10 @@ struct Expect {
 
 /// The agreed bar, the slow way (as round 2's reference, written again
 /// here): the running maximum over every row before row `i`, a late kept row
-/// placed at the next in-order row's stamp, one bar per placed second.
+/// placed at the next in-order row's stamp, one bar per placed second, and no
+/// open interest, which no capital-market file carries.
 /// `None` when a placed quantity or a second's sum does not fit an `i64`.
-fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect> {
+fn reference(on: Day, rows: &[Row], every_row: bool) -> Option<Expect> {
     let n = rows.len();
     let in_order = |i: usize| (0..i).all(|j| rows[j].sod <= rows[i].sod);
     let mut out = Expect {
@@ -227,18 +230,12 @@ fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect>
             return None;
         }
         let volume = if every_row { 0 } else { u128::from(r.ltq) };
-        let oi = if oi {
-            i64::try_from(r.oi).unwrap()
-        } else {
-            OI_NULL
-        };
         let ts = utc_micros(on, second);
         match out.bars.last_mut() {
             Some(bar) if bar.ts_micros == ts => {
                 bar.high = bar.high.max(r.ltp);
                 bar.low = bar.low.min(r.ltp);
                 bar.close = r.ltp;
-                bar.open_interest = oi;
                 *sums.last_mut().unwrap() += volume;
             }
             _ => {
@@ -249,7 +246,7 @@ fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect>
                     low: r.ltp,
                     close: r.ltp,
                     volume: 0,
-                    open_interest: oi,
+                    open_interest: OI_NULL,
                 });
                 sums.push(volume);
             }
@@ -270,10 +267,7 @@ fn tree(dir: &Path, under: &str) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&at) else {
-            continue;
-        };
-        for entry in entries {
+        for entry in std::fs::read_dir(&at).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
@@ -810,8 +804,14 @@ fn r3_04_a_columnar_block_never_builds_past_its_stated_size() {
     let crc = crate::gdfl_archive::crc32(&file);
     let (day, entry) = entry_of(&block, file.len() as u64, 3, crc);
     assert_eq!(rebuild(&day, &entry).unwrap(), file);
-    // One byte short of its size it is refused, one byte long it is too.
-    for size in [file.len() as u64 - 1, file.len() as u64 + 1] {
+    // Two bytes short of its size the rebuild passes the size before its last
+    // field and is refused; one byte short or one long it is refused or
+    // rebuilt whole, never anything else (the length is `verify`'s to hold).
+    for size in [
+        file.len() as u64 - 2,
+        file.len() as u64 - 1,
+        file.len() as u64 + 1,
+    ] {
         let (day, entry) = entry_of(&block, size, 3, crc);
         let got = rebuild(&day, &entry);
         let rebuilt_whole = got.as_ref().is_ok_and(|b| *b == file);
@@ -1071,7 +1071,7 @@ fn want_cm(kind: CmKind, world: &[(Day, Vec<Cm>)], only: &[&str]) -> WantCm {
             } else if every_row && !closed {
                 want.totals.files_refused += 1;
                 late.push((file, "ends inside the session"));
-            } else if let Some(expect) = reference(*on, rows, every_row, false) {
+            } else if let Some(expect) = reference(*on, rows, every_row) {
                 files.push((symbol, expect));
             } else {
                 want.totals.files_refused += 1;

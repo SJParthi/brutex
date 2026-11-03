@@ -785,8 +785,9 @@ fn the_unsized_days_hold_at_the_span_edges_and_extremes() {
 fn a_calendar_change_that_closes_a_held_day_is_named_before_it_is_applied() {
     let store = seeded("ref-retract");
     let old = load(&store);
-    // The first regular session from 2026-09-07 on, found, never typed.
-    let held_day = (epoch(2026, 9, 7)..epoch(2026, 12, 31))
+    // The first regular session from 2026-09-07 on, found, never typed. The
+    // search starts on Sunday 2026-09-06, so it passes over a closed day.
+    let held_day = (epoch(2026, 9, 6)..epoch(2026, 12, 31))
         .find(|day| {
             matches!(
                 old.calendar.table().unwrap().kind_of(*day),
@@ -859,7 +860,21 @@ fn two_writers_of_one_generation_never_both_land() {
         .map(|w| w.generation)
         .collect();
     assert_eq!(landed, [2], "{outcomes:?}");
-    for outcome in &outcomes {
+    // THE LOST RACE, made on demand through the link seam (`write_linking`):
+    // over a second seeded store, a writer that listed generation 1 as the
+    // newest finds generation 2 landed by another writer between its listing
+    // and its link, and answers `Raced(2)`. Both are judged with the eight.
+    let race = seeded("ref-race-lost");
+    let winner = std::cell::RefCell::new(None);
+    let link = |staging: &Path, path: &Path| -> std::io::Result<()> {
+        *winner.borrow_mut() = Some(write(&race, &draft));
+        std::fs::hard_link(staging, path)
+    };
+    let loser = write_linking(&race, &draft, &link);
+    let winner = winner.into_inner().expect("the other writer ran");
+    assert!(winner.as_ref().is_ok_and(|w| w.landed), "{winner:?}");
+    assert!(matches!(loser, Err(WriteError::Raced(2))), "{loser:?}");
+    for outcome in outcomes.iter().chain([&winner, &loser]) {
         match outcome {
             Ok(written) => assert_eq!(written.generation, 2, "{outcomes:?}"),
             Err(WriteError::Raced(generation)) => assert_eq!(*generation, 2),
@@ -1004,16 +1019,17 @@ fn a_reused_symbol_is_one_action_item_and_not_a_nightly_incomplete() {
         month: 1,
         day: 1,
     };
-    if let Err(stale) = lineage.filed_under(change.new, before) {
-        assert!(matches!(stale, alias::Stale::BeforeChange(_)));
-        assert!(
-            nfo_cause(&NfoRefusal::UnderlyingStale {
-                ticker: "X".into(),
-                why: stale
-            })
-            .closes
-        );
-    }
+    let stale = lineage
+        .filed_under(change.new, before)
+        .expect_err("the new symbol before its change is refused");
+    assert!(matches!(stale, alias::Stale::BeforeChange(_)));
+    assert!(
+        nfo_cause(&NfoRefusal::UnderlyingStale {
+            ticker: "X".into(),
+            why: stale
+        })
+        .closes
+    );
 }
 
 /// DB-B44 replayed on a REAL table the operator keeps outside the tree: the
@@ -1188,14 +1204,14 @@ fn a_seeded_row_keeps_every_citations_checksum() {
         .flat_map(|table| seed_draft(table).unwrap().rows)
         .map(|row| row.last().cloned().unwrap())
         .collect();
+    // An unverified row cites nothing (its `citations` are empty), so every
+    // row's citations are walked alike.
     for (status, source) in rows.zip(&seeded) {
-        if let RowStatus::Sourced(citations) = status {
-            for citation in citations {
-                assert!(source.contains(citation.url), "{source}");
-                if let Some(sha) = citation.sha256 {
-                    with_sha += 1;
-                    assert!(source.contains(&format!("sha256 {sha}")), "{source}");
-                }
+        for citation in status.citations() {
+            assert!(source.contains(citation.url), "{source}");
+            if let Some(sha) = citation.sha256 {
+                with_sha += 1;
+                assert!(source.contains(&format!("sha256 {sha}")), "{source}");
             }
         }
     }
@@ -1210,15 +1226,13 @@ fn a_seeded_row_keeps_every_citations_checksum() {
 fn a_loaded_row_cites_its_own_source_and_checksum() {
     type Cite = (&'static str, &'static str, Option<&'static str>);
     let cites = |status: RowStatus| -> Option<Vec<Cite>> {
-        match status {
-            RowStatus::Sourced(citations) => Some(
-                citations
-                    .iter()
-                    .map(|c| (c.url, c.read, c.sha256))
-                    .collect(),
-            ),
-            RowStatus::Unverified(_) => None,
-        }
+        status.applies().then(|| {
+            status
+                .citations()
+                .iter()
+                .map(|c| (c.url, c.read, c.sha256))
+                .collect()
+        })
     };
     let loaded = load(&seeded("ref-own-cite"));
     assert_eq!(loaded.renames.origin(), "store");

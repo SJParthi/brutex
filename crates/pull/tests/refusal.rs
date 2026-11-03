@@ -537,20 +537,23 @@ fn only_the_feed_whose_error_page_was_read_declares_a_contract() {
     // reader, because the three vendors agree on none of them: `error_type` at
     // the root, `errorCode` at the root, `code` inside an `error` object.
     for feed in pull::vendor::Feed::ALL {
-        let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
-            continue;
+        // An archive has no error page to read, so it declares no contract:
+        // the answer a network feed whose page was not read gives.
+        let error_names = match feed.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => spec.error_names,
+            pull::vendor::Transport::LocalArchive(_) => None,
         };
         let expected = matches!(
             feed,
             pull::vendor::Feed::Zerodha | pull::vendor::Feed::Dhan | pull::vendor::Feed::Groww
         );
         assert_eq!(
-            spec.error_names.is_some(),
+            error_names.is_some(),
             expected,
             "{}: a contract appears here only when a page has been read for it",
             feed.display()
         );
-        let Some(contract) = spec.error_names else {
+        let Some(contract) = error_names else {
             continue;
         };
         // AND IT ACTUALLY READS THE VENDOR'S NAMES, rather than being a row
@@ -719,10 +722,10 @@ fn zerodha_is_never_asked_for_an_expired_option_and_its_futures_go_through_a_tok
     // strike offset, and neither by token.
     let mut serving = 0;
     for feed in pull::vendor::Feed::ALL {
-        if let pull::vendor::Transport::Http(other) = feed.descriptor().transport
-            && other.fno.serves()
-        {
-            serving += 1;
+        if let pull::vendor::Transport::Http(other) = feed.descriptor().transport {
+            // A network feed that serves no contract is not counted, and it
+            // has no token route either: its `by_token` is `None` as well.
+            serving += usize::from(other.fno.serves());
             if feed != pull::vendor::Feed::Zerodha {
                 assert!(other.fno.by_token().is_none(), "{feed:?}");
             }

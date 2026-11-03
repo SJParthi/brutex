@@ -643,14 +643,19 @@ mod gdfl_nfo {
         Day::new(2024, 4, 1).expect("a real day")
     }
 
-    /// A source holding one file's bytes and nothing else.
+    /// A source holding one file's bytes, listed as the one option file of
+    /// whichever day it is asked for.
     struct OneFile(Vec<u8>);
 
     impl NfoSource for OneFile {
         type Locator = ();
 
-        fn day(&self, _: Day) -> Result<Option<NfoDay<()>>, CmRefusal> {
-            Ok(None)
+        fn day(&self, on: Day) -> Result<Option<NfoDay<()>>, CmRefusal> {
+            let mut listing: NfoDay<()> = NfoDay::new(on, 1);
+            let entry = format!("{}/Options/{TICKER}.NFO.csv", day_folder_name(on));
+            let len = u64::try_from(self.0.len()).expect("fits");
+            listing.push(&entry, len, crc32(&self.0), ());
+            Ok(Some(listing))
         }
 
         fn fetch(&self, _: &ListedFile<()>) -> Result<Vec<u8>, CmRefusal> {
@@ -682,11 +687,8 @@ mod gdfl_nfo {
     /// `bytes` listed as the day's one option file and read through
     /// `read_file`: the rows decoded, the allocating calls and bytes taken.
     fn read(bytes: Vec<u8>) -> (Result<usize, NfoRefusal>, usize, usize) {
-        let mut listing: NfoDay<()> = NfoDay::new(trade(), 1);
-        let entry = format!("{}/Options/{TICKER}.NFO.csv", day_folder_name(trade()));
-        let len = u64::try_from(bytes.len()).expect("fits");
-        listing.push(&entry, len, crc32(&bytes), ());
         let source = OneFile(bytes);
+        let listing = source.day(trade()).expect("listed").expect("the day");
         let file = listing.entries().first().expect("one entry").clone();
         counted(|| read_file(&source, &listing, &file).map(|day| day.file.rows.len()))
     }
@@ -699,11 +701,8 @@ mod gdfl_nfo {
     /// and the bytes allocated reading it. The named list is taken after the
     /// count, so it is never charged to the read.
     fn read_named(bytes: Vec<u8>) -> (Named, usize) {
-        let mut listing: NfoDay<()> = NfoDay::new(trade(), 1);
-        let entry = format!("{}/Options/{TICKER}.NFO.csv", day_folder_name(trade()));
-        let len = u64::try_from(bytes.len()).expect("fits");
-        listing.push(&entry, len, crc32(&bytes), ());
         let source = OneFile(bytes);
+        let listing = source.day(trade()).expect("listed").expect("the day");
         let file = listing.entries().first().expect("one entry").clone();
         let (got, _, allocated) = counted(|| read_file(&source, &listing, &file));
         let got = got.map(|day| {

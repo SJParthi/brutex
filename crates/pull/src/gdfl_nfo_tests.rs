@@ -304,15 +304,15 @@ fn a_retired_text_traded_after_its_rename_is_refused() {
     }
 }
 
-/// A source whose fetch is never expected: a refusal before any byte is read
-/// comes back as itself, not as this source's error.
+/// A source that is never asked for a day and refuses every fetch: a refusal
+/// before any byte is read comes back as itself, not as this source's error.
 struct NoFetch;
 
 impl NfoSource for NoFetch {
     type Locator = u8;
 
     fn day(&self, _: Day) -> Result<Option<NfoDay<u8>>, CmRefusal> {
-        Ok(None)
+        unreachable!("read_file is handed its listing: it never asks the source for a day")
     }
 
     fn fetch(&self, _: &ListedFile<u8>) -> Result<Vec<u8>, CmRefusal> {
@@ -391,13 +391,19 @@ fn an_expiry_before_the_trade_day_or_past_the_horizon_is_refused() {
         "the trade day itself"
     );
     let name = |d: Day| format!("X{:02}{}{:02}100CE", d.day(), mon(d), d.year() % 100);
-    let on = (0..7)
+    // The trade days of one week whose horizon edge and the day after it are
+    // both weekdays: whatever the horizon, the four whose edge falls Monday to
+    // Thursday. Every day of the week is asked; the first that fits is the
+    // day tested, the one `find` gave.
+    let fits: Vec<Day> = (0..7)
         .map(|k| Day::from_days(trade().days_from_epoch() + k).unwrap())
-        .find(|t| {
+        .filter(|t| {
             let edge = Day::from_days(t.days_from_epoch() + EXPIRY_HORIZON_DAYS).unwrap();
             is_weekday(edge) && is_weekday(edge.succ().unwrap())
         })
-        .unwrap();
+        .collect();
+    assert_eq!(fits.len(), 4, "{fits:?}");
+    let on = fits[0];
     let edge = Day::from_days(on.days_from_epoch() + EXPIRY_HORIZON_DAYS).unwrap();
     assert!(
         decode_ticker(&name(edge), on).is_ok(),
@@ -1164,7 +1170,8 @@ fn every_fault_of_the_yearly_zip_is_refused_by_name() {
         open(b"nope".to_vec()).err(),
         Some(CmRefusal::ArchiveMalformed { .. })
     ));
-    // A member whose deflate stream is cut: corrupt or short, never accepted.
+    // A member whose deflate stream is cut does not inflate: the read refuses
+    // it as corrupt, never accepted.
     let year = zip(&[(name, &day_zip, Method::Stored)]);
     let listing = open(year.clone()).unwrap().unwrap();
     let file = &listing.entries()[0];
@@ -1184,11 +1191,13 @@ fn every_fault_of_the_yearly_zip_is_refused_by_name() {
     let listing = open(cut).unwrap().unwrap();
     let file = &listing.entries()[0];
     let got = member_bytes(&*file.locator.file, file.locator.at, &file.entry, file.len);
-    match got {
-        Err(CmRefusal::ArchiveMemberCorrupt { .. }) => {}
-        Ok(bytes) => assert!(crate::gdfl_cm::verify(file, &bytes).is_err()),
-        other => panic!("{other:?}"),
-    }
+    // Measured: these two flipped bytes of a fixed fixture do not inflate
+    // under the locked `flate2`, so the read refuses the member itself,
+    // before any CRC-32 is compared.
+    assert!(
+        matches!(got, Err(CmRefusal::ArchiveMemberCorrupt { .. })),
+        "{got:?}"
+    );
 }
 
 #[test]
@@ -1951,6 +1960,17 @@ fn a_day_zip_in_the_next_years_zip_is_named() {
 /// answer.
 #[test]
 fn a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held() {
+    // Mode bits do not bind root, which is how this suite runs in a
+    // container: re-run the body where they do (D-0995), so the year zip the
+    // platform refuses is refused on every host.
+    crate::support::where_permission_binds(
+        "gdfl_nfo::tests::a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held",
+        a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held_body() {
     let ticker = "NIFTY25APR2422000CE";
     let file = |d: Day| csv(&[row(&format!("{ticker}.NFO"), d, 33_300, "10", 75, 300)]);
     let day_zip = |d: Day| zip(&[(&entry(d, ticker), &file(d), Method::Deflated)]);
@@ -2131,15 +2151,13 @@ fn a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held() {
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        if std::fs::File::open(&path).is_err() {
-            let zips = NfoZips::new(&locked);
-            let denied = Some(CmRefusal::ArchiveUnavailable {
-                kind: std::io::ErrorKind::PermissionDenied,
-            });
-            assert_eq!(zips.day(day(2026, 1, 2)).err(), denied);
-            assert_eq!(zips.day(d2).err(), denied);
-            assert!(zips.day(d1).unwrap().is_some());
-        }
+        let zips = NfoZips::new(&locked);
+        let denied = Some(CmRefusal::ArchiveUnavailable {
+            kind: std::io::ErrorKind::PermissionDenied,
+        });
+        assert_eq!(zips.day(day(2026, 1, 2)).err(), denied);
+        assert_eq!(zips.day(d2).err(), denied);
+        assert!(zips.day(d1).unwrap().is_some());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
@@ -2453,7 +2471,17 @@ fn the_real_window_sweep_lists_every_event_the_detector_declares() {
 /// fixed array is checked against on real days: one `Vec<&str>` per row and an
 /// unreserved row vector. Test-only; nothing in the crate calls it.
 fn decode_by_field_vector(bytes: &[u8], stem: &str, day: Day) -> Result<NfoFile, NfoRefusal> {
-    let cap = crate::fetch::MAX_ROWS;
+    decode_by_field_vector_capped(bytes, stem, day, crate::fetch::MAX_ROWS)
+}
+
+/// `decode_by_field_vector` with the row bound as a parameter, as
+/// `decode_capped` takes it, so an invented file can meet the bound.
+fn decode_by_field_vector_capped(
+    bytes: &[u8],
+    stem: &str,
+    day: Day,
+    cap: usize,
+) -> Result<NfoFile, NfoRefusal> {
     let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let mut lines = body.split(|&b| b == b'\n');
     match lines
@@ -2620,6 +2648,147 @@ fn the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files() {
     );
     assert!(decode(&eleven, STEM, trade()).is_ok());
     assert!(decode_by_field_vector(&eleven, STEM, trade()).is_err());
+}
+
+/// A file of [`the_oracle_and_the_relation_meet_every_shape_on_invented_files`], with the
+/// field-vector oracle's answer: its rows and quoted rows, or its refusal.
+type OracleCase = (Vec<u8>, Result<(usize, u32), NfoRefusal>);
+
+/// Every arm of the field-vector oracle and of D-4816's relation, each met by
+/// an invented file both readers read: the September 2018 header; a row of
+/// another file, and of another day; each quote and quantity field that is
+/// not a number; a zero bid beside an ask that is not; a negative LTQ and a
+/// negative open interest (2026-04-16's shape); a bad price after a good row;
+/// a header with four empty trailing fields (2025-03-11's shape, D-4829); the
+/// four ways the per-row reader refuses a file past the line the whole-file
+/// reader stopped at; and the row bound, at caps of one and two. The oracle
+/// answers each as definition 4 did and the relation holds on each, so the
+/// real-day checks compare two readers known to agree on every shape.
+#[test]
+fn the_oracle_and_the_relation_meet_every_shape_on_invented_files() {
+    let good = rows(&[(33_300, "10.05", 75, 300), (33_301, "0", 0, 300)]);
+    let bent = |from: &str, to: &str| good[0].replacen(from, to, 1);
+    let foreign = bent(STEM, "ZQ04APR2422000CE.NFO");
+    let other_day = bent("01/04/2024", "02/04/2024");
+    let bad_bid = bent(",0,0,0,0,", ",x,0,0,0,");
+    let bad_ask = bent(",0,0,0,0,", ",0,0,x,0,");
+    let bad_bid_qty = bent(",0,0,0,0,", ",0,x,0,0,");
+    let bad_ask_qty = bent(",0,0,0,0,", ",0,0,0,x,");
+    let ask_only = bent(",0,0,0,0,", ",0,0,10.10,75,");
+    let negative_ltq = bent(",75,300", ",-75,300");
+    let negative_oi = bent(",75,300", ",75,-300");
+    let bad_price = bent("10.05", "10.x");
+    let malformed = NfoRefusal::MalformedRow { line: 2 };
+    let spaced = format!(
+        "{HEADER_OPEN_INTEREST_SPACED}\r\n{}\r\n{}\r\n",
+        good[0], good[1]
+    );
+    let padded = format!("{HEADER_OPEN_INTEREST},,,,");
+    let trailing = format!("{padded}\r\n{},,,,\r\n", good[0]);
+    // Each file, and the oracle's answer: its rows and quoted rows, or its
+    // refusal.
+    let cases: Vec<OracleCase> = vec![
+        (spaced.into_bytes(), Ok((2, 0))),
+        (
+            csv(std::slice::from_ref(&foreign)),
+            Err(NfoRefusal::TickerMismatch { line: 2 }),
+        ),
+        (
+            csv(std::slice::from_ref(&other_day)),
+            Err(NfoRefusal::DateMismatch { line: 2 }),
+        ),
+        (csv(std::slice::from_ref(&bad_bid)), Err(malformed.clone())),
+        (csv(&[bad_ask]), Err(malformed.clone())),
+        (csv(&[bad_bid_qty]), Err(malformed.clone())),
+        (csv(&[bad_ask_qty]), Err(malformed.clone())),
+        (csv(&[ask_only]), Ok((1, 1))),
+        (csv(&[negative_ltq]), Err(malformed.clone())),
+        (csv(&[negative_oi]), Err(malformed.clone())),
+        (
+            csv(&[good[0].clone(), bad_price]),
+            Err(NfoRefusal::PriceRefused { line: 3 }),
+        ),
+        (
+            trailing.into_bytes(),
+            Err(unknown_header(padded.as_bytes())),
+        ),
+    ];
+    for (file, oracle) in cases {
+        let (new, old) = (
+            decode(&file, STEM, trade()),
+            decode_by_field_vector(&file, STEM, trade()),
+        );
+        assert_eq!(
+            old.as_ref()
+                .map(|read| (read.rows.len(), read.quoted_rows))
+                .map_err(NfoRefusal::clone),
+            oracle,
+            "{new:?}"
+        );
+        assert!(
+            definition_5_differs_only_where_4_refused(&new, &old),
+            "{new:?} against {old:?}"
+        );
+    }
+    // Where the oracle stops at line 2, the per-row reader names that row and
+    // refuses the file later: past the bad-row bound, at a row of another
+    // file or day, or at a cut last line.
+    let over = crate::gdfl_cm::MAX_BAD_ROWS + 1;
+    let mut cut = csv(std::slice::from_ref(&bad_bid));
+    cut.extend_from_slice(b"x");
+    let later = [
+        (
+            csv(&vec![bad_bid.clone(); usize::try_from(over).unwrap()]),
+            NfoRefusal::TooManyBadRows {
+                refused: over,
+                rows: over,
+            },
+        ),
+        (
+            csv(&[bad_bid.clone(), foreign]),
+            NfoRefusal::TickerMismatch { line: 3 },
+        ),
+        (
+            csv(&[bad_bid.clone(), other_day]),
+            NfoRefusal::DateMismatch { line: 3 },
+        ),
+        (cut, NfoRefusal::MalformedRow { line: 3 }),
+    ];
+    for (file, refusal) in later {
+        let (new, old) = (
+            decode(&file, STEM, trade()),
+            decode_by_field_vector(&file, STEM, trade()),
+        );
+        assert_eq!(new, Err(refusal), "{old:?}");
+        assert_eq!(old, Err(malformed.clone()), "the oracle stops at line 2");
+        assert!(
+            definition_5_differs_only_where_4_refused(&new, &old),
+            "{new:?} against {old:?}"
+        );
+    }
+    // The row bound, at the caps `decode_capped` takes: a second row read is
+    // refused by both readers alike; past a bad first row, the per-row reader
+    // reaches the bound the oracle never did.
+    let two = csv(&good);
+    assert_eq!(
+        decode_by_field_vector_capped(&two, STEM, trade(), 1),
+        Err(NfoRefusal::RowsOverCap { cap: 1 })
+    );
+    assert_eq!(
+        decode_capped(&two, STEM, trade(), 1),
+        decode_by_field_vector_capped(&two, STEM, trade(), 1)
+    );
+    let bounded = csv(&[bad_bid, good[0].clone(), good[1].clone()]);
+    let (new, old) = (
+        decode_capped(&bounded, STEM, trade(), 2),
+        decode_by_field_vector_capped(&bounded, STEM, trade(), 2),
+    );
+    assert_eq!(new, Err(NfoRefusal::RowsOverCap { cap: 2 }), "{old:?}");
+    assert_eq!(old, Err(malformed), "the oracle stops at line 2");
+    assert!(
+        definition_5_differs_only_where_4_refused(&new, &old),
+        "{new:?} against {old:?}"
+    );
 }
 
 /// **D-5800 ON REAL DAYS, READ-ONLY.** Every option file of NIFTY,

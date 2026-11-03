@@ -184,10 +184,7 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&at) else {
-            continue;
-        };
-        for entry in entries {
+        for entry in fs::read_dir(&at).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
@@ -509,15 +506,13 @@ fn a_held_day_writes_nothing_and_a_restated_minute_is_refused_as_raw() {
             0
         );
     }
+    // Not a byte of the store moved, its bars and revisions or anything
+    // beside them: a held day and a refused restatement write no file.
     let now = tree(&sealed.0);
     let changed: Vec<&PathBuf> = now
         .iter()
         .filter(|(path, bytes)| before.get(*path) != Some(*bytes))
         .map(|(path, _)| path)
-        .filter(|path| {
-            path.starts_with(sealed.0.join("bars"))
-                || path.starts_with(sealed.0.join("bar-revisions-v1"))
-        })
         .collect();
     assert!(changed.is_empty(), "{changed:?}");
     assert!(!repairs(&sealed.0).contains("sealed-month"));
