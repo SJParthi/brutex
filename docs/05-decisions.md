@@ -87668,3 +87668,31 @@ reading `whole:api`, set `state/fix/round2/deep-BASE-COV-API-4beea8da837b-set.tx
    a caller, are reported and not removed (L-BCA-7): `detail::run_scan`, `ingest::discovery_ask`,
    `settings_route::snapshot_off_worker`, `census::Since::read_back`, `census::Manifests::partitions` and
    `census::Manifests::closes`.
+
+### D-7347 — Repair 2's figures: the bar is still not met; the (F)/(U) list rebuilt and read by hand (BASE-COV-API, repair 2) — 2026-11-03
+
+**Status: locked as a record; the bar is NOT met.** D3 recipe v4, Route B, pins as in D-7340 (rustc 1.99.0-nightly
+1a98b1e13 2026-08-07; llvm-cov and llvm-profdata LLVM 23.1.0-rust-1.99.0-nightly), deep dir `tgt/deep-10`, reading
+`whole:api`, set `state/fix/round2/deep-BASE-COV-API-8091e72f7d85-set.txt` (205 coverage files, 298 mutants lines),
+tree `8091e72f7d85` (11:34-12:12 IST: build 2 min, 3,087 instrumented tests passed, 0 failed, 16 ignored, readout
+27 min). The tip adds this entry and its rows only: no `.rs` line differs from the tree measured.
+
+1. **Figures.** Lines 171,626 / 176,239 (4,613 uncovered), branches 12,637 / 15,420 (2,783 uncovered sides), 182 files
+   read. At check r2 (tree `129c6da42a74`) they were 4,853 and 2,848; this repair closed 240 lines and 65 sides net
+   while its own 663 new lines of tests are every one covered. Production GAP rows went from 3,724 lines and 1,381
+   sides to 3,514 and 1,353. `served_routes_tests.rs` 277/277 and 4/4, `sweeprun_accepted_tests.rs` 308/308 and 10/10,
+   `emitted.rs` 962/962 and 78/78. Every row with its text: `state/fix/round2/base-cov-api-gaps-r2.txt`.
+2. **The (F)/(U) list** is `state/fix/round2/base-cov-api-fu.txt`, as D-7340 named it, now 427 lines and 1,053 sides
+   (F), every row read by hand: the rule (D-7346 item 6) keeps a side (F) only where it fails its check, and reading
+   the rows moved 20 more to GAP, each named in `state/fix/round2/base-cov-api-fu-read-overrides.txt` with why (an
+   operand of `||` never reached, a closure inside the compared expression never called, an operand of an `.any()`
+   opened on the line above). A row inside an `#[ignore]`d test is a GAP marked `ignored` (233 lines, 12 sides,
+   L-BCA-3). (U): `lib.rs`, whole.
+3. **GAP rows left**: 4,186 lines and 1,730 sides, most in `recovery.rs`, `server.rs`, `dayflags.rs` and the
+   research projections (L-BCA-5), the paths that end at a real host (L-BCA-6), the six public functions nothing
+   calls (L-BCA-7), the load-bound tests (L-BCA-4) and the 22 bench files no object holds (L-BCA-2).
+4. D-7340's item 5 stands: because the bar is not met, `Merge BASE-COV-API:` must not happen on these figures, and
+   D-7250's narrow reading holds for `api`.
+
+**Proof.** `scratch/deep-BASE-COV-API-logs/8091e72f7d85-routeb-r2.log`, ending `ROUTE-B DONE ... WITH NOT PROVED lines
+above` for the 22 benches and `lib.rs` only; profile `scratch/deep-BASE-COV-API-prof/8091e72f7d85-10-B-r2`.
