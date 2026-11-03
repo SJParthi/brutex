@@ -3635,3 +3635,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// BASE-COV-PULL repair 2 (D-7334): the public transport's every answer,
+// against a loopback socket this test opens itself.
+#[cfg(test)]
+#[path = "masters_cov_tests.rs"]
+mod cov_tests;

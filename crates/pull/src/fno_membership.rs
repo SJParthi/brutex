@@ -3055,3 +3055,9 @@ fn finish(
 #[cfg(test)]
 #[path = "fno_membership_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL repair 2 (D-7334): a day's evidence, the fold's span and
+// counts, a month's pool, and a record offered out of its month's order.
+#[cfg(test)]
+#[path = "fno_membership_cov_tests.rs"]
+mod cov_tests;

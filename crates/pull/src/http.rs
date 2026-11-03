@@ -4454,7 +4454,7 @@ mod tests {
         }
     }
 
-    fn spec_top(prices: PriceScale) -> HttpSpec {
+    pub(super) fn spec_top(prices: PriceScale) -> HttpSpec {
         HttpSpec {
             // The fixture declares no body-level error contract: these tests
             // are about decoding a SUCCESSFUL answer, and `crate::refusal`
@@ -9184,3 +9184,10 @@ mod tests {
         );
     }
 }
+
+// BASE-COV-PULL repair 2 (D-7334): the redacted credential, a budget no
+// governor takes, a source left ungoverned, and a discovery field in a bars
+// request.
+#[cfg(test)]
+#[path = "http_cov_tests.rs"]
+mod cov_tests;

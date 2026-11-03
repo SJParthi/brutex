@@ -968,13 +968,27 @@ pub async fn get_parameter(
     // `answer.text()`, which held the whole body before anything looked at it,
     // with only the client's 10 s timeout as a bound. See `answer_within`.
     let text = answer_within(&mut answer).await?;
+    answer_of(region, status.as_u16(), &text)
+}
 
-    if !status.is_success() {
+/// What one `GetParameter` answer says: the value, or the refusal its
+/// status and fault name map to, and the read noted with the region, the
+/// status and the length only. Out of [`get_parameter`] (BASE-COV-PULL repair
+/// 2, D-7334) so every arm is driven by a test without a socket; the socket
+/// half stays there.
+///
+/// # Errors
+///
+/// [`SsmError`] for a status outside 200..300 (mapped to the port's
+/// vocabulary, the body never quoted), a body this build cannot read, and an
+/// empty value.
+fn answer_of(region: &str, status: u16, text: &str) -> Result<String, SsmError> {
+    if !(200..300).contains(&status) {
         // AWS names its faults in the body; the port's four variants are what
         // an operator acts on. Mapped rather than flattened.
-        let kind = if text.contains("AccessDenied") || status.as_u16() == 403 {
+        let kind = if text.contains("AccessDenied") || status == 403 {
             SecretError::AccessDenied
-        } else if text.contains("ParameterNotFound") || status.as_u16() == 404 {
+        } else if text.contains("ParameterNotFound") || status == 404 {
             SecretError::NotFound
         } else {
             SecretError::Unreachable
@@ -1006,7 +1020,7 @@ pub async fn get_parameter(
         // is still in CloudTrail, where it belongs and where the account
         // already controls who reads it.
         return Err(SsmError {
-            detail: refusal_detail(status.as_u16(), &text),
+            detail: refusal_detail(status, &text),
             kind,
         });
     }
@@ -1040,7 +1054,7 @@ pub async fn get_parameter(
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("pull.ssm", "credential read")
             .with("region", telemetry::Value::Str(region))
-            .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
+            .with("status", telemetry::Value::Uint(u64::from(status)))
             .with("value_len", telemetry::Value::Uint(value.len() as u64)),
     );
     Ok(value)
