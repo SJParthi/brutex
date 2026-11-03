@@ -129,16 +129,14 @@ pub fn expiry_of(
         // that spells its weekly `W` or `WEEKLY` needs no edit here.
         let next = match cadence {
             crate::vendor::ExpiryCadence::Weekly => costs::expiry::next_weekly_expiry(slot, at)
-                .map_err(|_| RollingError::NoExpiry {
-                    why: "the day is before this weekly regime was verified from",
-                })?
+                .map_err(|why| step_refused(WEEKLY_FLOOR, &why))?
                 .ok_or(RollingError::NoExpiry {
                     why: "this weekly was withdrawn for that slot, so no contract existed",
                 })?,
-            crate::vendor::ExpiryCadence::Monthly => costs::expiry::next_monthly_expiry(slot, at)
-                .map_err(|_| RollingError::NoExpiry {
-                why: "the day is before this monthly regime was verified from",
-            })?,
+            crate::vendor::ExpiryCadence::Monthly => {
+                costs::expiry::next_monthly_expiry(slot, at)
+                    .map_err(|why| step_refused(MONTHLY_FLOOR, &why))?
+            }
         };
         found = Some(next);
         // ONE DAY PAST THE ONE JUST FOUND, so the next step cannot return it
@@ -235,16 +233,36 @@ pub fn listing_of(
             match costs::expiry::next_weekly_expiry(slot, day) {
                 Ok(Some(_)) => Ok(Listing::Listed),
                 Ok(None) => Ok(Listing::Withdrawn),
-                Err(_) => Err(RollingError::NoExpiry {
-                    why: "the day is before this weekly regime was verified from",
-                }),
+                Err(why) => Err(step_refused(WEEKLY_FLOOR, &why)),
             }
         }
         crate::vendor::ExpiryCadence::Monthly => costs::expiry::next_monthly_expiry(slot, day)
             .map(|_| Listing::Listed)
-            .map_err(|_| RollingError::NoExpiry {
-                why: "the day is before this monthly regime was verified from",
-            }),
+            .map_err(|why| step_refused(MONTHLY_FLOOR, &why)),
+    }
+}
+
+/// What a weekly regime's calendar step refusing a day before it means.
+const WEEKLY_FLOOR: &str = "the day is before this weekly regime was verified from";
+
+/// What a monthly regime's calendar step refusing a day before it means.
+const MONTHLY_FLOOR: &str = "the day is before this monthly regime was verified from";
+
+/// A calendar step's refusal in this module's words. `costs::expiry` refuses
+/// a day before the regime was verified (`floor`, the regime's own sentence)
+/// and a roll past the last day it can represent (a weekly past
+/// `TradeDay::MAX` is `OrdinalOutsideWindow`, a monthly past December 2100
+/// `YearOutsideWindow`). Until BASE-COV-PULL PS3 (D-7337) both read as
+/// `floor`, so a question about 2101 was told the day was too early.
+fn step_refused(floor: &'static str, why: &costs::error::CostError) -> RollingError {
+    RollingError::NoExpiry {
+        why: match why {
+            costs::error::CostError::OrdinalOutsideWindow { .. }
+            | costs::error::CostError::YearOutsideWindow { .. } => {
+                "the calendar ran past the last day it can represent"
+            }
+            _ => floor,
+        },
     }
 }
 
@@ -2043,15 +2061,23 @@ mod tests {
             Ok(brutex_core::instrument::Expiry::new(2100, 12, 28).expect("an expiry")),
             "the last Tuesday of December 2100 is that month's too"
         );
-        // ONE STEP PAST IT is 2101-01-04, which no trade day holds.
-        assert!(matches!(
-            expiry_of("NIFTY", &spec(), "WEEK", "2", last),
-            Err(RollingError::NoExpiry { .. })
-        ));
-        assert!(matches!(
-            expiry_of("NIFTY", &spec(), "MONTH", "2", last),
-            Err(RollingError::NoExpiry { .. })
-        ));
+        // ONE STEP PAST IT is 2101-01-04, which no trade day holds, and the
+        // refusal says so: it is not a day before the regime (BASE-COV-PULL
+        // PS3, D-7337: until then every calendar refusal read as that).
+        let past = Err(RollingError::NoExpiry {
+            why: "the calendar ran past the last day it can represent",
+        });
+        assert_eq!(expiry_of("NIFTY", &spec(), "WEEK", "2", last), past);
+        assert_eq!(expiry_of("NIFTY", &spec(), "MONTH", "2", last), past);
+        let after = Day::new(2100, 12, 29).expect("the day after it");
+        assert_eq!(
+            listing_of("NIFTY", &spec(), "WEEK", after).map(|_| ()),
+            past.clone().map(|_: brutex_core::instrument::Expiry| ())
+        );
+        assert_eq!(
+            listing_of("NIFTY", &spec(), "MONTH", after).map(|_| ()),
+            past.map(|_: brutex_core::instrument::Expiry| ())
+        );
     }
 
     /// **A VALUE SEGMENT IN A ROLLING PATH IS WRITTEN AS ITS PLACEHOLDER**, never
