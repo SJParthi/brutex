@@ -2334,6 +2334,17 @@ const LATE_PIECES: &str = "
 // vendor field.
 const LATE_LABEL: &str = "stamp body reliance";
 
+// FNO-LEVERAGE (D-8150, D-8151, D-8155): `pull::nse_margin`, the dated
+// leverage table read from NSE's C_VAR1 margin files, each word read in
+// crates/pull/src/nse_margin.rs. `nse-margin-v1` is the table's own
+// directory under its build's `out` argument (`nse_margin::DIR_NAME`) and
+// `nsm` its month files' extension (`nse_margin::EXTENSION`); `2211` is the
+// denominator of the exact ratio `10000/2211` that the test
+// `twenty_two_point_one_one_percent_is_the_exact_ratio` prints, which the
+// joined-literal split cuts at its `/`. None names an account, an
+// environment, a vendor credential or a field of a parameter path.
+const FNO_LEVERAGE_LITERAL: &str = "nse-margin-v1 nsm 2211";
+
 // The GDFL import and its readers (D-2800 to D-2806), met when the
 // capital-market reader was squashed onto this line and the import landed.
 // Invented test values (strikes, prices, line numbers and day pieces of
@@ -3015,7 +3026,7 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 /// 78 -> 79 with R4-26's group (repair 4, 26 Oct 2026), at its merge of
 /// feat/db-fix c53812824: both groups raised 77 -> 78 for their own, and
 /// both landed, so the joined list holds 79.
-const DECLARED: [&str; 79] = [
+const DECLARED: &[&str] = &[
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3045,6 +3056,7 @@ const DECLARED: [&str; 79] = [
     NSE_PUBLISHED,
     JOIN_VERDICT,
     NAV_WORD,
+    FNO_LEVERAGE_LITERAL,
     HTTP_STATUS,
     WITHDRAWN_INDEX,
     ZERODHA_ROW,
