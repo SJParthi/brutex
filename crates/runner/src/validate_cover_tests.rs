@@ -1528,3 +1528,163 @@ fn the_search_doors_refuse_zero_rungs_and_a_coarse_execution_path() {
         ))
     );
 }
+
+/// The V4 grid pair resolved over `bars` under one identity, both sides.
+fn grid_pair_v4(
+    instrument: &brutex_core::instrument::InstrumentKey,
+    feed: &str,
+    commit: &str,
+    calendar: [u8; 32],
+    bars: &[indicators::Candle],
+) -> (
+    crate::exit_grid_policy::ResolvedExitGridV1,
+    crate::exit_grid_policy::ResolvedExitGridV1,
+) {
+    let resolve = |side| {
+        let series = crate::exit_grid_policy::ExecutionSeriesV1::new(
+            instrument, feed, commit, calendar, bars,
+        )
+        .expect("complete identity");
+        super::tests::exact_grid_policy_v4(side)
+            .resolve_attested(series)
+            .expect("the grid resolves")
+    };
+    (
+        resolve(crate::excursion::Side::Long),
+        resolve(crate::excursion::Side::Short),
+    )
+}
+
+/// THE V4 GRID PAIR IS ONE SOURCE SEEN FROM TWO SIDES: a Short in the Short
+/// slot, and a pair whose instrument, feed, commit or calendar differ between
+/// its sides, or from the attested series, is refused by name.
+#[test]
+fn a_grid_pair_of_two_sources_or_the_wrong_side_is_refused_by_name() {
+    use brutex_core::instrument::{Exchange, InstrumentKey};
+    let bars = crate::synthetic::sessions(2);
+    let nifty = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("an allowed index");
+    let bank = InstrumentKey::index(Exchange::Nse, "BANKNIFTY").expect("an allowed index");
+    let series = |instrument| {
+        crate::exit_grid_policy::ExecutionSeriesV1::new(
+            instrument,
+            "test-feed",
+            "test-commit",
+            [0xA5; 32],
+            &bars,
+        )
+        .expect("complete identity")
+    };
+    let (long, short) = grid_pair_v4(&nifty, "test-feed", "test-commit", [0xA5; 32], &bars);
+    let mut moved = bars.clone();
+    moved[10].close = moved[10].low;
+    assert_ne!(moved, bars);
+    assert!(super::authenticate_grid_pair_v4(series(&nifty), &long, &short, false).is_ok());
+    assert_eq!(
+        super::authenticate_grid_pair_v4(series(&nifty), &long, &long, false),
+        Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+            "Long/Short resolutions are swapped or carry the wrong side"
+        ))
+    );
+    assert_eq!(
+        super::authenticate_grid_pair_v4(series(&nifty), &short, &short, false),
+        Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+            "Long/Short resolutions are swapped or carry the wrong side"
+        ))
+    );
+    let differs = Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+        "Long/Short source or training identity differs",
+    ));
+    for (what, other) in [
+        (
+            "instrument",
+            grid_pair_v4(&bank, "test-feed", "test-commit", [0xA5; 32], &bars).1,
+        ),
+        (
+            "feed",
+            grid_pair_v4(&nifty, "other-feed", "test-commit", [0xA5; 32], &bars).1,
+        ),
+        (
+            "commit",
+            grid_pair_v4(&nifty, "test-feed", "other-commit", [0xA5; 32], &bars).1,
+        ),
+        (
+            "calendar",
+            grid_pair_v4(&nifty, "test-feed", "test-commit", [0x5A; 32], &bars).1,
+        ),
+        (
+            "training bars",
+            grid_pair_v4(&nifty, "test-feed", "test-commit", [0xA5; 32], &moved).1,
+        ),
+    ] {
+        assert_eq!(
+            super::authenticate_grid_pair_v4(series(&nifty), &long, &other, false),
+            differs,
+            "{what}"
+        );
+    }
+    assert_eq!(
+        super::authenticate_grid_pair_v4(series(&bank), &long, &short, false),
+        differs,
+        "a pair over another series than the attested one"
+    );
+}
+
+/// A TORN OR RESEALED GRID PAIR IS REFUSED BY NAME: a side whose digest no
+/// longer reproduces, a resealed side whose training span is not its training
+/// digest's, and a resealed side whose levels are not what its policy
+/// resolves from the attested series.
+#[test]
+fn a_torn_or_resealed_grid_pair_is_refused_by_name() {
+    type Resolved = crate::exit_grid_policy::ResolvedExitGridV1;
+    use crate::exit_grid_policy::resolution_tamper::{torn, with_training_span, with_wider_stops};
+    let bars = crate::synthetic::sessions(2);
+    let nifty = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("an allowed index");
+    let series = || {
+        crate::exit_grid_policy::ExecutionSeriesV1::new(
+            &nifty,
+            "test-feed",
+            "test-commit",
+            [0xA5; 32],
+            &bars,
+        )
+        .expect("complete identity")
+    };
+    let (long, short) = grid_pair_v4(&nifty, "test-feed", "test-commit", [0xA5; 32], &bars);
+    let pair = |long: &Resolved, short: &Resolved| {
+        super::authenticate_grid_pair_v4(series(), long, short, false)
+    };
+    assert!(pair(&long, &short).is_ok());
+    let torn_pair = Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+        "one resolution or policy digest is torn",
+    ));
+    assert_eq!(pair(&torn(&long), &short), torn_pair, "long");
+    assert_eq!(pair(&long, &torn(&short)), torn_pair, "short");
+    let differs = Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+        "Long/Short source or training identity differs",
+    ));
+    let (count, first, last) = (
+        short.training_bars(),
+        short.training_first_ts_micros(),
+        short.training_last_ts_micros(),
+    );
+    for (what, span) in [
+        ("bars", (count - 1, first, last)),
+        ("first", (count, first + 60_000_000, last)),
+        ("last", (count, first, last - 60_000_000)),
+    ] {
+        assert_eq!(
+            pair(&long, &with_training_span(&short, span)),
+            differs,
+            "{what}"
+        );
+    }
+    let stale = Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+        "retained resolution does not exactly match the attested execution series",
+    ));
+    assert_eq!(pair(&with_wider_stops(&long), &short), stale, "long");
+    assert_eq!(pair(&long, &with_wider_stops(&short)), stale, "short");
+}
