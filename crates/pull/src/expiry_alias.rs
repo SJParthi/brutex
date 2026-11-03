@@ -1767,13 +1767,13 @@ mod tests {
         // Nothing to extend, nothing listed; an empty set lists nothing.
         assert!(rekey_plan(contracts, sourced_kind_of, sourced_kind_of).is_empty());
         assert!(rekey_plan(std::iter::empty::<(&str, Day)>(), sourced_kind_of, newer).is_empty());
-        // A newer calendar that closes every day refuses by name.
-        let closed = rekey_plan([("NIFTY", d(2027, 1, 28))], sourced_kind_of, |day: i64| {
-            if day <= SOURCED_LAST_DAY {
-                sourced_kind_of(day)
-            } else {
-                DayKind::Closed
-            }
+        // A newer calendar that closes every day refuses by name. Every day:
+        // the walk back from 2027-01-28 stops after CLOSED_WALK_DAYS (10)
+        // days, at 2027-01-18, 18 days past the record's last day, so a
+        // calendar that kept the record held a side no walk asked
+        // (BASE-COV-PULL-PS1).
+        let closed = rekey_plan([("NIFTY", d(2027, 1, 28))], sourced_kind_of, |_: i64| {
+            DayKind::Closed
         });
         assert_eq!(closed.len(), 1);
         assert!(closed[0].now.is_err());
@@ -1795,6 +1795,14 @@ mod tests {
                 DayKind::Open(Session::full())
             }
         };
+        // The two invented calendars at the edges no contract above asks of
+        // them (BASE-COV-PULL-PS1): a Saturday of either extension is closed,
+        // and a day past the second is unmeasured, as the rules they are
+        // written to state.
+        let epoch = |day: Day| i64::from(day.days_from_epoch());
+        assert_eq!(newer(epoch(d(2027, 1, 30))), DayKind::Closed);
+        assert_eq!(newest(epoch(d(2028, 1, 29))), DayKind::Closed);
+        assert_eq!(newest(epoch(d(2029, 1, 1))), DayKind::Unmeasured);
         let pairs = |plan: &[Rekey<'static>]| -> Vec<(&'static str, Day)> {
             plan.iter()
                 .map(|rekey| (rekey.underlying, rekey.stated))

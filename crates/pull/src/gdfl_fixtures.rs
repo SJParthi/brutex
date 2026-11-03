@@ -278,3 +278,8 @@ pub(crate) fn as_compared(rel: &Path, bytes: Vec<u8>) -> Vec<u8> {
         bytes
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): a provenance sidecar record that does not decode.
+#[cfg(test)]
+#[path = "gdfl_fixtures_ps1_tests.rs"]
+mod ps1_tests;

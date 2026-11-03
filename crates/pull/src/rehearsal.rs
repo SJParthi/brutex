@@ -1083,3 +1083,8 @@ pub fn after_run(
 #[cfg(test)]
 #[path = "rehearsal_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL-PS1 (D-7335): a package table without its name or its flag, and a reason cut at a character boundary.
+#[cfg(test)]
+#[path = "rehearsal_ps1_tests.rs"]
+mod ps1_tests;
