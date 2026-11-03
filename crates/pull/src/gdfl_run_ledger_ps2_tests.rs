@@ -320,3 +320,43 @@ fn an_alert_the_ledger_could_not_put_is_said_by_name() {
         },
     );
 }
+
+/// Cuts the ledger at `at` to nothing: another writer's truncation.
+fn cut(at: &std::path::Path) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(at)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+}
+
+/// A ledger cut after this allocation measured it (the seam after
+/// `metadata`): the reads under the lock meet the end of the file, so the
+/// two last records read as damaged and the allocation is refused by offset,
+/// never an id from bytes that are not there; a one-record ledger cut so
+/// reads as its only record lost, and the id is raised past the claims,
+/// never one already given.
+#[test]
+fn a_ledger_cut_after_it_was_measured_never_gives_an_id_twice() {
+    let store = scratch("ledger-ps2-cut");
+    assert_eq!(allocate(&store, &entry()), Ok(NOW));
+    assert_eq!(allocate(&store, &entry()), Ok(NOW + 1));
+    let ledger = store.join(LEDGER);
+    assert_eq!(std::fs::metadata(&ledger).unwrap().len(), 3 * RECORD);
+    seam::plant("ledger.measured", cut);
+    assert_eq!(
+        allocate(&store, &entry()),
+        Err(RunsLedgerFault::Damaged { offset: RECORD })
+    );
+    assert_eq!(
+        std::fs::metadata(&ledger).unwrap().len(),
+        0,
+        "nothing written"
+    );
+    // One record, cut: its only record is read as lost.
+    std::fs::write(&ledger, Entry { id: 9, ..entry() }.record().unwrap()).unwrap();
+    seam::plant("ledger.measured", cut);
+    assert_eq!(allocate(&store, &entry()), Ok(NOW + 2));
+    assert_eq!(std::fs::metadata(&ledger).unwrap().len(), 2 * RECORD);
+}

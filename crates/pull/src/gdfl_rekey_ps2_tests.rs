@@ -1130,3 +1130,42 @@ fn no_bars_to_place_are_already_placed() {
         Ok(Write::Already)
     ));
 }
+
+/// Another writer landing the very bars a move appends, after apply's check
+/// found the month free and before its write (the seam before
+/// `open_or_create`): the store's own append finds them already there, so
+/// the month is counted already written, held once and never twice, and the
+/// move is still recorded.
+#[test]
+fn a_month_another_writer_filled_after_the_check_is_counted_already() {
+    let fixture = Fixture::new("ps2-raced-append");
+    fixture.counted();
+    let root = fixture.root().to_path_buf();
+    let found = survey(&root, None).unwrap();
+    let ledger = withdrawn(&root).unwrap();
+    let decided = plan(&found, &ledger);
+    assert_eq!(decided.moves.len(), 1, "{:?}", decided.unresolved);
+    let june = held(&root, "NIFTY", STATED, ym(2020, 6));
+    let target = month_file(&root, SETTLED, ym(2020, 6));
+    let (writer_root, landed) = (root.clone(), june.clone());
+    crate::gdfl_rekey::seam::plant("rekey.appending", move |at| {
+        assert_eq!(at, target.as_path(), "June is the first month written");
+        let nifty = sym("NIFTY");
+        let path = StorePath::new(month_parts(&nifty, c(SETTLED), ym(2020, 6))).unwrap();
+        let mut file = BarFile::open_or_create(&writer_root, path, symbol_id(nifty)).unwrap();
+        assert!(matches!(
+            file.append(&landed).unwrap(),
+            Appended::Committed { .. }
+        ));
+    });
+    let done = apply(&root, &found, &decided, &ledger).unwrap();
+    assert!(done.refused.is_empty(), "{:?}", done.refused);
+    assert_eq!((done.months_written, done.months_already), (1, 1));
+    assert_eq!(
+        held(&root, "NIFTY", SETTLED, ym(2020, 6)),
+        june,
+        "held once"
+    );
+    assert_eq!(held(&root, "NIFTY", SETTLED, ym(2020, 7)).len(), 1);
+    assert_eq!(done.moved.len(), 1);
+}

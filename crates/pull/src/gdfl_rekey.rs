@@ -2111,6 +2111,8 @@ impl Group<'_> {
             let named = |why: &dyn std::fmt::Display| format!("{}: {why}", shown.display());
             let file = match write {
                 Write::Append => {
+                    #[cfg(test)]
+                    seam::at("rekey.appending", &shown);
                     let mut file =
                         BarFile::open_or_create(root, at, id).map_err(|why| named(&why))?;
                     match file.append(bars).map_err(|why| named(&why))? {
@@ -2509,6 +2511,40 @@ fn note_applied(out: &Applied, plan: &Plan) {
                     }),
             ),
     );
+}
+
+/// Test seams between two host calls that another process could split
+/// (D-7336, the pattern of `ingest::census_store::seam`): a test plants one
+/// step under a name, and the next pass of that name on this thread runs it,
+/// once, with the path the code is at, the way another writer filling the month landing between the
+/// two calls would. Per thread, so tests running at once never meet each
+/// other's steps; and absent from every build but this crate's own tests.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Step = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Plants `step` for the next pass of `name` on this thread.
+    pub(crate) fn plant(name: &'static str, step: impl FnOnce(&Path) + 'static) {
+        STEPS.with_borrow_mut(|held| held.push((name, Box::new(step))));
+    }
+
+    /// Runs the step planted for `name`, once.
+    pub(super) fn at(name: &'static str, path: &Path) {
+        let step = STEPS.with_borrow_mut(|held| {
+            let found = held.iter().position(|(at, _)| *at == name)?;
+            Some(held.remove(found).1)
+        });
+        if let Some(step) = step {
+            step(path);
+        }
+    }
 }
 
 #[cfg(test)]
