@@ -247,16 +247,15 @@ fn held_now(journal: &Journal) -> bool {
 /// Whether a sample that read "not this process" stays wrong through both
 /// re-checks: `recheck` answers (the lock is held, its note names no holder
 /// here) and is asked at most twice. Both answers are taken at every
-/// re-check and joined without a short circuit (BASE-REDS-1023 repair 8): a
-/// lock let go inside the re-check's pause is a pass that a run of the
-/// hand-off test reaches only by timing, so the judgement keeps no side that
-/// hangs on it, and [`a_lock_let_go_inside_a_recheck_names_no_lost_holder`]
-/// drives every side of it by hand.
+/// re-check before they are compared (BASE-REDS-1023 repair 8), where the
+/// re-check's `held_now(..) && wrong()` asked the second only while the lock
+/// was held: a lock let go inside the re-check's pause is a pass that a run
+/// of the hand-off test reaches only by timing, so the judgement keeps no
+/// side that hangs on it, and
+/// [`a_lock_let_go_inside_a_recheck_names_no_lost_holder`] drives every case
+/// of it by hand.
 fn still_unnamed(mut recheck: impl FnMut() -> (bool, bool)) -> bool {
-    (0..2).all(|_| {
-        let (held, wrong) = recheck();
-        held & wrong
-    })
+    (0..2).all(|_| recheck() == (true, true))
 }
 
 /// [`still_unnamed`] over scripted re-checks: only a lock held AND unnamed at

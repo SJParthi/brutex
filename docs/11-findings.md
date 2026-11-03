@@ -1385,6 +1385,26 @@ confirmed by two skeptics; their corrections are applied.
   test's row read beside the swap ('left: Refreshing'), and the cut test's 1 s
   (1.15 s). FIXED (D-7152 addendum 21): the two bounds hold in one of up to seven
   asks or runs, unchanged (L-BRED23-14), and the row is waited for (BRED-57).
+- **BRED23-F59: a passing side of the hand-off sampler that only timing
+  reaches** (check r8, blocking: the D3 GAP
+  `crates/api/src/audit_lock_wait_tests.rs:295:21 False`, a lock let go inside
+  the re-check's millisecond). FIXED (D-7152 addendum 23): `still_unnamed`
+  takes both answers at each re-check before it compares them and counts with
+  no branch, every case driven by hand (BRED-59).
+- **BRED23-F60: the seven never-blocks runs fell inside seconds** (check r8,
+  follow-up 1: a burst failed all seven; the run's doc and L-BRED23-14 still
+  said five seconds a run). Repair 7's held read ends at zero, so a run lasts
+  well under a second. FIXED (D-7152 addendum 24): a run that does not hold
+  waits five seconds before the next, the bound and the seven unchanged
+  (BRED-60, L-BRED23-14).
+- **BRED23-F61: the R3-14 paragraph of `two_freezes_at_once_never_count_backwards`
+  headed repair 7's new test** (check r8, follow-up 2). FIXED (D-7152 addendum
+  24): back on its test.
+- **BRED23-F62: the (F)/(U) list of repair 7's tip judged its items by an
+  older tip's list** (check r8, follow-up 9), so new items, the GAP of
+  BRED23-F59 among them, had no entry. FIXED for repair 8's tip: its list
+  names every uncovered item by that tip's own figure text
+  (`state/fix/round2/deep-BASE-REDS-1023-<tip>-fu.txt`).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

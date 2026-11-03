@@ -84995,6 +84995,51 @@ extends; nothing above is edited.
     also takes away a branch only a minute's edge could reach. No request
     takes that lock. Cost measured in L-BRED23-23.
 
+**Addenda, 3 Nov 2026 (BASE-REDS-1023 repair 8; check r8 of 3 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r8.json`, verdict fail on one item).**
+The block is still used, so each is an addendum to the entry it extends;
+nothing above is edited.
+
+23. **D-7152: the hand-off sampler's re-check kept a side that only timing
+    reaches (check r8, blocking: the D3 GAP
+    `crates/api/src/audit_lock_wait_tests.rs:295:21 False`).** Addendum 19's
+    sampler re-checked a sample that read "not this process" with
+    `held_now(&journal) && wrong()`. The False side of `held_now` there is a
+    lock let go inside the re-check's millisecond: a pass, which no run of
+    check r8's Route B reached (that test 51/52 lines, 8/10 branches), and
+    neither an (F) side, which is only an assertion's failing arm, nor a (U)
+    one, since timing reaches it. Chosen: `still_unnamed`, which takes both
+    answers at each re-check and only then compares the pair with (held,
+    unnamed), so no side of the judgement hangs on timing, and
+    `a_lock_let_go_inside_a_recheck_names_no_lost_holder` drives each case by
+    hand: held and unnamed at both re-checks is the defect; let go or named at
+    either is not, and a cleared sample is not asked again. The count is
+    `unnamed += u64::from(still)`, so the `if still` pair beside it, an
+    increment that only a failing run makes, has no branch left either. The
+    sampler's `assert_eq!(unnamed, 0)` and `held >= 50` are as they were.
+    Refused: an (F) entry for a passing side; a loop that retries the test
+    until a run happens to reach it.
+24. **D-7152: the seven runs of L-BRED23-14 fell inside seconds (check r8,
+    follow-up 1).** Addendum 21 ended a held census read at zero, so a run of
+    `a_census_change_never_blocks_a_request` lasts @@NBRUN@@ where it lasted
+    the read's five seconds, and its seven runs fit in a few seconds: one
+    burst of load failed all seven inside check r8's connection storm ('a
+    request waited in every run', max 63 to 97 ms), against 0 of about 400
+    runs outside it, and the doc of `NEVER_BLOCKS_RUNS` and L-BRED23-14's
+    'about six seconds more' were no longer true. `first_run_within` now waits
+    `apart` after each run that does not hold, and none after the run that
+    holds (`the_runs_after_a_miss_are_apart_and_the_run_that_holds_ends_them_at_once`).
+    The never-blocks test passes the read's five seconds
+    (`NEVER_BLOCKS_APART`), so its seven sample the machine across more than
+    half a minute again, and the cut test passes the same, since a run of it
+    lasts @@CUTRUN@@; the /db view asks pass zero, because a read held for a
+    minute bounds them and waiting would let it run out. Every bound, every
+    count of runs and every other assertion is unchanged, and a run that holds
+    costs nothing more. Refused: more runs, which buy the spread with more
+    chances; a wider bound. The R3-14 paragraph that repair 7's two new tests
+    had cut from its test in `speed_tests.rs` (check r8, follow-up 2) is back
+    on `two_freezes_at_once_never_count_backwards`.
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store
