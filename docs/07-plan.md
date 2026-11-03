@@ -1149,6 +1149,9 @@ the first was closed in code afterwards.
 <!-- slot FNO-BAND -->
 
 <!-- slot FNO-CLOCK -->
+| Item | State |
+|---|---|
+| FNO-CLOCK (F1, wave 2): the per-stock-day GDFL clock calibration, `cli::fno_clock` (D-8220 to D-8226; FNO-CLOCK-I01 to I14, C-FNO-CLOCK-01) | Built on the cloud branch `cloud/fib-fno-clock-20261103`, cut from FNO-SEAM's passed tip `1ad6e24ef8e0` plus the cloud kit; its check, Route B coverage on the Mac's pin and the macOS bench are owed to the Mac. The `fno clock build` verb and the first build on real data are FNO-RUN's (D-8226) |
 
 <!-- slot FNO-NET -->
 

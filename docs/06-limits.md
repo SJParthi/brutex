@@ -22171,6 +22171,14 @@ stack peak is not a timing; these rows bound memory, not time.
 <!-- slot FNO-BAND -->
 
 <!-- slot FNO-CLOCK -->
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-FNO-CLOCK-01 | Calibrating one stock-day is a bounded batch step, not a per-step operation | the day's seconds are folded into the sparse table once, linear in them, and each shift then costs one step per comparable minute (C-FNO-CLOCK-01 times the step) | at most 86,400 seconds folded and 375 steps a shift; 121 shifts when the best shift lies within 59 s of zero; otherwise at most `2 × reach + 1` shifts, the reach under 22,500 s in a regular session, so about 17 million steps on a day whose prices never move or never agree (ESTIMATE, from the bounds; no real day was timed here) | FNO-CLOCK (D-8221, D-8225) |
+| L-FNO-CLOCK-02 | Reads scattered at random over a grid past the processor's caches are not measured | C-FNO-CLOCK-01 reads consecutive minute windows, the order a shift's sweep reads; a random read of a 100x grid (about 290 MB) would time the memory, and the calibration never reads that way | named, not bounded | FNO-CLOCK (D-8225) |
+| L-FNO-CLOCK-03 | The time and memory of a build on real data are UNMEASURED | no store and no real day are read in this part; a worker holds one day's grid, 128 bytes a second (an open, a close, six levels of highs and of lows and two index arrays, 8 bytes each: about 2.9 MB for a session, from the layout, not measured), and a build holds every row and every file it writes until its last refusal check has passed (48 bytes a key each) | measured by FNO-RUN's first `fno clock build` and by the Mac's check | FNO-CLOCK (D-8220) |
+| L-FNO-CLOCK-04 | Agreement is exact | a back-adjustment no exact fraction maps (an adjusted price rounded to the paisa) agrees only where the rounding happens to be exact; a day with no exact agreement is flagged uncalibrated, never approximated, and how many real stock-days that is is UNVERIFIED | named; the count is FNO-RUN's to report | FNO-CLOCK (D-8221) |
+| L-FNO-CLOCK-05 | The back step of the 13 names of the 218 off the swept surface needs a stored scope | `read_listed` refuses a share its listing's scope does not file (`NotSwept`); with the swept scope their rows are offset-only and flagged | closed when FNO-RUN builds the `TickStore` over a `CmScope::stored` naming them (D-8222, D-8226) | FNO-CLOCK |
+| L-FNO-CLOCK-06 | `docs/02-store-format.md` holds no row for `fno-clock-v1` | the F&O parts have no slot in it, and an edit outside a part's slots needs the main session's anchor (PARTS, 1 Nov 2026 anchors addendum) | D-8220 and the module header record the format until the main session names the row's owner | FNO-CLOCK |
 
 <!-- slot FNO-NET -->
 

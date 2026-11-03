@@ -87625,6 +87625,87 @@ unused.
 <!-- slot FNO-BAND -->
 
 <!-- slot FNO-CLOCK -->
+### D-8220 — FNO-CLOCK's table is one fixed-stride file per stock under `fno-clock-v1/`, built from a (stock, day) key list as its one input, with the bars behind a seam FNO-RUN fills and the ticks read through any `CmSource` — 2026-11-03
+
+**Context.** PARTS FNO-CLOCK names `build(range)` writing `<shadow>/reference/fno-clock-v1/`, fixed stride, with a digest; its READINESS ADDENDUM item 8 (main-session decision 5 of 1 Nov 2026) makes the (stock, day) key list the one input: a full build and a list rebuild over the same keys give equal bytes, and keys outside the list are untouched. FNO-CLOCK depends on FNO-SEAM alone, so it may call neither FNO-SEC-WIRE's GDFL seconds reader nor FNO-DAYMASK's mask, and it takes no mask type.
+
+**Decision.** `cli::fno_clock::build(keys, bars, ticks, out)`:
+- `keys` is the one input, deduplicated; nothing else chooses a day. `bars` is any `BarSource`, one stock-day's GDFL one-second bars and Zerodha one-minute bars as the store holds them (`store::format::Bar`); FNO-RUN implements it over the store with FNO-SEC-WIRE's reader, so no second copy of a store reader exists. `ticks` is any `pull::gdfl_cm::CmSource`, `pull::gdfl_tickstore::TickStore` in a run (D-8222). `out` is the folder the caller names: `<shadow>/reference` in a run, a temporary folder in the tests.
+- It writes `<out>/fno-clock-v1/<STOCK>.fcl`, one file per stock: a 72-byte header (`BRTXFCL1`, version 1, row length 48, row count, the stock zero-padded to 24 bytes, and BLAKE3 of a domain tag, the first 40 bytes and every row), then 48-byte rows in day order: day, offset in milliseconds (`i32::MIN` when uncalibrated), score, margin, back step in seconds (`u32::MAX` when unmeasured), rows that stepped back, comparable minutes, unmatched minutes, traded seconds, window and reach in seconds, all little-endian 4-byte; flags and a zero pad, 2 bytes each.
+- `Table::digest` is BLAKE3 of a domain tag and, per stock in name order, its padded name and its file's digest: the run identity's `clock_digest` (PARTS READINESS ADDENDUM item 2).
+- A list rebuild replaces or adds each listed key's row, carries every other row of that stock's file byte for byte, opens no other stock's file for writing, and leaves unwritten a file whose bytes would not change. Keys are calibrated in parallel by day, each day's tick listing read once; a row is a pure function of its key's data, so the bytes do not depend on which work finished first.
+
+**Why.** One file per stock keeps a list rebuild to the stocks it names, and a fixed stride with a header digest lets the reader check every byte it serves. The seam keeps the store's GDFL reader single (FNO-SEC-WIRE's) and keeps FNO-CLOCK on FNO-SEAM alone.
+
+**Consequences.** `docs/02-store-format.md` has no slot for F&O parts, so this entry and the module header are the format's record until the main session names an owner for its row there. Proven by `cli::fno_clock::tests::a_full_build_and_a_list_rebuild_over_the_same_keys_give_equal_bytes` and `keys_outside_the_list_are_untouched` (FNO-CLOCK-I08, FNO-CLOCK-I09).
+
+### D-8221 — The offset is the shift at which the most Zerodha minute prices agree with GDFL's shifted fold under the session's best-supported exact ratio; ties take the larger |delta| and then the positive one — 2026-11-03
+
+**Context.** PARTS FNO-CLOCK: for shifts over a generated window (start ±60 s, doubled until the best shift is interior), fold the GDFL seconds into shifted minutes and count disagreements with Zerodha's minute OHLC, ratio-mapped inside the session, a per-day sparse table making each shift cost 375 fixed queries; ties take the larger |delta|, the worse reading. D-0802 item 6 recorded that how GDFL seconds align with Zerodha minutes was unmeasured.
+
+**Decision.**
+- **Which minutes.** A Zerodha minute is compared when it traded and `pull::calendar::phase_at(NseCash, day, minute, CasEligibility::Unknown)` is `Continuous`: the one hours authority, so the closing-auction band from 2026-08-03, a recorded halt and its reopening auction, and every minute outside the session are never compared, and no time or date is typed in the module. An unknown eligibility is never read as eligible or not: the band is left out for every share.
+- **The fold.** At shift `delta`, minute `[t, t + 60)` is set against GDFL's traded seconds (volume above zero) in `[t + delta, t + delta + 60)`, folded to one open, high, low and close through a per-day sparse table of range highs and lows and two index arrays.
+- **Agreement.** Each matched price gives the exact ratio GDFL over Zerodha as a reduced fraction. The session's ratio at a shift is the one the most prices give among the ratios that prices of at least two minutes give; the score is the number of prices agreeing under it. A minute whose window holds no traded second matches none of its prices, so every shift is scored over the same minutes.
+- **The choice.** The highest score; on a tie the larger |delta|, and the positive delta on an equal |delta|, because the floor takes `max(0, offset)` and the larger floor admits fewer latencies (SPEC FIB-I5).
+- **The window.** ±60 s first; doubled while the best shift sits on its edge, until it is inside or the window covers the reach, the largest |delta| at which some minute's window can still meet a traded second.
+- **No agreement.** A best score of zero leaves the offset uncalibrated (`NO_AGREEMENT`).
+
+**Why the ratio is fitted at each shift, and needs two minutes.** Zerodha is back-adjusted and GDFL raw, and inside one session they differ by one ratio (SPEC FIB-I8). SPEC 10.2's single-pair ρ(D) would pin the comparison to one minute's close, and the feeds' four prices agree in 57.1% of minutes (SPEC 19), so one pair is not a reliable session ratio here. A ratio only one minute gives is fitted to that minute and proves nothing: without the two-minute rule every shift would score at least one by construction and no day could read as having no agreement.
+
+**Consequences.** A day whose prices agree only under no common ratio, such as an adjustment no exact fraction maps, is flagged and not calibrated, never calibrated on noise. A day whose prices barely move ties across many shifts and takes the largest of them, flagged `TIED`: the worse reading, a large floor. Proven by FNO-CLOCK-I01 to FNO-CLOCK-I06.
+
+### D-8222 — The back step is measured from the vendor file's own row order, read through `pull::gdfl_cm::read_listed` over the tick store, over every kept row; an absent or refused file leaves it unmeasured and flagged — 2026-11-03
+
+**Context.** PARTS FNO-CLOCK: the backward clock step comes from the raw tick order, read through `pull::gdfl_tickstore` if that module exposes order, which PARTS called UNVERIFIED; if it does not, the step is unmeasured and the row flagged. SPEC 4.2: GDFL's clock can step back 2-14 s; D-0802 item 1 measured a time column stepping back 25 times in each index file read.
+
+**Decision.** It exposes order. `pull::gdfl_tickstore::TickStore` is a `CmSource` whose `fetch` rebuilds the vendor's file byte for byte, and `pull::gdfl_cm::read_listed` checks the bytes against the length and CRC-32 the day's listing states before it decodes `CmFile::rows`: every kept row in file order with its stamp. The back step is the most by which a row's stamp falls below the largest stamp of the rows before it in the file, over every kept row (pre- and post-session rows included: a larger step is a larger floor, the stricter reading), with the number of rows that fell below. A day the source does not hold, or no file for the stock, is `TICKS_ABSENT`; any refusal of the listing or the file is `TICKS_REFUSED`, counted, and the first 16 named with their key in the build's report. A refused row (D-3318) and a diverted auction print (D-3320) are not kept rows and are not read.
+
+**Why.** The order is the vendor's evidence of its own clock; reading it through the one reader keeps the CRC check in front of it.
+
+**Consequences.** The 13 names of the 218 that are not `FNO_UNDERLYINGS` shares (SPEC 3.1) are off the swept scope: their tick files are refused (`NotSwept`), and their rows offset-only and labelled, unless FNO-RUN builds the `TickStore` with `TickStore::with_scope` over a `CmScope::stored` that names them. Proven by FNO-CLOCK-I07.
+
+### D-8223 — The floor is `max(0, offset) + back_step` in whole seconds, offset-only when the back step is unmeasured, and absent when the offset is — 2026-11-03
+
+**Context.** PARTS FNO-CLOCK: `floor(s, D) = max(0, offset) + back_step`; PARTS 8.3 lever 4: with no back step, the offset-only floor, labelled; SPEC 4.2 and OP-07: the headline uses only latencies at or above the calibrated floor, smaller ones labelled "uncalibrated clock".
+
+**Decision.** `ClockRow::floor` answers `Floor::Calibrated(max(0, offset) + back_step)`, `Floor::OffsetOnly(max(0, offset))` when the back step was not measured, or `Floor::Uncalibrated` when the offset was not. Offsets are whole seconds, kept in milliseconds; a positive offset means GDFL stamps later than Zerodha, so a latency must cover it before a GDFL second can hold no print from before the decision. A run labels every latency under the floor "uncalibrated clock", an offset-only floor "back step unmeasured", and every latency of an uncalibrated stock-day "uncalibrated clock"; the labels and their wording are FNO-RUN's.
+
+**Why.** The type makes each consumer handle the three cases by name, so an unmeasured term can never read as a zero.
+
+**Consequences.** Proven by FNO-CLOCK-I10.
+
+### D-8224 — Every calibration is a row and names what it lacked in its flags; a bar-source refusal or a damaged file already in the table refuses the build before any write; the reader refuses whatever is not a stock's file — 2026-11-03
+
+**Context.** `CLAUDE.md` §4: degrade loudly and name the reason, or refuse; never a fallback that hides a failure.
+
+**Decision.**
+- `calibrate` always returns a row. Its flags name what the day lacked: no session, no comparable minute, no traded second, no agreement, malformed minutes or seconds (a bar off its whole unit, off its day, out of order, unpriced or with a negative volume), a tie, an absent or a refused tick file.
+- `build` refuses, before writing anything, the first key in (day, stock) order whose bars the source refused (`BuildRefusal::Bars`), and a stock file already in the table that fails its checks (`BuildRefusal::Corrupt`): its other rows are never dropped or rebuilt from nothing. A folder or file that cannot be made, read, written, flushed or renamed is `BuildRefusal::Io`; files written before it are whole and stay.
+- Every file is written to a hidden temporary made by `store::staging::create` (gate 28's one door), flushed, renamed over its name, and the folder flushed; a temporary the door refused is left as it was found.
+- `Table::open` refuses a missing folder (a run with no table is refused, never run as uncalibrated everywhere), an entry that is neither `<STOCK>.fcl` spelt as the table spells it nor hidden, and a file that fails its magic, version, row length, length, stock, digest, row or day-order checks; hidden temporaries are counted and never read.
+
+**Consequences.** Proven by FNO-CLOCK-I11 and FNO-CLOCK-I12.
+
+### D-8225 — C-FNO-CLOCK-01 times one minute-boundary step at 1x, 10x and 100x a session's seconds, in the order a shift's sweep reads; the per stock-day cost is a bounded batch — 2026-11-03
+
+**Context.** PARTS FNO-CLOCK and section 11: C-FNO-CLOCK-01, one minute boundary, p99 target 1 µs (ESTIMATE); the per stock-day cost is linear in the day's seconds, a bounded batch step recorded in `docs/06-limits.md`, not a hot path. PARTS "Bench shape": the measuring function lives in the module and a unit test runs it at tiny sizes; the bench file is a thin wrapper.
+
+**Decision.** `cli::fno_clock::measure_minute_boundary(seconds, samples, steps)` times the calibration's own step (one shifted minute window read and its four prices tallied) on a grid of invented seconds, one in seven untraded, each sample reading consecutive minutes from an invented first second as a shift's sweep does. `crates/cli/benches/ratio/fno_clock.rs` runs it at 22,500, 225,000 and 2,250,000 seconds (a full session, then 10x and 100x, which no day holds), 200 samples of 1,000 steps each, prints p50, p99, max and n at each, and fails when a p99 ratio is above the crate's ceiling (`CEILING_PERMILLE`, 2.5x) or a p99 is over 1 µs.
+
+**Why.** Reads scattered at random over a 100x grid would time the memory, not the step, and the calibration never reads that way. That case is named in `docs/06-limits.md` (L-FNO-CLOCK-02) rather than measured.
+
+**Consequences.** The figures measured on the cloud host are advisory; the Mac's check measures again. Proven by C-FNO-CLOCK-01.
+
+### D-8226 — What FNO-CLOCK leaves to FNO-RUN: the verb, its flags and key file, the store seam, the run's labels and the build's telemetry — 2026-11-03
+
+**Context.** PARTS READINESS ADDENDUM item 8 gives the verb `cli fno clock build --from --to --universe --join --skip --t2t --membership [--keys FILE]` to FNO-RUN, and its appendix question 2 leaves the flags, the key file's format, the shadow's naming, the lease and resuming to FNO-RUN's builder.
+
+**Decision.** FNO-CLOCK adds no verb, no dispatch arm, no `COMMANDS` entry and no telemetry: it is a library module. FNO-RUN's verb builds the key list (the day mask under `CalendarReading::HaltAndOutagePlans`, PARTS READINESS ADDENDUM item 8), implements `BarSource` over the store, hands `build` a `TickStore` (with a stored scope for the 13 names off the swept surface, D-8222), prints `Built` and logs it at its boundary, takes no lease (item 1), and labels the run (D-8223). A resume needs nothing more of FNO-CLOCK: a list rebuild of the keys not yet written writes the same bytes a full build would.
+
+**Consequences.** Nothing in this part reads real data, a store or a shadow; the first build on real data is FNO-RUN's.
+
+D-8227 to D-8229 are unused.
 
 <!-- slot FNO-NET -->
 
