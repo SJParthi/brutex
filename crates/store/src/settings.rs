@@ -1465,3 +1465,8 @@ mod tests;
 #[cfg(test)]
 #[path = "settings_cover_tests.rs"]
 mod cover_tests;
+
+/// The settings door's answers no other test reached (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "settings_door_cover_tests.rs"]
+mod door_cover_tests;
