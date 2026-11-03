@@ -32,7 +32,7 @@ use crate::session::Day;
 
 // ------------------------------------------------------------- fixtures --
 
-fn scratch(tag: &str) -> PathBuf {
+pub(super) fn scratch(tag: &str) -> PathBuf {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -46,16 +46,16 @@ fn scratch(tag: &str) -> PathBuf {
     root
 }
 
-fn day(y: u16, m: u8, d: u8) -> Day {
+pub(super) fn day(y: u16, m: u8, d: u8) -> Day {
     Day::new(y, m, d).unwrap()
 }
 
 /// A regular full session of record (Tuesday 23 April 2024).
-fn regular() -> Day {
+pub(super) fn regular() -> Day {
     day(2024, 4, 23)
 }
 
-fn index() -> Series {
+pub(super) fn index() -> Series {
     Series {
         exchange: Exchange::Nse,
         segment: Segment::Index,
@@ -64,7 +64,7 @@ fn index() -> Series {
     }
 }
 
-fn share() -> Series {
+pub(super) fn share() -> Series {
     Series {
         exchange: Exchange::Nse,
         segment: Segment::Cash,
@@ -73,11 +73,11 @@ fn share() -> Series {
     }
 }
 
-fn utc_s(on: Day, minute: u32) -> i64 {
+pub(super) fn utc_s(on: Day, minute: u32) -> i64 {
     i64::from(on.days_from_epoch()) * 86_400 - 19_800 + i64::from(minute) * 60
 }
 
-fn bar_at(on: Day, minute: u32, price: i64) -> Bar {
+pub(super) fn bar_at(on: Day, minute: u32, price: i64) -> Bar {
     Bar {
         ts_micros: utc_s(on, minute) * 1_000_000,
         open: price,
@@ -89,7 +89,7 @@ fn bar_at(on: Day, minute: u32, price: i64) -> Bar {
     }
 }
 
-fn row_of(bar: &Bar) -> RawRow {
+pub(super) fn row_of(bar: &Bar) -> RawRow {
     RawRow {
         timestamp: bar.ts_micros / 1_000_000,
         open: bar.open,
@@ -102,18 +102,18 @@ fn row_of(bar: &Bar) -> RawRow {
 }
 
 /// Every minute 09:15..15:29 of `on`, less `skip`.
-fn full_day(on: Day, skip: &[u32]) -> Vec<Bar> {
+pub(super) fn full_day(on: Day, skip: &[u32]) -> Vec<Bar> {
     (555..930)
         .filter(|m| !skip.contains(m))
         .map(|m| bar_at(on, m, 1_111_100 + i64::from(m)))
         .collect()
 }
 
-fn whole_day(on: Day) -> (i64, i64) {
+pub(super) fn whole_day(on: Day) -> (i64, i64) {
     (utc_s(on, 0), utc_s(on, 0) + 86_399)
 }
 
-fn write_month(root: &Path, series: &Series, tf: Timeframe, bars: &[Bar]) {
+pub(super) fn write_month(root: &Path, series: &Series, tf: Timeframe, bars: &[Bar]) {
     let first = bars.first().expect("bars");
     let (number, _) = ist_day_minute(first.ts_micros / 1_000_000);
     let on = Day::from_days(u32::try_from(number).unwrap()).unwrap();
@@ -124,13 +124,13 @@ fn write_month(root: &Path, series: &Series, tf: Timeframe, bars: &[Bar]) {
     file.append(bars).unwrap();
 }
 
-fn write_ledger(root: &Path, text: &str) {
+pub(super) fn write_ledger(root: &Path, text: &str) {
     std::fs::create_dir_all(root.join("audit")).unwrap();
     std::fs::write(root.join("audit").join("zerodha.gaps"), text).unwrap();
 }
 
 /// The answer the oracle makes of `bars` asked over the whole of `on`.
-fn answer_of(on: Day, bars: &[Bar], receipt: u32) -> DayAnswer {
+pub(super) fn answer_of(on: Day, bars: &[Bar], receipt: u32) -> DayAnswer {
     let rows: Vec<RawRow> = bars.iter().map(row_of).collect();
     let mut made = oracle(
         &rows,
@@ -147,7 +147,7 @@ fn answer_of(on: Day, bars: &[Bar], receipt: u32) -> DayAnswer {
     answer
 }
 
-fn minute_record(series: &Series, on: Day, inputs: &DayInputs<'_>) -> SpoolRecord {
+pub(super) fn minute_record(series: &Series, on: Day, inputs: &DayInputs<'_>) -> SpoolRecord {
     verify_day(series, on, inputs)
         .into_iter()
         .find(|r| r.timeframe == Timeframe::MINUTE_1)
@@ -155,11 +155,17 @@ fn minute_record(series: &Series, on: Day, inputs: &DayInputs<'_>) -> SpoolRecor
         .record
 }
 
-fn reason_word(record: &SpoolRecord) -> &'static str {
+pub(super) fn reason_word(record: &SpoolRecord) -> &'static str {
     words::reason_word(record.facts.reason).unwrap_or("")
 }
 
-fn the_record(root: &Path, segment: Segment, tf: Timeframe, on: Day, key: &str) -> verdict::Record {
+pub(super) fn the_record(
+    root: &Path,
+    segment: Segment,
+    tf: Timeframe,
+    on: Day,
+    key: &str,
+) -> verdict::Record {
     let series = verdict::Series {
         root,
         feed: Vendor::Zerodha,
@@ -180,7 +186,7 @@ fn the_record(root: &Path, segment: Segment, tf: Timeframe, on: Day, key: &str) 
     }
 }
 
-fn spooled(on: Day, key: &str, code: Code, receipt: u32) -> SpoolRecord {
+pub(super) fn spooled(on: Day, key: &str, code: Code, receipt: u32) -> SpoolRecord {
     SpoolRecord {
         exchange: Exchange::Nse,
         day: on,
@@ -191,7 +197,7 @@ fn spooled(on: Day, key: &str, code: Code, receipt: u32) -> SpoolRecord {
     }
 }
 
-fn year_generation(root: &Path, segment: Segment, tf: Timeframe, on: Day) -> u32 {
+pub(super) fn year_generation(root: &Path, segment: Segment, tf: Timeframe, on: Day) -> u32 {
     let series = verdict::Series {
         root,
         feed: Vendor::Zerodha,
@@ -2713,13 +2719,13 @@ fn every_reason_this_verifier_writes_is_in_the_table() {
 
 // -------------------------------------------------------------- helpers --
 
-fn append_raw(path: &Path, bytes: &[u8]) {
+pub(super) fn append_raw(path: &Path, bytes: &[u8]) {
     use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
     file.write_all(bytes).unwrap();
 }
 
-fn flip(path: &Path, at: u64) {
+pub(super) fn flip(path: &Path, at: u64) {
     use std::os::unix::fs::FileExt as _;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -2736,7 +2742,7 @@ fn flip(path: &Path, at: u64) {
 
 /// An invented Kite-shaped body of `bars` (rupees with two decimals, the
 /// stamp with its zone), as `http::decode_body` reads one.
-fn kite_body(bars: &[Bar]) -> String {
+pub(super) fn kite_body(bars: &[Bar]) -> String {
     let mut rows = Vec::with_capacity(bars.len());
     for bar in bars {
         let local = bar.ts_micros / 1_000_000 + 19_800;
@@ -2775,7 +2781,7 @@ fn keep(root: &Path, on: Day, bars: &[Bar]) -> YearMonth {
 
 /// Keeps `body` as one answer of `on` for `ZZIDX` at 1min whose landing
 /// decoded `rows_decoded` rows and landed `landed`, through `door`.
-fn keep_answer(
+pub(super) fn keep_answer(
     root: &Path,
     on: Day,
     body: String,
@@ -3007,11 +3013,14 @@ fn an_impossible_candle_is_skipped_by_the_oracle_as_by_the_decoder() {
             month: on.year_month().unwrap(),
         };
         let read = spool::read_spool(&id.path(&root), &id).unwrap();
-        let record = read
-            .records
-            .iter()
-            .find(|r| r.day == on && r.key.text() == "NSE-INDEX-ZZIDX")
-            .unwrap();
+        // The one record the run spooled at 1min: ZZIDX's, of `on`.
+        assert_eq!(read.records.len(), 1, "{tag}: {:?}", read.records);
+        let record = &read.records[0];
+        assert_eq!(
+            (record.day, record.key.text()),
+            (on, "NSE-INDEX-ZZIDX"),
+            "{tag}"
+        );
         assert_eq!(record.facts.code, code, "{tag}: {record:?}");
         assert_eq!(
             (record.facts.source_units, record.facts.store_units),
@@ -3386,7 +3395,7 @@ fn a_halted_pull_is_not_compared_never_a_hole() {
 
 // ------------------------------------------------------- progress (§5.7) --
 
-fn progress_at(path: &Path) -> crate::gdfl_run::Progress {
+pub(super) fn progress_at(path: &Path) -> crate::gdfl_run::Progress {
     let bytes = std::fs::read(path).expect("a progress file");
     crate::gdfl_run::Progress::decode(&bytes).expect("a whole v1 record")
 }
@@ -3790,11 +3799,14 @@ fn a_changed_answer_shape_is_named_and_alerted_once() {
                 month: on.year_month().unwrap(),
             };
             let read = spool::read_spool(&id.path(&root), &id).unwrap();
-            let record = read
-                .records
-                .iter()
-                .find(|r| r.day == on && r.key.text() == "NSE-INDEX-ZZIDX")
-                .unwrap();
+            // The one record the run spooled at 1min: ZZIDX's, of `on`.
+            assert_eq!(read.records.len(), 1, "{tag}: {:?}", read.records);
+            let record = &read.records[0];
+            assert_eq!(
+                (record.day, record.key.text()),
+                (on, "NSE-INDEX-ZZIDX"),
+                "{tag}"
+            );
             assert_eq!(record.facts.code, Code::Match, "{tag}: {record:?}");
             let found: Vec<(u32, String)> = record
                 .details
@@ -3815,14 +3827,14 @@ fn a_changed_answer_shape_is_named_and_alerted_once() {
                 "{tag}"
             );
         }
-        let alerts = match crate::alerts::window(&root) {
-            Ok(window) => window
-                .alerts
-                .into_iter()
-                .filter(|a| a.record.kind == VENDOR_SHAPE_CHANGED)
-                .count(),
-            Err(_) => 0,
-        };
+        // An absent alert queue reads as an empty page, never a refusal: a
+        // queue that would not read fails the test rather than read as 0.
+        let alerts = crate::alerts::window(&root)
+            .unwrap()
+            .alerts
+            .into_iter()
+            .filter(|a| a.record.kind == VENDOR_SHAPE_CHANGED)
+            .count();
         assert_eq!(
             alerts,
             usize::from(want.is_some()),
@@ -3937,7 +3949,7 @@ fn a_peer_month_that_will_not_open_is_named() {
 
 /// GDFL's one-second bars of `ZZIDX` at `seconds` past IST midnight of `on`:
 /// the peer month the cold sweep reads.
-fn write_peer(root: &Path, on: Day, seconds: &[u32]) {
+pub(super) fn write_peer(root: &Path, on: Day, seconds: &[u32]) {
     let path = StorePath::new(store::path::PathParts {
         vendor: Vendor::Gdfl,
         exchange: "NSE",
@@ -4219,7 +4231,7 @@ fn a_rare_verdict_is_an_example_however_many_common_ones_came_first() {
 
 /// The verdict record of `key` on `on` at `tf`, or `None` when the verdict
 /// store holds no record of it.
-fn looked_up(root: &Path, tf: Timeframe, on: Day, key: &str) -> Option<Code> {
+pub(super) fn looked_up(root: &Path, tf: Timeframe, on: Day, key: &str) -> Option<Code> {
     let series = verdict::Series {
         root,
         feed: Vendor::Zerodha,
@@ -4631,11 +4643,14 @@ fn a_series_held_at_1day_only_and_a_day_month_outside_the_minutes_are_verified()
         &month_of(Timeframe::DAY_1, april),
     )
     .unwrap();
-    let held = april_daily
-        .records
-        .iter()
-        .find(|r| r.key.text() == "NSE-INDEX-ZZIDX" && r.day == april)
-        .unwrap();
+    // Only ZZIDX holds an April 1day month: every April record is its own.
+    assert!(
+        april_daily
+            .records
+            .iter()
+            .all(|r| r.key.text() == "NSE-INDEX-ZZIDX")
+    );
+    let held = april_daily.records.iter().find(|r| r.day == april).unwrap();
     assert!(
         held.details
             .iter()
