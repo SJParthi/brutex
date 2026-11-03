@@ -60,3 +60,50 @@ fn an_unreadable_body_whose_folder_cannot_be_made_is_noted_and_not_kept_body() {
     assert!(root.join("captures").is_file(), "the file was left alone");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// **A CAPTURE THE HOST WILL NOT WRITE IS REMOVED AND NAMED IN THE HOST'S
+/// WORDS** (the write seam, D-7335): a write refused leaves no file and says
+/// why; a refused write whose file is already gone says the same and no
+/// second fault; and a refused write whose name now holds a folder, which
+/// the cleanup cannot unlink on either host, says both faults. Extremes at
+/// once: three refusals at three stamps in one folder, and a cleanup that
+/// meets the one thing it cannot remove.
+#[test]
+fn a_capture_the_host_will_not_write_is_removed_and_named() {
+    let dir = crate::gdfl_fixtures::scratch("ps1-capture-unwritten");
+    let refused = || Err(std::io::Error::other("an invented refusal"));
+    let why = write_new_capture_using(&dir, "zq", b"x", 1, |_, _, _| refused()).unwrap_err();
+    assert!(
+        why.ends_with(" could not be written and synced — an invented refusal"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "removed");
+    let why = write_new_capture_using(&dir, "zq", b"x", 2, |_, path, _| {
+        std::fs::remove_file(path)?;
+        refused()
+    })
+    .unwrap_err();
+    assert!(
+        why.ends_with(" could not be written and synced — an invented refusal"),
+        "{why}"
+    );
+    let why = write_new_capture_using(&dir, "zq", b"x", 3, |_, path, _| {
+        std::fs::remove_file(path)?;
+        std::fs::create_dir(path)?;
+        refused()
+    })
+    .unwrap_err();
+    assert!(
+        why.contains(
+            " could not be written and synced — an invented refusal; its incomplete file \
+             also could not be removed — "
+        ),
+        "{why}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        1,
+        "the folder stands"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

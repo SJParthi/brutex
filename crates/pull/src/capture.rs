@@ -239,6 +239,22 @@ fn write_new_capture_with_stamp(
     bytes: &[u8],
     stamp: u128,
 ) -> Result<std::path::PathBuf, String> {
+    write_new_capture_using(dir, prefix, bytes, stamp, |file, _path, bytes| {
+        file.write_all(bytes).and_then(|()| file.sync_all())
+    })
+}
+
+/// [`write_new_capture_with_stamp`] with the write and sync of the new file as
+/// an argument (BASE-COV-PULL-PS1, D-7335): production writes and syncs, and a
+/// test hands a write the host refuses, which no input of a capture makes
+/// happen on demand.
+fn write_new_capture_using(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+    stamp: u128,
+    persist: impl Fn(&mut std::fs::File, &std::path::Path, &[u8]) -> std::io::Result<()>,
+) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(dir)
         .map_err(|why| format!("{} cannot be created — {why}", dir.display()))?;
 
@@ -251,7 +267,7 @@ fn write_new_capture_with_stamp(
             Err(why) => return Err(format!("{} cannot be created — {why}", path.display())),
         };
 
-        if let Err(why) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        if let Err(why) = persist(&mut file, &path, bytes) {
             drop(file);
             let cleanup = std::fs::remove_file(&path);
             return Err(match cleanup {
