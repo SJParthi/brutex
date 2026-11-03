@@ -1439,6 +1439,90 @@ mod tests {
         [census.clone()]
     }
 
+    /// **A QUARANTINED MONTH'S ROW NAMES ITS QUARANTINE; EVERY OTHER ROW OF THE
+    /// FEED SAYS IT HAS NONE; A FEED WITH NO QUARANTINE WRITES NO KEY**
+    /// (BASE-COV-API, D-7346). Over a scratch store whose ledger quarantines
+    /// one month of an invented share whole: that month's row carries the
+    /// ledger's scope, cause and bars, the month beside it `null`. Extremes:
+    /// the quarantined month listed after the clean one; no summary at all; a
+    /// summary of a feed whose ledger holds nothing (empty, so no key).
+    #[test]
+    fn a_quarantined_months_row_names_it_and_every_other_row_says_none() {
+        use store::quarantine::{Cause, Record, Scope, Summary};
+        let root = crate::scratch::path("store-route-quarantine");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch store");
+        let share = series(Segment::Cash, "QSTORE");
+        let (quarantined, clean) = (month(2026, 6), month(2026, 7));
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Groww,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "QSTORE",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: quarantined,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a path");
+        store::quarantine::record(
+            &root,
+            &Record {
+                path,
+                scope: Scope::WholeMonth,
+                cause: Cause::BeforeListing,
+                stamps: &[],
+                bars: 3,
+                revision: 0,
+                source_digest: [7; 32],
+                who: "test",
+                reason: "invented: before listing",
+            },
+        )
+        .expect("recorded");
+        let summary = Summary::load(&root, Vendor::Groww).expect("the summary");
+        assert!(!summary.is_empty(), "the premise: one month is quarantined");
+        let census = census_of(&[
+            (share, quarantined, 3, priced(10_000, 10_100)),
+            (share, clean, 5, priced(10_100, 10_200)),
+        ]);
+        let entries = [(share, clean), (share, quarantined)];
+        let body = store_body_with(
+            &census_slice(&census),
+            &entries,
+            Vendor::Groww,
+            Some(&summary),
+        );
+        let rows: serde_json::Value = serde_json::from_str(&body).expect("JSON rows");
+        assert!(rows[0]["quarantine"].is_null(), "{body}");
+        assert!(
+            rows[0]
+                .as_object()
+                .expect("a row")
+                .contains_key("quarantine"),
+            "the clean month says it has none: {body}"
+        );
+        let named = &rows[1]["quarantine"];
+        assert_eq!(named["bars"], 3, "{body}");
+        assert_eq!(named["scope"], Scope::WholeMonth.code(), "{body}");
+        assert_eq!(named["cause"], Cause::BeforeListing.code(), "{body}");
+        // NO SUMMARY, OR AN EMPTY ONE: the wire is the one without the field.
+        let plain = store_body(&census_slice(&census), &entries, Vendor::Groww);
+        assert!(!plain.contains("quarantine"), "{plain}");
+        let empty = Summary::load(&root, Vendor::Dhan).expect("no ledger is an empty summary");
+        assert!(empty.is_empty());
+        assert_eq!(
+            store_body_with(
+                &census_slice(&census),
+                &entries,
+                Vendor::Groww,
+                Some(&empty)
+            ),
+            plain
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A ROW AND ITS NEIGHBOUR COST TWO PROBES AND NO FILE.**
     ///
     /// Two things are asserted, and each is the falsifiable half of a claim the
@@ -2001,6 +2085,14 @@ mod tests {
             epoch,
         );
         assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        // THE PUBLIC DOOR THE BENCH TIMES (`benches/ratio/census.rs`) IS THE
+        // ROUTE'S OWN DELTA, code and bytes, over this GDFL census (D-7346).
+        assert_eq!(census.vendor, Vendor::Gdfl, "the fixtures' feed");
+        assert_eq!(
+            super::census_delta(census, since, epoch),
+            (code.as_u16(), body.clone()),
+            "census_delta answers what the route answers"
+        );
         serde_json::from_str(&body).expect("json")
     }
 

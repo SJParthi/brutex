@@ -1625,3 +1625,150 @@ fn the_contract_and_strike_counts_are_counters_kept_by_apply() {
     }
     let _ = std::fs::remove_dir_all(&disk.root);
 }
+
+/// One spot key on `exchange`.
+fn spot_on(
+    exchange: Exchange,
+    segment: Segment,
+    symbol: &str,
+    tf: Timeframe,
+    at: YearMonth,
+) -> EntryKey {
+    EntryKey {
+        exchange,
+        ..spot(segment, symbol, tf, at)
+    }
+}
+
+/// **AN UNDERLYING HELD ON TWO EXCHANGES IS NEVER ANSWERED FOR ONE OF THEM
+/// UNASKED** (BASE-COV-API, D-7346). A share held on NSE and on BSE: the
+/// facet answer and the rows answer both refuse it by name, naming both
+/// exchanges, until one is named; named, each answers its own rows and its
+/// own close. Extremes: two months of one exchange beside one of the other;
+/// the segment listed whole, two underlyings in it; no underlying at all for
+/// the rows; an underlying no exchange holds; and, at once, both exchanges
+/// and a rows encoding; out of the box, the exchange named in lower case.
+#[test]
+fn an_underlying_held_on_two_exchanges_is_refused_until_one_is_named() {
+    let (march, april) = (month(2019, 3), month(2019, 4));
+    let rows = vec![
+        held(
+            spot_on(
+                Exchange::Nse,
+                Segment::Cash,
+                "TWOHOME",
+                Timeframe::MINUTE_1,
+                march,
+            ),
+            7,
+            0,
+            60,
+            4_321,
+        ),
+        held(
+            spot_on(
+                Exchange::Nse,
+                Segment::Cash,
+                "TWOHOME",
+                Timeframe::MINUTE_1,
+                april,
+            ),
+            2,
+            0,
+            60,
+            4_323,
+        ),
+        held(
+            spot_on(
+                Exchange::Bse,
+                Segment::Cash,
+                "TWOHOME",
+                Timeframe::MINUTE_1,
+                march,
+            ),
+            5,
+            0,
+            60,
+            4_322,
+        ),
+    ];
+    let index = built(Segment::Cash, &slot_of(&rows));
+    let unasked = "feed=gdfl&segment=CASH&underlying=TWOHOME";
+    let (code, body) =
+        render_answer(&index, &asked_for(unasked), "held", None).expect_err("ambiguous");
+    assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    let value = json(&body);
+    assert_eq!(value["error"], "ambiguous_underlying", "{body}");
+    assert!(
+        value["why"]
+            .as_str()
+            .expect("why")
+            .contains("TWOHOME is held on NSE, BSE"),
+        "{body}"
+    );
+    let (code, body) = rows_keys(
+        &index,
+        &asked_for(&format!("{unasked}&rows=census-tuples-v1")),
+    )
+    .expect_err("ambiguous rows");
+    assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(json(&body)["error"], "ambiguous_underlying", "{body}");
+
+    // OUT OF THE BOX: an exchange in lower case is no exchange this store
+    // names, refused by name rather than read as either.
+    let (code, body) = asked(&format!("{unasked}&exchange=bse")).expect_err("lower case");
+    assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("exchange"), "{body}");
+
+    // NAMED, EACH ANSWERS ITS OWN.
+    for (exchange, named, months, last_close) in [
+        ("NSE", Exchange::Nse, 2, 4_323),
+        ("BSE", Exchange::Bse, 1, 4_322),
+    ] {
+        let query = format!("{unasked}&exchange={exchange}");
+        let answer =
+            json(&render_answer(&index, &asked_for(&query), "held", None).expect("named answers"));
+        let under = &answer["underlyings"][0];
+        assert_eq!(under["exchange"], named.as_str(), "{answer}");
+        assert_eq!(under["months"], months, "{answer}");
+        assert_eq!(under["last_close"], last_close, "{answer}");
+        assert_eq!(
+            answer["months"].as_array().expect("months").len(),
+            months,
+            "{answer}"
+        );
+        let (got, keys, sums) = rows_keys(
+            &index,
+            &asked_for(&format!("{query}&rows=census-tuples-v1")),
+        )
+        .expect("named rows");
+        assert_eq!(got, Some(named));
+        assert_eq!(keys.len(), months, "one key a month at its one rung");
+        assert_eq!(sums.len(), 1, "{sums:?}");
+    }
+
+    // THE SEGMENT LISTED WHOLE names both, each once.
+    let answer = json(
+        &render_answer(&index, &asked_for("feed=gdfl&segment=CASH"), "held", None)
+            .expect("the segment"),
+    );
+    let listed: Vec<&str> = answer["underlyings"]
+        .as_array()
+        .expect("underlyings")
+        .iter()
+        .map(|under| under["exchange"].as_str().expect("exchange"))
+        .collect();
+    assert_eq!(listed, ["NSE", "BSE"], "{answer}");
+
+    // NO UNDERLYING, AND ONE NOBODY HOLDS: no key, no sum, never a guess.
+    for query in [
+        "feed=gdfl&segment=CASH",
+        "feed=gdfl&segment=CASH&underlying=NOBODY&rows=census-tuples-v1",
+    ] {
+        let (exchange, keys, sums) = rows_keys(&index, &asked_for(query)).expect(query);
+        assert!(
+            exchange.is_none() && keys.is_empty() && sums.is_empty(),
+            "{query}"
+        );
+    }
+}

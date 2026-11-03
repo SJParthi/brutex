@@ -189,6 +189,7 @@ async fn every_press_accepted(root: &Path) {
         "attempt=0",
         "attempt=01",
         "attempt=18446744073709551616",
+        "attempt=184467440737095516150",
         "attempt=",
         "when=1",
         "attempt=1&attempt=1",
@@ -290,6 +291,121 @@ fn every_press_the_routes_accept_runs_to_its_end_and_reads_back() {
         Some(&b"accepted"[..]),
         "the child ran every press"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **EACH PRESS DOOR ANSWERS THROUGH THE DETAIL POOL, AND A FULL POOL IS
+/// SAID** (BASE-COV-API, D-7346). The three handlers the router mounts, not
+/// the `_with` halves every other test calls: in a test build, which carries
+/// no commit stamp, each refuses in the stamp's own words before the slot;
+/// with every slot of the detail pool taken, each says the admission is
+/// unavailable and dispatches nothing. Neither leaves a press in the slot.
+#[tokio::test]
+async fn each_press_door_answers_through_its_pool_and_says_when_it_is_full() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    assert!(
+        cli::commit_stamp().is_none(),
+        "the premise: a test build carries no commit stamp"
+    );
+    let root = crate::scratch::path("sweep-doors");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let site: Loaded = std::sync::Arc::new(crate::server::Site::load(&root.join("masters"), &root));
+    let doors = || {
+        let site = std::sync::Arc::clone(&site);
+        async move {
+            let state = || axum::extract::State(std::sync::Arc::clone(&site));
+            let base = format!(r#""feed":"zerodha","underlying":"NIFTY",{SPAN}"#);
+            vec![
+                (
+                    "run",
+                    super::run(state(), format!(r#"{{{base},"rungs":["5min"]}}"#)).await,
+                ),
+                (
+                    "descend",
+                    super::descend(
+                        state(),
+                        format!(r#"{{{base},"rung":"15min","max_points":20,"top":25}}"#),
+                    )
+                    .await,
+                ),
+                (
+                    "command",
+                    super::command(
+                        state(),
+                        format!(
+                            r#"{{{base},"command":"audit-range","rung":"15min","min_hits":500}}"#
+                        ),
+                    )
+                    .await,
+                ),
+            ]
+        }
+    };
+    for (door, (status, _, body)) in doors().await {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{door}: {body}");
+        assert!(body.contains(r#""accepted":false"#), "{door}: {body}");
+        assert!(body.contains("BRUTEX_COMMIT"), "{door}: {body}");
+    }
+    let crowd = crate::detail::crowd(crate::detail::Named::Detail);
+    let full = doors().await;
+    drop(crowd);
+    for (door, (status, _, body)) in full {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{door}: {body}");
+        assert!(body.contains("admission is unavailable"), "{door}: {body}");
+        assert!(
+            body.contains("no engine command was dispatched"),
+            "{door}: {body}"
+        );
+    }
+    assert!(
+        site.sweep.lock().expect("the slot").is_none(),
+        "no refused press took the slot"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **AN ATTEMPT THE DURABLE RECORD CANNOT BE ASKED FOR IS UNAVAILABLE, NEVER
+/// A COMPLETION** (BASE-COV-API, D-7346). The status route reads an attempt
+/// the slot does not hold from the invocation journal: over a store root that
+/// is gone, the journal's own refusal is said with a `503`; with every slot
+/// of the detail pool taken, the read is not queued and says so. Extremes: the
+/// first durable attempt, and the largest.
+#[tokio::test]
+async fn an_attempt_the_record_cannot_be_asked_for_is_unavailable() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = crate::scratch::path("sweep-status-gone");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let site: Loaded = std::sync::Arc::new(crate::server::Site::load(
+        &root.join("masters"),
+        &root.join("no-store-here"),
+    ));
+    let first = cli::operation_audit::ID_BASE + 1;
+    for attempt in [first, u64::MAX] {
+        let target = format!("/backtest/run.json?attempt={attempt}");
+        let (code, answer) = status_of(&site, &target).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{attempt}: {answer}");
+        assert_eq!(answer["running"]["status"], "unknown", "{answer}");
+        assert!(
+            answer["running"]["why"]
+                .as_str()
+                .expect("the words")
+                .contains("store root is absent"),
+            "{answer}"
+        );
+        let crowd = crate::detail::crowd(crate::detail::Named::Detail);
+        let (code, answer) = status_of(&site, &target).await;
+        drop(crowd);
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{attempt}: {answer}");
+        assert!(
+            answer["running"]["why"]
+                .as_str()
+                .expect("the words")
+                .contains("persistent invocation read unavailable"),
+            "{answer}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 

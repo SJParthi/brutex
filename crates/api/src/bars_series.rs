@@ -2232,6 +2232,77 @@ mod tod_index_tests {
         agree(&index, &file, held, &[2, 4, 5, 11], &WINDOWS);
     }
 
+    /// **A SUMMARY THAT DOES NOT DESCRIBE ITS FILE IS REFUSED BY NAME, FIELD BY
+    /// FIELD** (BASE-COV-API, D-7346). A minute month's own kept summary
+    /// indexes it; that same summary with one field changed is refused in the
+    /// words of the check it fails: another month, another rung, another
+    /// generation, a row more, a first stamp moved, and each count a gap audit
+    /// cannot certify (rows folded, off the grid, out of order, outside the
+    /// month); and, at once, another month with another generation, which the
+    /// first check names.
+    #[test]
+    fn a_summary_that_does_not_describe_its_file_is_refused_field_by_field() {
+        let mut rows = Vec::new();
+        for date in [2_i64, 3, 4] {
+            for minute in 0..375 {
+                rows.push(bar(ist(date, 9, 15 + minute, 0), minute));
+            }
+        }
+        assert!(rows.len() >= 1_024, "a month the writer summarises");
+        let (_root, bars) = month_of("bca-tod-fields", Timeframe::MINUTE_1, &rows);
+        let (index, _file, held) = index_of(&bars, Timeframe::MINUTE_1);
+        assert!(index.is_ok(), "the premise: its own summary indexes it");
+        let summary = store::month_summary::read_kept(&bars, held.n_valid).expect("a kept summary");
+        let january = YearMonth::new(2024, 1).expect("a month");
+        let changed: [(&str, fn(&mut store::month_summary::MonthSummary), &str); 10] = [
+            (
+                "month",
+                |s| s.month = YearMonth::new(2024, 2).expect("a month"),
+                "another month or rung",
+            ),
+            ("rung", |s| s.timeframe_secs = 1, "another month or rung"),
+            ("generation", |s| s.generation += 1, "describes generation"),
+            ("rows", |s| s.n_valid += 1, "describes generation"),
+            (
+                "first stamp",
+                |s| s.first_ts_micros -= 60 * MICROS,
+                "describes generation",
+            ),
+            ("folded", |s| s.counts.folded += 1, "cannot be counted"),
+            (
+                "off the grid",
+                |s| s.counts.invalid = 1,
+                "cannot be counted",
+            ),
+            (
+                "out of order",
+                |s| s.counts.decreasing = 1,
+                "cannot be counted",
+            ),
+            (
+                "outside",
+                |s| s.counts.outside_month = 1,
+                "cannot be counted",
+            ),
+            (
+                "month and generation",
+                |s| {
+                    s.month = YearMonth::new(2023, 12).expect("a month");
+                    s.generation += 7;
+                },
+                "another month or rung",
+            ),
+        ];
+        for (field, change, said) in changed {
+            let mut wrong = summary.clone();
+            change(&mut wrong);
+            let why = TodIndex::from_summary(&wrong, january, Timeframe::MINUTE_1, held)
+                .err()
+                .unwrap_or_else(|| format!("{field}: indexed from a summary of another file"));
+            assert!(why.contains(said), "{field}: {why}");
+        }
+    }
+
     /// **A MONTH WITHOUT A USABLE SUMMARY IS NAMED, NEVER INDEXED FROM COUNTS
     /// THAT DO NOT ADD UP.** A sparse one-second month (one bar in three
     /// seconds) keeps no seconds by the density rule; a month under 1,024
