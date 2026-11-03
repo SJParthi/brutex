@@ -4513,3 +4513,9 @@ mod link_tests;
 #[cfg(test)]
 #[path = "census_store_kept_tests.rs"]
 mod kept_tests;
+
+// BASE-COV-PULL repair 2 (D-7334): a census directory the host will not
+// measure or list, where the permission bits bind.
+#[cfg(test)]
+#[path = "census_store_cov_tests.rs"]
+mod cov_tests;
