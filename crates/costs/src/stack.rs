@@ -3003,3 +3003,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stack_cover_tests.rs"]
+mod cover_tests;
