@@ -58,17 +58,18 @@ const HARNESS_STACK: usize = 2 << 20;
 /// at or over [`HARNESS_STACK`] is refused before any thread starts (D-7414).
 ///
 /// # Errors
-/// The OS would not start the thread.
+/// A size at or over [`HARNESS_STACK`], or the OS would not start the thread.
 #[cfg(test)]
 pub(crate) fn on_bounded_stack<T: Send>(
     name: &str,
     bytes: usize,
     body: impl FnOnce() -> T + Send,
 ) -> Result<T, String> {
-    assert!(
-        bytes < HARNESS_STACK,
-        "bounded-stack thread {name} asked for {bytes} bytes: this only ever lowers a stack"
-    );
+    if bytes >= HARNESS_STACK {
+        return Err(format!(
+            "bounded-stack thread {name} asked for {bytes} bytes: this only ever lowers a stack"
+        ));
+    }
     std::thread::scope(|scope| {
         let handle = std::thread::Builder::new()
             .name(name.to_owned())

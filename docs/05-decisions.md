@@ -87817,8 +87817,9 @@ test still cannot compare.
   comment on `Batch`. A `Cursor` is about 12 KiB (L-STACK1028-11).
 - `on_bounded_stack` said "Never raises a budget" and a 64 MiB stack passed
   through it. It now refuses a size at or over the harness's 2 MiB default before
-  any thread starts (STACK1028-15). The check runs on the caller's thread, not on
-  the bounded one, so no peak of L-STACK1028-07 or -08 moves.
+  any thread starts (STACK1028-15), as an `Err`, since gate 11 refuses a runtime
+  assert. The check runs on the caller's thread, not on the bounded one, so no peak
+  of L-STACK1028-07 or -08 moves.
 - `the_ledger_holds_the_agreed_row_once_and_its_tests_exist` read a name planted in
   a comment as a declaration. It now reads `#[test]` and then the test's `fn`
   (STACK1028-16).

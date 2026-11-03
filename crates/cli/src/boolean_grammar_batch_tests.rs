@@ -533,13 +533,10 @@ fn a_bounded_stack_refuses_the_default_or_more_before_any_thread_starts() {
     // and the body never runs. One byte under the default is still a bound.
     let ran = std::sync::atomic::AtomicBool::new(false);
     for bytes in [HARNESS_STACK, HARNESS_STACK + 1, 64 << 20, usize::MAX] {
-        let refused = std::panic::catch_unwind(|| {
-            on_bounded_stack("batch-raise", bytes, || {
-                ran.store(true, std::sync::atomic::Ordering::Relaxed);
-            })
+        let said = on_bounded_stack("batch-raise", bytes, || {
+            ran.store(true, std::sync::atomic::Ordering::Relaxed);
         })
-        .expect_err("a raise must fail, not run");
-        let said = refused.downcast_ref::<String>().map_or("", String::as_str);
+        .unwrap_err();
         assert!(said.contains("this only ever lowers a stack"), "{said}");
     }
     assert!(!ran.load(std::sync::atomic::Ordering::Relaxed));
