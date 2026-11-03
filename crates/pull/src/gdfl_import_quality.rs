@@ -1041,3 +1041,9 @@ impl Ledger {
         super::append_lines(&self.path, lines)
     }
 }
+
+// BASE-COV-PULL-PS2 (D-7336): the day ledger's edges its other tests leave
+// unreached.
+#[cfg(test)]
+#[path = "gdfl_import_quality_ps2_tests.rs"]
+mod ps2_tests;

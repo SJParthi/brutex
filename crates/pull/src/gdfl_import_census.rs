@@ -281,3 +281,9 @@ fn census_words(why: &str, room: &Result<CensusRoom, String>) -> String {
         ),
     }
 }
+
+// BASE-COV-PULL-PS2 (D-7336): a census that cannot be read for a reason other
+// than its absence.
+#[cfg(test)]
+#[path = "gdfl_import_census_ps2_tests.rs"]
+mod ps2_tests;
