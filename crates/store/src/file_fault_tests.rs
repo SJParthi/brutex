@@ -1096,15 +1096,14 @@ fn a_refused_sync_leaves_the_name_free() {
     let refused =
         BarFile::month_summary_existing(&root.0, month(FileKind::Bars), SYMBOL).unwrap_err();
     assert!(!sync_fault_fires(), "the door's sync was refused");
-    assert!(
-        matches!(
-            refused,
-            StoreError::Io {
-                action: Action::Sync,
-                ..
-            }
-        ),
-        "{refused:?}"
+    assert_eq!(
+        refused,
+        StoreError::Io {
+            path: sum.with_extension("new.sum"),
+            action: Action::Sync,
+            kind: ErrorKind::Other,
+            code: None,
+        }
     );
     assert!(!sum.exists(), "the name appears only after the flush");
 }

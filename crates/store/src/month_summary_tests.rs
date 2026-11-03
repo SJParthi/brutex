@@ -820,12 +820,12 @@ fn the_door_refuses_a_writer_and_never_a_reader() {
     // keeps the `.sum`, so the name is taken away under it.)
     let held = BarFile::open_or_create(&root, at, SYMBOL).unwrap();
     fs::rename(&beside, beside.with_extension("aside")).unwrap();
-    match BarFile::month_summary_existing(&root, at, SYMBOL) {
-        Err(StoreError::Locked { path }) => {
-            assert_eq!(path.extension().unwrap(), "lock", "{}", path.display());
-        }
-        other => panic!("{other:?}"),
-    }
+    assert_eq!(
+        BarFile::month_summary_existing(&root, at, SYMBOL),
+        Err(StoreError::Locked {
+            path: at.with_file(FileKind::Lock).to_path_buf(&root)
+        })
+    );
     assert!(!beside.exists(), "nothing written beside a writer");
     drop(held);
 
@@ -877,4 +877,126 @@ fn a_second_door_is_refused_by_the_bar_files_own_lock() {
         "a kept summary writes nothing, so it needs no door of its own"
     );
     drop(held);
+}
+
+/// **AN EMPTY MONTH AND A SMALL ONE OWE NO SUMMARY, AND THE DOOR SAYS WHICH
+/// (D-4933, D-7430).** A month file holding a header and no row is `Empty`; a
+/// month one row short of the threshold is `BelowThreshold`. Neither gets a
+/// `.sum` or a staging name, and asking again answers the same.
+#[test]
+fn the_door_names_an_empty_and_a_small_month_and_writes_nothing() {
+    let root = root("door-owed-none");
+    let (empty, small) = (path(Timeframe::MINUTE_1), path(Timeframe::SECOND_1));
+    drop(BarFile::open_or_create(&root, empty, SYMBOL).unwrap());
+    let mut writer = BarFile::open_or_create(&root, small, SYMBOL).unwrap();
+    let rows = i64::try_from(INDEX_MIN_ROWS).unwrap() - 1;
+    writer.append(&session(2, rows, 1, 0)).unwrap();
+    assert_eq!(writer.header().n_valid, INDEX_MIN_ROWS - 1);
+    drop(writer);
+    for _ in 0..2 {
+        assert_eq!(
+            BarFile::month_summary_existing(&root, empty, SYMBOL),
+            Ok(Summarized::Empty)
+        );
+        assert_eq!(
+            BarFile::month_summary_existing(&root, small, SYMBOL),
+            Ok(Summarized::BelowThreshold)
+        );
+    }
+    for at in [empty, small] {
+        let sum = at.with_file(FileKind::MonthSummary).to_path_buf(&root);
+        assert!(!sum.exists(), "{}", sum.display());
+        assert!(!sum.with_extension("new.sum").exists(), "{}", sum.display());
+    }
+}
+
+/// **A NAME HELD BY A DIRECTORY IS REFUSED BEFORE A BYTE IS WRITTEN.** A
+/// directory where the month's `.sum` goes is left as it is and the door is
+/// refused naming it, before any staging file is made. A directory at the
+/// staging name is no dead writer's leftover: it is neither removed nor
+/// written through, and the door is refused naming it. Once the name is free
+/// the same door builds the writer's own bytes.
+#[test]
+fn a_name_held_by_a_directory_is_refused_before_a_byte_is_written() {
+    use crate::file::Action;
+    use std::io::ErrorKind;
+    let root = root("door-names");
+    let at = path(Timeframe::SECOND_1);
+    let mut writer = BarFile::open_or_create(&root, at, SYMBOL).unwrap();
+    writer.append(&session(12, 1_500, 1, 9)).unwrap();
+    let beside = path_beside(writer.path());
+    drop(writer);
+    let image = fs::read(&beside).unwrap();
+    let staging = beside.with_extension("new.sum");
+    fs::remove_file(&beside).unwrap();
+    fs::create_dir(&beside).unwrap();
+    assert_eq!(
+        BarFile::month_summary_existing(&root, at, SYMBOL),
+        Err(StoreError::Io {
+            path: beside.clone(),
+            action: Action::Write,
+            kind: ErrorKind::AlreadyExists,
+            code: None,
+        })
+    );
+    assert!(beside.is_dir(), "left as it was");
+    assert!(!staging.exists(), "no staging file was made");
+    fs::remove_dir(&beside).unwrap();
+    fs::create_dir(&staging).unwrap();
+    assert_eq!(
+        BarFile::month_summary_existing(&root, at, SYMBOL),
+        Err(StoreError::Io {
+            path: staging.clone(),
+            action: Action::Open,
+            kind: ErrorKind::AlreadyExists,
+            code: None,
+        })
+    );
+    assert!(staging.is_dir(), "neither removed nor written through");
+    assert!(!beside.exists(), "no name for a refused file");
+    fs::remove_dir(&staging).unwrap();
+    let built = BarFile::month_summary_existing(&root, at, SYMBOL);
+    assert!(matches!(built, Ok(Summarized::Built(_))), "{built:?}");
+    assert_eq!(fs::read(&beside).unwrap(), image, "the writer's own bytes");
+}
+
+/// **A STAGING NAME THE HOST WILL NOT CREATE IS THE DOOR'S REFUSAL.** The
+/// month's directory is closed to new names: the door reads the month, the
+/// host refuses the create of `<yyyy-mm>.new.sum`, and the door says so,
+/// naming the staging name and the open; no name appears. Opened again the
+/// door builds. Run where the mode bits bind (`crate::support`), so a root
+/// host runs the same refusal.
+#[test]
+fn a_staging_name_the_host_refuses_is_the_doors_refusal() {
+    crate::support::where_permission_binds(
+        "month_summary::tests::a_staging_name_the_host_refuses_is_the_doors_refusal",
+        || {
+            use std::os::unix::fs::PermissionsExt as _;
+            let root = root("door-closed");
+            let at = path(Timeframe::SECOND_1);
+            let mut writer = BarFile::open_or_create(&root, at, SYMBOL).unwrap();
+            writer.append(&session(12, 1_500, 1, 9)).unwrap();
+            let beside = path_beside(writer.path());
+            drop(writer);
+            let aside = beside.with_extension("aside");
+            fs::rename(&beside, &aside).unwrap();
+            let dir = beside.parent().unwrap().to_path_buf();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+            let refused = BarFile::month_summary_existing(&root, at, SYMBOL);
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            let staging = beside.with_extension("new.sum");
+            assert_eq!(
+                refused,
+                Err(StoreError::Denied {
+                    path: staging.clone(),
+                    action: crate::file::Action::Open,
+                })
+            );
+            assert!(!beside.exists(), "no name for a refused file");
+            assert!(!staging.exists(), "nothing staged");
+            let built = BarFile::month_summary_existing(&root, at, SYMBOL);
+            assert!(matches!(built, Ok(Summarized::Built(_))), "{built:?}");
+            assert_eq!(fs::read(&beside).unwrap(), fs::read(&aside).unwrap());
+        },
+    );
 }
