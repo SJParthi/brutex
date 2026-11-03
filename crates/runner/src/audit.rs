@@ -3555,6 +3555,132 @@ mod tests {
              with less machinery\nbest(): {chosen}\nrow:    {top}\n{out}"
         );
     }
+    /// THE INTEGER RENDERERS SIGN A NEGATIVE AND GROUP INDIAN-STYLE: a
+    /// thousand takes one comma, a crore three (2-2-3), and each helper writes
+    /// a minus only for a negative.
+    #[test]
+    fn the_integer_renderers_sign_negatives_and_group_lakhs_and_crores() {
+        assert_eq!(super::money(99), "\u{20b9}0.99");
+        assert_eq!(super::money(123_456), "\u{20b9}1,234.56");
+        assert_eq!(super::money(1_000_000_000), "\u{20b9}1,00,00,000.00");
+        assert_eq!(super::money(-150), "-\u{20b9}1.50");
+        assert_eq!(super::hundredths(250), "2.50");
+        assert_eq!(super::hundredths(-250), "-2.50");
+        assert_eq!(super::ppm_pct(12_345), "1.23%");
+        assert_eq!(super::ppm_pct(-12_345), "-1.23%");
+        assert_eq!(super::rupees(150), "1.50");
+        assert_eq!(super::rupees(-150), "-1.50");
+    }
+
+    /// A cell with only a trailing stop is a level variant, never the
+    /// baseline: every absent axis renders `-`.
+    #[test]
+    fn a_trail_only_cell_is_named_by_its_trail_and_not_as_the_baseline() {
+        let trail_only = crate::grid::Cell {
+            tsl: Some(3),
+            ..crate::grid::Cell::default()
+        };
+        assert_eq!(super::exit_name(&trail_only), "-/-/3");
+        assert_eq!(super::exit_name(&crate::grid::Cell::default()), "NONE");
+    }
+
+    /// A grid that dropped paths on refused bars says how many, under the
+    /// ladders; a sound grid prints no such row.
+    #[test]
+    fn a_grid_with_refused_paths_prints_the_count_and_why() {
+        let mut g = populated_grid();
+        let mut sound = String::new();
+        grid(&mut sound, &g, 10);
+        assert!(!sound.contains("PATHS UNPRICED"), "{sound}");
+        g.refused_paths = 7;
+        let mut out = String::new();
+        grid(&mut out, &g, 10);
+        let line = out
+            .lines()
+            .find(|l| l.contains("PATHS UNPRICED, refused bar"))
+            .expect("the refused-path row");
+        assert!(line.contains('7'), "{line}");
+        assert!(out.contains("STILL HELD THE POSITION"), "{out}");
+    }
+
+    /// A walk that refused prints REFUSED and its reason verbatim, and no fold
+    /// row.
+    #[test]
+    fn a_refused_walk_forward_prints_its_reason_and_no_fold() {
+        let v = Validated {
+            folds: Vec::new(),
+            refused: Some("the slice holds no warm row".to_owned()),
+        };
+        let mut out = String::new();
+        walk_forward(&mut out, &v);
+        assert!(out.contains("REFUSED"), "{out}");
+        assert!(
+            out.contains("    the slice holds no warm row\n"),
+            "the reason, verbatim:\n{out}"
+        );
+        assert!(!out.contains("fold 0"), "{out}");
+    }
+
+    /// An exit grid with no variant names no chosen strategy: the section says
+    /// the combination took no trades, and no STRATEGY REPORT follows.
+    #[test]
+    fn an_empty_exit_grid_renders_no_strategy_report() {
+        let empty = crate::grid::Grid::default();
+        let out = render_selected(
+            CostScope::IndexSpot,
+            None,
+            Some(&empty),
+            None,
+            None,
+            None,
+            None,
+            10,
+        );
+        assert!(out.contains("the combination took no trades"), "{out}");
+        assert!(!out.contains("STRATEGY REPORT"), "{out}");
+        let full = render_selected(
+            CostScope::IndexSpot,
+            None,
+            Some(&populated_grid()),
+            None,
+            None,
+            None,
+            None,
+            10,
+        );
+        assert!(full.contains("STRATEGY REPORT"), "the control:\n{full}");
+    }
+
+    /// BELOW THE CUT THE TWO MARKED ROWS ARE IN KEY ORDER WHICHEVER COMES
+    /// FIRST IN THE GRID. With the winless top earner (`best()`) placed before
+    /// the sharpest row, the pair is found already in key order and printed as
+    /// found; the full table is the reference.
+    #[test]
+    fn the_marked_rows_below_the_cut_keep_key_order_when_best_comes_first() {
+        let mut g = populated_grid();
+        let mut rich = g.cells.first().copied().unwrap_or_default();
+        rich.pessimistic = 9_000_000;
+        rich.wins = 0;
+        g.cells.insert(0, rich);
+        let (best, sharp) = (g.best().copied(), g.sharpest().copied());
+        assert!(best.is_some() && sharp.is_some() && best != sharp);
+        let marked = |out: &str| -> Vec<String> {
+            out.lines()
+                .filter(|l| is_grid_row(l) && l.contains("<-"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut full = String::new();
+        grid(&mut full, &g, g.cells.len() + 1);
+        let mut cut = String::new();
+        grid(&mut cut, &g, 0);
+        assert_eq!(marked(&cut), marked(&full));
+        assert_eq!(marked(&cut).len(), 2, "{cut}");
+        assert!(
+            marked(&cut).first().is_some_and(|l| l.contains("best()")),
+            "{cut}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3856,6 +3982,47 @@ mod overnight_tests {
         assert_eq!(
             largest_traded_overnight_move(&raw[375..], Some(&prior)),
             largest_overnight_move(&raw[375..], Some(&prior))
+        );
+    }
+
+    /// A PRIOR CLOSE AT OR BELOW ZERO MEASURES NO OVERNIGHT: there is no ratio
+    /// to a price of nothing, so that overnight is skipped and the next one
+    /// that can be measured is the answer.
+    #[test]
+    fn an_overnight_from_a_close_at_or_below_zero_is_not_measured() {
+        let mut bars = crate::synthetic::sessions(3);
+        let honest = largest_overnight_move(&bars, None).expect("two overnights");
+        for close in [0, -5] {
+            bars[374].close = close;
+            let found = largest_overnight_move(&bars, None).expect("the second overnight");
+            assert_eq!(found.prior_day, indicators::ist_day(bars[749].ts_micros));
+            assert_eq!(found.day, indicators::ist_day(bars[750].ts_micros));
+            assert!(found.prior_close > 0, "{found:?} against {honest:?}");
+        }
+        let two = &bars[..750];
+        assert_eq!(
+            largest_overnight_move(two, None),
+            None,
+            "the only overnight"
+        );
+    }
+
+    /// An upward move into a traded open is signed with a plus.
+    #[test]
+    fn an_upward_traded_overnight_is_signed_with_a_plus() {
+        let up = OvernightMove {
+            day: 1,
+            prior_day: 0,
+            prior_close: 10_000,
+            open: 10_100,
+            ppm: 10_000,
+            untraded_open: false,
+        };
+        let line = traded_overnight_line(&up, "2024-06-14", "2024-06-13");
+        let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("THE LARGEST MOVE TO A TRADED OPEN: +1.00% into the 2024-06-14"),
+            "{line}"
         );
     }
 }
