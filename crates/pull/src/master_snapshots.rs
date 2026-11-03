@@ -2954,3 +2954,9 @@ mod cov_tests;
 #[cfg(test)]
 #[path = "master_snapshots_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL-PS1 (D-7335): a reused token's every difference, an ISIN
+// handed on, a contract listed twice, and a diff whose rename is refused.
+#[cfg(test)]
+#[path = "master_snapshots_ps1_tests.rs"]
+mod ps1_tests;
