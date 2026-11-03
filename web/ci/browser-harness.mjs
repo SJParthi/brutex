@@ -1291,7 +1291,7 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
     // What the tab is still loading is stopped; the caller closes the tab.
     await cdp.send('Page.stopLoading', {}, tab.sessionId).catch(() => undefined);
     const seen = tab.seen();
-    return { ended: false, why, waited, fcp: null, longest: 0, heap: 0, wire: seen.reduce((s, r) => s + r.bytes, 0), settled: false, drew: false, status: tab.doc.status, build: tab.doc.build, requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed })) };
+    return { ended: false, why, waited, fcp: null, longest: 0, heap: 0, wire: seen.reduce((s, r) => s + r.bytes, 0), settled: false, pending: [], drew: false, status: tab.doc.status, build: tab.doc.build, requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed })) };
   };
   let ended;
   try {

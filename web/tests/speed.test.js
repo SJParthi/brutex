@@ -1052,7 +1052,7 @@ test('a page is judged against the four targets, each miss by name and figure', 
   assert.deepEqual(held.failures, ['/x warm: 2 loads still had a request in flight after 30 s: GET /feeds.json?a=1, POST /page-report'], 'a settled load\'s requests are not named');
   assert.equal(harness.askedAs({ method: 'GET', url: `data:text/plain,${'x'.repeat(300)}` }), `GET data:text/plain,${'x'.repeat(184)}`);
   assert.equal(harness.askedAs({ method: 'GET', url: 'not an address' }), 'GET not an address');
-  assert.deepEqual(harness.inFlightNames([load({ settled: false }), { pending: [] }]), [], 'a load that names nothing adds nothing');
+  assert.deepEqual(harness.inFlightNames([{ pending: undefined }, { pending: [] }]), [], 'a load that names nothing adds nothing');
 });
 
 test('a real browser\'s row is checked for what does not depend on the machine: measured, its verdict its failures\', and failed only on a timed judgement', () => {
