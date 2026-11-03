@@ -148,7 +148,24 @@ C-FNO-LEV-01 (`crates/pull/benches/ratio.rs` → `nse_margin::margin_lookup_is_f
 - on a day inside the span with no file;
 - on a day before the span.
 
-It does so over in-memory tables of 1, 10 and 100 months (400 symbols, days 1-28 held except the 15th). It fails on a ratio above the harness's 3x ceiling, and on a p99 above 1 µs at 100x (PARTS section 11; an ESTIMATE until measured on the Mac). The figures are in the last section. Benches measured here are advisory.
+It does so over in-memory tables of 1, 10 and 100 months (400 symbols, days 1-28 held except the 15th). It fails on a ratio above the harness's 3x ceiling, and on a p99 above 1 µs at 100x (PARTS section 11; an ESTIMATE until measured on the Mac).
+
+Measured here with `cargo bench -p pull --bench ratio --profile dev --locked`. That is the dev profile (opt-level 3, no LTO), chosen because the bench profile's fat LTO over `pull` would not finish in this session's time on 4 cores. It ran on a shared 4-core container, so it is ADVISORY (L-FNO-LEV-6); the Mac's check re-measures. Lines as printed:
+
+```
+C-FNO-LEV-01 one margin lookup at 1x, 10x, 100x the months held (FNO-LEVERAGE, D-8154)
+  C-FNO-LEV-01 margin(symbol, day), a held day, 10x     54099 ps ->     59001 ps   ratio 1.090x  ok
+  C-FNO-LEV-01 margin(symbol, day), a held day, 100x     54099 ps ->     53291 ps   ratio 0.985x  ok
+  C-FNO-LEV-01 margin(symbol, day), a held day, 100x p50       73 ns  p99      234 ns  max      26962 ns  n=20000  p99 budget 1000 ns  ok
+  C-FNO-LEV-01 margin(symbol, day), a day with no file, 10x      5051 ps ->      5552 ps   ratio 1.099x  ok
+  C-FNO-LEV-01 margin(symbol, day), a day with no file, 100x      5051 ps ->     10540 ps   ratio 2.086x  ok
+  C-FNO-LEV-01 margin(symbol, day), a day with no file, 100x p50       50 ns  p99      143 ns  max      61316 ns  n=20000  p99 budget 1000 ns  ok
+  C-FNO-LEV-01 margin(symbol, day), before the span, 10x      8316 ps ->      8445 ps   ratio 1.015x  ok
+  C-FNO-LEV-01 margin(symbol, day), before the span, 100x      8316 ps ->      6847 ps   ratio 0.823x  ok
+  C-FNO-LEV-01 margin(symbol, day), before the span, 100x p50       44 ns  p99      138 ns  max      25394 ns  n=20000  p99 budget 1000 ns  ok
+```
+
+All six ratios are within the 3x ceiling and all three p99 figures are within 1 µs. The largest ratio, 2.086x, is the no-file case at 100x, a path of about 5 ns a call, where one clock tick is a large share of the cost. It is under the ceiling, and it is not explained here. Each max (25 to 61 µs) is a single call that took the scheduler's slice, and is printed rather than gated, as the harness's own spread lines are.
 
 ## Decisions drafted (this part's block, D-8150 to D-8159; six used)
 
