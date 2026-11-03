@@ -885,7 +885,7 @@ fn a_priced_trade_reads_back_as_its_statistical_row() {
         let result = fixture.evaluate(side);
         assert_eq!(result.direction(), side);
         assert_eq!(*result.program(), always());
-        assert!(!result.alignment().is_empty());
+        assert!(!fixture.prepared().alignment().is_empty());
         let family = result.family();
         assert_eq!(family, ResearchFamilyV1::new(fixture.key).unwrap());
         assert!(family.legacy_index_family().is_some());
