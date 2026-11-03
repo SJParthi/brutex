@@ -77,3 +77,10 @@ NEXT: read Route B #1's figures; write the lists from them; close what they show
 - **The code is frozen at `4cf93ce8`** for Route B #2 (set file written: 74 coverage files whole, 622 mutants lines). Route B #1 on `e81f0aa6` is still in its lib-test object.
 
 NEXT: Route B #1's figures and interim lists; then Route B #2 at `4cf93ce8`; then the final lists, this report and the fix json.
+
+### 2026-11-03 20:30 IST Route B #1 at `e81f0aa6` done (interim figures)
+`ROUTE-B DONE 2026-11-03 20:20:17 IST WITH NOT PROVED lines above`, exit 3. Build rc 0 (30 artifacts, 10 reused, 14 test objects); `== test runner rc=0 END 2026-11-03 20:19:47 IST (89 min); tests passed 931 failed 0 ignored 0`; 14 profraw files merged. **runner at `e81f0aa6`: lines 49901/50358 (457 uncovered), branches 3709/4232 (523 uncovered), 70 of 71 set files read.** NOT PROVED: only `crates/runner/benches/ratio.rs`, as at START (no test object; L-BCL-1). Against START (991 lines, 869 sides uncovered) that is 534 lines and 346 sides fewer. Of the 980 uncovered rows, 241 are (F) and 739 are not: 218 [U] (proved), 32 [FAULT], 5 [HASH], 8 [UNPROVEN], 476 [open] (171 production, 305 test code or hand-read). The interim lists `gaps-LS2.txt.md` and `fu-LS2.txt.md` in this folder are from these figures and say so in their heads; the final Route B replaces them.
+
+Route B #2 (at `4cf93ce8`, started 20:20:46 IST) was stopped after six minutes, before any figure: the #1 figures show cheap reachable rows (rational-percentile refusals, the floor resolution arm, the Short cost direction, a non-index key and others), so I add those tests first and measure once at the final tip instead of measuring `4cf93ce8` and then again. Its partial profile folder `/home/user/ls2-prof/4cf93ce8b49e-1-B` is unused.
+
+NEXT: cheap tests for the open rows the #1 figures show; stable gates; the final Route B at the code tip; final lists, this report and the fix json.
