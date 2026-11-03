@@ -226,3 +226,85 @@ fn a_pool_with_fewer_workers_than_asked_runs_every_job() {
         .expect("one worker ran them all");
     assert_eq!(done, vec![10, 20, 30, 40]);
 }
+
+/// A day's filer over an invented run whose journal is absent, and its
+/// run-wide hold-back map filled to the cap when `full`.
+fn with_filer(full: bool, check: impl FnOnce(&mut DayFiler<'_>)) {
+    let root = scratch("FILER");
+    let day = Day::new(2019, 11, 14).unwrap();
+    let run = super::super::Run {
+        kind: ImportKind::Options,
+        from: day,
+        to: day,
+        only: &[],
+        store_root: &root,
+    };
+    let journal = super::super::journal::Journal::load(root.join("journal")).unwrap();
+    let month = day.year_month().unwrap();
+    let held_back = (0..if full { super::super::HELD_BACK_CAP } else { 0 })
+        .map(|n| ((format!("INVENTED{n}"), None, month), day))
+        .collect();
+    let ctx = Ctx {
+        run: &run,
+        journal: &journal,
+        options: super::super::RunOptions::default(),
+        id: 1,
+        started: 1,
+        announced: std::cell::Cell::new(false),
+        scoped: None,
+        held_back: std::cell::RefCell::new(held_back),
+        store_id: std::cell::Cell::new(None),
+    };
+    let request = BarRequest {
+        instrument_id: "INVENTED".to_owned(),
+        listing: crate::vendor::Listing::Index,
+        window: crate::session::Window::new(day, day).unwrap(),
+        granularity: crate::vendor::Granularity::Minute1,
+    };
+    let mut report = Report::default();
+    let mut filer = DayFiler::of_day(&ctx, ("options 2019-11-14 *", day), &request, &mut report);
+    check(&mut filer);
+    drop(filer);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// THE HOLD-BACK PAST ITS CAP names the first key it could not hold and the
+/// count it would have reached, once: a later key past the cap changes
+/// neither.
+#[test]
+fn the_hold_back_past_its_cap_names_its_first_key_once() {
+    with_filer(true, |filer| {
+        let month = filer.day.year_month().unwrap();
+        let first = ("OVER-ONE".to_owned(), None, month);
+        filer.hold_back(first.clone());
+        filer.hold_back(("OVER-TWO".to_owned(), None, month));
+        assert_eq!(
+            filer.held_back_cap,
+            Some((held_key_text(&first), super::super::HELD_BACK_CAP + 1))
+        );
+        assert_eq!(
+            filer.ctx.held_back.borrow().len(),
+            super::super::HELD_BACK_CAP
+        );
+    });
+}
+
+/// THE FIRST FILE THAT MET A FULL DISK, A LOST STORE OR A STORE THAT TAKES NO
+/// WRITES is the one the day keeps: a later file's words for the same fault
+/// never replace it.
+#[test]
+fn the_first_fault_of_each_kind_is_the_one_the_day_keeps() {
+    with_filer(false, |filer| {
+        let said = |word: &str| Filed {
+            disk_full: Some(format!("{word}: disk")),
+            store_lost: Some(format!("{word}: lost")),
+            not_writable: Some(format!("{word}: not writable")),
+            ..Filed::default()
+        };
+        filer.fold(said("first"));
+        filer.fold(said("second"));
+        assert_eq!(filer.disk_full.as_deref(), Some("first: disk"));
+        assert_eq!(filer.store_lost.as_deref(), Some("first: lost"));
+        assert_eq!(filer.not_writable.as_deref(), Some("first: not writable"));
+    });
+}
