@@ -3668,11 +3668,20 @@ fn a_renamed_share_owes_only_the_days_of_its_own_name() {
 
 /// A refused spool whose alert cannot be written (here a directory planted
 /// at the alert queue's name) and whose merge log cannot take its `refused`
-/// line (a directory at the log's name) is still refused by name, and both
-/// failed writes are named in `faults`, never dropped: before this, both
-/// results were discarded and the merge said nothing.
+/// line (the spool's folder made read-only, so the log cannot be created)
+/// is still refused by name, and both failed writes are named in `faults`,
+/// never dropped: before this, both results were discarded and the merge
+/// said nothing. Run where the permission bits bind (D-0995): as root a
+/// folder of mode 0o555 takes the log anyway.
 #[test]
 fn a_write_beside_a_merge_that_fails_is_named() {
+    crate::support::where_permission_binds(
+        "zerodha_verify::tests::a_write_beside_a_merge_that_fails_is_named",
+        a_write_beside_a_merge_that_fails_is_named_body,
+    );
+}
+
+fn a_write_beside_a_merge_that_fails_is_named_body() {
     let root = scratch("faults");
     let on = regular();
     let writer = SpoolWriter::new(&root, 33, Mode::ZerodhaMerge, 1);
@@ -5071,8 +5080,17 @@ fn a_merge_holds_a_bounded_number_of_live_locks() {
 /// merge log the host will not open keeps the host's words. Only a name that
 /// is not a regular file is `not_regular`; a regular file refused (here
 /// `EACCES`; `EMFILE` takes the same path) is `io` with the host's error.
+/// Run where the permission bits bind (D-0995): as root a file of mode
+/// 0o000 opens anyway.
 #[test]
 fn a_refused_open_keeps_the_hosts_words() {
+    crate::support::where_permission_binds(
+        "zerodha_verify::tests::a_refused_open_keeps_the_hosts_words",
+        a_refused_open_keeps_the_hosts_words_body,
+    );
+}
+
+fn a_refused_open_keeps_the_hosts_words_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = scratch("refused-open");
     let on = regular();

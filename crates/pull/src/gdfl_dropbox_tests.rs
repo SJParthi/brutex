@@ -2754,9 +2754,18 @@ mod repair_r1 {
     /// R407-02 (C5): a journal that cannot be written stops the press before
     /// any byte is fetched: `journal_unwritable`, nothing handed, nothing
     /// downloaded, on every press. Failed before the repair: Complete, the
-    /// file handed, and downloaded again by press two.
+    /// file handed, and downloaded again by press two. Run where the
+    /// permission bits bind (D-0995): as root a journal folder of mode 0o555
+    /// takes the line anyway, so the refusal under test would never run.
     #[test]
     fn a_journal_that_cannot_be_written_stops_the_press_before_any_byte() {
+        crate::support::where_permission_binds(
+            "gdfl_dropbox::tests::repair_r1::a_journal_that_cannot_be_written_stops_the_press_before_any_byte",
+            a_journal_that_cannot_be_written_stops_the_press_before_any_byte_body,
+        );
+    }
+
+    fn a_journal_that_cannot_be_written_stops_the_press_before_any_byte_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let server = Server::start(fake_with(&[(
             "/GFDLNFO_TICK_08082019.zip",
@@ -2851,9 +2860,17 @@ mod repair_r1 {
     }
 
     /// C12: a store root that is there but may not be written is
-    /// `store_not_writable`, never `store_lost`.
+    /// `store_not_writable`, never `store_lost`. Run where the permission
+    /// bits bind (D-0995): as root a root of mode 0o555 is written anyway.
     #[test]
     fn a_read_only_store_root_is_not_writable_not_lost() {
+        crate::support::where_permission_binds(
+            "gdfl_dropbox::tests::repair_r1::a_read_only_store_root_is_not_writable_not_lost",
+            a_read_only_store_root_is_not_writable_not_lost_body,
+        );
+    }
+
+    fn a_read_only_store_root_is_not_writable_not_lost_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let server = Server::start(fake_with(&[(
             "/GFDLNFO_TICK_08082019.zip",

@@ -2691,9 +2691,18 @@ fn chmod_all(dir: &Path, mode: u32) {
 /// the fix, and day 3 has no `begin`. A second run stops again at the same
 /// file by the same words, never a refusal repeated on every later day. Once
 /// the month takes writes again, a resume converges. A planted permission
-/// refusal (the inject seam) ends the run the same way.
+/// refusal (the inject seam) ends the run the same way. Run where the
+/// permission bits bind (D-0995): as root a month of mode 0o444 is written
+/// anyway, so the host's refusal under test would never come.
 #[test]
 fn an_immutable_month_stops_the_run_by_name() {
+    crate::support::where_permission_binds(
+        "gdfl_import::tests::ia16::an_immutable_month_stops_the_run_by_name",
+        an_immutable_month_stops_the_run_by_name_body,
+    );
+}
+
+fn an_immutable_month_stops_the_run_by_name_body() {
     let root = scratch("ia16-fm129");
     world(&root, &[d1(), d2(), d3()]);
     let store = root.join("S");
