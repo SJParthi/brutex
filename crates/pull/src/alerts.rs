@@ -1697,7 +1697,7 @@ fn keep(names: &Names, now: u64) -> Result<PathBuf, AlertError> {
             }
             let path = entry.path();
             let same = fs::symlink_metadata(&path)
-                .is_ok_and(|meta| meta.dev() == queue.dev() && meta.ino() == queue.ino());
+                .is_ok_and(|meta| (meta.dev(), meta.ino()) == (queue.dev(), queue.ino()));
             // The smallest such name, by `Ord::min` (GF-1): `path < kept`
             // mutated to `<=` was an equivalent mutant, two entries of one
             // directory never carrying one name.
@@ -1975,3 +1975,9 @@ fn note_reserve_spent(freed: bool) {
 #[cfg(test)]
 #[path = "alerts_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL-PS2 (D-7336): the arms the module above leaves unreached,
+// each driven by the input that reaches it.
+#[cfg(test)]
+#[path = "alerts_ps2_tests.rs"]
+mod ps2_tests;
