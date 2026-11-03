@@ -24,7 +24,7 @@ One change from my own first draft: files were first written through a `.part` t
 
 | File | Change |
 |---|---|
-| `crates/pull/src/nse_margin.rs` | new: 2,629 lines, of which about 1,000 are production code and the rest the in-file `#[cfg(test)] mod tests` |
+| `crates/pull/src/nse_margin.rs` | new: 2,629 lines. Lines 1-1,417 are the module (its documentation included); lines 1,418-2,629 are the in-file `#[cfg(test)] mod tests`. |
 | `crates/pull/src/lib.rs` | `pub mod nse_margin;` with its doc comment, right after `pub mod nse;` (ADDENDUM 1 Nov, PARTS :1323) |
 | `crates/pull/benches/ratio/nse_margin.rs` | new: the C-FNO-LEV-01 wrapper |
 | `crates/pull/benches/ratio.rs` | `#[path = "ratio/nse_margin.rs"] mod nse_margin;` with its doc and a blank line, right after the blank line that follows `use std::time::Instant;`. The `println!` of C-FNO-LEV-01 and its `ok &=` line go right after `ok &= day_table::day_lookup_is_flat();` (PARTS :1324-1325). |
