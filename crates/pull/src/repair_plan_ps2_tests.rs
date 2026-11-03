@@ -282,3 +282,65 @@ fn an_empty_window_is_passed_over_and_none_judges_nothing() {
     drop(file);
     let _cleanup = std::fs::remove_dir_all(&root);
 }
+
+/// A full invented session of minute bars on `on`: 09:15 to 15:29.
+fn session_of(on: Day) -> Vec<Bar> {
+    (555..930).map(|minute| bar(on, minute)).collect()
+}
+
+/// Cuts a month file to its header, so every record read past it fails.
+fn cut_to_header(at: &Path) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(at)
+        .unwrap()
+        .set_len(32_768)
+        .unwrap();
+}
+
+/// PS2 (D-7336): A MONTH WHOSE ROWS FAIL TO READ AFTER IT OPENED is refused at
+/// its first session, by that day, and judged no further.
+#[test]
+fn a_month_whose_rows_fail_to_read_after_it_opened_is_refused_at_its_first_session() {
+    let root = scratch("cut-opened");
+    drop(month_file(
+        &root,
+        parts(november()),
+        &session_of(day(2020, 11, 2)),
+    ));
+    seam::plant("repair.opened", cut_to_header);
+    let window = Window::new(day(2020, 11, 2), day(2020, 11, 6)).unwrap();
+    let [month] = plan(&root, parts(november()), window).try_into().unwrap();
+    let why = month.refused.as_deref().unwrap();
+    assert!(why.starts_with("2020-11-02: "), "{why}");
+    assert_eq!(
+        (month.sessions, month.held),
+        (1, 0),
+        "stopped at its first session"
+    );
+    let _cleanup = std::fs::remove_dir_all(&root);
+}
+
+/// PS2 (D-7336): A DAY WHOSE WINDOWS FAIL TO READ AFTER IT WAS COUNTED is
+/// refused by that day: the judge never answers for bars it could not read.
+#[test]
+fn a_day_whose_windows_fail_to_read_after_it_was_counted_is_refused_by_its_judge() {
+    let root = scratch("cut-counted");
+    drop(month_file(
+        &root,
+        parts(november()),
+        &session_of(day(2020, 11, 2)),
+    ));
+    seam::plant("repair.counted", cut_to_header);
+    let window = Window::new(day(2020, 11, 2), day(2020, 11, 6)).unwrap();
+    let [month] = plan(&root, parts(november()), window).try_into().unwrap();
+    let why = month.refused.as_deref().unwrap();
+    assert!(why.starts_with("2020-11-02: "), "{why}");
+    assert_eq!(
+        (month.sessions, month.held),
+        (1, 1),
+        "counted, then not judged"
+    );
+    assert!(month.short.is_empty());
+    let _cleanup = std::fs::remove_dir_all(&root);
+}
