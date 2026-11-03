@@ -90,7 +90,10 @@ fn seeded(tolerance: Tolerance, high: i64, low: i64, close: i64) -> Evaluator {
 
 fn level(high: i64, low: i64, numerator: i64, down: bool) -> Option<i64> {
     let range = i128::from(high) - i128::from(low);
-    if range <= 0 || range > i128::from(i64::MAX) {
+    // A session that printed one price has no range to place a rung on. (This
+    // also refused a span wider than `i64`, which no pair of the positive prices
+    // an evaluator accepts can have: that side had no run. BASE-COV-LIBS-LS3.)
+    if range <= 0 {
         return None;
     }
     let step = range * i128::from(numerator) / 1000;
@@ -112,9 +115,8 @@ fn expected(
     let Some((high, low)) = reference else {
         return Truth::Unknown;
     };
-    if tolerance.base() != Some(Base::SessionRange) {
-        return Truth::Unknown;
-    }
+    // No band of another base reaches an evaluator (`Widths::new` refuses it,
+    // D-1553), so its `Unknown` here was a side no run took. BASE-COV-LIBS-LS3.
     let Some(level) = level(high, low, numerator, down) else {
         return Truth::Unknown;
     };
@@ -415,23 +417,25 @@ fn public_column_retains_known_false_fibonacci_answers_for_negated_search() {
         .zip(column.bits())
         .zip(column.known())
     {
-        if *source >= 375 {
-            assert_answers(
-                *truth,
-                *known,
-                105_000,
-                Some((112_345, 100_000)),
-                Some((112_345, 100_000)),
-                pinned(),
-            );
-            assert_eq!(
-                Expression::parse("!71")
-                    .expect("valid false rung")
-                    .evaluate(*truth, *known),
-                Truth::True
-            );
-            verified += 1;
-        }
+        // Every swept row is past the first session (`first_swept` is 376, above),
+        // so this is asserted rather than filtered: the filter's other side had
+        // no run. BASE-COV-LIBS-LS3.
+        assert!(*source >= 375, "a swept row from bar {source}");
+        assert_answers(
+            *truth,
+            *known,
+            105_000,
+            Some((112_345, 100_000)),
+            Some((112_345, 100_000)),
+            pinned(),
+        );
+        assert_eq!(
+            Expression::parse("!71")
+                .expect("valid false rung")
+                .evaluate(*truth, *known),
+            Truth::True
+        );
+        verified += 1;
     }
     assert_eq!(
         verified, 74,

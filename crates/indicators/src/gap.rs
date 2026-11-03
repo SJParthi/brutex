@@ -1535,3 +1535,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "gap_cover_tests.rs"]
+mod gap_cover_tests;

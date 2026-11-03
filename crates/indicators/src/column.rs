@@ -1409,17 +1409,16 @@ pub(super) mod tests {
         let mut bars = run(8);
         // Corrupt one bar deep inside the swept region: high below low.
         let victim = bars.len() - 20;
-        if let Some(b) = bars.get_mut(victim) {
-            *b = Candle::new(
-                b.ts_micros,
-                b.open,
-                b.low - 100,
-                b.high,
-                b.close,
-                1,
-                OI_NULL,
-            );
-        }
+        let b = bars.get_mut(victim).expect("in range by construction");
+        *b = Candle::new(
+            b.ts_micros,
+            b.open,
+            b.low - 100,
+            b.high,
+            b.close,
+            1,
+            OI_NULL,
+        );
         let column = Column::build(&bars, &mut evaluator(Availability::Absent));
 
         assert_eq!(
@@ -1490,17 +1489,16 @@ pub(super) mod tests {
     fn column_across_a_refusal() -> Column {
         let mut bars = run(8);
         let victim = bars.len() - 20;
-        if let Some(b) = bars.get_mut(victim) {
-            *b = Candle::new(
-                b.ts_micros,
-                b.open,
-                b.low - 100,
-                b.high,
-                b.close,
-                1,
-                OI_NULL,
-            );
-        }
+        let b = bars.get_mut(victim).expect("in range by construction");
+        *b = Candle::new(
+            b.ts_micros,
+            b.open,
+            b.low - 100,
+            b.high,
+            b.close,
+            1,
+            OI_NULL,
+        );
         let column = Column::build(&bars, &mut evaluator(Availability::Absent));
         assert_eq!(
             column.census().high_below_low,
@@ -1591,9 +1589,7 @@ pub(super) mod tests {
                     "the row from bar {source} is at or after the boundary {boundary} \
                      and was changed, so the comparison is off by one"
                 );
-                if !now.is_empty() {
-                    still_firing += 1;
-                }
+                still_firing += usize::from(!now.is_empty());
             }
         }
         assert!(
@@ -2099,9 +2095,8 @@ pub(super) mod tests {
         assert!(at > 0, "the victim index must be inside the fixture");
 
         let mut poisoned = clean.clone();
-        if let Some(slot) = poisoned.get_mut(victim) {
-            *slot = Candle::new(at, 0, 0, 0, 0, 0, OI_NULL);
-        }
+        let slot = poisoned.get_mut(victim).expect("in range by construction");
+        *slot = Candle::new(at, 0, 0, 0, 0, 0, OI_NULL);
         // The same series with the bar simply ABSENT. `Evaluator::stepped` takes
         // `self` by value, so a refused record is documented to leave no trace —
         // which means refusing it and it never existing must be the same run.
@@ -2275,9 +2270,8 @@ pub(super) mod tests {
             .get(victim.saturating_sub(1))
             .copied()
             .expect("the warm fixture has a predecessor");
-        if let Some(bar) = bars.get_mut(victim) {
-            bar.ts_micros = previous.ts_micros;
-        }
+        let bar = bars.get_mut(victim).expect("in range by construction");
+        bar.ts_micros = previous.ts_micros;
         assert!(
             bars.get(victim).is_some_and(|bar| bar.check().is_ok()),
             "one record alone cannot see timestamp ordering"
@@ -2570,18 +2564,14 @@ mod reproject_tests {
         // resolve to bar 24. Everything else is distinct, and the map stays
         // non-decreasing, which is the precondition this door checks.
         let mut onto: Vec<Option<usize>> = (0..column.len()).map(|i| Some(i + 20)).collect();
-        if let Some(slot) = onto.get_mut(1) {
-            *slot = Some(22);
-        }
-        if let Some(slot) = onto.get_mut(2) {
-            *slot = Some(22);
-        }
-        if let Some(slot) = onto.get_mut(3) {
-            *slot = Some(24);
-        }
-        if let Some(slot) = onto.get_mut(4) {
-            *slot = Some(24);
-        }
+        let slot = onto.get_mut(1).expect("in range by construction");
+        *slot = Some(22);
+        let slot = onto.get_mut(2).expect("in range by construction");
+        *slot = Some(22);
+        let slot = onto.get_mut(3).expect("in range by construction");
+        *slot = Some(24);
+        let slot = onto.get_mut(4).expect("in range by construction");
+        *slot = Some(24);
 
         let (projected, dropped) = column
             .reproject(&onto, 9_999)
@@ -2691,15 +2681,12 @@ mod reproject_tests {
         // A dropped row between two kept rows does not excuse a step back:
         // the guard compares with the last KEPT target, not the last row.
         let mut across_a_gap = identity.clone();
-        if let Some(slot) = across_a_gap.get_mut(1) {
-            *slot = Some(3);
-        }
-        if let Some(slot) = across_a_gap.get_mut(2) {
-            *slot = None;
-        }
-        if let Some(slot) = across_a_gap.get_mut(3) {
-            *slot = Some(2);
-        }
+        let slot = across_a_gap.get_mut(1).expect("in range by construction");
+        *slot = Some(3);
+        let slot = across_a_gap.get_mut(2).expect("in range by construction");
+        *slot = None;
+        let slot = across_a_gap.get_mut(3).expect("in range by construction");
+        *slot = Some(2);
         assert!(
             column.reproject(&across_a_gap, len).is_none(),
             "row 3 steps back to bar 2 after row 1 took bar 3, with a dropped row between"
@@ -2707,9 +2694,8 @@ mod reproject_tests {
 
         // Re-taking the SAME bar across that gap is the adjacent duplicate the
         // guard counts, not a step back, so it still projects.
-        if let Some(slot) = across_a_gap.get_mut(3) {
-            *slot = Some(3);
-        }
+        let slot = across_a_gap.get_mut(3).expect("in range by construction");
+        *slot = Some(3);
         let (repeated, dropped) = column
             .reproject(&across_a_gap, len)
             .expect("a repeated target is non-decreasing");
@@ -2730,3 +2716,7 @@ mod reproject_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "column_cover_tests.rs"]
+mod column_cover_tests;

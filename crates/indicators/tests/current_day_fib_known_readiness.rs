@@ -76,9 +76,14 @@ fn anchor(prior: &[Sample], day: i64) -> Option<(i128, i128, bool)> {
     }
     let up = up?;
     let range = i128::from(high) - i128::from(low);
-    if range <= 0 || range > i128::from(i64::MAX) {
-        return None;
-    }
+    // A determined leg moved an extreme, so the high is above the low; and every
+    // price the evaluator accepted is positive, so the span fits an `i64`. Both
+    // are asserted: this returned `None` for them, a refusal no fixture reached.
+    // BASE-COV-LIBS-LS3.
+    assert!(
+        (1..=i128::from(i64::MAX)).contains(&range),
+        "a determined leg spans a range: {range}"
+    );
     Some((i128::from(if up { high } else { low }), range, up))
 }
 
@@ -93,7 +98,10 @@ fn expected(prior: &[Sample], current: Sample, tolerance: Tolerance) -> [Truth; 
         } else {
             anchor + distance
         };
-        if i64::try_from(level).is_err() || tolerance.base() != Some(Base::SessionRange) {
+        // No band of another base reaches an evaluator (`refused_widths` below), so
+        // the base is not re-checked here; this read `|| tolerance.base() !=
+        // Some(Base::SessionRange)`, a side no run took. BASE-COV-LIBS-LS3.
+        if i64::try_from(level).is_err() {
             Truth::Unknown
         } else if (i128::from(current.candle.close) - level).abs() * 1000
             <= i128::from(tolerance.milli()) * range

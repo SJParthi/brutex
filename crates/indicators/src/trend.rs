@@ -1756,10 +1756,12 @@ mod tests {
             };
             let bar = candle(m * 60_000_000, close + 700, close - 700, close);
             let mask = t.step(&bar, tolerance).expect("a sane candle");
-            if mask.get(56) || mask.get(57) {
+            // Each pair read as a set (BASE-COV-LIBS-LS3: these legs break as 56 and
+            // 59 only, so `||` chains left 57 and 58 to no run).
+            if [56, 57].into_iter().any(|position| mask.get(position)) {
                 seen_bos = true;
             }
-            if mask.get(58) || mask.get(59) {
+            if [58, 59].into_iter().any(|position| mask.get(position)) {
                 seen_choch = true;
             }
         }
@@ -2282,7 +2284,6 @@ mod the_stop_on_both_sides {
         let mut s = SuperTrend::new(TrendThresholds::CLASSICAL);
         s.fold(&bar(0, 2_510_000, 2_490_000, 2_491_000));
         let mut previous = s.stop();
-        let mut tightened = 0_u32;
         for i in 1..20_i64 {
             let p = 2_490_000 - i * 2_000;
             s.fold(&bar(i * 60_000_000, p + 1_000, p - 1_000, p));
@@ -2292,20 +2293,17 @@ mod the_stop_on_both_sides {
                 "candle {i} closed far below the stop and must still be short"
             );
             let now = s.stop();
+            // STRICTLY, on every candle. This counted the candles that tightened and
+            // asked for at least one, and every candle of a series falling 2,000 paisa
+            // a candle tightens: the not-tightened side was a line no run executed
+            // (BASE-COV-LIBS-LS3), and a ratchet that stalled for a candle mid-fall
+            // passed it. A stop that loosened or vanished fails here too.
             assert!(
-                matches!((previous, now), (Some(before), Some(after)) if after <= before),
-                "the short stop loosened or vanished at candle {i}: {previous:?} then {now:?}"
+                matches!((previous, now), (Some(before), Some(after)) if after < before),
+                "the short stop did not tighten at candle {i}: {previous:?} then {now:?}"
             );
-            if matches!((previous, now), (Some(before), Some(after)) if after < before) {
-                tightened += 1;
-            }
             previous = now;
         }
-        assert!(
-            tightened > 0,
-            "a series falling 2,000 paisa a candle must tighten the short stop at least \
-             once, or the ratchet is not moving at all"
-        );
 
         // A candle whose range explodes puts mid + band far ABOVE the stop. The ratchet
         // must hold it, not follow the band out: the market has not taken it out.
@@ -2728,3 +2726,7 @@ mod a_period_is_folded_before_it_is_named {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "trend_cover_tests.rs"]
+mod trend_cover_tests;

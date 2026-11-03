@@ -125,9 +125,12 @@ fn closes(range: i64) -> Vec<i64> {
             for step in [(p * r).div_euclid(1000), -(-p * r).div_euclid(1000)] {
                 for level in [i128::from(anchor) + step, i128::from(anchor) - step] {
                     for d in &offsets {
-                        if let Ok(close) = i64::try_from(level + i128::from(*d)) {
-                            out.push(close);
-                        }
+                        // Every anchor, rung and offset here is a few lakh paisa,
+                        // so each close fits: expected, not filtered (the filter's
+                        // other side had no run). BASE-COV-LIBS-LS3.
+                        out.push(
+                            i64::try_from(level + i128::from(*d)).expect("a close of this scale"),
+                        );
                     }
                 }
             }

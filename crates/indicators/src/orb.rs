@@ -1031,3 +1031,7 @@ mod boundary_bar {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "orb_cover_tests.rs"]
+mod orb_cover_tests;

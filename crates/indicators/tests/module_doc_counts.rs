@@ -332,3 +332,60 @@ fn the_crate_header_table_and_summary_are_the_code() {
         emitted.len()
     );
 }
+
+/// **THE HEADER PARSERS READ WHAT THEY SHOULD AND REFUSE THE REST**, on text
+/// made for them. BASE-COV-LIBS-LS3: the two tests above read the real
+/// headers, which state every count in the checked form, so no refusal of
+/// these parsers had ever run; a parser that refused nothing, or read every
+/// cell as empty, would pass those tests vacuously. Extreme cases: a blank line
+/// inside the header, code before the claim, bold words that are not a number,
+/// a number that is the last word, a number about something else, a reversed
+/// range, a hyphen range, a cell that is not a number, the second table
+/// heading, and a summary missing its closing phrase.
+#[test]
+fn the_header_parsers_read_what_they_should_and_refuse_the_rest() {
+    assert_eq!(
+        claimed("//! intro\n\n//! It emits **12 vocabulary positions**.\n"),
+        Some(12),
+        "a blank line inside the header does not end it"
+    );
+    assert_eq!(
+        claimed("//! intro\nuse x;\n//! **3 vocabulary positions**\n"),
+        None
+    );
+    assert_eq!(claimed("//! **bold** words and no count\n"), None);
+    assert_eq!(claimed("//! the count is **12\n"), None);
+    assert_eq!(claimed("//! **12 rows** of something else\n"), None);
+
+    assert_eq!(
+        parse_ranges("7–9, 54–55, 60"),
+        Some(vec![7, 8, 9, 54, 55, 60])
+    );
+    assert_eq!(parse_ranges("60, 7-8"), Some(vec![7, 8, 60]));
+    assert_eq!(parse_ranges("9-7"), None, "a reversed range is refused");
+    assert_eq!(parse_ranges("7, x"), None, "a cell that is not a number");
+
+    let header: Vec<String> = [
+        "| Module | Positions | Count |",
+        "|---|---|---|",
+        "| alpha | 1-3 | 3 |",
+        "",
+        "| beta | 9 | 1 |",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    assert_eq!(
+        header_rows(&header),
+        [("alpha".to_owned(), vec![1, 2, 3], 3)],
+        "the second heading is read, and the table ends at its first non-row"
+    );
+    let summary = |text: &str| header_summary(&[text.to_owned()]);
+    assert_eq!(
+        summary("**7 of the vocabulary's 9 live positions are computable"),
+        Some((7, 9))
+    );
+    assert_eq!(
+        summary("**7 of the vocabulary's 9 live positions exist"),
+        None
+    );
+}

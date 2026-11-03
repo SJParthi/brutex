@@ -92,9 +92,14 @@ fn every_crossing_and_ordinal_matches_a_last_definite_side_oracle_including_know
                     None
                 };
                 let event = now.zip(*prior).filter(|(a, b)| a != b).map(|(a, _)| a);
+                // Both sides' availability read as a set: once a definite side was
+                // seen this session the level's `above` bit is always known, so a
+                // chain of `&&` left that operand's false side to no run.
+                // BASE-COV-LIBS-LS3.
                 let available = prior.is_some()
-                    && known.get(u32::from(level.above))
-                    && known.get(u32::from(level.below));
+                    && [level.above, level.below]
+                        .into_iter()
+                        .all(|bit| known.get(u32::from(bit)));
                 if event.is_some() {
                     *count += 1;
                     event_count += 1;

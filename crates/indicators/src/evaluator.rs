@@ -994,14 +994,15 @@ impl Evaluator {
         //
         // A refused bar is now a refused bar. `Refused::Corrupt` is already what
         // `Candle::check` returns and cannot fire here; the other two are mapped so the
-        // caller learns which, rather than learning nothing.
-        match self.vwap.step(bar, self.widths.fib) {
-            Ok(v) => mask = mask.union(&v),
-            Err(crate::vwap::Refused::Corrupt(why)) => return Err(why),
-            Err(crate::vwap::Refused::AccumulatorTooLarge) => {
-                return Err(Corrupt::AccumulatorTooLarge);
-            }
-        }
+        // caller learns which, rather than learning nothing. The mapping is
+        // `Refused::into_corrupt`, one function proved for both refusals directly:
+        // written here as a three-arm match, its `Corrupt` arm was a region no bar
+        // the evaluator accepts can reach (D-8565).
+        let vwap = self
+            .vwap
+            .step(bar, self.widths.fib)
+            .map_err(crate::vwap::Refused::into_corrupt)?;
+        mask = mask.union(&vwap);
 
         // ── 276–279: two predicates from state this type already held ───────────
         //
@@ -1132,15 +1133,21 @@ impl Evaluator {
     /// `set_exact`. The length is a compile-time constant of this crate's own
     /// vocabulary, so nothing a caller supplies can make it grow.
     fn crossings_of(&mut self, mut mask: ConditionMask) -> ConditionMask {
-        for (slot, level) in vocab::table::CROSSINGS.iter().enumerate() {
-            // WHICH SIDE THIS BAR IS ON, OR THAT IT HAS NONE.
-            let now = if mask.get(u32::from(level.above)) {
-                Side::Above
-            } else if mask.get(u32::from(level.below)) {
-                Side::Below
-            } else {
-                Side::Unknown
-            };
+        // The level, its remembered side and its count, walked TOGETHER: both
+        // arrays are `[_; CROSSINGS.len()]`, so the zip is exact by type. It
+        // used to be `get_mut(slot)` on each, with an `else` arm no state could
+        // reach (D-8565).
+        for ((level, last), count) in vocab::table::CROSSINGS
+            .iter()
+            .zip(self.last_side.iter_mut())
+            .zip(self.crossings_seen.iter_mut())
+        {
+            // WHICH SIDE THIS BAR IS ON, AND THE EDGE A CROSSING TO IT FIRES; OR
+            // THAT IT HAS NO SIDE.
+            //
+            // The edge is chosen with the side, so no later match has to answer
+            // for a side this point has already ruled out (D-8565).
+            //
             // A BAR WITH NO SIDE RECORDS NOTHING AND REPORTS NOTHING.
             //
             // It does NOT clear the remembered side, and that is the whole
@@ -1165,10 +1172,11 @@ impl Evaluator {
             // landing exactly ON a level no longer loses the crossing that
             // follows it, and a session's first bar still reports nothing
             // because `Unknown` is where the rollover leaves it.
-            if matches!(now, Side::Unknown) {
-                continue;
-            }
-            let Some(last) = self.last_side.get_mut(slot) else {
+            let (now, edge) = if mask.get(u32::from(level.above)) {
+                (Side::Above, level.up)
+            } else if mask.get(u32::from(level.below)) {
+                (Side::Below, level.down)
+            } else {
                 continue;
             };
             let was = *last;
@@ -1183,11 +1191,6 @@ impl Evaluator {
             // position in `CROSSINGS` is any of those. An `if let` would write a
             // branch no test can take, and a region that cannot run is a region
             // nobody can be held to.
-            let edge = match now {
-                Side::Above => level.up,
-                Side::Below => level.down,
-                Side::Unknown => continue,
-            };
             mask = vocab::table::set_exact(mask, edge).unwrap_or(mask);
             // ONE ORDINAL PER CROSSING, WHICH THE SHAPE NOW GUARANTEES.
             //
@@ -1196,9 +1199,6 @@ impl Evaluator {
             // looped over both directions and needed a bar-level flag to avoid
             // double-counting; reading the side once removes the possibility
             // rather than guarding against it.
-            let Some(count) = self.crossings_seen.get_mut(slot) else {
-                continue;
-            };
             *count = count.saturating_add(1);
             let index = match *count {
                 1 => level.first,
@@ -1793,9 +1793,12 @@ mod tests {
         assert_changed("calendar.len", changed);
         for index in 0..baseline.calendar.days.len() {
             changed = baseline;
-            if let Some(day) = changed.calendar.days.get_mut(index) {
-                *day = day.saturating_add(1);
-            }
+            let day = changed
+                .calendar
+                .days
+                .get_mut(index)
+                .expect("in range by construction");
+            *day = day.saturating_add(1);
             assert_changed("one exact calendar day slot", changed);
         }
     }
@@ -3056,7 +3059,6 @@ mod tests {
     fn a_non_regular_session_still_emits_its_own_bars() {
         let short_day = 20_382_i64;
         let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
-        let mut any = false;
         for m in 0..60_i64 {
             let p = 2_900_000 + (m % 37) * 100;
             let bar = Candle {
@@ -3069,15 +3071,16 @@ mod tests {
                 open_interest: i64::MIN,
             };
             let mask = e.step(&bar).expect("a Muhurat bar is an ordinary bar");
-            if mask.popcount() > 0 {
-                any = true;
-            }
+            // CHECKED HERE, on every bar, rather than latched into a flag asserted
+            // after the loop: every bar of the session emits, so the flag's unset
+            // side was a line no correct run executed. BASE-COV-LIBS-LS3.
+            assert!(
+                mask.popcount() > 0,
+                "minute {m} of a non-regular session emitted nothing at all, so the fix \
+                 silenced a real hour of trading instead of merely keeping it out of the \
+                 anchors"
+            );
         }
-        assert!(
-            any,
-            "a non-regular session emitted nothing at all, so the fix silenced a real hour \
-             of trading instead of merely keeping it out of the anchors"
-        );
     }
 
     /// The 2021-02-24 outage stub is not the anchor for 2021-02-25.
@@ -3619,7 +3622,10 @@ mod tests {
                 open_interest: i64::MIN,
             };
             let mask = e.step(&bar).expect("a sane candle");
-            let event = mask.get(56) || mask.get(57) || mask.get(58) || mask.get(59);
+            // Any of the four break events, read as a set: this fixture never sets 57
+            // or 58 on a bar the earlier positions miss, so a chain of `||` left
+            // those two sides to no run.
+            let event = (56..=59).any(|position| mask.get(position));
             let regime = mask.get(278) || mask.get(279);
             if regime {
                 ever_set = true;
@@ -3697,7 +3703,10 @@ mod tests {
         /// inverse. Shares nothing with the constant under test.
         const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
             let y = if m <= 2 { y - 1 } else { y };
-            let era = if y >= 0 { y } else { y - 399 } / 400;
+            // Floor division, which the source spells `if y >= 0 { y } else { y - 399 }
+            // / 400`; every year this test asks about is positive, so that spelling's
+            // negative side never ran.
+            let era = y.div_euclid(400);
             let yoe = y - era * 400;
             let mp = (m + 9) % 12;
             let doy = (153 * mp + 2) / 5 + d - 1;
@@ -3799,9 +3808,11 @@ mod tests {
             let mask = e.step(&bar).expect("a sane candle");
 
             // 56 bos_up and 58 choch_up are upward breaks; 57 and 59 are downward.
-            if mask.get(56) || mask.get(58) {
+            // Each pair read as a set (BASE-COV-LIBS-LS3: this fixture breaks up only
+            // as 56 and down only as 59, so `||` chains left 58 and 57 to no run).
+            if [56, 58].into_iter().any(|position| mask.get(position)) {
                 last_break_up = Some(true);
-            } else if mask.get(57) || mask.get(59) {
+            } else if [57, 59].into_iter().any(|position| mask.get(position)) {
                 last_break_up = Some(false);
             }
 
@@ -3959,3 +3970,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "evaluator_cover_tests.rs"]
+mod evaluator_cover_tests;
