@@ -958,3 +958,47 @@ fn named_commits_on_main(repo: &Path, fixed: &[(String, String)]) -> Option<u32>
     }
     Some(checked)
 }
+
+/// BASE-COV-LIBS-LS4: **WHERE GIT CANNOT RUN, HISTORY IS SKIPPED, AND SAYS
+/// SO.** The test runs itself again in a child whose `PATH` names an empty
+/// folder, so no `git` can be found: `history_is_at` answers false for the
+/// repository root itself and prints why, the one skip it allows besides a
+/// tree with no `.git`.
+#[test]
+fn where_git_cannot_run_the_history_is_skipped_by_name() {
+    const CHILD: &str = "BRUTEX_FINDINGS_NO_GIT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(!history_is_at(&repository_root()));
+        return;
+    }
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("findings-no-git-{}", std::process::id()));
+    let _stale = std::fs::remove_dir_all(&empty);
+    std::fs::create_dir_all(&empty).expect("an empty folder for PATH");
+    let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+        .args([
+            "--exact",
+            "where_git_cannot_run_the_history_is_skipped_by_name",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .env("PATH", &empty)
+        .output()
+        .expect("the child test process starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the child failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child ran no test:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("SKIPPING: `git` cannot be run here"),
+        "the skip is said, not silent:\n{stdout}"
+    );
+    std::fs::remove_dir_all(&empty).expect("the empty folder is removed");
+}
