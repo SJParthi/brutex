@@ -190,3 +190,39 @@ fn a_begin_attempt_that_left_no_line_and_no_refusal_is_said_not_written() {
         "{refused:?}"
     );
 }
+
+/// A HOST THAT STARTS NO WORKER refuses the pool in its own words, and no job
+/// runs.
+#[test]
+fn a_pool_the_host_starts_no_worker_for_is_refused_in_its_words() {
+    inject::refuse_spawn(0);
+    let gate = BeginGate::new(None, 2);
+    let ran = AtomicUsize::new(0);
+    let jobs = [1, 2, 3];
+    let refused = on_workers(
+        2,
+        &jobs,
+        &gate,
+        &mut || Ok(1),
+        &|job: &i32| {
+            ran.fetch_add(1, Ordering::Relaxed);
+            *job
+        },
+        None,
+    )
+    .expect_err("no worker started");
+    assert_eq!(refused, "invented: the host refused worker 0 a thread");
+    assert_eq!(ran.load(Ordering::Relaxed), 0);
+}
+
+/// A HOST THAT STARTS FEWER WORKERS THAN ASKED: the pool runs every job on
+/// the ones it started, in the jobs' order.
+#[test]
+fn a_pool_with_fewer_workers_than_asked_runs_every_job() {
+    inject::refuse_spawn(1);
+    let gate = BeginGate::new(None, 2);
+    let jobs = [1, 2, 3, 4];
+    let done = on_workers(2, &jobs, &gate, &mut || Ok(1), &|job: &i32| job * 10, None)
+        .expect("one worker ran them all");
+    assert_eq!(done, vec![10, 20, 30, 40]);
+}

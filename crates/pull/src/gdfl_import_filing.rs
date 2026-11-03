@@ -301,23 +301,32 @@ pub(super) fn on_workers<J: Sync, T: Send>(
         let mut handles = Vec::with_capacity(want);
         let mut refused = None;
         for at in 0..want {
-            let spawned = std::thread::Builder::new()
-                .name(format!("gdfl-file-{at}"))
-                .spawn_scoped(scope, || {
-                    let _finishing = Finishing(gate);
-                    let mut done = Vec::new();
-                    loop {
-                        if stop.is_some_and(crate::gdfl_run::stop::StopControl::requested) {
-                            break;
+            // THE HOST'S REFUSAL OF ONE WORKER (D-7336): a test plants it
+            // through `inject`, so the arm a host that will not start a thread
+            // reaches is driven by that refusal, not by exhausting the host.
+            let refused_here: Option<std::io::Error> = None;
+            #[cfg(test)]
+            let refused_here = refused_here.or_else(|| inject::spawn_refused(at));
+            let spawned = match refused_here {
+                Some(why) => Err(why),
+                None => std::thread::Builder::new()
+                    .name(format!("gdfl-file-{at}"))
+                    .spawn_scoped(scope, || {
+                        let _finishing = Finishing(gate);
+                        let mut done = Vec::new();
+                        loop {
+                            if stop.is_some_and(crate::gdfl_run::stop::StopControl::requested) {
+                                break;
+                            }
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(one) = jobs.get(index) else {
+                                break;
+                            };
+                            done.push((index, job(one)));
                         }
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(one) = jobs.get(index) else {
-                            break;
-                        };
-                        done.push((index, job(one)));
-                    }
-                    done
-                });
+                        done
+                    }),
+            };
             match spawned {
                 Ok(handle) => handles.push(handle),
                 Err(why) => {
@@ -1561,6 +1570,31 @@ pub(super) mod inject {
     use std::sync::Mutex;
 
     use crate::ingest::{FailKind, Failure, Ingested};
+
+    std::thread_local! {
+        /// The workers whose start the host refuses, by index, on this
+        /// thread's next pools (D-7336).
+        static REFUSED_SPAWNS: std::cell::RefCell<Vec<usize>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Plants the host's refusal of worker `at`'s start, once, on this
+    /// thread.
+    pub(in crate::gdfl_import) fn refuse_spawn(at: usize) {
+        REFUSED_SPAWNS.with_borrow_mut(|held| held.push(at));
+    }
+
+    /// The planted refusal of worker `at`'s start, taken once.
+    pub(super) fn spawn_refused(at: usize) -> Option<std::io::Error> {
+        REFUSED_SPAWNS.with_borrow_mut(|held| {
+            let found = held.iter().position(|&one| one == at)?;
+            let _taken = held.remove(found);
+            Some(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("invented: the host refused worker {at} a thread"),
+            ))
+        })
+    }
 
     /// One planted answer: the store root, the file name, the kind, and
     /// whether the root is renamed to `<root>.gone` before it is answered
