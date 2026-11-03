@@ -1366,3 +1366,9 @@ fn paisa_of(text: &str) -> Option<i64> {
     // where the JSON decoders snap it; that difference is deliberate (D-1494).
     crate::csv::paisa(text)
 }
+
+// BASE-COV-PULL-PS2 (3 Nov 2026): the arms Route B found unreached on START,
+// each driven by input or a direct call and asserted.
+#[cfg(test)]
+#[path = "fno_ps2_tests.rs"]
+mod ps2_tests;
