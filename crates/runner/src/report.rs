@@ -1144,21 +1144,20 @@ mod tests {
         // condition was measured and lost, which is the distinction D-0080 is
         // about.
         assert!(
-            text.contains("never true on any loaded bar")
-                || text.contains("partitions nothing")
-                || text.contains("retired, void, or outside the table"),
+            text.contains("never true on any loaded bar"),
             "the reason is stated in words: {text}"
         );
 
         // A SUPPORT THAT WAS NEVER TAKEN SAYS SO rather than printing 0. §3
         // rule 6 forbids naming a measurement that was not made, and 0 is a
-        // real measurement.
-        if out.sweep.excluded.iter().any(|e| e.support.is_none()) {
-            assert!(
-                text.contains("not measured"),
-                "an unmeasured support must not render as a number: {text}"
-            );
-        }
+        // real measurement. A generated column measures every position it
+        // excludes, so none says it here; the unmeasured row is
+        // `cover_tests::an_unmeasured_exclusion_says_not_measured_and_names_its_reason`.
+        assert!(
+            out.sweep.excluded.iter().all(|e| e.support.is_some()),
+            "a generated column measures what it excludes"
+        );
+        assert!(!text.contains("not measured"), "{text}");
     }
 
     /// A MASK RENDERS ONE NAME PER SET BIT, INCLUDING BITS THE TABLE CANNOT NAME.
