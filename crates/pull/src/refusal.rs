@@ -649,3 +649,8 @@ pub fn disposition_of_value(
         None => (contract.read)(code),
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): a contract's equality and hash, and a code read under its name.
+#[cfg(test)]
+#[path = "refusal_ps1_tests.rs"]
+mod ps1_tests;

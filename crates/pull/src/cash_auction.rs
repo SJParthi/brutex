@@ -1418,6 +1418,33 @@ mod tests {
         DailyEligibility::parse(&text).unwrap()
     }
 
+    /// **THE AUDIT'S OWN READER READS A MASTER OF THE REAL WIDTH**
+    /// (BASE-COV-PULL-PS1, D-7335): an invented gzip master of 120 columns
+    /// (the five read and 115 invented names) is read whole within the
+    /// reader's byte bounds, its header width checked and its one row parsed,
+    /// so the operator's real-data run (L-BCP-3) can fail only on the
+    /// evidence, never on its reader. Every name and value is invented.
+    #[test]
+    fn the_audit_reader_reads_an_invented_master_of_the_real_width() {
+        use std::io::Write as _;
+
+        let mut names: Vec<String> = HEADER.split(',').map(str::to_owned).collect();
+        names.extend((names.len()..120).map(|n| format!("ZqInvented{n}")));
+        let text = format!(
+            "{}\n7,ZQAUC,EQ,ZQ0000000001,1{}\n",
+            names.join(","),
+            ",".repeat(115)
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(text.as_bytes()).unwrap();
+        let root = crate::gdfl_fixtures::scratch("ps1.cash-auction-reader");
+        let path = root.join("INVENTED_master.csv.gz");
+        std::fs::write(&path, gz.finish().unwrap()).unwrap();
+        let master = read_actual_master(&path);
+        assert_eq!(master.eligibility("ZQAUC", "ZQ0000000001"), Ok(true));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Read-only local evidence audit, independent of the calendar's measured
     /// horizon. A mismatch is reported, never replaced by an alias or ISIN join.
     /// Run explicitly with `BRUTEX_NSE_CASH_SAMPLE_DIR` naming the supplied root.
@@ -1490,3 +1517,8 @@ mod tests {
         );
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): an identity word holding a control character that is not whitespace.
+#[cfg(test)]
+#[path = "cash_auction_ps1_tests.rs"]
+mod ps1_tests;

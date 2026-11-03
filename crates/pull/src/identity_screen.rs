@@ -809,3 +809,8 @@ fn month_days(store_root: &Path, parts: PathParts<'_>, symbol_id: u32) -> Result
         .map(|i| file.read_record(i).map_err(|why| why.to_string()))
         .collect()
 }
+
+// BASE-COV-PULL-PS1 (D-7335): a stored minute between the suspect and the clean, and a first day unread.
+#[cfg(test)]
+#[path = "identity_screen_ps1_tests.rs"]
+mod ps1_tests;

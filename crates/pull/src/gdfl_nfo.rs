@@ -2032,3 +2032,8 @@ mod cloud_mutant_tests {
         assert_eq!(got, Some(Day::new(2018, 3, 28).unwrap()));
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): a year zip the host will not open, a row past its fields, and a column set said once.
+#[cfg(test)]
+#[path = "gdfl_nfo_ps1_tests.rs"]
+mod ps1_tests;
