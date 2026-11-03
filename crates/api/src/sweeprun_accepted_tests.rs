@@ -328,10 +328,12 @@ where
 
 /// **EACH PRESS DOOR ANSWERS THROUGH THE DETAIL POOL, AND A FULL POOL IS
 /// SAID** (BASE-COV-API, D-7346). The three handlers the router mounts, not
-/// the `_with` halves every other test calls: in a test build, which carries
-/// no commit stamp, each refuses in the stamp's own words before the slot;
-/// with every slot of the detail pool taken, each says the admission is
-/// unavailable and dispatches nothing. Neither leaves a press in the slot.
+/// the `_with` halves every other test calls: each answers what its half
+/// answers through the pool (a body it cannot read is a `400` that accepts
+/// nothing, whether or not this build carries a commit stamp: a test build
+/// from a clean tree does); with every slot of the detail pool taken, each
+/// says the admission is unavailable and dispatches nothing. Neither leaves a
+/// press in the slot.
 #[test]
 fn each_press_door_answers_through_its_pool_and_says_when_it_is_full() {
     in_a_child(
@@ -343,29 +345,28 @@ fn each_press_door_answers_through_its_pool_and_says_when_it_is_full() {
 /// The child half of the test above: alone in its process, so its crowd of
 /// the detail pool refuses no other test.
 async fn press_doors() {
-    assert!(
-        cli::commit_stamp().is_none(),
-        "the premise: a test build carries no commit stamp"
-    );
     let root = crate::scratch::path("sweep-doors");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch root");
     let site: Loaded = std::sync::Arc::new(crate::server::Site::load(&root.join("masters"), &root));
-    let doors = || {
+    let doors = |readable: bool| {
         let site = std::sync::Arc::clone(&site);
         async move {
             let state = || axum::extract::State(std::sync::Arc::clone(&site));
             let base = format!(r#""feed":"zerodha","underlying":"NIFTY",{SPAN}"#);
+            let body = |good: String| if readable { good } else { "{}".to_owned() };
             vec![
                 (
                     "run",
-                    super::run(state(), format!(r#"{{{base},"rungs":["5min"]}}"#)).await,
+                    super::run(state(), body(format!(r#"{{{base},"rungs":["5min"]}}"#))).await,
                 ),
                 (
                     "descend",
                     super::descend(
                         state(),
-                        format!(r#"{{{base},"rung":"15min","max_points":20,"top":25}}"#),
+                        body(format!(
+                            r#"{{{base},"rung":"15min","max_points":20,"top":25}}"#
+                        )),
                     )
                     .await,
                 ),
@@ -373,22 +374,21 @@ async fn press_doors() {
                     "command",
                     super::command(
                         state(),
-                        format!(
+                        body(format!(
                             r#"{{{base},"command":"audit-range","rung":"15min","min_hits":500}}"#
-                        ),
+                        )),
                     )
                     .await,
                 ),
             ]
         }
     };
-    for (door, (status, _, body)) in doors().await {
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{door}: {body}");
+    for (door, (status, _, body)) in doors(false).await {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{door}: {body}");
         assert!(body.contains(r#""accepted":false"#), "{door}: {body}");
-        assert!(body.contains("BRUTEX_COMMIT"), "{door}: {body}");
     }
     let crowd = crate::detail::crowd(crate::detail::Named::Detail);
-    let full = doors().await;
+    let full = doors(true).await;
     drop(crowd);
     for (door, (status, _, body)) in full {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{door}: {body}");
