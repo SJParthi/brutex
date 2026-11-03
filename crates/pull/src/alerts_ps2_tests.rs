@@ -119,7 +119,7 @@ fn spoil_header(scratch: &Scratch) {
 fn a_record_of_any_length_but_128_decodes_to_nothing() {
     let whole = raw(TYPE_ALERT, "k1", 0, 1).encode();
     assert!(Record::decode(&whole).is_some());
-    let mut long = whole.to_vec();
+    let mut long = whole.clone();
     long.push(0);
     assert_eq!(Record::decode(&long), None, "129 bytes");
     assert_eq!(Record::decode(&whole[..125]), None, "125 bytes");
