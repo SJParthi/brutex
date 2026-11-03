@@ -171,7 +171,7 @@ fn an_append_whose_lock_is_not_released_is_refused_by_name() {
     };
     let host = Host {
         release: &|_lock| Err(refusal()),
-        cut: &|file, len| file.set_len(len),
+        cut: &|_, _| unreachable!("a fresh sidecar has no torn tail to cut"),
     };
     assert_eq!(
         sidecar_why(append_with(&root, &key(), on, &one_print(), &host)),
