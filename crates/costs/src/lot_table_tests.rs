@@ -336,9 +336,45 @@ fn time_lookups(table: &LotTable, names: &[String], n: usize) -> (u128, u128, u1
         samples.push(started.elapsed().as_nanos());
         std::hint::black_box(answer.is_ok());
     }
+    picks(samples)
+}
+
+/// p50, p99 and max of `samples`, in their own unit.
+fn picks(mut samples: Vec<u128>) -> (u128, u128, u128) {
     samples.sort_unstable();
     let pick = |q: usize| samples[(samples.len() * q / 100).min(samples.len() - 1)];
     (pick(50), pick(99), *samples.last().unwrap())
+}
+
+/// BASE-COV-LIBS-LS4: the timing helpers the ignored run uses, checked where
+/// the gate runs: the picks on known samples, and a real timing of a small
+/// table, so the figures that run prints are the samples it names.
+#[test]
+fn the_lookup_timer_picks_the_named_samples_and_times_a_table() {
+    // 1. One hundred samples in reverse: index len*q/100, so p50 is the 51st
+    //    smallest and p99 the largest.
+    assert_eq!(picks((1..=100).rev().collect()), (51, 100, 100));
+    // 2. One sample is every pick.
+    assert_eq!(picks(vec![7]), (7, 7, 7));
+    // 3. Two samples: both picks are the larger one.
+    assert_eq!(picks(vec![9, 3]), (9, 9, 9));
+    // 4. COMBINED: both ends of the type, and ties.
+    assert_eq!(picks(vec![u128::MAX, 0, 0]), (0, u128::MAX, u128::MAX));
+    assert_eq!(picks(vec![4; 300]), (4, 4, 4));
+    // 5. A real timing of a two-row table, a found name and an absent one:
+    //    the three figures come out in order.
+    let table = LotTable::from_rows(vec![
+        sourced("SBIN", day(2018, 1, 1), 1_500),
+        sourced("SBIN", day(2025, 7, 1), 750),
+    ])
+    .unwrap();
+    let names = ["SBIN".to_owned(), "NOSUCH".to_owned()];
+    let (p50, p99, max) = time_lookups(&table, &names, 64);
+    assert!(p50 <= p99);
+    assert!(p99 <= max);
+    // 6. COMBINED: one lookup is one sample.
+    let (one, again, most) = time_lookups(&table, &names, 1);
+    assert_eq!((one, again), (most, most));
 }
 
 #[test]
