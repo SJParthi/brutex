@@ -1184,7 +1184,8 @@ fn a_migration_whose_rename_is_refused_leaves_its_staging() {
 /// Whether the zerodha single file still holds a census (not a stub).
 fn holds_census(root: &Path) -> bool {
     let single = manifest_path(root, Vendor::Zerodha);
-    single.is_file() && !holds_sealed_stub(&single)
+    assert!(single.is_file(), "{} is no file", single.display());
+    !holds_sealed_stub(&single)
 }
 
 /// A STAGED EPOCH THAT READS BACK OTHERWISE THAN IT WAS WRITTEN is refused

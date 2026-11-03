@@ -12,7 +12,6 @@
 //! fixture is invented.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::gdfl_run::stop::StopControl;
@@ -110,22 +109,18 @@ fn workers_asked_to_stop_take_no_job() {
     let stop = StopControl::new(root.join("stop"), 7);
     stop.ask("cli", 0);
     let gate = BeginGate::new(None, 2);
-    let ran = AtomicUsize::new(0);
     let jobs = [1, 2, 3];
+    // A JOB TAKEN WOULD PANIC, and the pool resumes a worker's panic here.
     let done = on_workers(
         2,
         &jobs,
         &gate,
         &mut || Ok(1),
-        &|job: &i32| {
-            ran.fetch_add(1, Ordering::Relaxed);
-            *job
-        },
+        &|_: &i32| -> i32 { unreachable!("a stopped worker takes no job") },
         Some(&stop),
     )
     .expect("no refusal");
     assert!(done.is_empty(), "{done:?}");
-    assert_eq!(ran.load(Ordering::Relaxed), 0);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -197,22 +192,17 @@ fn a_begin_attempt_that_left_no_line_and_no_refusal_is_said_not_written() {
 fn a_pool_the_host_starts_no_worker_for_is_refused_in_its_words() {
     inject::refuse_spawn(0);
     let gate = BeginGate::new(None, 2);
-    let ran = AtomicUsize::new(0);
     let jobs = [1, 2, 3];
     let refused = on_workers(
         2,
         &jobs,
         &gate,
         &mut || Ok(1),
-        &|job: &i32| {
-            ran.fetch_add(1, Ordering::Relaxed);
-            *job
-        },
+        &|_: &i32| -> i32 { unreachable!("no worker started, so no job runs") },
         None,
     )
     .expect_err("no worker started");
     assert_eq!(refused, "invented: the host refused worker 0 a thread");
-    assert_eq!(ran.load(Ordering::Relaxed), 0);
 }
 
 /// A HOST THAT STARTS FEWER WORKERS THAN ASKED: the pool runs every job on
@@ -307,4 +297,27 @@ fn the_first_fault_of_each_kind_is_the_one_the_day_keeps() {
         assert_eq!(filer.store_lost.as_deref(), Some("first: lost"));
         assert_eq!(filer.not_writable.as_deref(), Some("first: not writable"));
     });
+}
+
+/// THE TEST DOOR'S OWN UNTAKEN ANSWERS (`inject`, D-7336): a file with no
+/// planted swap or answer is left alone, and a swap planted for a root that is
+/// not there moves nothing and makes nothing.
+#[test]
+fn the_inject_door_leaves_an_unplanted_file_and_a_missing_root_alone() {
+    let root = scratch("INJECT-NONE");
+    inject::after_landed(&root, "none.zip");
+    assert!(root.is_dir(), "no swap planted: the root stays");
+    let file = crate::gdfl_import::TickFile {
+        symbol: "INVENTED".to_owned(),
+        contract: None,
+        name: "none.zip".to_owned(),
+        ticks: Vec::new(),
+    };
+    assert!(inject::answer(&root, &file).is_none(), "no answer planted");
+    let missing = root.join("not-there");
+    inject::plant_swap_after(&missing, "gone.zip");
+    inject::after_landed(&missing, "gone.zip");
+    assert!(!missing.exists(), "a missing root is not made");
+    assert!(!root.join("not-there.gone").exists(), "nor moved");
+    std::fs::remove_dir_all(&root).unwrap();
 }
