@@ -981,21 +981,19 @@ fn zstd_copy(original: &[u8]) -> Recompressed {
             chunk.data_page_offset = signed(
                 moved_data_at.expect("`data_page_offset` names a page boundary the walk crossed"),
             );
-            if chunk.dictionary_page_offset.is_some() {
-                chunk.dictionary_page_offset = Some(signed(chunk_start));
-            }
+            chunk.dictionary_page_offset =
+                chunk.dictionary_page_offset.map(|_| signed(chunk_start));
             chunk.total_compressed_size = signed(out.len() - chunk_start);
             column.offset_index_offset = None;
             column.offset_index_length = None;
             column.column_index_offset = None;
             column.column_index_length = None;
         }
-        if group.file_offset.is_some() {
-            group.file_offset = Some(signed(group_start));
-        }
-        if group.total_compressed_size.is_some() {
-            group.total_compressed_size = Some(signed(out.len() - group_start));
-        }
+        // Rewritten where the writer set them, left unset where it did not.
+        group.file_offset = group.file_offset.map(|_| signed(group_start));
+        group.total_compressed_size = group
+            .total_compressed_size
+            .map(|_| signed(out.len() - group_start));
     }
     Recompressed {
         bytes: close_with_footer(out, &meta),
@@ -1280,21 +1278,19 @@ fn edit_pages(original: &[u8], mut edit: impl FnMut(&mut PageHeader)) -> Vec<u8>
                 pos = body_at + body.len();
             }
             chunk.data_page_offset = signed(moved_data_at.expect("a data page was crossed"));
-            if chunk.dictionary_page_offset.is_some() {
-                chunk.dictionary_page_offset = Some(signed(chunk_start));
-            }
+            chunk.dictionary_page_offset =
+                chunk.dictionary_page_offset.map(|_| signed(chunk_start));
             chunk.total_compressed_size = signed(out.len() - chunk_start);
             column.offset_index_offset = None;
             column.offset_index_length = None;
             column.column_index_offset = None;
             column.column_index_length = None;
         }
-        if group.file_offset.is_some() {
-            group.file_offset = Some(signed(group_start));
-        }
-        if group.total_compressed_size.is_some() {
-            group.total_compressed_size = Some(signed(out.len() - group_start));
-        }
+        // Rewritten where the writer set them, left unset where it did not.
+        group.file_offset = group.file_offset.map(|_| signed(group_start));
+        group.total_compressed_size = group
+            .total_compressed_size
+            .map(|_| signed(out.len() - group_start));
     }
     close_with_footer(out, &meta)
 }

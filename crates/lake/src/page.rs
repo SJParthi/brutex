@@ -34,7 +34,7 @@
 //! abort rather than a refusal.
 
 use core::fmt;
-use std::io::{Cursor, Read, Seek};
+use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -386,20 +386,20 @@ fn encoding(e: parquet_format_safe::Encoding) -> PqResult<Encoding> {
 
 /// Parses the page header at the start of `rest`, answering it and its length
 /// in bytes.
+///
+/// The length is how far the parse advanced through `rest`: reading from a
+/// `&[u8]` moves the slice past what it read, so what is left is a suffix of
+/// `rest` and the difference is exact. This used to be a `Cursor` position, a
+/// `u64` turned back into a `usize` through a refusal no 64-bit target can
+/// reach. D-8564.
 fn read_header(rest: &[u8]) -> PqResult<(PageHeader, usize)> {
-    let mut cursor = Cursor::new(rest);
+    let mut unread = rest;
     let header = {
-        let mut proto = TCompactInputProtocol::new(&mut cursor, rest.len());
+        let mut proto = TCompactInputProtocol::new(&mut unread, rest.len());
         PageHeader::read_from_in_protocol(&mut proto)
             .map_err(|e| ParquetError::General(format!("page header refused: {e}")))?
     };
-    let consumed = cursor
-        .stream_position()
-        .map_err(|e| ParquetError::General(format!("cursor refused: {e}")))?;
-    let header_len = usize::try_from(consumed).map_err(|_| {
-        ParquetError::General("page header length does not fit in usize".to_owned())
-    })?;
-    Ok((header, header_len))
+    Ok((header, rest.len() - unread.len()))
 }
 
 /// The length, header and body, of the page at the start of `rest` if that
@@ -987,31 +987,13 @@ mod tests {
             plain.len()
         );
 
-        // RFC 8878 §3.1.1: the magic, then a frame header descriptor whose
-        // flags say how long the rest of the header is — a window descriptor
-        // unless the frame is single-segment, a dictionary id of 0/1/2/4
-        // bytes, and a content size of 0/1/2/4/8. The first block header is
-        // three little-endian bytes after that, bit 0 `Last_Block` and bits
-        // 1-2 `Block_Type`.
-        assert_eq!(frame[..4], [0x28, 0xB5, 0x2F, 0xFD], "a ZSTD frame");
-        let descriptor = frame[4];
-        let single_segment = descriptor & 0x20 != 0;
-        let content_size = match descriptor >> 6 {
-            0 => usize::from(single_segment),
-            1 => 2,
-            2 => 4,
-            _ => 8,
-        };
-        let dictionary_id = match descriptor & 0x03 {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            _ => 4,
-        };
-        let block = 5 + usize::from(!single_segment) + dictionary_id + content_size;
+        // RFC 8878 §3.1.1: the first block's `Block_Type`, read from the frame
+        // and block headers by the one walk the frozen fixtures use too
+        // (`v082::block_types`, which also refuses a frame its walk does not
+        // end exactly on, and is proved against every descriptor shape there).
         assert_eq!(
-            (frame[block] >> 1) & 0x03,
-            2,
+            v082::block_types(&frame).first(),
+            Some(&2),
             "the first block is Compressed, not Raw (0) or RLE (1)"
         );
 
@@ -1084,6 +1066,69 @@ mod tests {
             seen.iter().all(|n| *n > 0),
             "Raw, RLE and Compressed blocks each appear: {seen:?}"
         );
+    }
+
+    /// A frame of `descriptor` and the header bytes it implies, then `blocks`
+    /// (each a three-byte block header plus its payload), then four checksum
+    /// bytes when the descriptor's checksum flag is set. Every byte but the
+    /// flags is zero: [`v082::block_types`] reads lengths, never content.
+    fn crafted_frame(descriptor: u8, blocks: &[(u8, bool, usize)]) -> Vec<u8> {
+        let single_segment = descriptor & 0x20 != 0;
+        let window = usize::from(!single_segment);
+        let dictionary = [0, 1, 2, 4][usize::from(descriptor & 0x03)];
+        let content = [usize::from(single_segment), 2, 4, 8][usize::from(descriptor >> 6)];
+        let mut frame = v082::MAGIC.to_vec();
+        frame.push(descriptor);
+        frame.extend(std::iter::repeat_n(0_u8, window + dictionary + content));
+        for &(block_type, last, size) in blocks {
+            let header = usize::from(last) | usize::from(block_type) << 1 | size << 3;
+            frame.extend(&header.to_le_bytes()[..3]);
+            let payload = if block_type == 1 { 1 } else { size };
+            frame.extend(std::iter::repeat_n(0_u8, payload));
+        }
+        if descriptor & 0x04 != 0 {
+            frame.extend([0_u8; 4]);
+        }
+        frame
+    }
+
+    /// **THE FRAME WALK READS EVERY DESCRIPTOR SHAPE RFC 8878 ALLOWS.** The
+    /// frozen frames all declare a checksum and one content-size width, so
+    /// until this test the walk's other widths and its no-checksum path had
+    /// never run: content sizes of 0, 1, 2, 4 and 8 bytes, dictionary ids of
+    /// 0, 1, 2 and 4, a window byte or none, a checksum or none, and blocks of
+    /// every type, last and not. Combinations: every flag set at once, and an
+    /// RLE block whose declared size is far larger than the one byte it holds.
+    #[test]
+    fn the_frame_walk_reads_every_descriptor_shape() {
+        let last_raw = [(0_u8, true, 0_usize)];
+        for descriptor in [
+            0x00_u8, 0x04, 0x20, 0x40, 0x80, 0xC0, 0x01, 0x02, 0x03, 0xE7, 0x64,
+        ] {
+            assert_eq!(
+                v082::block_types(&crafted_frame(descriptor, &last_raw)),
+                [0],
+                "descriptor {descriptor:#04x}"
+            );
+        }
+        let mixed = [(1_u8, false, 4_096_usize), (2, false, 3), (0, true, 2)];
+        for descriptor in [0x00_u8, 0x04, 0xC4] {
+            assert_eq!(
+                v082::block_types(&crafted_frame(descriptor, &mixed)),
+                [1, 2, 0],
+                "descriptor {descriptor:#04x}"
+            );
+        }
+    }
+
+    /// **A FRAME THE WALK DOES NOT END EXACTLY ON IS REFUSED**, so a fixture
+    /// that is not one whole frame cannot pass as one: one trailing byte.
+    #[test]
+    #[should_panic(expected = "the walk ends at the frame's last byte")]
+    fn a_frame_with_a_byte_after_its_last_block_is_refused_by_the_walk() {
+        let mut frame = crafted_frame(0x00, &[(0, true, 0)]);
+        frame.push(0);
+        let _ = v082::block_types(&frame);
     }
 
     /// **A TORN PAGE IS REFUSED AT EVERY LENGTH.** Every proper prefix of every
@@ -1412,5 +1457,87 @@ mod tests {
         assert!(r.peek_next_page().is_err());
         assert!(r.skip_next_page().is_err());
         assert!(r.at_record_boundary().unwrap());
+    }
+
+    // BASE-COV-LIBS-LS3 (attempt 5). Extreme cases: a position exactly at the
+    // chunk's end, one byte past it and `usize::MAX`; a position past the end
+    // with values still owed and with none owed (the combination); a header
+    // with nothing after it, with its body after it and with trailing junk;
+    // an empty slice; and, out of the box, a header parsed out of the middle
+    // of a longer chunk.
+
+    /// **A POSITION PAST THE CHUNK IS REFUSED, NEVER READ AS AN EMPTY TAIL.**
+    ///
+    /// `pos` is only ever 0 or the end of a body that `get` has just proved
+    /// lies inside the chunk, so no chunk reaches this refusal; it is driven
+    /// by setting the position. At the chunk's last byte the reader is done;
+    /// one byte further, while values are still owed, it refuses by name.
+    #[test]
+    fn a_position_past_the_chunk_is_refused_and_one_at_its_end_is_done() {
+        let page = page_bytes(PageType::DATA_PAGE, 1, 2, b"ab");
+        let chunk = Bytes::from(page);
+        let len = chunk.len();
+
+        let mut at_end = LakePageReader::new(chunk.clone(), 1, Codec::Uncompressed);
+        at_end.pos = len;
+        assert!(
+            at_end.get_next_page().unwrap().is_none(),
+            "at the last byte: no more pages"
+        );
+
+        for past in [len + 1, len + 2, usize::MAX] {
+            let mut r = LakePageReader::new(chunk.clone(), 1, Codec::Uncompressed);
+            r.pos = past;
+            let err = r.get_next_page().unwrap_err().to_string();
+            assert!(
+                err.ends_with("page offset runs past the end of the column chunk"),
+                "{past}: {err}"
+            );
+        }
+
+        // Nothing owed: the walk is over, nothing is read and nothing is
+        // counted as stranded, wherever the position stands.
+        let mut done = LakePageReader::new(chunk, 0, Codec::Uncompressed);
+        done.pos = len + 1;
+        assert!(done.get_next_page().unwrap().is_none());
+        assert_eq!(done.stranded().load(Ordering::Relaxed), 0);
+    }
+
+    /// **A HEADER'S LENGTH IS EXACTLY THE BYTES ITS PARSE CONSUMED**: the body
+    /// and anything after it are not counted, and a slice that is not a header
+    /// is refused. D-8564.
+    #[test]
+    fn a_header_length_is_exactly_the_bytes_the_parse_consumed() {
+        let bare = page_bytes(PageType::DATA_PAGE, 1, 5, b"");
+        let (header, n) = read_header(&bare).unwrap();
+        assert_eq!(
+            n,
+            bare.len(),
+            "a header with nothing after it is all header"
+        );
+        assert_eq!(header.compressed_page_size, 5);
+
+        let whole = page_bytes(PageType::DATA_PAGE, 1, 5, b"vwxyz");
+        assert_eq!(
+            read_header(&whole).unwrap().1,
+            bare.len(),
+            "the body is not header"
+        );
+        let mut junk = whole.clone();
+        junk.extend_from_slice(&[0xff; 7]);
+        assert_eq!(
+            read_header(&junk).unwrap().1,
+            bare.len(),
+            "nor is what follows"
+        );
+
+        // Out of the box: the second of two pages, parsed where it starts.
+        let dict = page_bytes(PageType::DICTIONARY_PAGE, 0, 3, b"abc");
+        let both: Vec<u8> = [dict.as_slice(), &whole].concat();
+        let (second, m) = read_header(&both[dict.len()..]).unwrap();
+        assert_eq!((second.type_, m), (PageType::DATA_PAGE, bare.len()));
+
+        assert!(read_header(&[]).is_err(), "no bytes");
+        assert!(read_header(&[0xff, 0xff]).is_err(), "not a header");
     }
 }

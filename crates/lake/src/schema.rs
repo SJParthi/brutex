@@ -430,3 +430,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "schema_cover_tests.rs"]
+mod schema_cover_tests;

@@ -55,7 +55,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use lake::error::LakeError;
+use lake::error::{ColumnType, LakeError};
 use lake::reader::LakeFile;
 
 use parquet::basic::{Compression, Repetition, Type as PhysicalType};
@@ -349,7 +349,6 @@ fn a_column_chunk_short_of_its_row_count_is_refused_and_never_fills_the_tail_wit
 fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls() {
     const ROWS: usize = 2_480;
 
-    let mut fabricated: Vec<String> = Vec::new();
     for (layout, sound) in [
         ("multi-page, no dictionary", multi_page_cash_file(ROWS, 200)),
         ("single page, dictionary", dictionary_cash_file(ROWS)),
@@ -372,19 +371,22 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
                     );
                     println!("  {layout}, cut to 1/{divisor}: refused -- {e}");
                 }
+                // A chunk short of its bytes must be refused by name, not
+                // padded. (This arm used to collect into a list asserted empty
+                // at the end; it fails here, on the first accepted cut.)
                 Ok(batch) => {
                     let got: Vec<Option<i64>> = (0..batch.len())
                         .map(|i| batch.row(i).expect("row in range").open_interest())
                         .collect();
                     let real = got.iter().filter(|v| v.is_some()).count();
                     let first = got.iter().position(Option::is_none);
-                    fabricated.push(format!(
+                    panic!(
                         "{layout}, cut to 1/{divisor}: ACCEPTED, rows={}, real={real}, \
                          FABRICATED nulls={}, first at row {first:?} whose true value is {:?}",
                         batch.len(),
                         got.len() - real,
                         first.map(|i| OI_BASE + i64::try_from(i).expect("fits"))
-                    ));
+                    );
                 }
             }
         }
@@ -398,15 +400,18 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
     // COUNTED (P1-14-07): every iteration could `continue` -- a helper whose
     // page-header read stopped matching the writer's layout answers `None` for
     // every cut -- and the half below would be green having run nothing.
+    // BASE-COV-LIBS-LS3: a cut the helper cannot find, or one that is the
+    // whole chunk, now fails here by name rather than being skipped and
+    // caught only by the count below.
     let mut boundary_cases = 0_usize;
     let cuts = [1_i64, 2, 4, 8, 12];
     for pages in cuts {
-        let Some(len) = exact_page_prefix(&sound, OI, pages) else {
-            continue;
-        };
-        if len >= full {
-            continue;
-        }
+        let len = exact_page_prefix(&sound, OI, pages)
+            .unwrap_or_else(|| panic!("no {pages}-page prefix: the helper lost the layout"));
+        assert!(
+            len < full,
+            "{pages} page(s) are the whole {full}-byte chunk; the fixture must hold more"
+        );
         boundary_cases += 1;
         let cut = patch_footer(&sound, |meta| {
             meta.row_groups[0].columns[OI]
@@ -430,14 +435,14 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
                     .collect();
                 let real = got.iter().filter(|v| v.is_some()).count();
                 let first = got.iter().position(Option::is_none);
-                fabricated.push(format!(
+                panic!(
                     "cut to exactly {pages} page(s) ({len} of {full} bytes): ACCEPTED, \
                      rows={}, real={real}, FABRICATED nulls={}, first at row {first:?} \
                      whose true value is {:?}",
                     batch.len(),
                     got.len() - real,
                     first.map(|i| OI_BASE + i64::try_from(i).expect("fits"))
-                ));
+                );
             }
         }
     }
@@ -447,12 +452,9 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
         "every exact page-boundary cut must reach `read_row_group`; the fixture \
          holds more pages than the largest cut"
     );
-
-    assert!(
-        fabricated.is_empty(),
-        "a chunk short of its bytes must be refused by name, not padded:\n  {}",
-        fabricated.join("\n  ")
-    );
+    // The helper itself: asked for more pages than the chunk holds, it finds
+    // none rather than answering the whole chunk.
+    assert_eq!(exact_page_prefix(&sound, OI, 1_000), None);
 }
 
 /// The declared compressed length of one column chunk, out of the footer.
@@ -703,24 +705,17 @@ fn a_nested_column_is_refused_rather_than_silently_decoding_to_all_null() {
              the wrong reason sends an operator looking in the wrong place, which is the \
              whole of CLAUDE.md §4."
         ),
-        Ok(file) => match file.read_row_group(0) {
-            Err(e) => panic!(
-                "the shape must be refused at the SCHEMA gate, before a page is \
-                 decompressed; this file was opened and only refused at read time: {e:?}"
-            ),
-            Ok(batch) => {
-                let got: Vec<Option<i64>> = (0..batch.len())
-                    .map(|i| batch.row(i).expect("row in range").open_interest())
-                    .collect();
-                assert_eq!(
-                    got,
-                    vec![Some(7), Some(8), Some(9)],
-                    "ACCEPTED a definition-level-2 open_interest and decoded every row to \
-                     None while the file holds 7, 8, 9. Every one of those nulls is \
-                     i64::MIN downstream — the vendor-reported-none sentinel, invented."
-                );
-            }
-        },
+        // Opening it at all is the defect, whatever a read would then do: the
+        // shape is refused at the SCHEMA gate, before a page is decompressed.
+        // A read used to decode every row to None while the file holds 7, 8,
+        // 9 — each of them i64::MIN downstream, the vendor-reported-none
+        // sentinel, invented. (Until BASE-COV-LIBS-LS3 this arm also accepted
+        // a read that decoded 7, 8, 9; the reader refuses the shape, so that
+        // was an outcome no reader of this crate can produce.)
+        Ok(file) => panic!(
+            "ACCEPTED a definition-level-2 open_interest: the file opened as {file:?}; the \
+             shape must be refused at the SCHEMA gate, before a page is decompressed"
+        ),
     }
 }
 
@@ -1005,6 +1000,314 @@ fn sample_dirs(root: &std::path::Path, want: usize) -> Vec<std::path::PathBuf> {
     all.into_iter().step_by(stride).take(want).collect()
 }
 
+// ---------------------------------------------------------------------------
+// BASE-COV-LIBS-LS3 (attempt 5): THE SCAN ITSELF, ON FILES MADE TO CARRY EACH
+// DEFECT.
+//
+// The real-lake test below proves something only if the scan can see what it
+// asserts is absent: a scan that never noticed a short chunk would pass the
+// real lake vacuously. So every detector is shown firing on a file built to
+// trip it, and quiet on a sound one, on every machine; the real lake adds its
+// own files on a machine that has it. Extreme cases: a REQUIRED leaf, a
+// REPEATED leaf, 3, 7 and 17 leaves, version-2 data pages, a declared count
+// of zero, a chunk cut to one page, a negative offset, a negative length, a
+// chunk past the end of the file, a page header of garbage, a page whose body
+// length is negative, a directory and a file of junk where a lake file
+// should be; a stride sample of nothing, of zero, of more than there is.
+// Combinations: both defect-1 lies in one chunk at once, and a declared short
+// count beside a nested leaf in one file. Out of the box: the tree the scan
+// walks holds a year that is a file and a contract with no `1minute`.
+// ---------------------------------------------------------------------------
+
+/// A file of `leaves` INT64 leaves `c0..`, three rows each, every leaf
+/// OPTIONAL but the last, which is `last`; `v2` writes version-2 data pages.
+fn int64_leaves_file(leaves: usize, last: Repetition, v2: bool) -> Vec<u8> {
+    let mut kinds = vec![Repetition::OPTIONAL; leaves];
+    kinds[leaves - 1] = last;
+    let fields: Vec<Arc<Type>> = kinds
+        .iter()
+        .enumerate()
+        .map(|(i, kind)| {
+            Arc::new(
+                Type::primitive_type_builder(&format!("c{i}"), PhysicalType::INT64)
+                    .with_repetition(*kind)
+                    .build()
+                    .expect("leaf"),
+            )
+        })
+        .collect();
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let version = [
+        parquet::file::properties::WriterVersion::PARQUET_1_0,
+        parquet::file::properties::WriterVersion::PARQUET_2_0,
+    ][usize::from(v2)];
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_writer_version(version)
+            .build(),
+    );
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        for kind in &kinds {
+            let mut column = group.next_column().expect("column").expect("one per leaf");
+            let ColumnWriter::Int64ColumnWriter(typed) = column.untyped() else {
+                panic!("every leaf is INT64");
+            };
+            let (defs, reps): (Option<&[i16]>, Option<&[i16]>) = match kind {
+                Repetition::REQUIRED => (None, None),
+                Repetition::REPEATED => (Some(&[1, 1, 1]), Some(&[0, 0, 0])),
+                Repetition::OPTIONAL => (Some(&[1, 1, 1]), None),
+            };
+            typed.write_batch(&[1_i64, 2, 3], defs, reps).expect("i64");
+            column.close().expect("close column");
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// An edit of one column chunk's footer metadata.
+type ChunkEdit<'a> = &'a dyn Fn(&mut parquet_format_safe::ColumnMetaData);
+
+/// The four defect lists of a scan, by length:
+/// `[declared_short, pages_short, nested, unreadable]`.
+fn defects(s: &Scan) -> [usize; 4] {
+    [
+        s.declared_short.len(),
+        s.pages_short.len(),
+        s.nested.len(),
+        s.unreadable.len(),
+    ]
+}
+
+#[test]
+fn the_real_lake_scan_finds_each_defect_in_a_file_made_to_carry_it() {
+    let dir = std::env::temp_dir().join(format!("brutex-lake-scan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let scan = |name: &str, bytes: &[u8]| {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write the fixture");
+        let mut s = Scan::default();
+        scan_file(&path, "2020", &mut s);
+        s
+    };
+
+    // Sound files: counted by width, every defect list empty.
+    let sound = multi_page_cash_file(40, 10);
+    let s = scan("cash.parquet", &sound);
+    assert_eq!(
+        (s.files, s.cash, s.fno, s.row_groups, s.rows),
+        (1, 1, 0, 1, 40)
+    );
+    assert_eq!(defects(&s), [0; 4]);
+    assert_eq!(s.years.iter().collect::<Vec<_>>(), ["2020"]);
+    let s = scan(
+        "wide.parquet",
+        &int64_leaves_file(17, Repetition::OPTIONAL, false),
+    );
+    assert_eq!((s.files, s.cash, s.fno, s.rows), (1, 0, 1, 3));
+    assert_eq!(defects(&s), [0; 4]);
+    let s = scan(
+        "three.parquet",
+        &int64_leaves_file(3, Repetition::OPTIONAL, false),
+    );
+    assert_eq!((s.files, s.cash, s.fno), (1, 0, 0), "neither width");
+    let s = scan(
+        "v2.parquet",
+        &int64_leaves_file(7, Repetition::OPTIONAL, true),
+    );
+    assert_eq!(
+        (s.cash, defects(&s)),
+        (1, [0; 4]),
+        "version-2 pages are counted"
+    );
+
+    // Defect 3: a leaf that is not flat, by either level.
+    let s = scan(
+        "required.parquet",
+        &int64_leaves_file(7, Repetition::REQUIRED, false),
+    );
+    assert_eq!(defects(&s), [0, 0, 1, 0]);
+    assert!(s.nested[0].ends_with("leaf `c6` max_def_level=0 max_rep_level=0"));
+    let s = scan(
+        "repeated.parquet",
+        &int64_leaves_file(7, Repetition::REPEATED, false),
+    );
+    assert_eq!(defects(&s), [0, 0, 1, 0]);
+    assert!(s.nested[0].ends_with("leaf `c6` max_def_level=1 max_rep_level=1"));
+
+    // Defect 1, declared and delivered, each alone and both in one chunk.
+    let oi = |bytes: &[u8], edit: &dyn Fn(&mut parquet_format_safe::ColumnMetaData)| {
+        patch_footer(bytes, |meta| {
+            edit(
+                meta.row_groups[0].columns[OI]
+                    .meta_data
+                    .as_mut()
+                    .expect("metadata"),
+            );
+        })
+    };
+    let s = scan("declared.parquet", &oi(&sound, &|m| m.num_values = 0));
+    assert_eq!(defects(&s), [1, 0, 0, 0]);
+    assert!(
+        s.declared_short[0].ends_with("`open_interest`: declared num_values=0 against num_rows=40")
+    );
+    let one_page = exact_page_prefix(&sound, OI, 1).expect("a first page");
+    let s = scan(
+        "pages.parquet",
+        &oi(&sound, &|m| m.total_compressed_size = one_page),
+    );
+    assert_eq!(defects(&s), [0, 1, 0, 0]);
+    assert!(s.pages_short[0].ends_with("page headers deliver 10 values against num_rows=40"));
+    let both = oi(&sound, &|m| {
+        m.num_values = 10;
+        m.total_compressed_size = one_page;
+    });
+    assert_eq!(defects(&scan("both.parquet", &both)), [1, 1, 0, 0]);
+
+    // A footer whose chunk cannot be walked: every way is named.
+    let walks: [(&str, ChunkEdit, &str); 4] = [
+        (
+            "offset",
+            &|m| m.data_page_offset = -1,
+            "offset -1 is not a position",
+        ),
+        (
+            "length",
+            &|m| m.total_compressed_size = -1,
+            "length -1 is not a length",
+        ),
+        (
+            "past",
+            &|m| m.total_compressed_size = 1 << 40,
+            "runs past the file end",
+        ),
+        ("garbage", &|m| m.data_page_offset = 0, "page header at 0:"),
+    ];
+    for (name, edit, said) in walks {
+        let s = scan(&format!("{name}.parquet"), &oi(&sound, edit));
+        assert_eq!(defects(&s)[3], 1, "{name}");
+        assert!(
+            s.unreadable[0].contains(said),
+            "{name}: {}",
+            s.unreadable[0]
+        );
+    }
+    // A page whose header parses and whose body length is negative.
+    let mut torn = sound.clone();
+    let mut start = 0_usize;
+    let _ = patch_footer(&sound, |meta| {
+        let chunk = meta.row_groups[0].columns[OI]
+            .meta_data
+            .as_ref()
+            .expect("metadata");
+        start = usize::try_from(chunk.data_page_offset).expect("a position");
+    });
+    let mut header: Vec<u8> = Vec::new();
+    parquet_format_safe::PageHeader {
+        type_: parquet_format_safe::PageType::DATA_PAGE,
+        uncompressed_page_size: 0,
+        compressed_page_size: -1,
+        crc: None,
+        data_page_header: Some(parquet_format_safe::DataPageHeader {
+            num_values: 10,
+            encoding: parquet_format_safe::Encoding(0),
+            definition_level_encoding: parquet_format_safe::Encoding(3),
+            repetition_level_encoding: parquet_format_safe::Encoding(3),
+            statistics: None,
+        }),
+        index_page_header: None,
+        dictionary_page_header: None,
+        data_page_header_v2: None,
+    }
+    .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut header))
+    .expect("a header serialises");
+    torn[start..start + header.len()].copy_from_slice(&header);
+    let s = scan("torn.parquet", &torn);
+    assert!(
+        s.unreadable[0].ends_with("page size -1 is not a length"),
+        "{}",
+        s.unreadable[0]
+    );
+
+    // Where a lake file should be: a directory, and bytes that are not one.
+    let mut s = Scan::default();
+    scan_file(&dir, "2020", &mut s);
+    assert_eq!((s.files, defects(&s)), (0, [0, 0, 0, 1]));
+    let s = scan("junk.parquet", b"PAR1 not a parquet footer PAR1");
+    assert_eq!((s.files, defects(&s)), (0, [0, 0, 0, 1]));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_real_lake_walk_finds_month_files_and_samples_by_stride() {
+    let root = std::env::temp_dir().join(format!("brutex-lake-walk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let fno = root.join("FNO");
+    for contract in ["a", "b", "c", "d"] {
+        for year in ["2019", "2020"] {
+            let at = fno.join(contract).join("1minute").join(year);
+            std::fs::create_dir_all(&at).expect("a year");
+            for month in ["01.parquet", "02.parquet"] {
+                std::fs::write(at.join(month), b"").expect("a month");
+            }
+        }
+    }
+    std::fs::create_dir_all(fno.join("e")).expect("a contract with no 1minute");
+    std::fs::create_dir_all(fno.join("f").join("1minute")).expect("1minute");
+    std::fs::write(fno.join("f").join("1minute").join("2021"), b"").expect("a year that is a file");
+
+    let mut found = Vec::new();
+    month_files(&fno.join("a"), &mut found);
+    let mut years: Vec<&str> = found.iter().map(|(_, y)| y.as_str()).collect();
+    years.sort_unstable();
+    assert_eq!(years, ["2019", "2019", "2020", "2020"]);
+    assert!(
+        found
+            .iter()
+            .all(|(p, _)| p.extension().is_some_and(|e| e == "parquet"))
+    );
+    for empty in ["e", "f", "missing"] {
+        let mut none = Vec::new();
+        month_files(&fno.join(empty), &mut none);
+        assert!(none.is_empty(), "{empty}");
+    }
+
+    assert_eq!(
+        sample_dirs(&fno, 2).len(),
+        2,
+        "six entries at a stride of three"
+    );
+    assert_eq!(
+        sample_dirs(&fno, 100).len(),
+        6,
+        "more wanted than there are: all of them"
+    );
+    assert_eq!(sample_dirs(&fno, 6).len(), 6);
+    assert!(sample_dirs(&fno, 0).is_empty(), "none wanted");
+    assert!(
+        sample_dirs(&fno.join("e"), 3).is_empty(),
+        "an empty directory"
+    );
+    assert!(
+        sample_dirs(&root.join("missing"), 3).is_empty(),
+        "no directory"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 #[ignore = "needs ~/.brutex/lake, which cannot be tracked: CI gate 1 forbids a .parquet in this repository. Run with `cargo test -p lake -- --ignored` on a machine that has the lake."]
 fn no_real_lake_file_triggers_either_defect() {
@@ -1136,30 +1439,42 @@ fn the_month_case_tolerance_is_normalisation_and_can_never_alias_two_contracts()
 
     // Measured, not assumed: the lake writes exactly one spelling. Across all
     // 116,086 NSE and 33,199 BSE F&O directories there is no non-canonical
-    // month token, so no REAL name is ever changed by this tolerance.
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
+    // month token, so no REAL name is ever changed by this tolerance. No HOME
+    // is no lake, and is skipped exactly as an absent lake is.
+    let real = std::env::var_os("HOME")
+        .map(|home| std::path::Path::new(&home).join(".brutex/lake/bars/NSE/FNO"));
+    println!("{}", month_spelling_census(real.as_deref()));
+}
+
+/// The month-spelling census over the contract directories under `root`
+/// (at most 20,000): every name must parse and render back byte for byte.
+/// Answers the line the test prints.
+///
+/// A SKIP, not a refusal, and the distinction is the whole point of the
+/// caller not being `#[ignore]`d. Everything the caller asserts before the
+/// census runs without the lake: that case folding stays injective across all
+/// twelve months, and that four spellings of one month round-trip to the
+/// canonical form. This census is an EXTRA -- it measures that no real
+/// directory name is affected -- so its absence must not fail a test that has
+/// already proved something.
+///
+/// A bulk edit turned this into a hard refusal along with the six genuinely
+/// vacuous tests in this crate, and CI caught it: the commit message said this
+/// test was deliberately excluded and the edit had included it anyway.
+///
+/// BASE-COV-LIBS-LS3: a function of its root, so the census and its skip are
+/// both driven on every machine by
+/// `the_month_spelling_census_round_trips_what_it_finds_and_skips_what_is_absent`.
+fn month_spelling_census(root: Option<&std::path::Path>) -> String {
+    use lake::contract::ContractName;
+
+    let Some(root) = root.filter(|r| r.exists()) else {
+        return "SKIPPING the month-spelling census: ~/.brutex/lake is absent.\n  \
+                Everything asserted above this point ran."
+            .to_owned();
     };
-
-    let root = std::path::Path::new(&home).join(".brutex/lake/bars/NSE/FNO");
-    // A SKIP, not a refusal, and the distinction is the whole point of this test not
-    // being `#[ignore]`d. Everything above this line asserts without the lake: that
-    // case folding stays injective across all twelve months, and that four spellings
-    // of one month round-trip to the canonical form. This census is an EXTRA -- it
-    // measures that no real directory name is affected -- so its absence must not
-    // fail a test that has already proved something.
-    //
-    // A bulk edit turned this into a hard refusal along with the six genuinely
-    // vacuous tests in this crate, and CI caught it: the commit message said this
-    // test was deliberately excluded and the edit had included it anyway.
-    if !root.exists() {
-        println!("SKIPPING the month-spelling census: ~/.brutex/lake is absent.");
-        println!("  Everything asserted above this point ran.");
-        return;
-    }
-
     let mut checked = 0_usize;
-    for entry in std::fs::read_dir(&root)
+    for entry in std::fs::read_dir(root)
         .expect("read the F&O directory")
         .flatten()
         .take(20_000)
@@ -1175,7 +1490,46 @@ fn the_month_case_tolerance_is_normalisation_and_can_never_alias_two_contracts()
         );
         checked += 1;
     }
-    println!("{checked} real contract directories round-tripped byte for byte");
+    format!("{checked} contract directories round-tripped byte for byte")
+}
+
+#[test]
+fn the_month_spelling_census_round_trips_what_it_finds_and_skips_what_is_absent() {
+    let root = std::env::temp_dir().join(format!("brutex-lake-census-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for name in [
+        "NSE-NIFTY-01Apr20-10000-CE",
+        "NSE-BANKNIFTY-24Apr24-FUT",
+        "NSE-NIFTY-02Jan19-1-PE",
+    ] {
+        std::fs::create_dir_all(root.join(name)).expect("a contract directory");
+    }
+    assert_eq!(
+        month_spelling_census(Some(&root)),
+        "3 contract directories round-tripped byte for byte"
+    );
+    let empty = root.join("NSE-NIFTY-01Apr20-10000-CE");
+    assert_eq!(
+        month_spelling_census(Some(&empty)),
+        "0 contract directories round-tripped byte for byte",
+        "an empty root holds nothing to refuse"
+    );
+    let missing = root.join("absent");
+    for absent in [None, Some(missing.as_path())] {
+        assert!(month_spelling_census(absent).starts_with("SKIPPING"));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The census is not vacuous: a name that parses but does not render back as
+/// itself fails it.
+#[test]
+#[should_panic(expected = "a real lake name must round-trip byte for byte")]
+fn the_month_spelling_census_fails_on_a_name_that_does_not_round_trip() {
+    let root = std::env::temp_dir().join(format!("brutex-lake-census-odd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("NSE-NIFTY-01APR20-10000-CE")).expect("a directory");
+    let _ = month_spelling_census(Some(&root));
 }
 
 /// **The leading-zero strike is a defect, not normalisation.**
@@ -1764,6 +2118,23 @@ fn an_integer_column_annotated_as_anything_but_a_signed_integer_is_refused_by_na
                 .is_ok(),
                 "{leaf} {converted} {logical:?} decodes as a signed integer"
             );
+        }
+    }
+    // BASE-COV-LIBS-LS3: a count written 32 bits wide under a SIGNED
+    // annotation, which the annotation check alone would pass, is refused by
+    // its physical type first, naming both widths.
+    for leaf in ["volume", "open_interest"] {
+        match LakeFile::from_bytes(cash_file_annotated(
+            leaf,
+            PhysicalType::INT32,
+            ConvertedType::INT_32,
+            Some(LogicalType::integer(32, true)),
+        )) {
+            Err(LakeError::ColumnTypeMismatch { name, want, got }) => assert_eq!(
+                (name, want, got),
+                (leaf, ColumnType::Int64, ColumnType::Int32)
+            ),
+            other => panic!("an INT32 {leaf}: {:?}", other.map(|f| f.num_rows())),
         }
     }
 }
