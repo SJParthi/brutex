@@ -1,4 +1,8 @@
 #![cfg(test)]
+#![allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a fixture step that fails must fail the test loudly"
+)]
 //! Generated fixture checks for program-aware resolved-coordinate authority.
 use super::*;
 use crate::exit_grid_policy::{
@@ -152,7 +156,8 @@ fn programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once() -
             &program,
             &bars,
             None,
-        )?;
+        )
+        .expect("a fixture step that must succeed");
         let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
         let validated = resolved.validate_expression_evaluation(&evaluated)?;
         for (ordinal, cell) in evaluated.grid().cells.iter().enumerate() {
@@ -194,7 +199,8 @@ fn same_referenced_bits_do_not_collapse_or_not_or_unknown_programs() -> Result<(
             &program,
             &bars,
             None,
-        )?;
+        )
+        .expect("a fixture step that must succeed");
         let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
         let validated = resolved.validate_expression_evaluation(&evaluated)?;
         assert_eq!(
@@ -221,7 +227,8 @@ fn same_referenced_bits_do_not_collapse_or_not_or_unknown_programs() -> Result<(
         &unknown,
         &bars,
         None,
-    )?;
+    )
+    .expect("a fixture step that must succeed");
     let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
     assert!(evaluated.summary().unknown > 0);
     assert_eq!(evaluated.summary().hits, 0);
@@ -288,7 +295,8 @@ fn source_terms_foreign_resolutions_and_incomplete_populations_refuse() -> Resul
         &program,
         &bars,
         None,
-    )?;
+    )
+    .expect("a fixture step that must succeed");
     assert!(
         short
             .evaluate_expression_with_attested(&attested, &run)

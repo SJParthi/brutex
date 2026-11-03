@@ -1,4 +1,8 @@
 #![cfg(test)]
+#![allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a fixture step that fails must fail the test loudly"
+)]
 //! Defensive internal corruption injection, not a constructible public input.
 use super::*;
 use crate::excursion::Side;
@@ -27,7 +31,8 @@ fn internally_corrupted_resolution_cannot_reach_ladders_or_training_attestation(
         ForcedStopV1::Disabled,
         1,
         1,
-    )?;
+    )
+    .expect("a fixture step that must succeed");
     let original = policy.resolve_research_attested(series)?;
     let mut evaluator = indicators::evaluator::Evaluator::with_calendar(
         indicators::evaluator::Widths::pinned()?,
