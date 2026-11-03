@@ -257,9 +257,18 @@ fn a_damaged_last_record_that_a_run_used_is_never_handed_out_again() {
 /// written, unborn (the seed cannot be raised past claims it cannot read)
 /// and born (their tail is read on every allocation since repair 3); claims
 /// that can be read and not written (read-only) refuse it by name with its
-/// id recorded, never handed out and never given later either.
+/// id recorded, never handed out and never given later either. Run where
+/// the permission bits bind (D-0995): as root a read-only claims file takes
+/// the line anyway, so the last refusal under test would never run.
 #[test]
 fn every_id_the_runs_ledger_gives_is_written_down_twice() {
+    crate::support::where_permission_binds(
+        "gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice",
+        every_id_the_runs_ledger_gives_is_written_down_twice_body,
+    );
+}
+
+fn every_id_the_runs_ledger_gives_is_written_down_twice_body() {
     let store = scratch("claims");
     let claims_path = store.join("audit/runs.claims");
     let import = allocate(&store, NOW).unwrap();
