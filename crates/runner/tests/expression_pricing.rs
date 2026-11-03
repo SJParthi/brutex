@@ -1,4 +1,8 @@
 //! Actual Boolean signals share the legacy fills, exit grid and exact replay.
+#![allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a fixture or a pricing call that fails must fail the test loudly"
+)]
 use costs::fill::Direction;
 use indicators::column::Column;
 use indicators::evaluator::{Calendar, Evaluator, Widths};
@@ -7,17 +11,17 @@ use runner::grid::{self, Levels};
 use runner::outcome::Horizon;
 use runner::trade::{self, SliceFacts};
 
-fn fixture() -> Result<(Vec<indicators::Candle>, Column), String> {
+fn fixture() -> (Vec<indicators::Candle>, Column) {
     let bars = runner::synthetic::sessions(8);
     let mut evaluator = Evaluator::with_calendar(
-        Widths::pinned().map_err(debug)?,
+        Widths::pinned().expect("pinned widths are valid"),
         indicators::vwap::Availability::Absent,
         indicators::pattern::Thresholds::CLASSICAL,
         Calendar::all_regular(),
     );
     let column = Column::build(&bars, &mut evaluator);
     assert!(!column.bits().is_empty());
-    Ok((bars, column))
+    (bars, column)
 }
 fn levels() -> Levels<'static> {
     Levels {
@@ -28,17 +32,14 @@ fn levels() -> Levels<'static> {
         stops_ppm: &[100],
     }
 }
-fn debug(why: impl std::fmt::Debug) -> String {
-    format!("{why:?}")
-}
 
 #[test]
 fn conjunctions_match_all_legacy_trade_and_grid_fields_for_both_sides() -> Result<(), String> {
-    let (bars, column) = fixture()?;
+    let (bars, column) = fixture();
     let facts = SliceFacts::of(&bars, &column);
     let horizon = Horizon::bars(3).ok_or("horizon")?;
     for source in ["0", "63", "369", "0 & 369"] {
-        let expression = Expression::parse(source).map_err(debug)?;
+        let expression = Expression::parse(source).expect("a valid fixture expression");
         let mask = expression.referenced();
         for (direction, side) in [
             (Direction::Long, runner::excursion::Side::Long),
@@ -52,7 +53,8 @@ fn conjunctions_match_all_legacy_trade_and_grid_fields_for_both_sides() -> Resul
                     horizon,
                     direction,
                     &facts
-                )?,
+                )
+                .expect("the expression walk prices"),
                 trade::walk_over(&bars, &column, &mask, horizon, direction, &facts)
             );
             let priced = grid::evaluate_expression_over(
@@ -63,7 +65,8 @@ fn conjunctions_match_all_legacy_trade_and_grid_fields_for_both_sides() -> Resul
                 side,
                 levels(),
                 &facts,
-            )?;
+            )
+            .expect("the expression grid prices");
             let legacy =
                 grid::evaluate_over(&bars, &column, &mask, horizon, side, levels(), &facts);
             assert_eq!(priced, legacy);
@@ -77,10 +80,10 @@ fn conjunctions_match_all_legacy_trade_and_grid_fields_for_both_sides() -> Resul
                         side,
                         &priced,
                         selected
-                    )?,
-                    grid::materialize_cell(
-                        &bars, &column, &mask, horizon, side, &legacy, selected
-                    )?
+                    )
+                    .expect("the expression cell replays"),
+                    grid::materialize_cell(&bars, &column, &mask, horizon, side, &legacy, selected)
+                        .expect("the legacy cell replays")
                 );
             }
         }
@@ -91,12 +94,12 @@ fn conjunctions_match_all_legacy_trade_and_grid_fields_for_both_sides() -> Resul
 #[test]
 fn mixed_operators_price_only_definite_signals_and_replay_exact_selected_cells()
 -> Result<(), String> {
-    let (bars, column) = fixture()?;
+    let (bars, column) = fixture();
     let facts = SliceFacts::of(&bars, &column);
     let horizon = Horizon::bars(3).ok_or("horizon")?;
     let mut priced_rows = 0;
     for source in ["0 | 369", "!0", "(0 | 369) & !63"] {
-        let expression = Expression::parse(source).map_err(debug)?;
+        let expression = Expression::parse(source).expect("a valid fixture expression");
         let expected = column
             .bits()
             .iter()
@@ -122,8 +125,12 @@ fn mixed_operators_price_only_definite_signals_and_replay_exact_selected_cells()
                 side,
                 levels(),
                 &facts,
-            )?;
-            assert_eq!(priced.signals, u64::try_from(expected).map_err(debug)?);
+            )
+            .expect("the expression grid prices");
+            assert_eq!(
+                priced.signals,
+                u64::try_from(expected).expect("a small count")
+            );
             if let Some(cell) = priced.best() {
                 let rows = grid::materialize_expression_cell(
                     &bars,
@@ -133,9 +140,13 @@ fn mixed_operators_price_only_definite_signals_and_replay_exact_selected_cells()
                     side,
                     &priced,
                     cell,
-                )?;
+                )
+                .expect("the best cell replays");
                 priced_rows += rows.len();
-                assert_eq!(u64::try_from(rows.len()).map_err(debug)?, cell.trades);
+                assert_eq!(
+                    u64::try_from(rows.len()).expect("a small count"),
+                    cell.trades
+                );
                 let mut changed = *cell;
                 changed.pessimistic = changed.pessimistic.checked_add(1).ok_or("fixture money")?;
                 assert!(
@@ -162,7 +173,7 @@ fn mixed_operators_price_only_definite_signals_and_replay_exact_selected_cells()
 
 #[test]
 fn unavailable_negation_and_contradiction_never_create_trades() -> Result<(), String> {
-    let (bars, column) = fixture()?;
+    let (bars, column) = fixture();
     let facts = SliceFacts::of(&bars, &column);
     let horizon = Horizon::bars(3).ok_or("horizon")?;
     assert!(
@@ -170,7 +181,7 @@ fn unavailable_negation_and_contradiction_never_create_trades() -> Result<(), St
         "absent VWAP evidence"
     );
     for source in ["!143", "143 | !143", "0 & !0"] {
-        let expression = Expression::parse(source).map_err(debug)?;
+        let expression = Expression::parse(source).expect("a valid fixture expression");
         for side in [
             runner::excursion::Side::Long,
             runner::excursion::Side::Short,
@@ -183,7 +194,8 @@ fn unavailable_negation_and_contradiction_never_create_trades() -> Result<(), St
                 side,
                 levels(),
                 &facts,
-            )?;
+            )
+            .expect("the expression grid prices");
             assert_eq!(priced.signals, 0);
             assert!(priced.cells.is_empty());
         }
