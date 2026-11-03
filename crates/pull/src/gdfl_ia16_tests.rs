@@ -1365,14 +1365,27 @@ impl Observer for SwapAfter {
     fn begun(&self, _kind: ImportKind, _run: u64) {}
     fn day_begun(&self, _kind: ImportKind, _day: Day, _at: (usize, usize)) {}
     fn day_passed(&self, _kind: ImportKind, day: Day, _report: &Report) {
-        if day == self.after {
-            let mut gone = self.store.as_os_str().to_owned();
-            gone.push(".gone");
-            std::fs::rename(&self.store, &gone).unwrap();
-            std::fs::create_dir(&self.store).unwrap();
-        }
+        // The swap ends the run, so `after` is the only day that passes.
+        assert_eq!(day, self.after, "only the planned day passes");
+        let mut gone = self.store.as_os_str().to_owned();
+        gone.push(".gone");
+        std::fs::rename(&self.store, &gone).unwrap();
+        std::fs::create_dir(&self.store).unwrap();
     }
     fn finished(&self, _kind: ImportKind, _end: Result<&Report, &ImportRefusal>) {}
+}
+
+/// The counter the store-lost tests trust to say "nothing was written" counts
+/// every file and folder of a tree, nested ones too, and a missing folder as
+/// empty. BASE-COV-PULL PS3.
+#[test]
+fn entries_under_counts_every_entry_of_a_tree() {
+    let root = scratch("ia16-entries-under");
+    std::fs::create_dir_all(root.join("a/b")).unwrap();
+    std::fs::write(root.join("a/b/c"), b"").unwrap();
+    std::fs::write(root.join("d"), b"").unwrap();
+    assert_eq!(entries_under(&root), 4, "a, a/b, a/b/c and d");
+    assert_eq!(entries_under(&root.join("missing")), 0);
 }
 
 /// Every entry under `dir`, recursively: what a writer left there.
@@ -2100,16 +2113,12 @@ fn an_option_file_with_rows_refused_one_by_one_is_admitted_not_failed_whole() {
                 }));
                 let jobs = [handed];
                 let _reads = filer.file_all(&jobs, &|_| None, &|slot| {
-                    slot.lock()
+                    let one = slot
+                        .lock()
                         .unwrap()
                         .take()
-                        .map(|one| (one, None))
-                        .ok_or_else(|| {
-                            Refused::at(
-                                Cause::open(Stage::File, "file_taken_twice"),
-                                failure("file", "taken twice".to_owned()),
-                            )
-                        })
+                        .expect("each file is taken once");
+                    Ok((one, None))
                 });
                 assert_eq!(day, d1());
                 (
@@ -2423,16 +2432,12 @@ fn drive_nifty(
                 month.map(|month| ("NIFTY".to_owned(), None, month))
             };
             let _reads = filer.file_all(&jobs, &key_of, &|slot| {
-                slot.lock()
+                let one = slot
+                    .lock()
                     .unwrap()
                     .take()
-                    .map(|one| (one, None))
-                    .ok_or_else(|| {
-                        Refused::at(
-                            Cause::open(Stage::File, "file_taken_twice"),
-                            failure("file", "taken twice".to_owned()),
-                        )
-                    })
+                    .expect("each file is taken once");
+                Ok((one, None))
             });
             (
                 DayRead {
@@ -2468,14 +2473,12 @@ fn a_full_held_back_set_ends_the_run_by_name() {
     .unwrap();
     let reader = BarFile::open_existing(&store, nifty, filing::symbol_id_of("NIFTY")).unwrap();
     let month = d1().year_month().unwrap();
-    let mut filled = false;
+    // Filled on every day the run reaches: the same keys and day each time,
+    // so a second fill changes nothing (the cap ends the run at the first).
     let ended = drive_nifty(&store, (d2(), d3()), &mut |filer| {
-        if !filled {
-            let mut set = filer.ctx.held_back.borrow_mut();
-            for n in 0..HELD_BACK_CAP {
-                set.insert((format!("FILLER{n}"), None, month), d1());
-            }
-            filled = true;
+        let mut set = filer.ctx.held_back.borrow_mut();
+        for n in 0..HELD_BACK_CAP {
+            set.insert((format!("FILLER{n}"), None, month), d1());
         }
     })
     .unwrap_err();

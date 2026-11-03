@@ -426,6 +426,50 @@ fn monthly_reference(ticker: &str, on: Day) -> Option<(String, String)> {
     None
 }
 
+/// The two oracles the sweeps judge the reader by refuse what is not their
+/// canonical form, so no answer is ever matched against a guess
+/// (BASE-COV-PULL PS3): `canonical_strike` refuses an empty, lettered or
+/// sixteen-digit whole part, a lettered or three-digit fraction and a
+/// fraction the writer would not spell; `monthly_reference` reads a month in
+/// its window and refuses one before the trade's month and one whose first
+/// day lies past the horizon.
+#[test]
+fn dpn_14_the_oracles_refuse_what_is_not_canonical() {
+    assert_eq!(canonical_strike("100.5"), Some(10_050));
+    assert_eq!(canonical_strike("195"), Some(19_500));
+    for refused in [
+        "",
+        ".5",
+        "1a",
+        "1234567890123456",
+        "100.a",
+        "100.123",
+        "100.50",
+    ] {
+        assert_eq!(canonical_strike(refused), None, "{refused:?}");
+    }
+    let ticker = "BANKNIFTY18DEC23500CE";
+    let (under, _) = monthly_reference(ticker, d(2018, 12, 3)).expect("inside the window");
+    assert_eq!(under, "BANKNIFTY");
+    assert_eq!(
+        monthly_reference(ticker, d(2019, 1, 2)),
+        None,
+        "a past month"
+    );
+    assert_eq!(
+        monthly_reference("BANKNIFTY26DEC23500CE", d(2018, 12, 3)),
+        None,
+        "a month past the horizon"
+    );
+    // `monthly_plausible`, the looser reading the fuzz sweep asks: a month
+    // in reach is plausible; no `CE`/`PE`, a strike that is not a number or a
+    // month already over is not.
+    assert!(monthly_plausible(ticker, d(2018, 12, 3)));
+    assert!(!monthly_plausible("BANKNIFTY18DEC23500", d(2018, 12, 3)));
+    assert!(!monthly_plausible("BANKNIFTY18DECZZZCE", d(2018, 12, 3)));
+    assert!(!monthly_plausible(ticker, d(2019, 1, 2)));
+}
+
 /// The cutover pinned on both sides, for a share (`ADANIENT`, `TV18BRDCST`),
 /// for the index weeklies and for an index name that reads both ways.
 #[test]
@@ -991,13 +1035,13 @@ fn random_ticker(rng: &mut Rng) -> String {
             _ => write!(out, "{dd}{m}{yy}{strike}").unwrap(),
         }
         out.push_str(if rng.below(2) == 0 { "CE" } else { "PE" });
+        // Every byte of this shape is ASCII (an F&O symbol, digits, a month,
+        // `CE`/`PE` and ALPHABET), so every index is a char boundary.
         for _ in 0..rng.below(3) {
             let at = usize::try_from(rng.below(out.len() as u64 + 1)).unwrap();
             let c =
                 char::from(ALPHABET[usize::try_from(rng.below(ALPHABET.len() as u64)).unwrap()]);
-            if out.is_char_boundary(at) {
-                out.insert(at, c);
-            }
+            out.insert(at, c);
         }
     } else {
         for _ in 0..len {
