@@ -1250,16 +1250,18 @@ impl Table {
         let mut held = BTreeMap::new();
         let mut leftovers = 0;
         for (name, path) in entries {
-            match name.to_str() {
-                Some(text) if text.starts_with('.') => leftovers += 1,
-                Some(text) => match stock_of(text) {
-                    Some(stock) => {
-                        held.insert(stock, path);
-                    }
-                    None => return Err(TableRefusal::Stray { path }),
-                },
-                None => return Err(TableRefusal::Stray { path }),
+            // Read lossily: a name that is not UTF-8 (which Linux allows and
+            // APFS does not) keeps its replacement character, which no symbol
+            // holds, so it is refused as a stray like any other.
+            let text = name.to_string_lossy();
+            if text.starts_with('.') {
+                leftovers += 1;
+                continue;
             }
+            let Some(stock) = stock_of(&text) else {
+                return Err(TableRefusal::Stray { path });
+            };
+            held.insert(stock, path);
         }
         let mut decoded = Vec::with_capacity(held.len());
         let mut total = 0_usize;
@@ -1737,7 +1739,6 @@ mod tests {
     use super::*;
     use pull::gdfl_cm::{HEADER_OPEN_INTEREST, ListedFile, day_folder_name};
     use pull::session::IST_OFFSET_SECS;
-    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
 
     // ── invented feeds ───────────────────────────────────────────────────────
@@ -2781,10 +2782,17 @@ mod tests {
             );
             fs::remove_file(dir.join(stray)).unwrap();
         }
-        let odd = std::ffi::OsStr::from_bytes(b"\xff.fcl");
-        fs::write(dir.join(odd), b"").unwrap();
-        assert!(matches!(Table::open(&out), Err(TableRefusal::Stray { .. })));
-        fs::remove_file(dir.join(odd)).unwrap();
+        // A name that is not UTF-8 is a stray too. Only Linux can hold one:
+        // APFS refuses it, so on macOS the case cannot be made and the path it
+        // takes is the stray path above.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let odd = std::ffi::OsStr::from_bytes(b"\xff.fcl");
+            fs::write(dir.join(odd), b"").unwrap();
+            assert!(matches!(Table::open(&out), Err(TableRefusal::Stray { .. })));
+            fs::remove_file(dir.join(odd)).unwrap();
+        }
         std::os::unix::fs::symlink(dir.join("TCS.fcl"), dir.join("INFY.fcl")).unwrap();
         assert!(matches!(
             Table::open(&out),

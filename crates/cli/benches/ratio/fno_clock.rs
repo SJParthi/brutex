@@ -16,10 +16,14 @@ use pull::calendar::Session;
 use super::ratio;
 
 /// Samples at each size.
-const SAMPLES: usize = 200;
+const SAMPLES: usize = 2_000;
 
-/// Steps in one sample: enough that a sample is tens of microseconds of work.
-const STEPS: usize = 1_000;
+/// Steps in one sample: a sample is tens of microseconds of work, short
+/// enough that a preemption lands in well under one sample in a hundred, so
+/// the p99 reads the step rather than the scheduler. Measured on the cloud
+/// host on 3 Nov 2026: 200 samples of 1,000 steps (about 200 µs each) read a
+/// 10x p99 of 3.6 times its p50 and a max of 2.3 µs a step.
+const STEPS: usize = 100;
 
 /// The p99 budget of one step, in picoseconds: PARTS section 11's 1 µs, an
 /// ESTIMATE until measured.
