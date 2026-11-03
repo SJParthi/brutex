@@ -1,4 +1,8 @@
 #![cfg(test)]
+#![allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a fixture step that fails must fail the test loudly"
+)]
 //! Generated fixtures, never market or admission evidence.
 use super::super::super::ExpressionExecutionRunV1;
 use super::*;
@@ -111,18 +115,19 @@ fn with_projection(
         )
         .map_err(display)?;
     let program = Expression::parse("30").map_err(|e| format!("{e:?}"))?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("a fixture step that must succeed");
     let validated = resolved.validate_expression_evaluation(&training)?;
     let anchor = validated.later_period_anchor();
-    let observed = resolved.evaluate_expression_oos(
-        &anchor,
-        series(&key, &later)?,
-        &later_column,
-        &run(&key, &later, &program, Direction::Long)?,
-    )?;
+    let observed = resolved
+        .evaluate_expression_oos(
+            &anchor,
+            series(&key, &later)?,
+            &later_column,
+            &run(&key, &later, &program, Direction::Long)?,
+        )
+        .expect("a fixture step that must succeed");
     let (requested, parts) = windows(&later)?;
     let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
     let bound = plan.bind(&observed, 100_000)?;
@@ -261,10 +266,9 @@ fn fixed_plan_rejects_training_overlap_missing_dates_empty_actual_folds_and_mapp
         )
         .map_err(display)?;
     let program = Expression::parse("30 | !30").map_err(|e| format!("{e:?}"))?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("a fixture step that must succeed");
     let anchor = resolved
         .validate_expression_evaluation(&training)?
         .later_period_anchor();
@@ -288,12 +292,14 @@ fn fixed_plan_rejects_training_overlap_missing_dates_empty_actual_folds_and_mapp
         FixedTrainingFoldPlanV1::new(&resolved, &anchor, training_overlap, &[training_overlap], 1)
             .is_err()
     );
-    let observed = resolved.evaluate_expression_oos(
-        &anchor,
-        series(&key, &later)?,
-        &later_column,
-        &run(&key, &later, &program, Direction::Long)?,
-    )?;
+    let observed = resolved
+        .evaluate_expression_oos(
+            &anchor,
+            series(&key, &later)?,
+            &later_column,
+            &run(&key, &later, &program, Direction::Long)?,
+        )
+        .expect("a fixture step that must succeed");
     let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
     assert_eq!(plan.requested(), requested);
     assert_eq!(plan.windows(), parts);
@@ -353,30 +359,35 @@ fn both_sides_reject_foreign_full_program_anchors_selections_and_ordinals() -> R
                 Horizon::bars(5).ok_or("horizon")?,
             )
             .map_err(display)?;
-        let training = resolved.evaluate_expression_with_attested(
-            &attested,
-            &run(&key, &bars, &program, direction)?,
-        )?;
+        let training = resolved
+            .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, direction)?)
+            .expect("a fixture step that must succeed");
         let validated = resolved.validate_expression_evaluation(&training)?;
         let anchor = validated.later_period_anchor();
-        let foreign_training = resolved.evaluate_expression_with_attested(
-            &attested,
-            &run(&key, &bars, &foreign_program, direction)?,
-        )?;
+        let foreign_training = resolved
+            .evaluate_expression_with_attested(
+                &attested,
+                &run(&key, &bars, &foreign_program, direction)?,
+            )
+            .expect("a fixture step that must succeed");
         let foreign_validated = resolved.validate_expression_evaluation(&foreign_training)?;
         let foreign_anchor = foreign_validated.later_period_anchor();
-        let observed = resolved.evaluate_expression_oos(
-            &anchor,
-            series(&key, &later)?,
-            &later_column,
-            &run(&key, &later, &program, direction)?,
-        )?;
-        let foreign_observed = resolved.evaluate_expression_oos(
-            &foreign_anchor,
-            series(&key, &later)?,
-            &later_column,
-            &run(&key, &later, &foreign_program, direction)?,
-        )?;
+        let observed = resolved
+            .evaluate_expression_oos(
+                &anchor,
+                series(&key, &later)?,
+                &later_column,
+                &run(&key, &later, &program, direction)?,
+            )
+            .expect("a fixture step that must succeed");
+        let foreign_observed = resolved
+            .evaluate_expression_oos(
+                &foreign_anchor,
+                series(&key, &later)?,
+                &later_column,
+                &run(&key, &later, &foreign_program, direction)?,
+            )
+            .expect("a fixture step that must succeed");
         let (requested, parts) = windows(&later)?;
         let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
         assert!(plan.bind(&foreign_observed, 100_000).is_err());
@@ -486,19 +497,20 @@ fn actual_window_bounds_and_cold_records_follow_sealed_acceptance_authority() ->
         )
         .map_err(display)?;
     let program = Expression::parse("30").map_err(|why| format!("{why:?}"))?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("a fixture step that must succeed");
     let anchor = resolved
         .validate_expression_evaluation(&training)?
         .later_period_anchor();
-    let observed = resolved.evaluate_expression_oos(
-        &anchor,
-        series(&key, &later)?,
-        &later_column,
-        &run(&key, &later, &program, Direction::Long)?,
-    )?;
+    let observed = resolved
+        .evaluate_expression_oos(
+            &anchor,
+            series(&key, &later)?,
+            &later_column,
+            &run(&key, &later, &program, Direction::Long)?,
+        )
+        .expect("a fixture step that must succeed");
     let (requested, parts) = windows(&later)?;
     let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
     let bound = plan.bind(&observed, 100_000)?;
@@ -604,18 +616,22 @@ fn one_fold_map_binds_every_program_exactly_as_bind_does() -> Result<(), String>
     let shared = super::super::LaterExpressionSliceV1::new(series(&key, &later)?, &later_column);
     for raw in ["30", "30 | !30"] {
         let program = Expression::parse(raw).map_err(|e| format!("{e:?}"))?;
-        let training = resolved.evaluate_expression_with_attested(
-            &attested,
-            &run(&key, &bars, &program, Direction::Long)?,
-        )?;
+        let training = resolved
+            .evaluate_expression_with_attested(
+                &attested,
+                &run(&key, &bars, &program, Direction::Long)?,
+            )
+            .expect("a fixture step that must succeed");
         let anchor = resolved
             .validate_expression_evaluation(&training)?
             .later_period_anchor();
-        let observed = resolved.evaluate_expression_oos_on(
-            &anchor,
-            &shared,
-            &run(&key, &later, &program, Direction::Long)?,
-        )?;
+        let observed = resolved
+            .evaluate_expression_oos_on(
+                &anchor,
+                &shared,
+                &run(&key, &later, &program, Direction::Long)?,
+            )
+            .expect("a fixture step that must succeed");
         let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
         let own = plan.bind(&observed, bytes)?;
         let reused = plan.bind_with(&observed, &map, bytes)?;
