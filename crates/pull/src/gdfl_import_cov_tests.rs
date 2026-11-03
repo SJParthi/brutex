@@ -1111,6 +1111,29 @@ fn a_lost_store_a_lost_source_and_an_unmeasured_disk_report_what_they_did() {
     );
 }
 
+/// **A STORE THAT TOOK NO WRITE ENDS THE RUN WITH WHAT IT DID** (BASE-COV-PULL-PS1,
+/// D-7335): `store_not_writable` carries its report through a seal and says
+/// the kind, the day, the days imported and the host's reason. Extremes at
+/// once: no day imported beside a reason that names the path, and the last
+/// kind.
+#[test]
+fn a_store_that_took_no_write_ends_the_run_with_what_it_did() {
+    let mut end = ImportRefusal::StoreNotWritable {
+        kind: ImportKind::Options,
+        day: day(2024, 3, 1),
+        why: "an invented store root refused the probe".to_owned(),
+        done: Box::new(Report::default()),
+    };
+    end.seal();
+    assert_eq!(end.code(), "store_not_writable");
+    assert_eq!(end.report().map(|done| done.days_imported), Some(0));
+    assert_eq!(
+        end.to_string(),
+        "the store took no write on options 2024-03-01 and the run ended after 0 day(s) \
+         imported: an invented store root refused the probe"
+    );
+}
+
 /// A day whose calendar windows land no bar and a refused auction sidecar are
 /// open causes: another calendar or another sidecar can change them, so
 /// neither closes a day (D-3319, D-3320).
