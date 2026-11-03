@@ -2887,13 +2887,46 @@ fn a_clock_stepped_back_gives_a_resume_its_own_id() {
 /// **EVERY `msum` RUN SAYS WHAT IT WAS GIVEN AND WHAT IT LEFT, ON `store.sum`.**
 /// One line at its start and one at its end, so the months lacking a summary
 /// are searched on `/logs` and no walk is needed to see them. A run that
-/// leaves work says so at WARN.
+/// leaves work says so at WARN. An `--all` plan holds months that have their
+/// `.sum`: the start line counts its items and, apart, those lacking one.
 #[test]
 fn a_run_says_on_store_sum_what_it_was_given_and_left() {
-    let given = super::msum_given(Vendor::Gdfl, 7, "7 of the 9 month file(s)");
+    fn field<'a>(event: &telemetry::Event<'a>, key: &str) -> Option<telemetry::Value<'a>> {
+        event
+            .fields()
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| *value)
+    }
+    let month = |at: YearMonth, lacks: upkeep::Lacks| {
+        let key = format!("bars/gdfl/NSE/INDEX/NIFTY/1s/{at}.bin");
+        (
+            key.clone(),
+            Item::Month(upkeep::Month {
+                exchange: "NSE".to_owned(),
+                segment: "INDEX".to_owned(),
+                symbol: "NIFTY".to_owned(),
+                contract: None,
+                rung: Timeframe::SECOND_1,
+                month: at,
+                key,
+                lacks,
+            }),
+        )
+    };
+    let plan = [
+        month(ym(2019, 1), upkeep::Lacks::of([Kind::MonthSummary])),
+        month(ym(2019, 2), upkeep::Lacks::of([Kind::SortIndex])),
+        month(ym(2019, 3), upkeep::Lacks::of(Kind::ALL)),
+    ];
+    let said = "3 of the 9 month file(s) in scope (--all: every one)";
+    let given = super::msum_given(Vendor::Gdfl, &plan, said);
     assert_eq!(given.target(), "store.sum");
     assert_eq!(given.level(), telemetry::Level::Info);
-    assert!(given.fields().iter().any(|(key, _)| *key == "lacking"));
+    assert_eq!(field(&given, "vendor"), Some(telemetry::Value::Str("gdfl")));
+    assert_eq!(field(&given, "items"), Some(telemetry::Value::Uint(3)));
+    assert_eq!(field(&given, "lacking"), Some(telemetry::Value::Uint(2)));
+    assert_eq!(field(&given, "scope"), Some(telemetry::Value::Str(said)));
     let whole = upkeep::Ran {
         id: 9,
         resumed: None,
@@ -2918,5 +2951,13 @@ fn a_run_says_on_store_sum_what_it_was_given_and_left() {
     let event = super::msum_left(Vendor::Zerodha, &left);
     assert_eq!(event.level(), telemetry::Level::Warn);
     assert_eq!(event.target(), "store.sum");
-    assert!(event.fields().iter().any(|(key, _)| *key == "left"));
+    assert_eq!(
+        field(&event, "vendor"),
+        Some(telemetry::Value::Str("zerodha"))
+    );
+    assert_eq!(field(&event, "run"), Some(telemetry::Value::Uint(9)));
+    assert_eq!(field(&event, "how"), Some(telemetry::Value::Str("stopped")));
+    for (key, n) in [("built", 1), ("clean", 1), ("left", 1)] {
+        assert_eq!(field(&event, key), Some(telemetry::Value::Uint(n)), "{key}");
+    }
 }

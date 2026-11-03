@@ -1035,7 +1035,7 @@ fn run(
     };
     let _ = writeln!(out, "{heading} under {}", root.display());
     if kind == Kind::MonthSummary {
-        let _dropped_when_filtered = telemetry::emit(&msum_given(vendor, plan.len(), &said));
+        let _dropped_when_filtered = telemetry::emit(&msum_given(vendor, &plan, &said));
     }
     let busy = || live_run(root, vendor);
     let ask = Ask {
@@ -1069,11 +1069,21 @@ fn run(
 }
 
 /// `store.sum`, INFO: what one `msum` run was given, before its first item.
-/// One line a run. `said` carries the months in scope and those that owe none.
-fn msum_given<'a>(vendor: Vendor, given: usize, said: &'a str) -> telemetry::Event<'a> {
+/// One line a run: the items of its plan, how many of them lack a `.sum`
+/// (every one, unless `--all` gave months that have one), and `said`, which
+/// carries the months in scope and those that owe none. One pass over the
+/// plan, once a run, never per item.
+fn msum_given<'a>(vendor: Vendor, plan: &[(String, Item)], said: &'a str) -> telemetry::Event<'a> {
+    let lacking = plan
+        .iter()
+        .filter(
+            |(_, item)| matches!(item, Item::Month(month) if month.lacks.has(Kind::MonthSummary)),
+        )
+        .count();
     telemetry::Event::info("store.sum", "months lacking a summary, at a run's start")
         .with("vendor", vendor.as_str())
-        .with("lacking", given)
+        .with("items", plan.len())
+        .with("lacking", lacking)
         .with("scope", said)
 }
 

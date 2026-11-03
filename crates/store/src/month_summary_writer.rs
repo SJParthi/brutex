@@ -55,8 +55,7 @@ use std::path::{Path, PathBuf};
 
 use super::sort_writer::Hold;
 use super::{
-    Action, BarFile, StoreError, classify, fault, lock_fault, open_read, refuse_link, sync_hooked,
-    write_fully,
+    Action, BarFile, StoreError, classify, fault, lock_fault, refuse_link, sync_hooked, write_fully,
 };
 use crate::flock::Flock;
 use crate::format::Bar;
@@ -299,11 +298,10 @@ impl BarFile {
             Err(Refused::BelowThreshold) => return Ok(Summarized::BelowThreshold),
             Err(why) => why.to_string(),
         };
-        let _one_door = Flock::try_lock(
-            open_read(&file.bars_path).map_err(|why| why.refusal(&file.bars_path))?,
-            file.bars_path.clone(),
-        )
-        .map_err(|refusal| lock_fault(&file.bars_path, refusal))?;
+        // ONE DOOR AT A TIME, locked on the handle the door already opened:
+        // no second open of the bar file, so no second way for it to fail.
+        let _one_door = Flock::try_lock(&file.bars, file.bars_path.as_path())
+            .map_err(|refusal| lock_fault(&file.bars_path, refusal))?;
         file.msum = Some(sidecar.clone());
         let summary = file.whole_summary()?;
         write_image(&sidecar, &summary.file_image(), Durable::Synced)?;

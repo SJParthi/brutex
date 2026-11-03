@@ -2150,6 +2150,29 @@ fn the_length_of_a_bar_file_says_when_no_summary_is_owed() {
     assert!(summary_owed_by_len(u64::MAX));
 }
 
+/// **THE LENGTH RULE HOLDS FOR EVERY BAR GEOMETRY THIS BUILD READS (D-7430).**
+/// `summary_owed_by_len` counts rows as the length past one header over one
+/// stride, which is true only while every bar layout shares both. A bar
+/// version with a shorter header or stride would make it count a big month
+/// short and call it small, so such a version fails here first.
+#[test]
+fn the_length_rule_holds_for_every_bar_layout() {
+    use store::layout::Layout;
+    let bars: Vec<Layout> = Layout::KNOWN
+        .iter()
+        .copied()
+        .filter(|layout| ![Layout::OVERLAY, Layout::GREEKS].contains(layout))
+        .collect();
+    assert!(bars.contains(&Layout::CURRENT), "{bars:?}");
+    for layout in bars {
+        assert_eq!(
+            (layout.header_len(), layout.record_stride()),
+            (store::format::HEADER_LEN, store::format::RECORD_STRIDE),
+            "{layout:?}"
+        );
+    }
+}
+
 /// A set without a kind keeps the rest and ignores a kind with no sidecar.
 #[test]
 fn a_set_of_lacks_without_a_kind_keeps_the_rest() {
