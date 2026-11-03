@@ -1820,3 +1820,47 @@ fn a_fold_whose_horizon_spans_the_rest_of_the_series_is_refused() {
         Err(AnchoredSearchValidationRefusalV4::DiscontiguousTraining { fold: 0 })
     );
 }
+
+/// THE LEGACY WALK REFUSES A RUNG COUNT ITS ENVIRONMENT CANNOT GIVE, before any
+/// fold: with `BRUTEX_GRID_RUNGS=0` the walk returns no fold and a refusal
+/// that names the variable. The process environment is set only for a child
+/// run of this same test binary (the variable is never written in this
+/// process, which would need `unsafe`); the child runs this test alone and
+/// asserts the refusal, and the parent asserts that the child passed.
+#[test]
+fn a_zero_rung_environment_refuses_the_legacy_walk_by_name() {
+    const CHILD: &str = "BRUTEX_LS2_ZERO_RUNG_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let refused = super::walk_forward_shaped(
+            &[],
+            super::tests::h(15),
+            3,
+            Direction::Long,
+            &super::tests::sweeper(),
+            &mut super::tests::evaluator,
+            super::Shape::Anchored,
+            super::TradesOnTheseBars::Yes,
+        );
+        assert!(refused.folds.is_empty());
+        assert!(
+            refused
+                .refused
+                .as_deref()
+                .is_some_and(|why| why.starts_with("BRUTEX_GRID_RUNGS is \"0\"")),
+            "{:?}",
+            refused.refused
+        );
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--exact",
+            "validate::cover_tests::a_zero_rung_environment_refuses_the_legacy_walk_by_name",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .env("BRUTEX_GRID_RUNGS", "0")
+        .status()
+        .expect("the test binary re-runs");
+    assert!(status.success(), "the child run refused as named: {status}");
+}
