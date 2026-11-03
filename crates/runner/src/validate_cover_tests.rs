@@ -1688,3 +1688,85 @@ fn a_torn_or_resealed_grid_pair_is_refused_by_name() {
     assert_eq!(pair(&with_wider_stops(&long), &short), stale, "long");
     assert_eq!(pair(&long, &with_wider_stops(&short)), stale, "short");
 }
+
+/// THE V4 WALK REFUSES BEFORE IT EVALUATES ANY GRID: a span it cannot split
+/// (zero splits), a fold whose search halted at its ceiling, and a fold whose
+/// training execution is empty, because the execution series starts after
+/// the first test window opens, is refused when its grid is re-resolved.
+#[test]
+fn the_v4_walk_refuses_no_fold_a_halted_search_and_an_empty_training_execution() {
+    let bars = crate::synthetic::sessions(16);
+    let column = built(&bars);
+    let nifty = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("an allowed index");
+    let execution_of = |bars| {
+        crate::exit_grid_policy::ExecutionSeriesV1::new(
+            &nifty,
+            "test-feed",
+            "test-commit",
+            [0xA5; 32],
+            bars,
+        )
+        .expect("complete identity")
+    };
+    let (long, short) = grid_pair_v4(&nifty, "test-feed", "test-commit", [0xA5; 32], &bars);
+    let complete = crate::Sweeper::new(engine::Ladder::with_min_hits(2_200).with_ceiling(20_000));
+    let mut builder = |slice: &[indicators::Candle]| Ok(built(slice));
+    assert_eq!(
+        super::walk_forward_projected_prepared_anchored_search_v4(
+            &bars,
+            &column,
+            execution_of(&bars),
+            60_000_000,
+            super::tests::h(15),
+            0,
+            &complete,
+            &mut builder,
+            &long,
+            &short,
+        )
+        .map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV4::Empty)
+    );
+    let halting = crate::Sweeper::new(engine::Ladder::with_min_hits(1).with_ceiling(1));
+    assert_eq!(
+        super::walk_forward_projected_prepared_anchored_search_v4(
+            &bars,
+            &column,
+            execution_of(&bars),
+            60_000_000,
+            super::tests::h(15),
+            1,
+            &halting,
+            &mut builder,
+            &long,
+            &short,
+        )
+        .map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV4::IncompleteSearch { fold: 0 })
+    );
+    let late = &bars[bars.len() - 2 * crate::synthetic::BARS_PER_SESSION..];
+    let (late_long, late_short) =
+        grid_pair_v4(&nifty, "test-feed", "test-commit", [0xA5; 32], late);
+    assert_eq!(
+        super::walk_forward_projected_prepared_anchored_search_v4(
+            &bars,
+            &column,
+            execution_of(late),
+            60_000_000,
+            super::tests::h(15),
+            1,
+            &complete,
+            &mut builder,
+            &late_long,
+            &late_short,
+        )
+        .map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV4::ExitGrid(
+            ExitGridErrorV1::EmptyExecutionSeries
+        ))
+    );
+}
