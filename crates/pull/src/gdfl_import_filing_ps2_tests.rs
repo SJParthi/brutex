@@ -336,3 +336,62 @@ fn the_inject_door_leaves_an_unplanted_file_and_a_missing_root_alone() {
     assert!(!root.join("not-there.gone").exists(), "nor moved");
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// PS2 (the (U) audit: a direct call is an input): A BACK-FILL PASS HANDED NO
+/// `begin` LINE refuses each file it would file at its `begin`, in the
+/// journal's words, and files none of its bars. The day hands the pass the
+/// line its files wrote before they reached a door, so only a direct call
+/// reaches this. Every tick is invented.
+#[test]
+fn a_back_fill_pass_with_no_begin_line_refuses_its_file_at_the_journal() {
+    with_filer(false, |filer| {
+        let filing = Filing {
+            run: filer.ctx.run,
+            day: filer.day,
+            request: filer.request,
+            session: None,
+            origin: None,
+            source: None,
+            confirm: None,
+            id: filer.ctx.id,
+            repair_reason: None,
+            retries: std::sync::atomic::AtomicUsize::new(0),
+            store_id: None,
+        };
+        let handed = super::super::Handed {
+            file: crate::gdfl_import::TickFile {
+                symbol: "INVENTED".to_owned(),
+                contract: None,
+                name: "INVENTED.csv".to_owned(),
+                ticks: vec![crate::gdfl_import::Tick {
+                    sod: 33_300,
+                    ltp: 500_000,
+                    ltq: 1,
+                    oi: None,
+                }],
+            },
+            facts: super::super::FileFacts::default(),
+        };
+        let done = back_fill(
+            &filing,
+            None,
+            vec![JobDone::BackFill(Box::new(handed), None)],
+        );
+        let [Ok((filed, None))] = done.as_slice() else {
+            panic!("one filed job");
+        };
+        assert!(
+            filed.failures.iter().any(|staged| staged
+                .failure
+                .why
+                .contains("the day's begin line was not written")),
+            "{:?}",
+            filed
+                .failures
+                .iter()
+                .map(|s| &s.failure.why)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(filed.committed, 0, "nothing filed");
+    });
+}
