@@ -3566,6 +3566,37 @@ mod tests {
         );
     }
 
+    /// AN ENTRY WHOSE OPEN IS BELOW ONE TICK IS NOT HELD when its exit cannot
+    /// be filled: the bar is accepted and its range reaches a tick, but a
+    /// round trip at its own open sells below one tick, so nothing was ever
+    /// priceable there and the next signal is free to enter.
+    #[test]
+    fn an_entry_open_below_one_tick_is_not_held_when_its_exit_cannot_fill() {
+        let mut bars = crate::synthetic::sessions(6);
+        let first = *Column::build(&bars, &mut evaluator())
+            .sources()
+            .first()
+            .expect("six sessions warm the evaluator");
+        let (entry, exit) = (first + 1, first + 6);
+        let bar = bars.get_mut(entry).expect("inside the session");
+        *bar = indicators::Candle::new(bar.ts_micros, 1, 10, 1, 1, 1_000, indicators::OI_NULL);
+        let bar = bars.get_mut(exit).expect("inside the session");
+        *bar = indicators::Candle::new(bar.ts_micros, 1, 1, 1, 1, 1_000, indicators::OI_NULL);
+        let column = Column::build(&bars, &mut evaluator());
+        assert!(column.accepts(entry) && column.accepts(exit));
+        let walked = walk(&bars, &column, &ConditionMask::ZERO, h(5), Direction::Long);
+        assert!(walked.reconciles());
+        assert!(walked.occupancy.iter().all(|held| held.entry_bar != entry));
+        assert!(walked.trades.iter().all(|trade| trade.entry_bar != entry));
+        assert!(
+            walked
+                .trades
+                .iter()
+                .any(|trade| trade.entry_bar == entry + 1),
+            "nothing held the window, so the next signal trades"
+        );
+    }
+
     #[test]
     fn a_range_or_entry_outside_the_slice_facts_is_answered_no() {
         let (bars, column) = swept();
