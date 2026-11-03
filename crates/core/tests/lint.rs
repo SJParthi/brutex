@@ -172,44 +172,82 @@ fn no_float_in_price() {
         // list would have to name `blake3.rs` and would then stop scanning the very
         // file it excused. This still refuses `let x: f32` anywhere; it only stops
         // reading the inside of a quoted literal as code.
-        let lines: Vec<String> = text
-            .lines()
-            .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
-            .map(|code| {
-                let mut out = String::with_capacity(code.len());
-                let mut inside = false;
-                let mut escaped = false;
-                for c in code.chars() {
-                    if escaped {
-                        escaped = false;
-                    } else if inside && c == '\\' {
-                        escaped = true;
-                    } else if c == '"' {
-                        inside = !inside;
-                    } else if !inside {
-                        out.push(c);
-                    }
-                }
-                out
-            })
-            .collect();
-        for (i, line) in lines.iter().enumerate() {
-            if !line.contains("f64") && !line.contains("f32") {
-                continue;
-            }
-            let reaches = lines[i..lines.len().min(i + 3)]
-                .iter()
-                .any(|l| l.contains(THE_BOUNDARY));
-            assert!(
-                reaches,
-                "{name}:{}: a float in this crate is a value on its way to \
-                 {THE_BOUNDARY} and nothing else. This one is not handed to it \
-                 within two lines, so it is either arithmetic or a price that \
-                 stayed a float: {line}",
-                i + 1,
-            );
-        }
+        let strays = floats_off_the_boundary(text);
+        assert!(
+            strays.is_empty(),
+            "{name}: a float in this crate is a value on its way to {THE_BOUNDARY} \
+             and nothing else. These are not handed to it within two lines, so each \
+             is either arithmetic or a price that stayed a float: {strays:?}",
+        );
     }
+}
+
+/// Every line of `text` that names a float and does not reach
+/// [`THE_BOUNDARY`] within two lines, as (line number from 1, the line with
+/// its comment and its string literals stripped).
+///
+/// A function of the text, so the rule is checked on text that breaks it:
+/// no file in [`OTHERS`] names a float today, so a check run only over them
+/// passed on nothing (BASE-COV-LIBS-LS4).
+fn floats_off_the_boundary(text: &str) -> Vec<(usize, String)> {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
+        .map(|code| {
+            let mut out = String::with_capacity(code.len());
+            let mut inside = false;
+            let mut escaped = false;
+            for c in code.chars() {
+                if escaped {
+                    escaped = false;
+                } else if inside && c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    inside = !inside;
+                } else if !inside {
+                    out.push(c);
+                }
+            }
+            out
+        })
+        .collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("f64") || line.contains("f32"))
+        .filter(|&(i, _)| {
+            !lines[i..lines.len().min(i + 3)]
+                .iter()
+                .any(|l| l.contains(THE_BOUNDARY))
+        })
+        .map(|(i, line)| (i + 1, line.clone()))
+        .collect()
+}
+
+/// BASE-COV-LIBS-LS4: **A FLOAT OFF ITS WAY TO THE BOUNDARY IS NAMED; ONE ON
+/// IT, OR IN A COMMENT OR A STRING, IS NOT.**
+#[test]
+fn a_float_off_the_boundary_is_named_and_one_on_its_way_is_not() {
+    let text = "fn ok(v: f64) -> Paisa {\n    from_rupees_half_up(v)\n}\n\
+                fn stray() { let x: f32 = 1.0; }\n\
+                // an f64 in a comment\n\
+                const DIGEST: &str = \"cae41f3262\";\n\
+                fn late(v: f64) {\n    a();\n    b();\n    from_rupees_half_up(v);\n}\n\
+                let s = \"a \\\" f64 \\\" b\";\n";
+    assert_eq!(
+        floats_off_the_boundary(text),
+        [
+            (4, "fn stray() { let x: f32 = 1.0; }".to_owned()),
+            (7, "fn late(v: f64) {".to_owned()),
+        ]
+    );
+    // COMBINED: a float on the very last line, with no line after it.
+    assert_eq!(
+        floats_off_the_boundary("a\nlet y: f64"),
+        [(2, "let y: f64".to_owned())]
+    );
+    // OUT OF THE BOX: no text names nothing.
+    assert!(floats_off_the_boundary("").is_empty());
 }
 
 /// The hand-written module list above is the whole crate, not most of it.
