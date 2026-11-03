@@ -4,7 +4,11 @@
 //! in-memory secret source a test answers, never AWS. Every path segment and
 //! value is invented.
 
-#![allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail"
+)]
 
 use super::*;
 use crate::config::CredentialPath;

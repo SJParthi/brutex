@@ -1020,12 +1020,12 @@ fn answer_of(region: &str, status: u16, text: &str) -> Result<String, SsmError> 
         // is still in CloudTrail, where it belongs and where the account
         // already controls who reads it.
         return Err(SsmError {
-            detail: refusal_detail(status, &text),
+            detail: refusal_detail(status, text),
             kind,
         });
     }
 
-    let value = value_of(&text)?;
+    let value = value_of(text)?;
     if value.is_empty() {
         return Err(SsmError {
             detail: "the parameter exists and holds nothing. An empty \
