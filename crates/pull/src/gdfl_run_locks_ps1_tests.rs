@@ -431,3 +431,79 @@ fn a_sidecar_shorter_than_its_measured_length_is_unreadable() {
         SidecarState::Stale("unreadable".to_owned())
     );
 }
+
+/// **A RETRY WHOSE COPY OF THE LOCK FILE THE HOST REFUSES IS REFUSED IN THE
+/// HOST'S WORDS** (the copy seam, D-7335): with the lock held on another
+/// descriptor, a take that may retry once copies the file twice (once to read
+/// a holder by, once for the retry); the second copy refused is
+/// `run_lock_refused` with the host's words, after the one wait, never
+/// `run_busy`. Extremes at once: a retry of exactly one, and the first copy
+/// granted beside the second refused.
+#[test]
+fn a_retry_whose_copy_of_the_lock_the_host_refuses_is_refused_in_its_words() {
+    let store = scratch("ps1-locks-copy");
+    fs::create_dir_all(store.join("imports")).unwrap();
+    let name = "imports/ps1.lock";
+    let held = take(
+        open_lock_file(&store, name).unwrap(),
+        &store,
+        name,
+        Hold::Exclusive,
+        0,
+    )
+    .unwrap();
+    let copies = std::cell::Cell::new(0_u32);
+    let copy = |file: &File| {
+        copies.set(copies.get() + 1);
+        if copies.get() == 1 {
+            file.try_clone()
+        } else {
+            Err(std::io::Error::other("an invented refusal"))
+        }
+    };
+    let refused = take_cloning(
+        open_lock_file(&store, name).unwrap(),
+        &store,
+        name,
+        (Hold::Exclusive, 1),
+        &copy,
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused,
+        LockFault::Refused {
+            lock: name.to_owned(),
+            why: "an invented refusal".to_owned(),
+        }
+    );
+    assert_eq!(copies.get(), 2);
+    held.release().unwrap();
+}
+
+/// **AN UNLOCK THE HOST REFUSES IS NAMED FOR EACH LOCK, AND EVERY LOCK IS
+/// STILL TRIED** (the release seam, D-7335): the kind lock and the store lock
+/// of one run both refused are two faults in the host's words, and the run's
+/// release after them has nothing left to free. Extremes at once: every
+/// unlock refused, then a release of nothing.
+#[test]
+fn an_unlock_the_host_refuses_is_named_for_each_lock() {
+    let store = scratch("ps1-locks-unlock");
+    fs::create_dir_all(store.join("manifest/v4/gdfl")).unwrap();
+    let mut locks = RunLocks::take(&store, "indices", 0).unwrap();
+    let mut faults = Vec::new();
+    locks.unlock_into_with(&mut faults, &|flock: Flock<File>| {
+        flock.release()?;
+        Err(store::flock::Unreleased {
+            path: PathBuf::from("/invented/lock"),
+            why: std::io::Error::other("an invented refusal"),
+        })
+    });
+    assert_eq!(faults.len(), 2, "{faults:?}");
+    assert!(
+        faults.iter().all(|fault| fault
+            .starts_with("the advisory lock on /invented/lock could not be released")
+            && fault.ends_with(": an invented refusal")),
+        "{faults:?}"
+    );
+    locks.release().unwrap();
+}

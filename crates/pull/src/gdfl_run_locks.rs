@@ -398,8 +398,22 @@ pub fn take(
     hold: Hold,
     retry: u32,
 ) -> Result<Flock<File>, LockFault> {
+    take_cloning(file, store, name, (hold, retry), &File::try_clone)
+}
+
+/// [`take`] with the copy of the lock file's descriptor as an argument
+/// (BASE-COV-PULL-PS1, D-7335): production copies with `try_clone`, and a test
+/// hands a copy the host refuses on a retry, a descriptor table filled between
+/// two tries that no input makes happen on demand.
+fn take_cloning(
+    file: File,
+    store: &Path,
+    name: &str,
+    (hold, retry): (Hold, u32),
+    clone: &dyn Fn(&File) -> std::io::Result<File>,
+) -> Result<Flock<File>, LockFault> {
     let path = store.join(name);
-    let reader = file.try_clone().map_err(|why| LockFault::Refused {
+    let reader = clone(&file).map_err(|why| LockFault::Refused {
         lock: name.to_owned(),
         why: why.to_string(),
     })?;
@@ -429,7 +443,7 @@ pub fn take(
             Err(TryLockError::WouldBlock) if attempt < retry => {
                 attempt += 1;
                 std::thread::sleep(PROBE_STEP);
-                file = Some(reader.try_clone().map_err(|why| LockFault::Refused {
+                file = Some(clone(&reader).map_err(|why| LockFault::Refused {
                     lock: name.to_owned(),
                     why: why.to_string(),
                 })?);
@@ -785,8 +799,20 @@ impl RunLocks {
     }
 
     fn unlock_into(&mut self, faults: &mut Vec<String>) {
+        self.unlock_into_with(faults, &Flock::release);
+    }
+
+    /// [`Self::unlock_into`] with the release of each flock as an argument
+    /// (BASE-COV-PULL-PS1, D-7335): production releases, and a test hands a
+    /// release the host refuses, which no input makes an unlock of a lock
+    /// just held do.
+    fn unlock_into_with(
+        &mut self,
+        faults: &mut Vec<String>,
+        release: &dyn Fn(Flock<File>) -> Result<(), store::flock::Unreleased>,
+    ) {
         for flock in [self.kind.take(), self.store.take()].into_iter().flatten() {
-            if let Err(why) = flock.release() {
+            if let Err(why) = release(flock) {
                 faults.push(why.to_string());
             }
         }
