@@ -370,7 +370,10 @@ fn a_ledger_without_event_records_still_rebuilds_the_retired_keys() {
     let path = lineage_path(&store);
     let mut legacy = String::new();
     for line in std::fs::read_to_string(&path).unwrap().lines() {
-        if !line.starts_with("event ") && !line.starts_with("stopped ") {
+        if !["event ", "stopped "]
+            .iter()
+            .any(|later| line.starts_with(later))
+        {
             legacy.push_str(line);
             legacy.push('\n');
         }
@@ -710,9 +713,7 @@ fn tree_names(dir: &Path) -> Vec<std::path::PathBuf> {
     while let Some(at) = stack.pop() {
         for entry in std::fs::read_dir(&at).unwrap() {
             let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path.clone());
-            }
+            stack.extend(path.is_dir().then(|| path.clone()));
             out.push(path);
         }
     }
