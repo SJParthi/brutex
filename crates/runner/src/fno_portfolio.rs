@@ -622,6 +622,16 @@ enum Slot {
     },
 }
 
+impl Slot {
+    /// The position, while it is held.
+    const fn held(&self) -> Option<&Position> {
+        match self {
+            Self::Held(position) => Some(position),
+            Self::Free | Self::Closing { .. } => None,
+        }
+    }
+}
+
 /// The last `N` send seconds, oldest first from `head`: a sliding window of
 /// `N` orders.
 #[derive(Clone, Debug)]
@@ -1134,10 +1144,12 @@ impl Account {
     /// The slot and position `slot` names, if it is held now.
     fn held(&self, slot: SlotId) -> Result<(usize, Position), Invalid> {
         let index = usize::from(slot.index);
-        match self.slots.get(index) {
-            Some(Slot::Held(position)) if position.ticket == slot.ticket => Ok((index, *position)),
-            _ => Err(Invalid::StaleSlot),
-        }
+        self.slots
+            .get(index)
+            .and_then(Slot::held)
+            .filter(|position| position.ticket == slot.ticket)
+            .map(|position| (index, *position))
+            .ok_or(Invalid::StaleSlot)
     }
 
     /// Writes one row of the slot table.
@@ -1329,15 +1341,15 @@ struct Key {
 /// The key of a held position's exit; `None` only for an id no checked batch
 /// holds.
 fn exit_key(slots: &[Slot; POSITION_SLOTS], exit: &ExitIntent) -> Option<Key> {
-    match slots.get(usize::from(exit.slot.index)) {
-        Some(Slot::Held(position)) => Some(Key {
-            start: exit.start,
-            stock: position.stock,
-            recipe: position.recipe,
-            keys: position.keys,
-        }),
-        _ => None,
-    }
+    let position = slots
+        .get(usize::from(exit.slot.index))
+        .and_then(Slot::held)?;
+    Some(Key {
+        start: exit.start,
+        stock: position.stock,
+        recipe: position.recipe,
+        keys: position.keys,
+    })
 }
 
 /// The order of one second's intents: exits first, each group by start second,
@@ -1516,4 +1528,1519 @@ const fn bench_entry(stock: u8, at: i64) -> EntryRequest {
 /// Nanoseconds since `began`, saturated.
 fn elapsed_ns(began: Instant) -> u64 {
     u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "the exception every test module in this workspace takes: a test that cannot \
+              panic cannot fail"
+)]
+mod tests {
+    use super::{
+        Account, Admission, CAPITAL_PAISA, Capital, Dispatch, EXPOSURE_CAP_PAISA, EntryRequest,
+        ExitIntent, Fraction, Intent, Invalid, Key, MARGIN_FLOOR_PPM, MODIFICATIONS_PER_ORDER,
+        Margin, Modify, ORDERS_PER_DAY, ORDERS_PER_HOUR, ORDERS_PER_MINUTE, ORDERS_PER_SECOND,
+        OrderRole, Outcome, POSITION_SLOTS, Position, Refusal, STOCKS, Slot, SlotId, StockId,
+        TRADES_PER_DAY, TieBreak, TieKeys, measure_admit_release, mix, seeded,
+    };
+
+    /// One day in seconds: every ring has emptied a day later.
+    const DAY: i64 = 86_400;
+
+    /// A margin's scale: millionths of a paisa.
+    const MICRO: i128 = 1_000_000;
+
+    fn frac(num: u64, den: u64) -> Fraction {
+        Fraction::new(num, den).expect("a positive denominator")
+    }
+
+    fn keys(strength: (u64, u64), stop: (u64, u64), first_in_top: i64) -> TieKeys {
+        TieKeys {
+            strength: frac(strength.0, strength.1),
+            stop_in_r: frac(stop.0, stop.1),
+            first_in_top,
+        }
+    }
+
+    /// Rs 1 lakh of `stock` at Rs 1,000, offered at `start`, at the 20% floor.
+    fn entry(stock: u8, start: i64) -> EntryRequest {
+        EntryRequest {
+            stock: StockId::new(stock),
+            recipe: 0,
+            start,
+            qty: 100,
+            price: 100_000,
+            m_ppm: 0,
+            keys: keys((1, 100), (1, 4), 0),
+        }
+    }
+
+    /// `qty` of `stock` at `price` paisa.
+    fn worth(stock: u8, start: i64, qty: u64, price: i64) -> EntryRequest {
+        EntryRequest {
+            qty,
+            price,
+            ..entry(stock, start)
+        }
+    }
+
+    /// A carried account with its first session begun at second 0.
+    fn carried() -> Account {
+        let mut account = Account::new(Capital::Carried, TieBreak::Symbol);
+        account.begin_day(0).expect("a first session");
+        account
+    }
+
+    /// The position `request` takes at `at`.
+    fn take(account: &mut Account, at: i64, request: &EntryRequest) -> SlotId {
+        account
+            .admit(at, request)
+            .expect("a valid entry")
+            .slot()
+            .expect("admitted")
+    }
+
+    /// The position a slot holds or is closing, for the consistency checks.
+    fn position_of(slot: &Slot) -> Option<&Position> {
+        match slot {
+            Slot::Held(position) | Slot::Closing { position, .. } => Some(position),
+            Slot::Free => None,
+        }
+    }
+
+    /// The entry admitted in an outcome.
+    fn admitted_in(outcome: Outcome) -> Option<SlotId> {
+        match outcome {
+            Outcome::Entry(admission) => admission.slot(),
+            Outcome::Exit(_) => None,
+        }
+    }
+
+    /// Every invariant the account holds after any call: slots, the day's
+    /// trades and orders under their caps, one lock per taken slot naming its
+    /// stock (so no stock is locked twice), the sums equal to the slots', and,
+    /// with no mark, the exposure under its cap.
+    fn assert_consistent(account: &Account, marked: bool) {
+        assert!(account.slots_taken() <= POSITION_SLOTS);
+        assert!(account.trades_today() <= TRADES_PER_DAY);
+        assert!(account.orders_today() <= ORDERS_PER_DAY);
+        let mut locked = 0;
+        for (stock, lock) in account.locks.iter().enumerate() {
+            let Some(index) = *lock else { continue };
+            let position =
+                position_of(&account.slots[usize::from(index)]).expect("a lock names a taken slot");
+            assert_eq!(usize::from(position.stock.position()), stock);
+            locked += 1;
+        }
+        assert_eq!(locked, account.slots_taken(), "one lock per taken slot");
+        let (mut value, mut margin) = (0_i128, 0_i128);
+        for position in account.slots.iter().filter_map(position_of) {
+            value += position.value;
+            margin += position.margin();
+        }
+        assert_eq!(account.exposure(), value);
+        assert_eq!(account.margin_in_use().micro_paisa(), margin);
+        assert!(marked || account.exposure() <= i128::from(EXPOSURE_CAP_PAISA));
+    }
+
+    #[test]
+    fn the_twentieth_position_is_admitted_and_the_twenty_first_refused() {
+        let mut account = carried();
+        let held: Vec<SlotId> = (0..20_u8)
+            .map(|stock| {
+                take(
+                    &mut account,
+                    i64::from(stock),
+                    &entry(stock, i64::from(stock)),
+                )
+            })
+            .collect();
+        assert_eq!(account.slots_taken(), POSITION_SLOTS);
+        let mut indexes: Vec<u8> = held.iter().map(|slot| slot.index()).collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        assert_eq!(
+            indexes.len(),
+            POSITION_SLOTS,
+            "each position has its own slot"
+        );
+        assert_eq!(
+            account.admit(20, &entry(20, 20)),
+            Ok(Admission::Refused(Refusal::PositionCap))
+        );
+        account.release(held[5], 21, -500).expect("held");
+        assert_eq!(
+            account.admit(21, &entry(20, 21)),
+            Ok(Admission::Refused(Refusal::PositionCap)),
+            "a released position keeps its slot through its last fill second"
+        );
+        let next = take(&mut account, 22, &entry(20, 22));
+        assert_eq!(next.index(), held[5].index());
+        assert_eq!(account.trades_today(), 21);
+        assert_eq!(account.counts().position_cap, 2);
+        assert_consistent(&account, false);
+    }
+
+    #[test]
+    fn the_hundredth_trade_is_admitted_and_the_hundred_and_first_refused_with_cancelled_entries_counted()
+     {
+        let mut account = carried();
+        for k in 0..100_i64 {
+            let at = 10 * k;
+            let stock = u8::try_from(k).expect("below 256");
+            let slot = take(&mut account, at, &entry(stock, at));
+            // The first sixty are cancelled with nothing filled in their send
+            // second; the rest fill and exit five seconds later.
+            let (last_fill, net) = if k < 60 { (at, 0) } else { (at + 5, -100) };
+            account.release(slot, last_fill, net).expect("held");
+        }
+        assert_eq!(account.trades_today(), TRADES_PER_DAY);
+        assert_eq!(
+            account.admit(1_000, &entry(150, 1_000)),
+            Ok(Admission::Refused(Refusal::TradeCap))
+        );
+        assert_eq!(
+            account.slots_taken(),
+            0,
+            "every slot was free: the day's cap refused it"
+        );
+        assert_eq!(account.counts().trade_cap, 1);
+        assert_eq!(account.counts().admitted, 100);
+        assert_eq!(account.counts().released, 100);
+    }
+
+    #[test]
+    fn exposure_at_exactly_one_crore_is_admitted_and_one_paisa_more_refused() {
+        let mut account = carried();
+        for stock in 0..10_u8 {
+            let at = i64::from(stock);
+            // Rs 10 lakh each: the tenth brings the exposure to Rs 1 crore and
+            // the margin at 20% to exactly the Rs 20 lakh of capital.
+            take(&mut account, at, &worth(stock, at, 1_000, 100_000));
+        }
+        assert_eq!(account.exposure(), i128::from(EXPOSURE_CAP_PAISA));
+        assert_eq!(
+            account.margin_in_use().micro_paisa(),
+            i128::from(CAPITAL_PAISA) * MICRO
+        );
+        assert_eq!(
+            account.admit(10, &worth(10, 10, 1, 1)),
+            Ok(Admission::Refused(Refusal::ExposureCap))
+        );
+        assert_eq!(account.counts().exposure_cap, 1);
+        assert_eq!(account.counts().margin_cap, 0, "exposure is checked first");
+    }
+
+    #[test]
+    fn margin_exhausted_by_carried_losses_is_refused() {
+        let mut account = carried();
+        let first = take(&mut account, 0, &entry(0, 0));
+        account
+            .release(first, 10, -(CAPITAL_PAISA - 10_000_000))
+            .expect("held");
+        assert_eq!(
+            account.capital(),
+            i128::from(CAPITAL_PAISA),
+            "the loss is not in the capital through its last fill second"
+        );
+        account.settle(11).expect("forward");
+        assert_eq!(account.capital(), 10_000_000, "Rs 1 lakh left");
+        assert_eq!(
+            account.carried_net(),
+            -i128::from(CAPITAL_PAISA - 10_000_000)
+        );
+        // Rs 5 lakh at 20% blocks the Rs 1 lakh left exactly: admitted.
+        let second = take(&mut account, 11, &worth(1, 11, 500, 100_000));
+        assert_eq!(account.margin_in_use().micro_paisa(), 10_000_000 * MICRO);
+        // Five paisa of value at 20% is one paisa of margin more: refused.
+        assert_eq!(
+            account.admit(12, &worth(2, 12, 5, 1)),
+            Ok(Admission::Refused(Refusal::MarginCap))
+        );
+        account.release(second, 13, -10_000_000).expect("held");
+        account.settle(14).expect("forward");
+        assert_eq!(account.capital(), 0, "all of it lost");
+        assert_eq!(
+            account.admit(14, &worth(3, 14, 1, 1)),
+            Ok(Admission::Refused(Refusal::MarginCap))
+        );
+        assert_eq!(account.counts().margin_cap, 2);
+        assert_eq!(account.capital_bound().margin_refusals, 2);
+    }
+
+    #[test]
+    fn one_trade_per_stock_across_recipes_in_procedure_mode() {
+        let mut account = carried();
+        let mut batch = [
+            Intent::Entry(EntryRequest {
+                recipe: 1,
+                ..entry(7, 5)
+            }),
+            Intent::Entry(EntryRequest {
+                recipe: 0,
+                ..entry(7, 5)
+            }),
+            Intent::Entry(EntryRequest {
+                recipe: 2,
+                ..entry(8, 5)
+            }),
+        ];
+        let mut out = Vec::new();
+        account
+            .schedule_second(5, &mut batch, &mut out)
+            .expect("a valid batch");
+        assert_eq!(
+            batch[0],
+            Intent::Entry(EntryRequest {
+                recipe: 0,
+                ..entry(7, 5)
+            }),
+            "symbol order, then the recipe's place"
+        );
+        let held = admitted_in(out[0]).expect("recipe 0 takes stock 7");
+        assert_eq!(
+            out[1],
+            Outcome::Entry(Admission::Refused(Refusal::WhileOpen))
+        );
+        assert!(admitted_in(out[2]).is_some(), "stock 8 is another stock");
+        let third = EntryRequest {
+            recipe: 3,
+            ..entry(7, 6)
+        };
+        assert_eq!(
+            account.admit(6, &third),
+            Ok(Admission::Refused(Refusal::WhileOpen)),
+            "a third recipe, long or short alike"
+        );
+        account.release(held, 9, 0).expect("held");
+        let at_last_fill = EntryRequest { start: 9, ..third };
+        assert_eq!(
+            account.admit(9, &at_last_fill),
+            Ok(Admission::Refused(Refusal::WhileOpen)),
+            "locked through its last fill second"
+        );
+        let after = EntryRequest { start: 10, ..third };
+        assert!(account.admit(10, &after).expect("valid").slot().is_some());
+        assert_eq!(account.counts().while_open, 3);
+        assert_consistent(&account, false);
+    }
+
+    /// Four entries in one second; 11 and 13 tie, by value, on every measured
+    /// key, so each order falls through to symbol order between them.
+    fn contenders(start: i64) -> Vec<EntryRequest> {
+        vec![
+            EntryRequest {
+                keys: keys((5, 100), (3, 10), 300),
+                ..entry(10, start)
+            },
+            EntryRequest {
+                keys: keys((9, 100), (1, 10), 200),
+                ..entry(11, start)
+            },
+            EntryRequest {
+                keys: keys((2, 100), (2, 10), 100),
+                ..entry(12, start)
+            },
+            EntryRequest {
+                keys: keys((18, 200), (2, 20), 200),
+                ..entry(13, start)
+            },
+        ]
+    }
+
+    /// The stocks of one second's batch at second 50, in the order `order` acts
+    /// on them, with nineteen slots held so only the first takes a slot.
+    fn ordered(order: TieBreak, batch: &[EntryRequest]) -> Vec<u8> {
+        let mut account = Account::new(Capital::Carried, order);
+        account.begin_day(0).expect("a session");
+        for stock in 100..119_u8 {
+            let at = i64::from(stock - 100);
+            take(&mut account, at, &entry(stock, at));
+        }
+        let mut intents: Vec<Intent> = batch.iter().copied().map(Intent::Entry).collect();
+        let mut out = Vec::new();
+        account
+            .schedule_second(50, &mut intents, &mut out)
+            .expect("a valid batch");
+        let took: Vec<bool> = out
+            .iter()
+            .map(|outcome| admitted_in(*outcome).is_some())
+            .collect();
+        let mut first_only = vec![false; batch.len()];
+        first_only[0] = true;
+        assert_eq!(
+            took, first_only,
+            "the one free slot goes to the first in order"
+        );
+        intents
+            .iter()
+            .map(|intent| {
+                let index = batch
+                    .iter()
+                    .position(|request| Intent::Entry(*request) == *intent)
+                    .expect("an intent of the batch");
+                batch[index].stock.position()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tie_break_a_takes_the_larger_move_first() {
+        assert_eq!(
+            ordered(TieBreak::Strength, &contenders(50)),
+            [11, 13, 10, 12]
+        );
+    }
+
+    #[test]
+    fn tie_break_b_takes_the_smaller_stop_in_r_first() {
+        assert_eq!(
+            ordered(TieBreak::StopInR, &contenders(50)),
+            [11, 13, 12, 10]
+        );
+    }
+
+    #[test]
+    fn tie_break_c_takes_the_earlier_first_entry_into_top_n_first() {
+        assert_eq!(
+            ordered(TieBreak::FirstInTop, &contenders(50)),
+            [12, 11, 13, 10]
+        );
+    }
+
+    #[test]
+    fn tie_break_d_is_symbol_order() {
+        assert_eq!(ordered(TieBreak::Symbol, &contenders(50)), [10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn an_earlier_start_second_goes_first_under_every_order() {
+        let mut batch = contenders(50);
+        batch.push(EntryRequest {
+            keys: keys((0, 1), (99, 1), 999),
+            ..entry(14, 49)
+        });
+        for order in [
+            TieBreak::Strength,
+            TieBreak::StopInR,
+            TieBreak::FirstInTop,
+            TieBreak::Symbol,
+            TieBreak::Seeded(3),
+        ] {
+            assert_eq!(ordered(order, &batch)[0], 14, "{order:?}");
+        }
+    }
+
+    #[test]
+    fn two_entries_tied_on_every_key_are_ordered_by_what_they_are() {
+        let small = worth(20, 50, 10, 100_000);
+        let large = worth(20, 50, 20, 100_000);
+        assert_eq!(
+            ordered(TieBreak::Symbol, &[large, small]),
+            ordered(TieBreak::Symbol, &[small, large])
+        );
+        let mut account = carried();
+        let mut batch = [Intent::Entry(large), Intent::Entry(small)];
+        let mut out = Vec::new();
+        account
+            .schedule_second(50, &mut batch, &mut out)
+            .expect("a valid batch");
+        assert_eq!(batch[0], Intent::Entry(small), "the smaller quantity first");
+        assert_eq!(
+            out[1],
+            Outcome::Entry(Admission::Refused(Refusal::WhileOpen))
+        );
+    }
+
+    #[test]
+    fn the_seeded_spread_is_reproducible_from_its_seed() {
+        let batch: Vec<EntryRequest> = (0..16_u8).map(|stock| entry(stock, 50)).collect();
+        let reversed: Vec<EntryRequest> = batch.iter().rev().copied().collect();
+        let first = ordered(TieBreak::Seeded(7), &batch);
+        assert_eq!(
+            first,
+            ordered(TieBreak::Seeded(7), &reversed),
+            "one seed, one order, whatever the arrangement"
+        );
+        assert_ne!(
+            first,
+            ordered(TieBreak::Seeded(8), &batch),
+            "another seed, another order"
+        );
+        let mut by_key: Vec<u8> = (0..16).collect();
+        by_key.sort_by_key(|&stock| {
+            seeded(
+                7,
+                &Key {
+                    start: 50,
+                    stock: StockId::new(stock),
+                    recipe: 0,
+                    keys: entry(stock, 50).keys,
+                },
+            )
+        });
+        assert_eq!(first, by_key, "the order is the seeded key's");
+        let mut sorted = first.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (0..16).collect::<Vec<u8>>(),
+            "a permutation of the batch"
+        );
+        let later: Vec<EntryRequest> = (0..16_u8).map(|stock| entry(stock, 49)).collect();
+        assert_ne!(
+            first,
+            ordered(TieBreak::Seeded(7), &later),
+            "each start second draws afresh"
+        );
+    }
+
+    #[test]
+    fn twenty_simultaneous_exits_over_the_ten_a_second_limit_queue_to_the_next_second() {
+        let mut account = carried();
+        let held: Vec<SlotId> = (0..20_u8)
+            .map(|stock| {
+                let at = i64::from(stock) * 10;
+                take(&mut account, at, &entry(stock, at))
+            })
+            .collect();
+        let at = 1_000;
+        let mut batch: Vec<Intent> = held
+            .iter()
+            .rev()
+            .map(|&slot| Intent::Exit(ExitIntent { slot, start: at }))
+            .collect();
+        let mut out = Vec::new();
+        account
+            .schedule_second(at, &mut batch, &mut out)
+            .expect("a valid batch");
+        assert_eq!(out[..10], [Outcome::Exit(Dispatch::Sent); 10]);
+        assert_eq!(out[10..], [Outcome::Exit(Dispatch::Queued(at + 1)); 10]);
+        assert_eq!(
+            batch[0],
+            Intent::Exit(ExitIntent {
+                slot: held[0],
+                start: at
+            }),
+            "exits by symbol order under (d)"
+        );
+        let mut queued: Vec<Intent> = batch[10..].to_vec();
+        account
+            .schedule_second(at + 1, &mut queued, &mut out)
+            .expect("a valid batch");
+        assert_eq!(out, [Outcome::Exit(Dispatch::Sent); 10]);
+        assert_eq!(account.counts().exits_sent, 20);
+        assert_eq!(account.counts().exits_queued, 10);
+        assert_eq!(account.orders_today(), 40);
+    }
+
+    #[test]
+    fn exits_are_sent_before_entries_and_each_group_by_its_start_second() {
+        let mut account = Account::new(Capital::Carried, TieBreak::Strength);
+        account.begin_day(0).expect("a session");
+        let weak = take(
+            &mut account,
+            0,
+            &EntryRequest {
+                keys: keys((1, 100), (1, 4), 0),
+                ..entry(1, 0)
+            },
+        );
+        let strong = take(
+            &mut account,
+            1,
+            &EntryRequest {
+                keys: keys((9, 100), (1, 4), 0),
+                ..entry(2, 1)
+            },
+        );
+        let old = take(&mut account, 2, &entry(3, 2));
+        // Ten exit sends fill second 100's ring before the batch.
+        for _ in 0..ORDERS_PER_SECOND - 3 {
+            assert_eq!(account.send_exit(100, weak), Ok(Dispatch::Sent));
+        }
+        let entry_now = entry(4, 100);
+        let mut batch = [
+            Intent::Entry(entry_now),
+            Intent::Exit(ExitIntent {
+                slot: weak,
+                start: 100,
+            }),
+            Intent::Exit(ExitIntent {
+                slot: old,
+                start: 99,
+            }),
+            Intent::Exit(ExitIntent {
+                slot: strong,
+                start: 100,
+            }),
+        ];
+        let mut out = Vec::new();
+        account
+            .schedule_second(100, &mut batch, &mut out)
+            .expect("a valid batch");
+        assert_eq!(
+            batch,
+            [
+                Intent::Exit(ExitIntent {
+                    slot: old,
+                    start: 99
+                }),
+                Intent::Exit(ExitIntent {
+                    slot: strong,
+                    start: 100
+                }),
+                Intent::Exit(ExitIntent {
+                    slot: weak,
+                    start: 100
+                }),
+                Intent::Entry(entry_now),
+            ],
+            "risk first: the queued exit, then by |m|, then the entry"
+        );
+        assert_eq!(
+            out,
+            [
+                Outcome::Exit(Dispatch::Sent),
+                Outcome::Exit(Dispatch::Sent),
+                Outcome::Exit(Dispatch::Sent),
+                Outcome::Entry(Admission::Queued(101)),
+            ]
+        );
+        assert_eq!(account.counts().queued, 1);
+        assert_eq!(account.trades_today(), 3, "a queued entry is not sent");
+    }
+
+    #[test]
+    fn two_sends_of_one_position_in_one_second_are_both_acted_on() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        let exit = Intent::Exit(ExitIntent { slot, start: 5 });
+        let mut batch = [exit, exit];
+        let mut out = Vec::new();
+        account
+            .schedule_second(5, &mut batch, &mut out)
+            .expect("a valid batch");
+        assert_eq!(out, [Outcome::Exit(Dispatch::Sent); 2]);
+    }
+
+    #[test]
+    fn twenty_five_modifications_then_a_replacement_that_counts_in_the_rings() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        let orders = account.orders_today();
+        for count in 1..=MODIFICATIONS_PER_ORDER {
+            assert_eq!(
+                account.modify(i64::from(count), slot, OrderRole::TrailingStop),
+                Ok(Modify::Modified { count })
+            );
+        }
+        assert_eq!(
+            account.orders_today(),
+            orders,
+            "a modification in place is no order"
+        );
+        assert_eq!(
+            account.modify(26, slot, OrderRole::TrailingStop),
+            Ok(Modify::Replaced)
+        );
+        assert_eq!(
+            account.orders_today(),
+            orders + 1,
+            "the replacement is one order"
+        );
+        assert_eq!(
+            account.modify(27, slot, OrderRole::TrailingStop),
+            Ok(Modify::Modified { count: 1 }),
+            "the new order has its own 25"
+        );
+        for count in 2..=MODIFICATIONS_PER_ORDER {
+            assert_eq!(
+                account.modify(28, slot, OrderRole::TrailingStop),
+                Ok(Modify::Modified { count })
+            );
+        }
+        for _ in 0..ORDERS_PER_SECOND {
+            assert_eq!(account.send_exit(100, slot), Ok(Dispatch::Sent));
+        }
+        assert_eq!(
+            account.modify(100, slot, OrderRole::TrailingStop),
+            Ok(Modify::Queued(101)),
+            "a replacement over the ring waits, the old level kept"
+        );
+        assert_eq!(
+            account.modify(101, slot, OrderRole::TrailingStop),
+            Ok(Modify::Replaced)
+        );
+        let counts = account.counts();
+        assert_eq!(counts.modified, 50);
+        assert_eq!((counts.replaced, counts.replacements_queued), (2, 1));
+    }
+
+    #[test]
+    fn each_resting_order_counts_its_own_modifications() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        let roles = [
+            OrderRole::StopEntry,
+            OrderRole::Stop,
+            OrderRole::Target,
+            OrderRole::TrailingStop,
+            OrderRole::TrailingTakeProfit,
+        ];
+        for (times, role) in (1_u8..).zip(roles) {
+            for _ in 0..times {
+                account.modify(1, slot, role).expect("held");
+            }
+        }
+        for (times, role) in (1_u8..).zip(roles) {
+            assert_eq!(
+                account.modify(2, slot, role),
+                Ok(Modify::Modified { count: times + 1 }),
+                "{role:?}"
+            );
+        }
+        let next = take(&mut account, 3, &entry(1, 3));
+        assert_eq!(
+            account.modify(3, next, OrderRole::Stop),
+            Ok(Modify::Modified { count: 1 }),
+            "a new position starts every count at zero"
+        );
+    }
+
+    #[test]
+    fn the_slot_is_taken_at_send_and_freed_at_the_last_fill_or_a_zero_fill_cancel() {
+        let mut account = carried();
+        assert_eq!(account.slots_taken(), 0);
+        let cancelled = take(&mut account, 10, &entry(0, 10));
+        assert_eq!(account.slots_taken(), 1, "taken at send, before any fill");
+        account.release(cancelled, 10, 0).expect("held");
+        assert_eq!(
+            account.slots_taken(),
+            1,
+            "in force through its cancel second"
+        );
+        account.settle(11).expect("forward");
+        assert_eq!(account.slots_taken(), 0, "free after it");
+        let filled = take(&mut account, 11, &entry(0, 11));
+        account
+            .resize(filled, 60)
+            .expect("cut after a partial fill");
+        assert_eq!(account.slots_taken(), 1, "a cut entry keeps its slot");
+        account.release(filled, 500, 1_000).expect("held");
+        account.settle(500).expect("forward");
+        assert_eq!(
+            account.slots_taken(),
+            1,
+            "until its exit's last fill second ends"
+        );
+        account.settle(501).expect("forward");
+        assert_eq!(account.slots_taken(), 0);
+        assert_eq!(account.capital(), i128::from(CAPITAL_PAISA) + 1_000);
+        assert_eq!(account.exposure(), 0);
+        assert_eq!(account.margin_in_use(), Margin(0));
+    }
+
+    #[test]
+    fn the_daily_reset() {
+        let mut account = carried();
+        for k in 0..100_i64 {
+            let slot = take(&mut account, k, &entry(0, k));
+            account.release(slot, k, -100).expect("held");
+        }
+        assert_eq!(
+            account.admit(100, &entry(0, 100)),
+            Ok(Admission::Refused(Refusal::TradeCap))
+        );
+        account.begin_day(DAY).expect("the next session");
+        assert_eq!((account.trades_today(), account.orders_today()), (0, 0));
+        assert_eq!(
+            account.capital(),
+            i128::from(CAPITAL_PAISA) - 10_000,
+            "the carried reading keeps the losses"
+        );
+        let held = take(&mut account, DAY, &entry(0, DAY));
+        assert_eq!(
+            account.begin_day(2 * DAY),
+            Err(Invalid::OpenPositions(1)),
+            "a held position"
+        );
+        account.release(held, 2 * DAY, 0).expect("held");
+        assert_eq!(
+            account.begin_day(2 * DAY),
+            Err(Invalid::OpenPositions(1)),
+            "a position at its last fill second"
+        );
+        account.begin_day(2 * DAY + 1).expect("one second later");
+        assert_eq!(account.slots_taken(), 0);
+    }
+
+    #[test]
+    fn the_reset_daily_reading_starts_each_session_at_twenty_lakh() {
+        let mut account = Account::new(Capital::ResetDaily, TieBreak::Symbol);
+        account.begin_day(0).expect("a session");
+        let slot = take(&mut account, 0, &entry(0, 0));
+        account.release(slot, 5, -5_000_000).expect("held");
+        account.settle(6).expect("forward");
+        assert_eq!(account.capital(), i128::from(CAPITAL_PAISA) - 5_000_000);
+        account.begin_day(DAY).expect("the next session");
+        assert_eq!(account.capital(), i128::from(CAPITAL_PAISA));
+        assert_eq!(account.carried_net(), 0);
+    }
+
+    #[test]
+    fn the_unchecked_reading_never_refuses_for_margin() {
+        let mut account = Account::new(Capital::Unchecked, TieBreak::Symbol);
+        account.begin_day(0).expect("a session");
+        let first = take(&mut account, 0, &entry(0, 0));
+        account.release(first, 1, -CAPITAL_PAISA).expect("held");
+        account.settle(2).expect("forward");
+        assert_eq!(account.capital(), 0);
+        let request = EntryRequest {
+            m_ppm: 1_000_000,
+            ..worth(1, 2, 1_000, 100_000)
+        };
+        assert!(account.admit(2, &request).expect("valid").slot().is_some());
+        assert_eq!(account.counts().margin_cap, 0);
+    }
+
+    #[test]
+    fn the_margin_rate_has_a_twenty_percent_floor() {
+        let mut account = carried();
+        let floor = take(&mut account, 0, &entry(0, 0));
+        assert_eq!(
+            account.margin(floor),
+            Ok(Margin(10_000_000 * i128::from(MARGIN_FLOOR_PPM))),
+            "M under 20% blocks 20%"
+        );
+        let quarter = take(
+            &mut account,
+            1,
+            &EntryRequest {
+                m_ppm: 250_000,
+                ..entry(1, 1)
+            },
+        );
+        let margin = account.margin(quarter).expect("held");
+        assert_eq!(
+            margin.floor_paisa(),
+            2_500_000,
+            "M = 25% blocks Rs 25,000 of Rs 1 lakh"
+        );
+        let odd = take(
+            &mut account,
+            2,
+            &EntryRequest {
+                m_ppm: 221_100,
+                ..worth(2, 2, 3, 333)
+            },
+        );
+        let margin = account.margin(odd).expect("held");
+        assert_eq!(
+            margin.micro_paisa(),
+            999 * 221_100,
+            "M = 22.11%, kept exact"
+        );
+        assert_eq!((margin.floor_paisa(), margin.ceil_paisa()), (220, 221));
+    }
+
+    #[test]
+    fn a_margin_rounds_down_for_the_mtm_rule_and_up_on_request() {
+        for (micro, floor, ceil) in [
+            (0, 0, 0),
+            (1, 0, 1),
+            (999_999, 0, 1),
+            (1_000_000, 1, 1),
+            (1_000_001, 1, 2),
+        ] {
+            let margin = Margin(micro);
+            assert_eq!(margin.micro_paisa(), micro);
+            assert_eq!((margin.floor_paisa(), margin.ceil_paisa()), (floor, ceil));
+        }
+    }
+
+    #[test]
+    fn marks_and_resizes_move_the_exposure_and_the_margin_and_never_force_a_reduction() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        account.mark(slot, 150_000).expect("held");
+        assert_eq!(account.exposure(), 15_000_000);
+        assert_eq!(account.margin_in_use(), Margin(15_000_000 * 200_000));
+        account.resize(slot, 40).expect("held");
+        assert_eq!(account.exposure(), 6_000_000);
+        account.mark(slot, 30_000_000).expect("held");
+        assert_eq!(account.exposure(), 1_200_000_000, "a mark may pass the cap");
+        assert_eq!(account.slots_taken(), 1, "and reduces nothing");
+        assert_eq!(
+            account.admit(1, &worth(1, 1, 1, 1)),
+            Ok(Admission::Refused(Refusal::ExposureCap)),
+            "the next entry is checked against it"
+        );
+        assert_eq!(account.mark(slot, 0), Err(Invalid::NonPositivePrice(0)));
+        assert_eq!(
+            account.mark(slot, i64::MAX / 39),
+            Err(Invalid::ValueOverflow)
+        );
+        assert_eq!(account.resize(slot, 0), Err(Invalid::ZeroQuantity));
+        assert_eq!(
+            account.resize(slot, 41),
+            Err(Invalid::QuantityGrows {
+                held: 40,
+                asked: 41
+            })
+        );
+        assert_eq!(
+            account.exposure(),
+            1_200_000_000,
+            "a refused call changes nothing"
+        );
+        assert_consistent(&account, true);
+    }
+
+    #[test]
+    fn queued_entries_change_nothing_and_are_checked_again_when_offered() {
+        let mut account = carried();
+        let held: Vec<SlotId> = (0..19_u8)
+            .map(|stock| {
+                take(
+                    &mut account,
+                    i64::from(stock),
+                    &entry(stock, i64::from(stock)),
+                )
+            })
+            .collect();
+        for _ in 0..ORDERS_PER_SECOND {
+            assert_eq!(account.send_exit(100, held[0]), Ok(Dispatch::Sent));
+        }
+        let waiting = entry(50, 100);
+        let before = (
+            account.trades_today(),
+            account.slots_taken(),
+            account.exposure(),
+        );
+        assert_eq!(account.admit(100, &waiting), Ok(Admission::Queued(101)));
+        assert_eq!(
+            (
+                account.trades_today(),
+                account.slots_taken(),
+                account.exposure()
+            ),
+            before,
+            "nothing changed"
+        );
+        take(&mut account, 101, &entry(51, 101));
+        assert_eq!(
+            account.admit(101, &waiting),
+            Ok(Admission::Refused(Refusal::PositionCap)),
+            "offered again, every check runs again"
+        );
+        assert_eq!(
+            (account.counts().queued, account.counts().position_cap),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn the_minute_and_hour_rings_queue_to_the_second_their_oldest_send_expires() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        // 250 orders in 25 seconds fill the minute ring: its oldest went at 0.
+        for _ in 1..ORDERS_PER_SECOND {
+            assert_eq!(account.send_exit(0, slot), Ok(Dispatch::Sent));
+        }
+        for second in 1..=24 {
+            for _ in 0..ORDERS_PER_SECOND {
+                account.send_exit(second, slot).expect("held");
+            }
+        }
+        assert_eq!(account.send_exit(25, slot), Ok(Dispatch::Queued(60)));
+        assert_eq!(account.send_exit(60, slot), Ok(Dispatch::Sent));
+        // A thousand orders in 250 seconds fill the hour ring, never the minute's.
+        let mut hourly = carried_at(DAY);
+        let slot = take(&mut hourly, DAY, &entry(0, DAY));
+        for second in 0..250 {
+            let sends = if second == 0 { 3 } else { 4 };
+            for _ in 0..sends {
+                assert_eq!(hourly.send_exit(DAY + second, slot), Ok(Dispatch::Sent));
+            }
+        }
+        assert_eq!(
+            hourly.orders_today(),
+            u32::try_from(ORDERS_PER_HOUR).expect("fits")
+        );
+        assert_eq!(
+            hourly.send_exit(DAY + 250, slot),
+            Ok(Dispatch::Queued(DAY + 3_600))
+        );
+        assert_eq!(hourly.send_exit(DAY + 3_600, slot), Ok(Dispatch::Sent));
+    }
+
+    /// A carried account with its first session begun at `open`.
+    fn carried_at(open: i64) -> Account {
+        let mut account = Account::new(Capital::Carried, TieBreak::Symbol);
+        account.begin_day(open).expect("a first session");
+        account
+    }
+
+    #[test]
+    fn the_sessions_orders_stop_every_order_until_the_next_session() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        for k in 1..ORDERS_PER_DAY {
+            assert_eq!(
+                account.send_exit(i64::from(k) * 4, slot),
+                Ok(Dispatch::Sent)
+            );
+        }
+        let at = i64::from(ORDERS_PER_DAY) * 4;
+        assert_eq!(account.orders_today(), ORDERS_PER_DAY);
+        assert_eq!(account.send_exit(at, slot), Ok(Dispatch::Queued(i64::MAX)));
+        assert_eq!(
+            account.admit(at, &entry(1, at)),
+            Ok(Admission::Queued(i64::MAX))
+        );
+        account.release(slot, at, 0).expect("held");
+        account.begin_day(at + 1).expect("the next session");
+        assert!(
+            account
+                .admit(at + 1, &entry(1, at + 1))
+                .expect("valid")
+                .slot()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_rings_slide_across_a_session_reset() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        for _ in 1..ORDERS_PER_SECOND {
+            account.send_exit(0, slot).expect("held");
+        }
+        account.release(slot, 0, 0).expect("held");
+        account.begin_day(1).expect("a session one second later");
+        // The second ring held 0's ten sends; at 1 they are a second old.
+        assert!(
+            account
+                .admit(1, &entry(0, 1))
+                .expect("valid")
+                .slot()
+                .is_some()
+        );
+        let mut busy = carried();
+        let slot = take(&mut busy, 0, &entry(0, 0));
+        for second in 0..25 {
+            let sends = if second == 0 { 9 } else { 10 };
+            for _ in 0..sends {
+                busy.send_exit(second, slot).expect("held");
+            }
+        }
+        busy.release(slot, 25, 0).expect("held");
+        busy.begin_day(26).expect("a session");
+        assert_eq!(
+            busy.admit(26, &entry(0, 26)),
+            Ok(Admission::Queued(60)),
+            "the minute ring is not emptied by the reset"
+        );
+    }
+
+    #[test]
+    fn each_window_starts_at_twenty_lakh() {
+        let mut account = Account::new(Capital::Carried, TieBreak::Symbol);
+        assert_eq!(account.capital(), i128::from(CAPITAL_PAISA));
+        account.begin_window(0).expect("the first window");
+        let slot = take(&mut account, 0, &entry(0, 0));
+        assert_eq!(account.begin_window(DAY), Err(Invalid::OpenPositions(1)));
+        account.release(slot, 5, -3_000_000).expect("held");
+        account.settle(6).expect("forward");
+        assert_eq!(account.capital(), i128::from(CAPITAL_PAISA) - 3_000_000);
+        account.begin_window(DAY).expect("the next window");
+        assert_eq!(
+            account.capital(),
+            i128::from(CAPITAL_PAISA),
+            "Rs 20 lakh again"
+        );
+        assert_eq!(
+            account.counts(),
+            Account::new(Capital::Carried, TieBreak::Symbol).counts()
+        );
+        assert_eq!(account.clock(), DAY);
+        assert_eq!(
+            account.mark(slot, 1),
+            Err(Invalid::StaleSlot),
+            "the old id stays stale"
+        );
+        let next = take(&mut account, DAY, &entry(0, DAY));
+        assert_eq!(next.ticket(), 2, "tickets carry on across windows");
+        assert_eq!(
+            account.begin_window(DAY - 1),
+            Err(Invalid::TimeBackwards {
+                at: DAY - 1,
+                clock: DAY
+            })
+        );
+    }
+
+    /// One planned entry of a candidate: day, second of the day, stock,
+    /// value in rupees, `M / 100` in ppm, exit second of the day, net in paisa.
+    type Planned = (i64, i64, u8, u64, u32, i64, i64);
+
+    /// Walks the entries of `plan` from day `from` on, on one account that
+    /// starts there at Rs 20 lakh, and says which were admitted.
+    fn walk(capital: Capital, plan: &[Planned], from: i64) -> (Vec<bool>, Account) {
+        let mut account = Account::new(capital, TieBreak::Symbol);
+        let mut session = None;
+        let mut admitted = Vec::new();
+        for &(day, second, stock, rupees, m_ppm, exit, net) in
+            plan.iter().filter(|row| row.0 >= from)
+        {
+            if session != Some(day) {
+                account.begin_day(day * DAY).expect("flat at every open");
+                session = Some(day);
+            }
+            let at = day * DAY + second;
+            let request = EntryRequest {
+                m_ppm,
+                ..worth(stock, at, rupees, 100)
+            };
+            let outcome = account.admit(at, &request).expect("a valid entry");
+            if let Some(slot) = outcome.slot() {
+                account.release(slot, day * DAY + exit, net).expect("held");
+            }
+            admitted.push(outcome.slot().is_some());
+        }
+        (admitted, account)
+    }
+
+    /// Three overlapping Rs 6 lakh positions at 100% margin a day, Rs 18 lakh
+    /// in use, and Rs 1.5 lakh of losses at most from a peak.
+    const UNDER: [Planned; 12] = [
+        (0, 10, 1, 600_000, 1_000_000, 100, 5_000_000),
+        (0, 11, 2, 600_000, 1_000_000, 100, -10_000_000),
+        (0, 12, 3, 600_000, 1_000_000, 100, -5_000_000),
+        (1, 10, 1, 600_000, 1_000_000, 100, 2_000_000),
+        (1, 11, 2, 600_000, 1_000_000, 100, -1_000_000),
+        (1, 12, 3, 600_000, 1_000_000, 100, 3_000_000),
+        (2, 10, 1, 600_000, 1_000_000, 100, -2_000_000),
+        (2, 11, 2, 600_000, 1_000_000, 100, 1_000_000),
+        (2, 12, 1, 600_000, 1_000_000, 100, 0),
+        (3, 10, 4, 600_000, 1_000_000, 100, 1_000_000),
+        (3, 11, 5, 600_000, 1_000_000, 100, 1_000_000),
+        (3, 12, 6, 600_000, 1_000_000, 100, 1_000_000),
+    ];
+
+    #[test]
+    fn a_candidate_under_the_capital_bound_has_equal_rows_under_two_schemes() {
+        let (unchecked, once) = walk(Capital::Unchecked, &UNDER, 0);
+        let bound = once.capital_bound();
+        assert_eq!(bound.peak_margin, Margin(180_000_000 * MICRO));
+        assert_eq!(bound.largest_fall, 15_000_000);
+        assert!(
+            bound.holds(),
+            "Rs 18 lakh + Rs 1.5 lakh is within Rs 20 lakh"
+        );
+        let (anchored, carried) = walk(Capital::Carried, &UNDER, 0);
+        assert!(carried.capital_bound().holds());
+        assert_eq!(anchored, unchecked, "the capital check never bound");
+        // A second scheme's window starting at day 2 starts at Rs 20 lakh.
+        let (rolling, _) = walk(Capital::Carried, &UNDER, 2);
+        assert_eq!(rolling, anchored[6..], "the same rows from day 2");
+        assert_eq!(
+            rolling,
+            [true, true, false, true, true, true],
+            "stock 1 is still held at 12"
+        );
+    }
+
+    /// A Rs 15 lakh loss on day 0, then a position needing Rs 18 lakh of margin.
+    const OVER: [Planned; 2] = [
+        (0, 10, 1, 100_000, 0, 100, -150_000_000),
+        (1, 10, 2, 1_800_000, 1_000_000, 100, 0),
+    ];
+
+    #[test]
+    fn a_candidate_over_the_capital_bound_is_walked_per_window() {
+        let (_, once) = walk(Capital::Unchecked, &OVER, 0);
+        assert!(
+            !once.capital_bound().holds(),
+            "Rs 18 lakh + Rs 15 lakh is past Rs 20 lakh"
+        );
+        let (span, _) = walk(Capital::Carried, &OVER, 0);
+        let (window, _) = walk(Capital::Carried, &OVER, 1);
+        assert_eq!(
+            span,
+            [true, false],
+            "the carried walk had Rs 5 lakh on day 1"
+        );
+        assert_eq!(window, [true], "a window from day 1 has Rs 20 lakh");
+    }
+
+    /// A Rs 5 lakh loss on day 0, then a position needing Rs 18 lakh of margin.
+    const REFUSED: [Planned; 2] = [
+        (0, 10, 1, 100_000, 0, 100, -50_000_000),
+        (1, 10, 2, 1_800_000, 1_000_000, 100, 0),
+    ];
+
+    #[test]
+    fn a_walk_refused_for_capital_never_shares_its_rows() {
+        let (span, carried) = walk(Capital::Carried, &REFUSED, 0);
+        assert_eq!(span, [true, false]);
+        let bound = carried.capital_bound();
+        assert!(
+            bound.peak_margin.micro_paisa() + bound.largest_fall * MICRO
+                <= i128::from(CAPITAL_PAISA) * MICRO,
+            "its figures alone would pass"
+        );
+        assert_eq!(bound.margin_refusals, 1);
+        assert!(!bound.holds(), "a margin refusal is the failure itself");
+        let (window, _) = walk(Capital::Carried, &REFUSED, 1);
+        assert_eq!(window, [true], "a window after the fall takes that entry");
+    }
+
+    #[test]
+    fn fractions_compare_by_value_and_refuse_a_zero_denominator() {
+        assert_eq!(frac(1, 2), frac(2, 4));
+        assert!(frac(1, 3) < frac(1, 2));
+        assert!(frac(u64::MAX, 1) > frac(u64::MAX - 1, 1));
+        assert!(frac(1, u64::MAX) < frac(1, u64::MAX - 1));
+        assert_eq!((frac(3, 7).num(), frac(3, 7).den()), (3, 7));
+        assert_eq!(Fraction::new(1, 0), Err(Invalid::ZeroDenominator));
+    }
+
+    #[test]
+    fn identities_read_back() {
+        assert_eq!(StockId::new(217).position(), 217);
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(217, 0));
+        assert_eq!((slot.index(), slot.ticket()), (0, 1));
+        assert_eq!(STOCKS, 256, "every u8 position has a lock");
+    }
+
+    #[test]
+    fn refusals_carry_the_names_the_spec_counts() {
+        let names = [
+            Refusal::PositionCap,
+            Refusal::TradeCap,
+            Refusal::ExposureCap,
+            Refusal::MarginCap,
+            Refusal::WhileOpen,
+        ]
+        .map(Refusal::name);
+        assert_eq!(
+            names,
+            [
+                "position_cap",
+                "trade_cap",
+                "exposure_cap",
+                "margin_cap",
+                "while_open"
+            ]
+        );
+        assert_eq!(Admission::Refused(Refusal::TradeCap).slot(), None);
+        assert_eq!(Admission::Queued(9).slot(), None);
+    }
+
+    #[test]
+    fn time_going_backwards_is_refused_by_name_and_changes_nothing() {
+        let mut account = carried();
+        let slot = take(&mut account, 10, &entry(0, 10));
+        let backwards = Invalid::TimeBackwards { at: 9, clock: 10 };
+        assert_eq!(account.admit(9, &entry(1, 9)), Err(backwards));
+        assert_eq!(account.send_exit(9, slot), Err(backwards));
+        assert_eq!(account.modify(9, slot, OrderRole::Stop), Err(backwards));
+        assert_eq!(account.settle(9), Err(backwards));
+        assert_eq!(account.begin_day(9), Err(backwards));
+        let mut out = vec![Outcome::Exit(Dispatch::Sent)];
+        assert_eq!(
+            account.schedule_second(9, &mut [], &mut out),
+            Err(backwards)
+        );
+        assert_eq!(out, [Outcome::Exit(Dispatch::Sent)], "out is untouched");
+        assert_eq!(account.clock(), 10);
+        assert_eq!(account.counts().admitted, 1);
+    }
+
+    #[test]
+    fn a_bad_request_is_refused_by_name() {
+        let mut account = carried();
+        assert_eq!(
+            account.admit(5, &entry(0, 6)),
+            Err(Invalid::BeforeStart { at: 5, start: 6 })
+        );
+        assert_eq!(
+            account.admit(5, &worth(0, 5, 0, 100)),
+            Err(Invalid::ZeroQuantity)
+        );
+        assert_eq!(
+            account.admit(5, &worth(0, 5, 1, 0)),
+            Err(Invalid::NonPositivePrice(0))
+        );
+        assert_eq!(
+            account.admit(5, &worth(0, 5, 1, -5)),
+            Err(Invalid::NonPositivePrice(-5))
+        );
+        assert_eq!(
+            account.admit(5, &worth(0, 5, 2, i64::MAX)),
+            Err(Invalid::ValueOverflow)
+        );
+        assert_eq!(
+            account.admit(5, &worth(0, 5, 1, i64::MAX)),
+            Ok(Admission::Refused(Refusal::ExposureCap)),
+            "a value of exactly i64::MAX paisa is checked, and refused by the cap"
+        );
+        assert_eq!(
+            account.clock(),
+            5,
+            "only the call that was checked moved the clock"
+        );
+    }
+
+    #[test]
+    fn a_stale_slot_is_refused_everywhere() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        account.release(slot, 1, 0).expect("held");
+        let stale = Invalid::StaleSlot;
+        assert_eq!(
+            account.mark(slot, 1),
+            Err(stale),
+            "a closing position is no longer held"
+        );
+        assert_eq!(account.release(slot, 2, 0), Err(stale));
+        account.settle(2).expect("forward");
+        let reused = take(&mut account, 2, &entry(1, 2));
+        assert_eq!(reused.index(), slot.index(), "the slot is reused");
+        assert_eq!(
+            account.resize(slot, 1),
+            Err(stale),
+            "the old ticket names nothing"
+        );
+        assert_eq!(account.send_exit(3, slot), Err(stale));
+        assert_eq!(account.modify(3, slot, OrderRole::Stop), Err(stale));
+        assert_eq!(account.margin(slot), Err(stale));
+        let mut batch = [Intent::Exit(ExitIntent { slot, start: 3 })];
+        let mut out = Vec::new();
+        assert_eq!(account.schedule_second(3, &mut batch, &mut out), Err(stale));
+        assert_eq!(account.release(slot, 3, 0), Err(stale));
+        assert!(account.margin(reused).is_ok());
+    }
+
+    #[test]
+    fn a_release_before_its_send_is_refused() {
+        let mut account = carried();
+        let slot = take(&mut account, 10, &entry(0, 10));
+        assert_eq!(
+            account.release(slot, 9, 0),
+            Err(Invalid::ReleaseBeforeSend {
+                last_fill: 9,
+                sent: 10
+            })
+        );
+        assert_eq!(account.slots_taken(), 1);
+    }
+
+    #[test]
+    fn a_bad_batch_changes_nothing() {
+        let mut account = carried();
+        let slot = take(&mut account, 0, &entry(0, 0));
+        let mut batch = [
+            Intent::Entry(entry(1, 5)),
+            Intent::Exit(ExitIntent { slot, start: 6 }),
+        ];
+        let mut out = vec![Outcome::Exit(Dispatch::Sent)];
+        assert_eq!(
+            account.schedule_second(5, &mut batch, &mut out),
+            Err(Invalid::BeforeStart { at: 5, start: 6 })
+        );
+        let mut entries = [Intent::Entry(entry(1, 5)), Intent::Entry(worth(2, 5, 0, 1))];
+        assert_eq!(
+            account.schedule_second(5, &mut entries, &mut out),
+            Err(Invalid::ZeroQuantity)
+        );
+        assert_eq!(out, [Outcome::Exit(Dispatch::Sent)]);
+        assert_eq!(
+            batch[0],
+            Intent::Entry(entry(1, 5)),
+            "the batch was not reordered"
+        );
+        assert_eq!((account.clock(), account.trades_today()), (0, 1));
+    }
+
+    #[test]
+    fn the_capital_bound_needs_both_halves() {
+        let bound =
+            |peak_rupees: i128, fall_rupees: i128, margin_refusals: u64| super::CapitalBound {
+                peak_margin: Margin(peak_rupees * 100 * MICRO),
+                largest_fall: fall_rupees * 100,
+                margin_refusals,
+            };
+        assert!(bound(1_500_000, 500_000, 0).holds(), "exactly Rs 20 lakh");
+        assert!(!bound(1_500_000, 500_001, 0).holds(), "one rupee past it");
+        assert!(!bound(0, 0, 1).holds(), "a refusal");
+    }
+
+    #[test]
+    fn the_bench_fixture_admits_every_entry_it_times() {
+        let samples = measure_admit_release(1, 1).expect("the fixture runs as built");
+        assert_eq!(samples.admitted, 200, "two sessions of 100 entries");
+        assert_eq!((samples.admit_ns.len(), samples.release_ns.len()), (80, 80));
+        let none = measure_admit_release(0, 0).expect("nothing to run");
+        assert_eq!(none, super::Samples::default());
+    }
+
+    #[test]
+    fn after_any_random_sequence_slots_exposure_trades_and_locks_hold() {
+        for seed in 0..48_u64 {
+            random_walk(seed);
+        }
+    }
+
+    /// One seeded walk of 1,500 random calls, every invariant checked after
+    /// each, and every send checked against all three rings.
+    fn random_walk(seed: u64) {
+        let marks = seed % 2 == 1;
+        let capital = [Capital::Carried, Capital::ResetDaily, Capital::Unchecked]
+            [usize::try_from(seed % 3).expect("small")];
+        let order = [
+            TieBreak::Strength,
+            TieBreak::StopInR,
+            TieBreak::FirstInTop,
+            TieBreak::Symbol,
+            TieBreak::Seeded(seed),
+        ][usize::try_from(seed % 5).expect("small")];
+        let mut account = Account::new(capital, order);
+        let mut state = mix(seed);
+        let mut at = 0_i64;
+        let mut held: Vec<SlotId> = Vec::new();
+        let mut sends: Vec<i64> = Vec::new();
+        account.begin_day(at).expect("a session");
+        for _ in 0..1_500 {
+            state = mix(state);
+            at += i64::try_from(state % 3).expect("small");
+            let pick = (state >> 8) % 9;
+            let which = usize::try_from(state >> 40).expect("fits") % held.len().max(1);
+            match pick {
+                0..=2 => {
+                    let request = random_entry(state, at);
+                    let admission = account.admit(at, &request).expect("a valid entry");
+                    note_admission(&account, admission, at, &mut held, &mut sends);
+                }
+                3 if !held.is_empty() => {
+                    let slot = held.swap_remove(which);
+                    let last_fill = at + i64::try_from((state >> 16) % 5).expect("small");
+                    let net = i64::try_from((state >> 24) % 400_001).expect("small") - 200_000;
+                    account.release(slot, last_fill, net).expect("held");
+                }
+                4 if marks && !held.is_empty() => {
+                    let price = 1_000 + i64::try_from((state >> 16) % 400_000).expect("small");
+                    account.mark(held[which], price).expect("held");
+                }
+                5 if !held.is_empty() => {
+                    let dispatch = account.send_exit(at, held[which]).expect("held");
+                    note_dispatch(dispatch, at, &mut sends);
+                }
+                6 if !held.is_empty() => {
+                    let roles = [OrderRole::Stop, OrderRole::TrailingStop, OrderRole::Target];
+                    let role = roles[usize::try_from((state >> 16) % 3).expect("small")];
+                    let done = account.modify(at, held[which], role).expect("held");
+                    if done == Modify::Replaced {
+                        sends.push(at);
+                    }
+                    if let Modify::Queued(next) = done {
+                        assert!(next > at);
+                    }
+                }
+                7 => {
+                    let mut batch: Vec<Intent> = (0..(state >> 16) % 4)
+                        .map(|k| Intent::Entry(random_entry(mix(state ^ k), at)))
+                        .chain(
+                            held.iter()
+                                .take(2)
+                                .map(|&slot| Intent::Exit(ExitIntent { slot, start: at })),
+                        )
+                        .collect();
+                    let mut out = Vec::new();
+                    account
+                        .schedule_second(at, &mut batch, &mut out)
+                        .expect("a valid batch");
+                    for outcome in out {
+                        match outcome {
+                            Outcome::Entry(admission) => {
+                                note_admission(&account, admission, at, &mut held, &mut sends);
+                            }
+                            Outcome::Exit(dispatch) => note_dispatch(dispatch, at, &mut sends),
+                        }
+                    }
+                }
+                8 if (state >> 20).is_multiple_of(16) => {
+                    for slot in held.drain(..) {
+                        account.release(slot, at, 0).expect("held");
+                    }
+                    at += DAY;
+                    account.begin_day(at).expect("flat after every release");
+                }
+                _ => {}
+            }
+            assert_consistent(&account, marks);
+            sends.retain(|&sent| sent > at - 3_600);
+        }
+        assert!(
+            account.counts().admitted > 0,
+            "seed {seed} admitted something"
+        );
+    }
+
+    /// A random entry at `at`: one of 40 stocks, so locks collide, and up to
+    /// Rs 60 lakh, so every cap binds now and then.
+    fn random_entry(state: u64, at: i64) -> EntryRequest {
+        let stock = u8::try_from((state >> 12) % 40).expect("small");
+        let qty = 1 + (state >> 18) % 2_000;
+        let price = 1_000 + i64::try_from((state >> 30) % 300_000).expect("small");
+        EntryRequest {
+            recipe: u32::try_from((state >> 50) % 3).expect("small"),
+            m_ppm: u32::try_from((state >> 52) % 600_000).expect("small"),
+            keys: keys(((state >> 4) % 50, 100), ((state >> 6) % 9, 10), at),
+            ..worth(stock, at, qty, price)
+        }
+    }
+
+    /// Records an admission's send and holds its position; checks a queue
+    /// names a later second and an admission stays under its caps.
+    fn note_admission(
+        account: &Account,
+        admission: Admission,
+        at: i64,
+        held: &mut Vec<SlotId>,
+        sends: &mut Vec<i64>,
+    ) {
+        if let Some(slot) = admission.slot() {
+            held.push(slot);
+            note_send(at, sends);
+            assert!(account.exposure() <= i128::from(EXPOSURE_CAP_PAISA));
+            let checked = account.capital != Capital::Unchecked;
+            assert!(!checked || account.margin_in_use().micro_paisa() <= account.capital() * MICRO);
+        }
+        if let Admission::Queued(next) = admission {
+            assert!(next > at);
+        }
+    }
+
+    /// Records a dispatch's send; checks a queue names a later second.
+    fn note_dispatch(dispatch: Dispatch, at: i64, sends: &mut Vec<i64>) {
+        match dispatch {
+            Dispatch::Sent => note_send(at, sends),
+            Dispatch::Queued(next) => assert!(next > at),
+        }
+    }
+
+    /// Records one send at `at` and checks the three rings' windows hold.
+    fn note_send(at: i64, sends: &mut Vec<i64>) {
+        sends.push(at);
+        let within = |window: i64| sends.iter().filter(|&&sent| sent > at - window).count();
+        assert!(within(1) <= ORDERS_PER_SECOND);
+        assert!(within(60) <= ORDERS_PER_MINUTE);
+        assert!(within(3_600) <= ORDERS_PER_HOUR);
+    }
 }
