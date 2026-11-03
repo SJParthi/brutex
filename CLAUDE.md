@@ -11,7 +11,7 @@ A brute-force backtesting engine for Indian spot indices. It sweeps
 combinations of boolean market conditions over historical 1-minute bars and
 ranks what survives.
 
-**Engine surface — two shapes, NSE only:**
+**Engine surface — three shapes, NSE only:**
 
 1. The two spot indices `NSE-NIFTY` and `NSE-BANKNIFTY`.
 2. The **cash equities of the 208 F&O underlyings that are shares** — the
@@ -19,6 +19,27 @@ ranks what survives.
    Widened by D-0506, counted by D-0682. The list is
    `core::universe::FNO_UNDERLYINGS` less the five indices
    `core::universe::FNO_INDEX_UNDERLYINGS` names, which have no cash equity.
+3. The **cash shares of the operator's current F&O list, on the F&O strategy
+   path** — intraday, from 3 Sep 2018 to the last day both feeds are proven.
+   Widened by D-8100, from the operator's decision of 30 Oct 2026 (21:19 IST).
+   The list is held as a data file, never as a list in code: the operator's
+   `fno218.txt`, one symbol a line, 218 names when it was fixed, and the
+   blake3 digest of its bytes enters every run identity of the path. It is not
+   `core::universe::FNO_UNDERLYINGS` (13 of its names are not in that list,
+   and 3 of that list's are not in it), and neither is ever read in place of
+   the other. Stocks that left F&O since 2018 are not added: not to the traded
+   set and not to the rank pool. Within the list a stock is traded only on a
+   day it was a point-in-time F&O member (`pull::fno_membership::Membership`),
+   and a day the membership cannot answer is not traded. ICICIPRULI is joined
+   to ICICILIFE as one stock at read time, by a join map that is data:
+   ICICIPRULI's key before 2026-10-23, ICICILIFE's from that day, and a member
+   on a day it is a member under either spelling. Signals come from Zerodha
+   candles. Every fill is on GDFL 1-second bars under one model, the worst
+   price printed in the second: a buy at that second's high, a sell at its low
+   (D-8101). Every trade is charged on two cost clocks, its own day's dated
+   rates and today's, and the worse of the two is the headline (D-8102). Every
+   result and page of the path carries this label, word for word:
+   **"current F&O members only (survivorship bias not removed)"**.
 
 BSE and MCX are not swept and not pulled. Narrowed from three
 instruments by D-0017. Existing BSE data already on disk is not deleted --
@@ -41,9 +62,13 @@ is optional: a stock CAN be bought, so its costs are real — equities may be
 ranked cost-excluded only as labelled research, every such report stating it
 is gross of every charge (D-0509, D-0525, D-0681), and no equity result may
 enter Selection V6 or execution authority until a charter-sourced equity
-charge stack exists; and 210 instruments, 208 shares and the two indices,
-multiply the search by 210, so an in-sample result across the pool is the
-largest of billions and means nothing until it is validated out of sample.
+charge stack exists — that stack is FNO-COSTS's dated cash-equity intraday
+clock (D-8102), every rate a row of `docs/00-charter.md`, and a result it has
+not priced is gross and labelled as above; and 210 instruments, 208 shares
+and the two indices, multiply the search by 210, so an in-sample result
+across the pool is the largest of billions and means nothing until it is
+validated out of sample. On the F&O strategy path that validation is
+walk-forward, always (D-8105).
 
 ---
 
@@ -135,6 +160,17 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    term. Meanwhile `cli`'s own banner told the reader the identity *"names the
    exact column they came from"*. D-0225 is that entry, and this sentence is
    that edit.
+
+   **The F&O strategy path has its own identity domain** (D-8100), built by
+   FNO-SEC-WIRE as the sole owner of `runner::identity`: a run of that path is
+   identified by `fno_run_digest` over `FnoRunV1`, the run's terms (both
+   feeds — the Zerodha signal candles and the GDFL fill seconds — the commit,
+   the vocabulary version, the data digest, the digest of every input file,
+   the cost-table version, the span, the sample and the data proof), and each
+   candidate in it by `fno_identity` over `FnoCandidateV1` (that run's digest,
+   the walk-forward scheme and the recipe), each under its own append-only
+   domain tag, so no identity on the path can equal a sweep's and no
+   computation on it goes unrecorded.
 4. **Constant per-operation cost.** Bar lookup, condition lookup, mask
    evaluation, duplicate rejection and result append are each O(1). A change
    that makes one of them scan fails the bench gate.
