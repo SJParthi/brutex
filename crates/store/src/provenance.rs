@@ -1668,3 +1668,8 @@ fn take<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
     }
     out
 }
+
+/// The provenance door's answers no other test reached (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "provenance_cover_tests.rs"]
+mod cover_tests;
