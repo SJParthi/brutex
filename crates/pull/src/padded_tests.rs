@@ -485,7 +485,9 @@ fn injected_month() -> Vec<Bar> {
     month.push(flat(MON, OPEN, saturday_close));
     let mut m = OPEN + 1;
     while m < OPEN + 375 {
-        if (m - OPEN) % 7 == 0 && m + 3 < OPEN + 375 {
+        // The last run starts at OPEN + 371 and ends at OPEN + 373, inside the
+        // session, so no run needs a bound of its own (BASE-COV-PULL-PS2).
+        if (m - OPEN) % 7 == 0 {
             let before = *month.last().unwrap();
             for k in 0..3 {
                 month.push(pad(MON, m + k, &before));
@@ -597,4 +599,26 @@ fn held_minute_spans(summary: &MonthSummary) -> Vec<(i64, i64)> {
         .into_iter()
         .map(|(_, first, last)| (first, last))
         .collect()
+}
+
+/// PS2-PD-01 (BASE-COV-PULL-PS2): a day that is not an open session has no
+/// session windows to name, whatever else the calendar says of it; an open
+/// session's windows are its own, first and last minute inclusive.
+#[test]
+fn a_day_that_is_not_an_open_session_has_no_windows() {
+    for kind in [
+        DayKind::Closed,
+        DayKind::Unmeasured,
+        DayKind::OpenLengthUnmeasured,
+    ] {
+        assert_eq!(
+            super::windows_of(kind),
+            Vec::<(u16, u16)>::new(),
+            "{kind:?}"
+        );
+    }
+    assert_eq!(
+        super::windows_of(DayKind::Open(crate::calendar::Session::full())),
+        [(555, 929)]
+    );
 }

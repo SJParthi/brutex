@@ -1146,7 +1146,7 @@ mod tests {
 
     use super::*;
 
-    /// The same date, in each of the four renderings a descriptor can declare.
+    /// The same date, in each of the five renderings a descriptor can declare.
     fn rendered(year: u16, month: u8, day: u8, format: DateFormat) -> String {
         match format {
             DateFormat::CompactYmd => format!("{year:04}{month:02}{day:02}"),
@@ -1179,6 +1179,13 @@ mod tests {
                 "{text} read as {format:?} is 1 July 2025"
             );
         }
+        // THE WIRE'S DATETIME RENDERING IS NO CSV DATE FIELD: no archive
+        // declares one (`archive.rs` maps none to it), so it is refused, never
+        // cut to its first ten bytes (BASE-COV-PULL-PS2).
+        let wire = rendered(2025, 7, 1, DateFormat::DashedYmdMidnight);
+        assert_eq!(wire, "2025-07-01 00:00:00");
+        assert_eq!(day_of(&wire, DateFormat::DashedYmdMidnight), None);
+        assert_eq!(day_of(&wire, DateFormat::DashedYmd), None);
 
         // THE FAULT THIS EXISTS TO PREVENT. The same eight and ten bytes read
         // under the other convention are a different month, and the wrong
@@ -1497,6 +1504,10 @@ mod tests {
             (DateFormat::SlashedDmy, format!("0{}07/2025", 'é')),
             (DateFormat::CompactDmy, format!("012{}025", 'é')),
             (DateFormat::CompactDmy, format!("0{}12025", 'é')),
+            (
+                DateFormat::DashedYmdMidnight,
+                format!("2025-10{}0 00:00:00", 'é'),
+            ),
         ];
         for (format, text) in cases {
             let wanted = match format {
