@@ -956,9 +956,65 @@ fn lock_source(dir: &Path, source: &Source) -> Result<Flock<File>, String> {
         .map_err(|why| format!("{} could not be locked — {why}", path.display()))
 }
 
+/// One host call of a replacement a test may plant a refusal for.
+///
+/// A write, a sync or a rename the host refuses after the temporary opened,
+/// and a cleanup that refuses after that, cannot be made on demand on every
+/// host a test runs on (there is no portable full disk), so a test plants the
+/// refusal for one temporary's path and one step, and every line after the
+/// answer is the real path. Outside tests nothing is ever planted. D-7337.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Write,
+    Sync,
+    Rename,
+    Remove,
+}
+
+/// The refusal a test planted for `temporary` at `step`, taken once.
+#[cfg(test)]
+fn planted(temporary: &Path, step: Step) -> Option<std::io::Error> {
+    inject::take(temporary, step)
+}
+
+/// Outside tests nothing is planted, so every step is the host's own answer.
+#[cfg(not(test))]
+const fn planted(_temporary: &Path, _step: Step) -> Option<std::io::Error> {
+    None
+}
+
+/// The refusals tests plant, by temporary path and step (D-7337).
+#[cfg(test)]
+mod inject {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
+
+    use super::Step;
+
+    static PLANTED: Mutex<Vec<(PathBuf, Step, std::io::ErrorKind)>> = Mutex::new(Vec::new());
+
+    /// Plants `kind` for the next `step` of the replacement through `temporary`.
+    pub(super) fn plant(temporary: &Path, step: Step, kind: std::io::ErrorKind) {
+        PLANTED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((temporary.to_path_buf(), step, kind));
+    }
+
+    /// The refusal planted for `temporary` at `step`, removed as it is given.
+    pub(super) fn take(temporary: &Path, step: Step) -> Option<std::io::Error> {
+        let mut planted = PLANTED.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = planted
+            .iter()
+            .position(|(path, planted_step, _)| path == temporary && *planted_step == step)?;
+        let (_, _, kind) = planted.remove(at);
+        Some(std::io::Error::new(kind, "refused by the test's plant"))
+    }
+}
+
 /// Removes a failed partial and keeps both failures when cleanup also refuses.
 fn remove_partial_after(temporary: &Path, failure: String) -> String {
-    match std::fs::remove_file(temporary) {
+    match planted(temporary, Step::Remove).map_or_else(|| std::fs::remove_file(temporary), Err) {
         Ok(()) => failure,
         Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => failure,
         Err(cleanup) => format!(
@@ -982,14 +1038,16 @@ fn replace_locked(dir: &Path, source: &Source, body: &str) -> Result<Result<(), 
         .truncate(true)
         .open(&temporary)
         .map_err(|why| format!("{} could not be opened — {why}", temporary.display()))?;
-    if let Err(why) = file.write_all(body.as_bytes()) {
+    if let Err(why) =
+        planted(&temporary, Step::Write).map_or_else(|| file.write_all(body.as_bytes()), Err)
+    {
         drop(file);
         return Err(remove_partial_after(
             &temporary,
             format!("{} could not be written — {why}", temporary.display()),
         ));
     }
-    if let Err(why) = file.sync_all() {
+    if let Err(why) = planted(&temporary, Step::Sync).map_or_else(|| file.sync_all(), Err) {
         drop(file);
         return Err(remove_partial_after(
             &temporary,
@@ -998,7 +1056,9 @@ fn replace_locked(dir: &Path, source: &Source, body: &str) -> Result<Result<(), 
     }
     drop(file);
 
-    if let Err(why) = std::fs::rename(&temporary, &target) {
+    if let Err(why) =
+        planted(&temporary, Step::Rename).map_or_else(|| std::fs::rename(&temporary, &target), Err)
+    {
         return Err(remove_partial_after(
             &temporary,
             format!(
@@ -1420,27 +1480,27 @@ fn holds_exactly(target: &Path, body: &[u8]) -> Result<bool, crate::ingest::Unbo
     let Ok(file) = store::open_flags::open_read_no_follow(target) else {
         return Ok(false);
     };
-    let Ok(meta) = file.metadata() else {
-        return Ok(false);
-    };
-    if !meta.is_file() {
-        return Err(crate::ingest::Unbounded::NotRegular);
-    }
-    if meta.len() != body.len() as u64 {
-        return Ok(false);
+    // A STATUS THE HOST WILL NOT GIVE IS NOT HELD, like a length that differs:
+    // both answer `false` and the caller replaces the master. One arm serves
+    // both, so the answer to the fault is the one a test drives (D-7337).
+    match file.metadata() {
+        Ok(meta) if !meta.is_file() => return Err(crate::ingest::Unbounded::NotRegular),
+        Ok(meta) if meta.len() == body.len() as u64 => {}
+        _ => return Ok(false),
     }
     let mut reader = file.take(body.len() as u64);
     let mut chunk = [0_u8; 8_192];
     // `chunks` walks `body` itself, so there is no offset to advance and no
-    // loop bound a mutation could turn into a pass that never ends.
+    // loop bound a mutation could turn into a pass that never ends. Each piece
+    // is at most `chunk.len()` long, so the split below cannot fall short.
     for expected in body.chunks(chunk.len()) {
-        let Some(window) = chunk.get_mut(..expected.len()) else {
-            return Ok(false);
-        };
-        if reader.read_exact(window).is_err() {
-            return Ok(false);
-        }
-        if *window != *expected {
+        let (window, _) = chunk.split_at_mut(expected.len());
+        // A read cut short (the file shrank under the comparison, or the host
+        // refused it) answers like bytes that differ: not held (D-7337).
+        if !reader
+            .read_exact(&mut *window)
+            .is_ok_and(|()| *window == *expected)
+        {
             return Ok(false);
         }
     }
@@ -1780,11 +1840,14 @@ pub async fn fetch<D: crate::chain::Discovery, P: Pause>(
                 Verdict::Reprime => {
                     // NOTHING TO REFRESH, OR ALREADY REFRESHED. Either way the
                     // status means what it says on its face, which is no.
-                    if source.prime.is_none() || reprimed {
+                    let Some(prime) = source.prime else {
+                        break;
+                    };
+                    if reprimed {
                         break;
                     }
                     reprimed = true;
-                    prime_now(from, source, &mut attempts).await;
+                    prime_now(from, prime, &mut attempts).await;
                     // Deliberately no wait: the session is what changed, and a
                     // backoff here would be waiting for something else.
                 }
@@ -1806,20 +1869,15 @@ async fn prime_once<D: crate::chain::Discovery>(
     source: &Source,
     attempts: &mut Vec<Attempt>,
 ) {
-    if source.prime.is_some() {
-        prime_now(from, source, attempts).await;
+    if let Some(prime) = source.prime {
+        prime_now(from, prime, attempts).await;
     }
 }
 
-/// Establishes a session. The caller has already decided one is wanted.
-async fn prime_now<D: crate::chain::Discovery>(
-    from: &D,
-    source: &Source,
-    attempts: &mut Vec<Attempt>,
-) {
-    let Some(prime) = source.prime else {
-        return;
-    };
+/// Establishes a session at `prime`. The caller has already decided one is
+/// wanted, and hands the source's own prime URL, so there is no source
+/// without one to answer here (D-7337).
+async fn prime_now<D: crate::chain::Discovery>(from: &D, prime: &str, attempts: &mut Vec<Attempt>) {
     let got = match from.get(prime).await {
         Ok(_) => Got::Primed,
         Err(refusal) => Got::PrimeRefused {
@@ -1935,6 +1993,47 @@ mod tests {
             n += 1;
         }
         body
+    }
+
+    /// A source with no vendor gets the catalogue's own two-column shape from
+    /// the fixture, and that shape lands: no vendor, no column check, so only
+    /// the shape guards apply. BASE-COV-PULL PS3.
+    #[test]
+    fn a_source_without_a_vendor_lands_the_catalogues_own_shape() {
+        let dir = scratch("vendorless");
+        let source = super::Source {
+            shape: super::Shape::Csv,
+            vendor: None,
+            file: "zq-vendorless.csv",
+            url: "https://zq.invalid/index.csv",
+            mirrors: &[],
+            prime: None,
+            needs_token: false,
+        };
+        let body = a_master_for(&source);
+        assert!(body.starts_with("index_name,category\n"), "{body}");
+        assert!(land(&dir, &source, &body).is_written());
+        assert_eq!(
+            std::fs::read_to_string(path_of(&dir, &source)).expect("landed"),
+            body
+        );
+    }
+
+    /// A blank line between a vendor master's rows is skipped, not read as a
+    /// row the decoder refuses: the master lands whole, blank line and all.
+    /// BASE-COV-PULL PS3.
+    #[test]
+    fn a_blank_line_between_rows_is_skipped_not_refused() {
+        let dir = scratch("blank-row");
+        let source = &SOURCES[0];
+        let master = a_master_for(source);
+        let (header, rows) = master.split_once('\n').expect("a header line");
+        let body = format!("{header}\n\n{rows}");
+        assert!(land(&dir, source, &body).is_written());
+        assert_eq!(
+            std::fs::read_to_string(path_of(&dir, source)).expect("landed"),
+            body
+        );
     }
 
     #[test]
@@ -2358,9 +2457,12 @@ mod tests {
 
         // Same length, different bytes: compared, found different, replaced.
         let mut same_length = body.clone().into_bytes();
-        if let Some(last) = same_length.iter_mut().rev().nth(1) {
-            *last = last.wrapping_add(1);
-        }
+        let last = same_length
+            .iter_mut()
+            .rev()
+            .nth(1)
+            .expect("a master is longer than two bytes");
+        *last = last.wrapping_add(1);
         std::fs::write(&target, &same_length).expect("a same-length edit");
         let Landed::Written { changed, .. } = land(&dir, source, &body) else {
             panic!("the repair lands");
@@ -2816,12 +2918,13 @@ mod tests {
     impl Discovery for Scripted {
         async fn get(&self, url: &str) -> Result<String, Refusal> {
             self.asked.borrow_mut().push(url.to_owned());
-            if self.answers.borrow().is_empty() {
-                // THE SCRIPT RAN OUT, which in these tests means the ladder
-                // asked more times than the test expected. Saying so beats
-                // looping forever or answering a default.
-                return Err(Refusal::transport("the script ran out".to_owned()));
-            }
+            // THE SCRIPT RAN OUT, which in these tests means the ladder asked
+            // more times than the test expected: the test fails saying so,
+            // which beats looping forever or answering a default.
+            assert!(
+                !self.answers.borrow().is_empty(),
+                "the script ran out at {url}"
+            );
             self.answers.borrow_mut().remove(0)
         }
     }
@@ -3622,12 +3725,14 @@ mod tests {
                 let _ = sent.send(land(&dir, &SOURCES[0], &a_master()));
             })
         };
-        let landed = answer.recv_timeout(std::time::Duration::from_secs(2));
-        if landed.is_err() {
-            let _ = std::fs::OpenOptions::new().write(true).open(&target);
-        }
+        let landed = answer
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|_| {
+                // Release the landing blocked in open(2), then fail.
+                let _ = std::fs::OpenOptions::new().write(true).open(&target);
+                panic!("a FIFO at the target must not hold the landing");
+            });
         let _ = worker.join();
-        let landed = landed.expect("a FIFO at the target must not hold the landing");
         let Landed::Refused(ref why) = landed else {
             panic!("a target that is not a regular file is refused: {landed:?}");
         };
@@ -3641,3 +3746,9 @@ mod tests {
 #[cfg(test)]
 #[path = "masters_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL PS3 (D-7337): every refusal and uncertain state of the write
+// path behind `land`, on synthetic masters in scratch folders.
+#[cfg(test)]
+#[path = "masters_land_tests.rs"]
+mod land_tests;
