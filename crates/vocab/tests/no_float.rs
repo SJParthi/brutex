@@ -171,17 +171,7 @@ fn the_source_list_matches_the_directory() {
                 .collect::<BTreeSet<String>>(),
         ),
     ] {
-        let mut on_disk = BTreeSet::new();
-        for entry in std::fs::read_dir(dir).expect("the crate's own directory is readable") {
-            let entry = entry.expect("a directory entry is readable");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if std::path::Path::new(&name)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
-            {
-                on_disk.insert(name);
-            }
-        }
+        let on_disk = rs_names(std::path::Path::new(dir));
         assert!(!on_disk.is_empty(), "{dir} holds no source file");
         assert_eq!(
             on_disk, listed,
@@ -189,4 +179,39 @@ fn the_source_list_matches_the_directory() {
              never opens is a float it cannot see",
         );
     }
+}
+
+/// Every `.rs` file directly in `dir`, in any case of the extension, by name.
+fn rs_names(dir: &std::path::Path) -> BTreeSet<String> {
+    let mut on_disk = BTreeSet::new();
+    for entry in std::fs::read_dir(dir).expect("the directory is readable") {
+        let entry = entry.expect("a directory entry is readable");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+        {
+            on_disk.insert(name);
+        }
+    }
+    on_disk
+}
+
+/// **THE LISTING KEEPS RUST SOURCES ONLY, IN ANY CASE OF THE EXTENSION.**
+/// BASE-COV-LIBS-LS3: the crate's own directories hold nothing else, so the
+/// listing's refusal of another file had no run. Extremes: an upper-case
+/// extension, a file with no extension, a backup of a source, and a document.
+#[test]
+fn the_listing_keeps_rust_sources_only_in_any_case_of_the_extension() {
+    let dir = std::env::temp_dir().join(format!("brutex-vocab-listing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for name in ["a.rs", "B.RS", "notes.md", "noext", "c.rs.bak"] {
+        std::fs::write(dir.join(name), b"").expect("a scratch file");
+    }
+    assert_eq!(
+        rs_names(&dir),
+        ["B.RS", "a.rs"].map(str::to_owned).into_iter().collect()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
