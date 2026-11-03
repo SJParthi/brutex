@@ -477,3 +477,9 @@ pub(super) fn agree(sealed: Option<&SealedAudit>, raw: &AuditedBarFile) -> Resul
         ))
     }
 }
+
+/// The audited door's comparison of the two forms, one header fact at a time
+/// (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "file_sealed_cover_tests.rs"]
+mod cover_tests;
