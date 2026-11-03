@@ -2495,3 +2495,9 @@ pub(super) enum Mode {
     /// auction sidecar.
     Rescan,
 }
+
+// BASE-COV-PULL-PS1 (D-7335): the day loop's refusal arms, reach back,
+// widening and own warnings, driven.
+#[cfg(test)]
+#[path = "gdfl_import_day_ps1_tests.rs"]
+mod ps1_tests;
