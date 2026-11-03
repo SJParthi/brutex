@@ -1264,3 +1264,267 @@ fn each_signal_length_names_its_label_and_no_other_length_does() {
         assert_eq!(super::signal_timeframe_v4(length), None, "{length}");
     }
 }
+
+/// A plain signal column folded from `bars`.
+fn built(bars: &[indicators::Candle]) -> indicators::column::Column {
+    indicators::column::Column::build(bars, &mut super::tests::evaluator())
+}
+
+/// THE V4 DOOR AUTHENTICATES ITS SIGNAL COLUMN'S SHAPE: no signal, signal
+/// bars out of order, a column already projected onto fills, and a column
+/// folded from fewer bars than the series are each refused.
+#[test]
+fn a_signal_column_that_does_not_cover_its_series_is_refused_by_shape() {
+    let bars = crate::synthetic::sessions(4);
+    let column = built(&bars);
+    assert_eq!(
+        super::authenticate_signal_column_shape_v4(&bars, &column),
+        Ok(())
+    );
+    let refused = Err(AnchoredSearchValidationRefusalV4::SignalSourceMismatch(
+        "the prepared signal column does not exactly cover its ordered signal series",
+    ));
+    assert_eq!(
+        super::authenticate_signal_column_shape_v4(&[], &built(&[])),
+        refused
+    );
+    let mut repeated = bars.clone();
+    repeated[1].ts_micros = repeated[0].ts_micros;
+    assert_eq!(
+        super::authenticate_signal_column_shape_v4(&repeated, &column),
+        refused
+    );
+    let width = column.len();
+    let (fill, _) = column
+        .reproject(&vec![None; width], width)
+        .expect("a parallel map");
+    assert_eq!(
+        super::authenticate_signal_column_shape_v4(&bars, &fill),
+        refused
+    );
+    let shorter = built(&bars[..bars.len() - 1]);
+    assert_eq!(
+        super::authenticate_signal_column_shape_v4(&bars, &shorter),
+        refused
+    );
+}
+
+/// A PREPARED PREFIX MUST BE THE RETAINED FULL COLUMN'S OWN CAUSAL PREFIX:
+/// a prefix shorter than the one before, a cursor already past the full
+/// column, a full column shorter than the prefix, and a rebuilt prefix whose
+/// sources, bits, evaluator policy or acceptance alone differ from the full
+/// column's are each refused by name.
+#[test]
+fn a_prepared_prefix_that_is_not_the_full_columns_prefix_is_refused() {
+    let bars = crate::synthetic::sessions(7);
+    let full = built(&bars);
+    let first = *full
+        .sources()
+        .first()
+        .expect("seven sessions warm the evaluator");
+    let cut = first + 20;
+    let prefix = &bars[..cut];
+    let mismatch = AnchoredSearchValidationRefusalV4::SignalSourceMismatch;
+    let mut cursor = super::PreparedSignalPrefixCursor::default();
+    assert_eq!(cursor.authenticate(prefix, &built(prefix), &full), Ok(()));
+    assert!(cursor.end > 0, "the prefix holds warm rows");
+    let shorter = &bars[..cut - 1];
+    assert_eq!(
+        cursor.authenticate(shorter, &built(shorter), &full),
+        Err(mismatch(
+            "prepared signal-prefix boundaries are not monotonic"
+        ))
+    );
+    let mut past = super::PreparedSignalPrefixCursor {
+        end: full.sources().len() + 1,
+        last_signal_bars: None,
+    };
+    assert_eq!(
+        past.authenticate(prefix, &built(prefix), &full),
+        Err(mismatch(
+            "prepared signal-prefix boundaries are not monotonic"
+        ))
+    );
+    let short_full = built(shorter);
+    assert_eq!(
+        super::PreparedSignalPrefixCursor::default().authenticate(
+            prefix,
+            &built(prefix),
+            &short_full
+        ),
+        Err(mismatch(
+            "the retained full signal acceptance is shorter than a causal prefix"
+        ))
+    );
+    let differs = Err(mismatch(
+        "a rebuilt causal signal prefix differs from the retained full prepared column",
+    ));
+    let fresh = |prefix: &[indicators::Candle], prepared: &indicators::column::Column| {
+        super::PreparedSignalPrefixCursor::default().authenticate(prefix, prepared, &full)
+    };
+    let honest = built(prefix);
+    // A corrupt warm bar drops its row: the sources differ.
+    let mut corrupt = prefix.to_vec();
+    corrupt[first + 5].high = corrupt[first + 5].low - 1;
+    let dropped = built(&corrupt);
+    assert!(!dropped.sources().contains(&(first + 5)));
+    assert_eq!(fresh(&corrupt, &dropped), differs);
+    // Cleared rows keep every source and lose their bits.
+    let mut cleared = built(prefix);
+    cleared.clear_before(cut);
+    assert_eq!(cleared.sources(), honest.sources());
+    assert_ne!(cleared.bits(), honest.bits());
+    assert_eq!(fresh(prefix, &cleared), differs);
+    // Another calendar is another evaluator policy with the same truth here:
+    // no synthetic day is one of the charter's non-regular days.
+    let other = indicators::column::Column::build(
+        prefix,
+        &mut indicators::evaluator::Evaluator::with_calendar(
+            indicators::evaluator::Widths::pinned().expect("pinned widths are valid"),
+            indicators::vwap::Availability::Absent,
+            indicators::pattern::Thresholds::CLASSICAL,
+            indicators::evaluator::Calendar::all_regular(),
+        ),
+    );
+    assert_eq!(
+        (other.sources(), other.bits()),
+        (honest.sources(), honest.bits())
+    );
+    assert_ne!(
+        other.evaluation_spec_token(),
+        honest.evaluation_spec_token()
+    );
+    assert_eq!(fresh(prefix, &other), differs);
+    // A corrupt bar before the evaluator warms changes only the acceptance.
+    let mut cold = bars[..first].to_vec();
+    let last = cold.len() - 1;
+    cold[last].high = cold[last].low - 1;
+    let cold_column = built(&cold);
+    assert!(cold_column.is_empty(), "no row before the evaluator warms");
+    assert_eq!(fresh(&cold, &cold_column), differs);
+}
+
+/// A FOLD THAT CANNOT BE PROJECTED IS REFUSED BY NAME, never replaced: a
+/// signal length of zero cannot align, a column with no evaluator cannot be
+/// re-evaluated over execution bars, an OOS boundary past its series, and a
+/// projected row before the OOS execution boundary.
+#[test]
+fn a_fold_that_cannot_be_projected_is_refused_by_name() {
+    const MINUTE: i64 = 60_000_000;
+    let bars = crate::synthetic::sessions(6);
+    let column = built(&bars);
+    assert!(!column.is_empty(), "six sessions warm the evaluator");
+    assert!(super::project_fold(&bars, &column, &bars, MINUTE).is_ok());
+    assert!(super::project_fold(&bars, &column, &bars, 0).is_err());
+    let blank = indicators::column::Column::default();
+    assert!(super::project_fold(&bars, &blank, &bars, MINUTE).is_err());
+    assert!(super::project_oos_fold(&bars, &column, &bars, MINUTE, 0, 0).is_ok());
+    for (what, signal_at, execution_at, length) in [
+        (
+            "a signal boundary past the series",
+            bars.len() + 1,
+            0,
+            MINUTE,
+        ),
+        (
+            "an execution boundary past the series",
+            0,
+            bars.len() + 1,
+            MINUTE,
+        ),
+        ("a signal length of zero", 0, 0, 0),
+        (
+            "every projected row before the boundary",
+            0,
+            bars.len(),
+            MINUTE,
+        ),
+    ] {
+        assert!(
+            super::project_oos_fold(&bars, &column, &bars, length, signal_at, execution_at)
+                .is_err(),
+            "{what}"
+        );
+    }
+    assert!(super::project_oos_fold(&bars, &blank, &bars, MINUTE, 0, 0).is_err());
+}
+
+/// THE V3 DOOR REFUSES ZERO RESOLVED RUNGS BEFORE IT RUNS ANY SEARCH, and the
+/// V4 door refuses an execution series with a stamp off the minute grid.
+#[test]
+fn the_search_doors_refuse_zero_rungs_and_a_coarse_execution_path() {
+    let bars = crate::synthetic::sessions(2);
+    let called = std::cell::Cell::new(false);
+    let mut builder = |slice: &[indicators::Candle]| {
+        called.set(true);
+        Ok(built(slice))
+    };
+    assert_eq!(
+        super::walk_forward_projected_prepared_anchored_search_v3(
+            &bars,
+            super::ExecutionSeries {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            super::tests::h(15),
+            3,
+            &super::tests::sweeper(),
+            &mut builder,
+            0,
+        )
+        .map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV3::ZeroResolvedRungs)
+    );
+    assert!(!called.get(), "no fold is built for a refused policy");
+    let instrument = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("NSE-NIFTY is an allowed index");
+    let resolve = |side, bars: &[indicators::Candle]| {
+        let series = crate::exit_grid_policy::ExecutionSeriesV1::new(
+            &instrument,
+            "test-feed",
+            "test-commit",
+            [0xA5; 32],
+            bars,
+        )
+        .expect("complete identity");
+        super::tests::exact_grid_policy_v4(side)
+            .resolve_attested(series)
+            .expect("the grid resolves")
+    };
+    let long = resolve(crate::excursion::Side::Long, &bars);
+    let short = resolve(crate::excursion::Side::Short, &bars);
+    // A bar stamped half a minute off the grid: a whole missing minute is a
+    // legal gap, an off-grid stamp is not.
+    let mut coarse = bars.clone();
+    let middle = coarse.len() / 2;
+    coarse[middle].ts_micros += 30_000_000;
+    let execution = crate::exit_grid_policy::ExecutionSeriesV1::new(
+        &instrument,
+        "test-feed",
+        "test-commit",
+        [0xA5; 32],
+        &coarse,
+    )
+    .expect("complete identity");
+    assert_eq!(
+        super::walk_forward_projected_prepared_anchored_search_v4(
+            &bars,
+            &built(&bars),
+            execution,
+            60_000_000,
+            super::tests::h(15),
+            1,
+            &super::tests::sweeper(),
+            &mut builder,
+            &long,
+            &short,
+        )
+        .map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV4::GridPairMismatch(
+            "execution is not a non-empty exact one-minute path"
+        ))
+    );
+}

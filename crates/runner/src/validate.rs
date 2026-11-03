@@ -5368,7 +5368,7 @@ pub(crate) mod tests {
     use std::sync::OnceLock;
     use vocab::ConditionMask;
 
-    fn evaluator() -> Evaluator {
+    pub(super) fn evaluator() -> Evaluator {
         Evaluator::new(
             Widths::pinned().expect("pinned widths are valid"),
             Availability::Absent,
@@ -5467,7 +5467,7 @@ pub(crate) mod tests {
             .clone()
     }
 
-    fn exact_grid_policy_v4(side: crate::excursion::Side) -> ExitGridPolicyV1 {
+    pub(super) fn exact_grid_policy_v4(side: crate::excursion::Side) -> ExitGridPolicyV1 {
         let middle =
             RationalPercentileV1::new(1, 2).expect("the exact one-half percentile is valid");
         let rungs = RungPlanV1::new(vec![middle], vec![middle], vec![middle], 1)
