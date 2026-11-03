@@ -529,19 +529,26 @@ fn a_bounded_stack_body_keeps_its_panic_and_its_value() {
 
 #[test]
 fn a_bounded_stack_refuses_the_default_or_more_before_any_thread_starts() {
-    // A raise through this helper would pass and prove nothing, so it is refused,
-    // and the body never runs. One byte under the default is still a bound.
-    let ran = std::sync::atomic::AtomicBool::new(false);
-    for bytes in [HARNESS_STACK, HARNESS_STACK + 1, 64 << 20, usize::MAX] {
-        let said = on_bounded_stack("batch-raise", bytes, || {
-            ran.store(true, std::sync::atomic::Ordering::Relaxed);
-        })
-        .unwrap_err();
-        assert!(said.contains("this only ever lowers a stack"), "{said}");
+    // A raise through this helper would pass and prove nothing, so it is refused
+    // before any thread starts, and the body never runs. One byte under the
+    // default is still a bound, and there the same body runs.
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    for (bytes, bounded) in [
+        (HARNESS_STACK - 1, true),
+        (HARNESS_STACK, false),
+        (HARNESS_STACK + 1, false),
+        (64 << 20, false),
+        (usize::MAX, false),
+    ] {
+        let ran = AtomicBool::new(false);
+        let answer = on_bounded_stack("batch-bound", bytes, || ran.store(true, Relaxed));
+        assert_eq!(ran.load(Relaxed), bounded, "{bytes} bytes");
+        assert_eq!(
+            answer
+                .err()
+                .map(|said| said.contains("this only ever lowers a stack")),
+            (!bounded).then_some(true),
+            "{bytes} bytes"
+        );
     }
-    assert!(!ran.load(std::sync::atomic::Ordering::Relaxed));
-    assert_eq!(
-        on_bounded_stack("batch-just-under", HARNESS_STACK - 1, || 7).unwrap(),
-        7
-    );
 }
