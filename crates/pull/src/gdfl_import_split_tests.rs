@@ -982,3 +982,32 @@ fn the_line_counter_sets_aside_only_module_use_and_visibility() {
     let changed = counted(&after.replace("const D: u8 = 1;", "const D: u8 = 2;"), true);
     assert_ne!(changed.digest(), b.digest(), "a changed line is counted");
 }
+
+/// The two helpers the proofs trust, at their edges (BASE-COV-PULL PS3):
+/// `digests` zeroes a generation file's wall clock (bytes 48..56 and 60..64
+/// of each 64-byte record, a short last record as far as it reaches) and no
+/// other byte; `counted` keeps attribute and doc lines left at the end of a
+/// text with no item after them.
+#[test]
+fn the_split_proofs_helpers_hold_at_their_edges() {
+    let name = format!("x.{}", store::generation::EXTENSION);
+    let (one, two) = (scratch("split-digests-one"), scratch("split-digests-two"));
+    let mut records = vec![7_u8; 64 + 52];
+    std::fs::write(one.join(&name), &records).unwrap();
+    for at in (48..56).chain(60..64).chain(64 + 48..64 + 52) {
+        records[at] = 9;
+    }
+    std::fs::write(two.join(&name), &records).unwrap();
+    assert_eq!(digests(&one), digests(&two), "only the wall clock differs");
+    records[0] = 1;
+    std::fs::write(two.join(&name), &records).unwrap();
+    assert_ne!(
+        digests(&one),
+        digests(&two),
+        "a byte outside the clock differs"
+    );
+
+    let tail = counted("fn kept() {}\n#[inline]\n/// left at the end\n", false);
+    assert_eq!(tail.kept.values().sum::<usize>(), 3, "{:?}", tail.kept);
+    assert_eq!((tail.module, tail.uses, tail.visibility), (0, 0, 0));
+}
