@@ -3597,6 +3597,47 @@ mod tests {
         );
     }
 
+    /// A SQUARE-OFF TABLE WITH A HOLE INSIDE AN OPEN POSITION: a signal whose
+    /// entry falls inside the first position and has no square-off is still
+    /// counted while open, and is recorded nowhere else, where the derived
+    /// table records it as an eligible round trip and a held occupancy.
+    #[test]
+    fn a_blocked_entry_with_no_square_off_is_counted_while_open_and_recorded_nowhere() {
+        let (bars, column) = swept();
+        let facts = super::SliceFacts::of(&bars, &column);
+        let derived = walk(&bars, &column, &ConditionMask::ZERO, h(5), Direction::Long);
+        let first = derived.trades.first().expect("the fixture trades");
+        let inside = first.entry_bar + 1;
+        assert!(
+            inside <= first.exit_bar,
+            "the premise: an entry inside the first position"
+        );
+        assert!(
+            derived
+                .eligible
+                .iter()
+                .any(|trade| trade.entry_bar == inside),
+            "the derived table prices the blocked round trip"
+        );
+        let mut supplied = facts.exits().to_vec();
+        *supplied.get_mut(inside).expect("inside the slice") = None;
+        let holed = super::walk_with(
+            &bars,
+            &column,
+            &ConditionMask::ZERO,
+            h(5),
+            Direction::Long,
+            Some(&supplied),
+        );
+        assert!(holed.reconciles());
+        assert_eq!(holed.signals, derived.signals);
+        assert_eq!(holed.while_open, derived.while_open);
+        assert_eq!(holed.too_late, derived.too_late);
+        assert!(holed.eligible.iter().all(|trade| trade.entry_bar != inside));
+        assert!(holed.occupancy.iter().all(|held| held.entry_bar != inside));
+        assert_eq!(holed.trades, derived.trades);
+    }
+
     #[test]
     fn a_range_or_entry_outside_the_slice_facts_is_answered_no() {
         let (bars, column) = swept();
