@@ -137,3 +137,43 @@ fn a_port_nothing_answers_is_a_transport_refusal() {
     assert_eq!(refused.status, None);
     assert!(refused.detail.starts_with(&url), "{}", refused.detail);
 }
+
+/// The ceiling binds chunk by chunk when nothing is declared (BASE-COV-PULL
+/// PS3, D-7337): an answer with no `Content-Length`, read until the host
+/// closes, that offers 1 MiB past `MAX_BODY_BYTES` is refused by name and
+/// status at the first chunk that would pass the ceiling, before the rest is
+/// read. The host's writes after the refusal fail and are ignored.
+#[test]
+fn an_undeclared_body_past_the_ceiling_is_refused_as_it_streams() {
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let addr = socket.local_addr().expect("an address");
+    let host = std::thread::spawn(move || {
+        let (mut stream, _) = socket.accept().expect("a connection");
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+            let read = stream.read(&mut buf).expect("the request");
+            assert!(read > 0, "the request ended before its head did");
+            request.extend_from_slice(&buf[..read]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            .expect("the head is written");
+        let block = vec![b'z'; 1 << 20];
+        for _ in 0..=(MAX_BODY_BYTES >> 20) {
+            let _ = stream.write_all(&block);
+        }
+    });
+    let fetch = PublicFetch::new().unwrap();
+    let url = format!("http://{addr}/master.csv");
+    let refused = runtime().block_on(fetch.get(&url)).unwrap_err();
+    host.join().expect("the host thread ends");
+    assert_eq!(refused.status, Some(200));
+    assert!(
+        refused
+            .detail
+            .ends_with(&format!("sent more than the {MAX_BODY_BYTES}-byte ceiling")),
+        "{}",
+        refused.detail
+    );
+}
