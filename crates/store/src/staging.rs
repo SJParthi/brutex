@@ -321,3 +321,8 @@ pub fn create(path: &Path) -> Result<Staged, StagingError> {
 #[cfg(test)]
 #[path = "staging_tests.rs"]
 mod tests;
+
+/// A leftover the host will not let the door remove (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "staging_cover_tests.rs"]
+mod cover_tests;
