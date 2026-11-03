@@ -228,8 +228,9 @@ struct Expect {
 /// before row `i` (traded or not), a late kept row placed at the stamp of the
 /// next in-order row of any kind, the rest dropped and counted, then one bar
 /// per placed second in file order. `None` when a placed quantity or a
-/// second's sum does not fit an `i64`.
-fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect> {
+/// second's sum does not fit an `i64` (a quantity alone past it is such a
+/// sum). Untraded rows are counted and dropped.
+fn reference(on: Day, rows: &[Row], oi: bool) -> Option<Expect> {
     let n = rows.len();
     let in_order = |i: usize| (0..i).all(|j| rows[j].sod <= rows[i].sod);
     let mut out = Expect {
@@ -238,7 +239,7 @@ fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect>
     };
     let mut placed: Vec<(u32, &Row)> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
-        if !every_row && r.ltq == 0 {
+        if r.ltq == 0 {
             out.zero += 1;
             continue;
         }
@@ -256,10 +257,7 @@ fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect>
     }
     let mut sums: Vec<u128> = Vec::new();
     for (second, r) in placed {
-        if !every_row && i64::try_from(r.ltq).is_err() {
-            return None;
-        }
-        let volume = if every_row { 0 } else { u128::from(r.ltq) };
+        let volume = u128::from(r.ltq);
         let oi = if oi {
             i64::try_from(r.oi).unwrap()
         } else {
@@ -307,10 +305,10 @@ fn reference(on: Day, rows: &[Row], every_row: bool, oi: bool) -> Option<Expect>
                 .zip(&placed_at)
                 .filter(|(_, at)| at.map(|s| utc_micros(on, s)) == Some(bar.ts_micros))
                 .map(|(r, _)| r)
-                .next_back();
-            if let Some(r) = last {
-                bar.open_interest = i64::try_from(r.oi).unwrap();
-            }
+                .next_back()
+                .unwrap();
+            // The row that made the bar is placed in its second.
+            bar.open_interest = i64::try_from(last.oi).unwrap();
         }
     }
     for (bar, sum) in out.bars.iter_mut().zip(sums) {
@@ -329,10 +327,7 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&at) else {
-            continue;
-        };
-        for entry in entries {
+        for entry in std::fs::read_dir(&at).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
@@ -811,7 +806,7 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                         late_failures.push((format!("{on} {name}"), "the LTP is not a two-place"));
                         continue;
                     }
-                    if let Some(expect) = reference(*on, rows, false, true) {
+                    if let Some(expect) = reference(*on, rows, true) {
                         files.push((*opt, expect));
                     } else {
                         want.totals.files_refused += 1;
@@ -1062,6 +1057,79 @@ fn r2_03_random_options_worlds_match_the_reference_through_both_sources() {
     );
 }
 
+/// The one shape the random worlds draw seldom, every time (BASE-COV-PULL-PS2:
+/// a bent file whose only row is the bent one, which a bent draw makes once
+/// in 48): the file is refused naming its bent row, the day's other file of
+/// the same underlying is read, and the two sources agree, exactly as the
+/// reference says.
+#[test]
+fn r2_03b_a_bent_file_with_no_other_row_is_refused_by_its_bent_row() {
+    let on = day(2024, 4, 1);
+    // 2024-04-25: a Thursday, and the day its name states is its settlement.
+    let expiry = plus(on, 24);
+    assert!(
+        weekday(expiry) && settles_as_stated("NIFTY", expiry, on),
+        "{expiry}"
+    );
+    let bent = Opt {
+        under: "NIFTY",
+        expiry,
+        paisa: 2_200_000,
+        call: true,
+    };
+    let read = Opt {
+        call: false,
+        ..bent
+    };
+    let mut rng = Rng(0x7232_3033_4245_4E54);
+    let mut rows = random_rows(&mut rng, false);
+    rows.push(Row {
+        sod: OPEN + 60,
+        ltp: 750,
+        ltp_text: price_text(750),
+        ltq: 3,
+        oi: 9,
+    });
+    let world = vec![(
+        on,
+        vec![
+            Entry::Option {
+                opt: bent,
+                rows: Vec::new(),
+                bent: true,
+                upper: false,
+            },
+            Entry::Option {
+                opt: read,
+                rows,
+                bent: false,
+                upper: false,
+            },
+        ],
+    )];
+    let root = scratch("r2-bent-alone");
+    write_world(&root, &world);
+    let (a, b) = (root.join("A"), root.join("B"));
+    let ra = run_options(&root, false, &a, &[]);
+    let rb = run_options(&root, true, &b, &[]);
+    assert_eq!(ra, rb, "the two sources report one run");
+    let want = want_nfo(&world, &[]);
+    assert_eq!(totals_of(&ra), want.totals, "{ra:?}");
+    let named = format!("{on} {}", bent.name());
+    assert_eq!(
+        want.failures,
+        [(named.clone(), "the LTP is not a two-place")]
+    );
+    assert_eq!(ra.failures.len(), 1, "{ra:?}");
+    assert_eq!(ra.failures[0].instrument, named);
+    assert!(
+        ra.failures[0].why.contains("the LTP is not a two-place"),
+        "{}",
+        ra.failures[0].why
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 // ── the stocks world ───────────────────────────────────────────────────────
 
 /// One entry of a capital-market stocks day.
@@ -1278,7 +1346,7 @@ fn r2_04_random_stocks_worlds_match_the_reference_through_both_sources() {
                             // row inside the session, nothing a fill can use.
                             totals.files_refused += 1;
                             late.push((format!("{on} {name}"), "no usable row"));
-                        } else if let Some(expect) = reference(*on, rows, false, false) {
+                        } else if let Some(expect) = reference(*on, rows, false) {
                             files.push((sym, expect));
                         } else {
                             totals.files_refused += 1;
@@ -1342,9 +1410,9 @@ fn run_stocks_on(store: &Path) -> Result<Report, ImportRefusal> {
         only: &[],
         store_root: store,
     };
-    drive(&run, |_, _| DayRead {
-        held: true,
-        ..DayRead::default()
+    // Every run here is refused or finds its one day done: no day is read.
+    drive(&run, |_, _| {
+        unreachable!("a refused or done journal reads no day")
     })
 }
 
@@ -1579,7 +1647,8 @@ fn r2_06_pre_cutover_listings_key_every_file_by_its_decoded_contract() {
                 assert!(
                     read.refused
                         .iter()
-                        .any(|r| &r.instrument == name && r.why.contains("same contract")),
+                        .filter(|r| &r.instrument == name)
+                        .any(|r| r.why.contains("same contract")),
                     "{ctx}: {name} is not refused as ambiguous: {:?}",
                     read.refused
                 );
@@ -1648,12 +1717,15 @@ fn r2_07_every_table_month_on_every_weekday_around_its_expiry() {
                             "{name} on {on}"
                         );
                     }
-                } else if let Ok(t) = got {
-                    // Dated: `{yy}{MON}12` is the day, month and year 2012.
+                } else {
+                    // Dated: `{yy}{MON}12` is the day, month and year 2012, long
+                    // passed on every day from the cutover.
                     assert!(
-                        t.contract.as_str().starts_with("2012-"),
-                        "{name} on {on}: {}",
-                        t.contract.as_str()
+                        matches!(
+                            got,
+                            Err(NfoRefusal::ExpiryPassed { .. } | NfoRefusal::TickerUnparsed { .. })
+                        ),
+                        "{name} on {on}: {got:?}"
                     );
                 }
             }
