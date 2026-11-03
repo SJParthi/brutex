@@ -59,7 +59,7 @@ const DATED_BEFORE_CUTOVER: [&str; 2] = crate::gdfl_nfo::EARLY_DAY_FORM;
 use crate::gdfl_archive::{Archive, crc32, member_bytes, zip_entries};
 use crate::gdfl_cm::{CmFile, Expect, day_folder_name, decode};
 use crate::gdfl_fixtures::{Method, bts, csv, hms, put, row, scratch, zip};
-use crate::gdfl_tickstore::{TickStore, read_index, rebuild};
+use crate::gdfl_tickstore::{IndexEntry, TickStore, read_index, rebuild};
 
 // ── shared helpers ─────────────────────────────────────────────────────────
 
@@ -1050,10 +1050,7 @@ fn a_flipped_tick_store_byte_never_reaches_a_row_unnoticed() {
         };
         listed += 1;
         for entry in &index {
-            let Ok(rebuilt) = rebuild(&bytes, entry) else {
-                continue;
-            };
-            if u64::try_from(rebuilt.len()).unwrap() == entry.size && crc32(&rebuilt) == entry.crc {
+            if let Some(rebuilt) = whole_member(&bytes, entry) {
                 let mut original = None;
                 for (name, data) in &entries {
                     if *name == entry.name {
@@ -1069,6 +1066,34 @@ fn a_flipped_tick_store_byte_never_reaches_a_row_unnoticed() {
         listed > 1_000 && rebuilt_clean > 1_000,
         "{listed} {rebuilt_clean}"
     );
+    // A member whose stated size is past what it rebuilds to is not taken as
+    // the original, whatever its CRC: the size is checked before the CRC.
+    for entry in read_index(&whole, len).unwrap() {
+        if entry.kind == 0 {
+            continue;
+        }
+        assert!(whole_member(&whole, &entry).is_some(), "{}", entry.name);
+        let longer = IndexEntry {
+            size: entry.size + 1,
+            ..entry.clone()
+        };
+        // A columnar block rebuilds to fewer bytes than that; a raw one is refused.
+        assert_eq!(
+            rebuild(&whole, &longer).is_ok(),
+            entry.kind == 1,
+            "{}",
+            entry.name
+        );
+        assert!(whole_member(&whole, &longer).is_none(), "{}", entry.name);
+    }
+}
+
+/// The member `entry` rebuilds to from `bytes`, when it rebuilds whole: to
+/// its stated size, and then to its stated CRC-32.
+fn whole_member(bytes: &Vec<u8>, entry: &IndexEntry) -> Option<Vec<u8>> {
+    let rebuilt = rebuild(bytes, entry).ok()?;
+    let whole = u64::try_from(rebuilt.len()).unwrap() == entry.size && crc32(&rebuilt) == entry.crc;
+    whole.then_some(rebuilt)
 }
 
 /// A day file built from a raw index, for footer and entry fields no

@@ -2416,12 +2416,7 @@ fn a_source_that_grew_after_the_survey_is_refused_not_moved_with_a_stale_count()
         assert!(read.superseded(sym("NIFTY"), c(STATED)).is_none(), "{tag}");
         // The re-plan counts 4 and moves them; then nothing is pending.
         let (found, ledger, again) = view(root);
-        if again.moves.is_empty() {
-            // A new month the decoder files elsewhere is left by name,
-            // never moved with a stale count.
-            assert!(!again.unresolved.is_empty(), "{tag}");
-            continue;
-        }
+        assert_eq!(again.moves.len(), 1, "{tag}: {:?}", again.unresolved);
         assert_eq!(again.moves[0].bars, 4, "{tag}");
         let done = apply(root, &found, &again, &ledger).unwrap();
         assert_eq!(done.moved[0].bars, 4, "{tag}");
