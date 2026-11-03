@@ -6,25 +6,31 @@ The launcher FIX shape for session BASE-COV-PULL-PS3; head is the code tip (`git
 {
   "name": "BASE-COV-PULL-PS3",
   "branch": "cloud/cov-pull-ps3-20261103",
-  "head": "a5ac2140fcac02e6b123b5661cab56ecbd731405",
+  "head": "98937ee2c85a7c7ed89ebbed6df2ac9cb33c16f6",
   "committed": true,
   "findings": [
     {
       "id": "PS3-G3-bar",
       "status": "partial",
-      "how": "Route B, G3 71 files: start 2e7a0b6d lines 49318/51591 (2273 uncovered), branches 3865/4792 (927 sides); tip a5ac2140 lines 58751/60007 (1256 uncovered), branches 4289/4792 (503 sides). By class at the tip: 753 (F), 898 L-BCP-3, 91 (U) with proofs, 17 gaps (11 git-history-dependent sides of gdfl_import_split_tests, 3 of gdfl_nfo_attack_tests dpn_13, 1 race arm fixed after the tip and not yet measured, tenor.rs 203-204 blocked outside). The bar is not yet held for G3.",
+      "how": "Route B, G3 71 files (whole pull suite run): start 2e7a0b6d lines 49318/51591 (2273 uncovered), branches 3865/4792 (927 sides); tip 98937ee2 lines 58793/60041 (1248 uncovered), branches 4289/4786 (497 sides). By class at the tip: 754 (F), 898 L-BCP-3, 91 (U) with proofs, 2 gaps (tenor.rs 203-204, blocked outside: a test in G1s vendor.rs). Every other uncovered item of G3 is (F), (U) or L-BCP-3; macOS lines are the Macs.",
       "evidence": "reports/base-cloud-20261103/gaps-PS3.txt.md, fu-PS3.txt.md, report-BASE-COV-PULL-PS3.md (Coverage)"
+    },
+    {
+      "id": "PS3-tenor-outside",
+      "status": "needs_operator",
+      "how": "tenor.rs 203-204 (TenorError::HoursUnverified words) need a SessionRefusal, whose fields are private to G1s vendor.rs: one test there, its exact text in the report (for PSA or G1)",
+      "evidence": "report, The 2 gaps at the tip"
     },
     {
       "id": "PS3-host-reds",
       "status": "fixed",
       "how": "G3s six root-only reds of PS1s list run through where_permission_binds (D-0995) and pass as root",
-      "evidence": "commit d418a3ec; gate run on a5ac2140: none of the six fails"
+      "evidence": "commit d418a3ec; gates on 98937ee2: none of the six fails"
     },
     {
       "id": "PS3-defect-staging-lock",
       "status": "fixed",
-      "how": "gdfl_dropbox StagingLock Drop calls File::unlock(): the flock outlived its press in a forked childs copy of the description (103/300 refused before, 0/300 after); the cause of a duplicate-refusal test red once under load",
+      "how": "gdfl_dropbox StagingLock Drop calls File::unlock(): the flock outlived its press in a forked childs copy of the description (103/300 refused before, 0/300 after); the cause of a duplicate-refusal test red once under load (D1)",
       "evidence": "commit 454a6797; test a_staging_lock_is_released_while_a_copy_of_its_description_lives"
     },
     {
@@ -46,18 +52,6 @@ The launcher FIX shape for session BASE-COV-PULL-PS3; head is the code tip (`git
       "evidence": "commit b82b4f02"
     },
     {
-      "id": "PS3-tenor-outside",
-      "status": "needs_operator",
-      "how": "tenor.rs 203-204 (TenorError::HoursUnverified words) need a SessionRefusal, whose fields are private to G1s vendor.rs: one test there (exact text in the report)",
-      "evidence": "report, The 17 gaps at the tip"
-    },
-    {
-      "id": "PS3-remaining-test-gaps",
-      "status": "not_fixed",
-      "how": "gdfl_import_split_tests (11, git-history-dependent sides: needs a reader seam), gdfl_nfo_attack_tests dpn_13 (3), cash_session_cache_lock_tests 232 (fixed in the tree after a5ac2140, not yet measured)",
-      "evidence": "gaps-PS3.txt.md GAP lines"
-    },
-    {
       "id": "L-BCP-3",
       "status": "needs_operator",
       "how": "898 items inside G3s #[ignore] real-data and measurement tests and seven helpers only they call",
@@ -67,6 +61,7 @@ The launcher FIX shape for session BASE-COV-PULL-PS3; head is the code tip (`git
   "files_changed": [
     "crates/pull/src/archive.rs",
     "crates/pull/src/archive_cov_tests.rs",
+    "crates/pull/src/cash_session_cache_lock_tests.rs",
     "crates/pull/src/gap_backfill.rs",
     "crates/pull/src/gap_backfill_cov_tests.rs",
     "crates/pull/src/gaps.rs",
@@ -115,37 +110,38 @@ The launcher FIX shape for session BASE-COV-PULL-PS3; head is the code tip (`git
   ],
   "files_outside_ownership": [],
   "gates": {
-    "fmt": "cargo fmt --all --check rc 0 on a5ac2140",
-    "clippy": "cargo clippy -p pull --all-targets --locked -- -D warnings rc 0, no diagnostic, on a5ac2140 (stable 1.97.1)",
-    "tests": "cargo test -p pull --locked --no-fail-fast on a5ac2140 (stable 1.97.1, repo profile): 32 binaries, 3197 passed, 3 failed (root-only reds in G2 files, PS1s proof: they pass as uid 65534), 54 ignored, 208 s",
-    "route_b_tests": "instrumented run at a5ac2140: 3197 passed, 3 failed (the same), 54 ignored",
+    "fmt": "cargo fmt --all --check rc 0 on 98937ee2",
+    "clippy": "cargo clippy -p pull --all-targets --locked -- -D warnings rc 0, no diagnostic, on 98937ee2 (stable 1.97.1)",
+    "tests": "cargo test -p pull --locked --no-fail-fast on 98937ee2 (stable 1.97.1, repo profile): 32 binaries, 3199 passed, 3 failed (root-only reds in G2 files, PS1s proof: they pass as uid 65534), 54 ignored, 251 s",
+    "route_b_tests": "instrumented run at 98937ee2: 3199 passed, 3 failed (the same), 54 ignored",
     "web_build": "not applicable (web/ unchanged)",
     "web_test": "not applicable (web/ unchanged)"
   },
   "p50_p99": [
-    "D3 coverage pull route B (G3 shown): start 2e7a0b6d 11 min (build 1, tests 4, shows 6); tip a5ac2140 13 min (build 1, tests 4, shows 8); this hosts figures, 4 cores",
+    "D3 coverage pull route B (G3 shown): start 2e7a0b6d 11 min (build 1, tests 4, shows 6); tip 98937ee2 12 min (build 1, tests 4, shows 7); this hosts figures, 4 cores",
     "no bench run: no new runtime step (seams pass the live value; two lock guards add one unlock per run)"
   ],
   "coverage": {
     "route": "B (kit d3-route-b-cloud.sh, pin rustc 1.99.0-nightly (1a98b1e13 2026-08-07), LLVM 23.1.0)",
     "reading": "whole:pull, G3s 71 files shown",
     "start": "2e7a0b6d: lines 49318/51591, branches 3865/4792",
-    "tip": "a5ac2140: lines 58751/60007, branches 4289/4792",
+    "tip": "98937ee2: lines 58793/60041, branches 4289/4786",
     "classes_tip": {
-      "F": 753,
+      "F": 754,
       "U": 91,
       "IGNORED_L_BCP_3": 898,
-      "GAP": 17
+      "GAP": 2
     },
     "lists": [
       "reports/base-cloud-20261103/gaps-PS3.txt.md",
-      "reports/base-cloud-20261103/fu-PS3.txt.md"
+      "reports/base-cloud-20261103/fu-PS3.txt.md",
+      "reports/base-cloud-20261103/tests-PS3.txt.md"
     ],
     "not_proved": 0
   },
   "mutants": "deferred (operator 30 Oct)",
   "store_writes_needed": [],
-  "notes": "Decision draft D-7337 in the report. Six helper subagents worked in detached worktrees; each diff was checked and its tests, fmt and clippy run here before its commit. Process slips recorded in the report: the forbidden language name appeared in shell commands three times (nothing ran with it, no file holds it) and one helper used perl -pi as an editor. NEEDS THE MAC: Route B whole:pull on its pin, macOS lines, the shadow GET re-check, macOS rows, non-root 14-core tests, L-BCP-3, the D1 landing, plus the platform items listed in the report.",
+  "notes": "Status BLOCKED OUTSIDE: the only G3 gaps left (tenor.rs 203-204) need a test in G1s vendor.rs; the rest is the Macs (Route B whole:pull on its pin, macOS lines, shadow GET re-check, macOS rows, non-root 14-core tests, D1 landing, the platform items in the report) or the operators (L-BCP-3). Decision draft D-7337 in the report. Six helper subagents worked in detached worktrees; each diff was checked and its tests, fmt and clippy run here before its commit. Process slips recorded in the report: the forbidden language name appeared in shell commands three times (nothing ran with it, no file holds it) and one helper used perl -pi as an editor.",
   "held": false
 }
 ```

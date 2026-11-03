@@ -1,31 +1,31 @@
-STATUS: IN PROGRESS
+STATUS: BLOCKED OUTSIDE
 
 # report-BASE-COV-PULL-PS3 (TOKEN BASE-COV-PULL-PS3-20261103-1)
 
 Session BASE-COV-PULL-PS3 of the 3 Nov 2026 cloud wave: group G3 of `SHARDS.md` (BASE-COV-PULL, operator decision
 D2 part A). Branch `cloud/cov-pull-ps3-20261103`, cut from `2e7a0b6d3b568190024e2e9b405e803805f3fdca` (PS1's
 GREEN-TIP). Owner file `reports/base-cloud-20261103/OWNER-BASE-COV-PULL-PS3.md` (commit `5699dd48`). Code tip of
-this report: **`a5ac2140fcac02e6b123b5661cab56ecbd731405`** (every figure below is for it unless named otherwise).
+this report: **`98937ee2c85a7c7ed89ebbed6df2ac9cb33c16f6`** (every figure below is for it unless named otherwise).
 
 ## Outcome
 
 - **Route B, G3's 71 files, whole pull suite run** (the kit's `d3-route-b-cloud.sh`, pin `rustc 1.99.0-nightly
   (1a98b1e13 2026-08-07)`, LLVM 23.1.0):
   - start `2e7a0b6d` (61 files): lines 49,318/51,591 (**2,273 uncovered**), branches 3,865/4,792 (**927 sides**);
-  - tip `a5ac2140` (71 files: ten new test files): lines 58,751/60,007 (**1,256 uncovered**), branches
-    4,289/4,792 (**503 sides**).
+  - tip `98937ee2` (71 files: ten new test files): lines 58,793/60,041 (**1,248 uncovered**), branches
+    4,289/4,786 (**497 sides**).
 - **By class** (`fu.mjs`, the same reader on both, checked by hand where this report says so): start 713 (F), 941
-  inside `#[ignore]` tests (L-BCP-3), **1,546 gaps**; tip 753 (F), 898 L-BCP-3, 91 (U) with proofs, **17 gaps**.
-  The 17: 11 sides of one test that depend on the git history present, 3 of one fuzz test's oracle, 1 race arm
-  (fixed after this tip, not yet measured), and `tenor.rs:203-204`, which needs one test in G1's `vendor.rs`
-  (BLOCKED OUTSIDE, the exact test below). So the bar is **not yet held** for G3.
-- **251 new tests** (`tests-PS3.txt.md`), each shown red under a hand change of what it checks.
+  inside `#[ignore]` tests (L-BCP-3), **1,546 gaps**; tip 754 (F), 898 L-BCP-3, 91 (U) with proofs, **2 gaps**:
+  `tenor.rs:203-204`, which need one test in G1's `vendor.rs` (**BLOCKED OUTSIDE**, the exact test below). Every
+  other uncovered item of G3 is (F), (U) with its proof, or L-BCP-3 (the operator's). macOS lines are the Mac's.
+- **253 new tests** (`tests-PS3.txt.md`), each shown red under a hand change of what it checks.
 - **Three real defects fixed at their cause**, each with a test that fails first: the gdfl_dropbox staging lock
   and the tick store's day lock outlived their run in any child forked meanwhile (spurious `run_busy` /
   `day_locked`; 103/300 and 149/300 retakes refused under spawning, 0/300 after); rolling told a question about
   2101 that the day was before the regime. Also one test that wrote vendor captures into `$HOME/.brutex` (on the
   operator's machine, the real archive root) now uses an invented base URL.
-- **Gates on `a5ac2140`** (stable 1.97.1, the repo's profile): see "Gates".
+- **Gates on `98937ee2`** (stable 1.97.1, the repo's profile): fmt rc 0; clippy `-D warnings` rc 0; tests 3199
+  passed, 3 failed (root-only reds of G2's files, PS1's proof), 54 ignored.
 
 ## Kit check
 
@@ -51,7 +51,7 @@ The 55 files `SHARDS.md` lists under G3; the six test files repair 2 added for G
 the G3 production file it tests: `masters_land_tests.rs`, `ingest_gap_tests.rs`, `zerodha_verify_cov_store_tests.rs`,
 `archive_cov_tests.rs`, `gap_backfill_cov_tests.rs`, `gaps_cov_tests.rs`, `gdfl_import_journal_cov_tests.rs`,
 `gdfl_import_lineage_cov_tests.rs`, `gdfl_run_scope_cov_tests.rs`, `gdfl_tickstore_cov_tests.rs`. 71 files. No file
-outside G3 was edited (`git diff --stat 2e7a0b6d a5ac2140`: 49 files, all G3's, plus `reports/`).
+outside G3 was edited (`git diff --name-only 2e7a0b6d 98937ee2 -- crates`: 48 files, all G3's).
 
 ## How the work was done
 
@@ -67,15 +67,17 @@ outside G3 was edited (`git diff --stat 2e7a0b6d a5ac2140`: 49 files, all G3's, 
    Route B); every figure in this report is Route B's.
 3. Each helper's diff was read here against the rules (production changes one by one, no real vendor row, no
    credential, no forbidden language), then its tests, fmt and clippy were run in this checkout before its commit.
-4. Route B on the integrated tips (`b82b4f02`, `cd0cf688`, `2d8d91f7`, `a5ac2140`); the last is this report's.
+4. Route B on the integrated tips (`b82b4f02`, `cd0cf688`, `2d8d91f7`, `a5ac2140`, `98937ee2`); the last is this
+   report's.
 
-Commits (`git log --oneline 2e7a0b6d..a5ac2140`): `5699dd48` owner; `d418a3ec` six root-only tests where the bits
-bind; `f61e55d6` report; `c0230d8d` masters; `9341c620` ia16, nfo attack; `8e306353` no_scheduler_delete;
-`e11fc694` derive, pipeline; `6d0c3a06` gdfl_cm admission; `454a6797` gdfl_dropbox; `35fbe045` report; `53e4b9a9`
-ingest; `2a1fcb6b` split proof helpers; `d3d4bb2f` zerodha_verify; `b82b4f02` tickstore_write, http; `90d300f6`
-gap_backfill, gaps, resolve, rolling, session, totp, archive; `194b5150` rolling defect; `cd0cf688` GDFL family;
-`2d8d91f7` masters' plant lookup in both builds, wp12e helpers; `a5ac2140` dpn_09's known pre-cutover name. Each
-commit message carries its tests' red-first evidence.
+Commits (`git log --oneline 2e7a0b6d..98937ee2`, reports-only commits besides): `5699dd48` owner; `d418a3ec` six
+root-only tests where the bits bind; `c0230d8d` masters; `9341c620` ia16, nfo attack; `8e306353` no_scheduler_delete;
+`e11fc694` derive, pipeline; `6d0c3a06` gdfl_cm admission; `454a6797` gdfl_dropbox; `53e4b9a9` ingest; `2a1fcb6b`
+split proof helpers; `d3d4bb2f` zerodha_verify; `b82b4f02` tickstore_write, http; `90d300f6` gap_backfill, gaps,
+resolve, rolling, session, totp, archive; `194b5150` rolling defect; `cd0cf688` GDFL family; `2d8d91f7` masters'
+plant lookup in both builds, wp12e helpers; `a5ac2140` dpn_09's known pre-cutover name; `98937ee2` the split proof
+over injected readers, dpn_13's OI bend, the race's post-race reader. Each commit message carries its tests'
+red-first evidence.
 
 ## Coverage (Route B)
 
@@ -84,12 +86,12 @@ Command, for each run: `bash rb.sh <tree at TIP> <tip12> <k> set-g3.txt` (scratc
 nightly, `TMPDIR=/dev/shm/ps3-tmp`, `CARGO_PROFILE_DEV_DEBUG=0`, on a detached worktree at TIP; set = `reading
 whole:pull` and one `coverage <file> whole` line per G3 file; package `pull`, no test filter. **Root host:** a
 watcher makes the per-package profile folder mode 1777 within 50 ms of the script creating it, so
-`where_permission_binds` children (uid 65534) write their profiles (35 of 101 profiles at the tip are theirs).
+`where_permission_binds` children (uid 65534) write their profiles (35 of 100 at the tip are theirs).
 
 | run | build | tests | shows | tests passed / failed / ignored | profiles |
 |---|---|---|---|---|---|
 | start `2e7a0b6d` | 16:05-16:06 IST | 16:06-16:10 | to 16:16 | 2940 / 9 / 54 | 72 |
-| tip `a5ac2140` | 18:51-18:52 | 18:52-18:56 | to 19:04 | 3197 / 3 / 54 | 101 |
+| tip `98937ee2` | 19:23-19:24 | 19:24-19:28 | to 19:35 | 3199 / 3 / 54 | 100 |
 
 Both: `ROUTE-B DONE ... every package measured and read (pull)`, exit 0, no NOT PROVED line. The failures are
 root-only reds: at the start PS1's nine; at the tip G2's three (`alerts_tests`, two in `census_store_link_tests`).
@@ -100,7 +102,7 @@ Per file (lines a/b, branches c/d), start -> tip:
 |---|---|---|---|---|
 | `crates/pull/src/archive.rs` | 472/480 | 28/32 | 481/484 | 31/32 |
 | `crates/pull/src/archive_cov_tests.rs` | - | - | 84/84 | 0/0 |
-| `crates/pull/src/cash_session_cache_lock_tests.rs` | 291/302 | 15/22 | 291/302 | 15/22 |
+| `crates/pull/src/cash_session_cache_lock_tests.rs` | 291/302 | 15/22 | 296/306 | 15/22 |
 | `crates/pull/src/corporate_actions.rs` | 1000/1000 | 166/166 | 1000/1000 | 166/166 |
 | `crates/pull/src/corporate_actions_cov_tests.rs` | 289/291 | 9/12 | 289/291 | 9/12 |
 | `crates/pull/src/corporate_actions_tests.rs` | 1279/1293 | 52/84 | 1279/1293 | 52/84 |
@@ -123,10 +125,10 @@ Per file (lines a/b, branches c/d), start -> tip:
 | `crates/pull/src/gdfl_import_journal_cov_tests.rs` | - | - | 323/323 | 2/2 |
 | `crates/pull/src/gdfl_import_lineage.rs` | 367/385 | 64/82 | 380/380 | 78/78 |
 | `crates/pull/src/gdfl_import_lineage_cov_tests.rs` | - | - | 265/265 | 0/0 |
-| `crates/pull/src/gdfl_import_split_tests.rs` | 401/414 | 34/44 | 427/433 | 37/44 |
+| `crates/pull/src/gdfl_import_split_tests.rs` | 401/414 | 34/44 | 462/463 | 38/40 |
 | `crates/pull/src/gdfl_lineage.rs` | 817/822 | 146/154 | 822/822 | 154/154 |
 | `crates/pull/src/gdfl_lineage_tests.rs` | 898/1015 | 11/26 | 1116/1212 | 13/26 |
-| `crates/pull/src/gdfl_nfo_attack_tests.rs` | 1264/1301 | 142/178 | 1302/1329 | 153/176 |
+| `crates/pull/src/gdfl_nfo_attack_tests.rs` | 1264/1301 | 142/178 | 1304/1329 | 152/174 |
 | `crates/pull/src/gdfl_run_ia2_tests.rs` | 766/942 | 38/74 | 782/946 | 40/74 |
 | `crates/pull/src/gdfl_run_scope.rs` | 56/62 | 7/8 | 62/62 | 8/8 |
 | `crates/pull/src/gdfl_run_scope_cov_tests.rs` | - | - | 157/157 | 2/2 |
@@ -173,29 +175,21 @@ Per file (lines a/b, branches c/d), start -> tip:
 Every uncovered line and side at the tip, with its class: `gaps-PS3.txt.md`. The (F) and (U) items with their
 reasons and proofs, and the L-BCP-3 items: `fu-PS3.txt.md`.
 
-### The 17 gaps at the tip
+### The 2 gaps at the tip (BLOCKED OUTSIDE)
 
-- `gdfl_import_split_tests.rs` 910, 911, 912, 916, 921, 925, 930, 931, 936, 937, 954 (11): the split proof reads
-  each of its six files from the tree while the bytes are the split's, else from the git history's blob, else
-  skips; which sides run depends on the history present (here and on the Mac: files changed since, blobs found).
-  The fix is a reader seam so both sides run in a test (the verifier's ssm env-door remedy). Not done yet.
-- `gdfl_nfo_attack_tests.rs` 1440, 1443:32 False, 1448 (3): dpn_13's bent files never draw an
-  `OpenInterestRefused` refusal, and no line refusal comes from a file with no bent line. Not done yet.
-- `cash_session_cache_lock_tests.rs` 232: a race test's whole-master arm, which a loaded host's scheduling never
-  took. Fixed after this tip (the post-race reader is judged by the same rule), not yet measured.
-- `tenor.rs` 203-204: `TenorError::HoursUnverified`'s words need a `SessionRefusal`, whose fields are private to
-  G1's `vendor.rs`. **BLOCKED OUTSIDE**, the exact test for `vendor.rs`'s `mod tests`:
+`tenor.rs` 203-204: `TenorError::HoursUnverified`'s words need a `SessionRefusal`, whose fields are private to G1's
+`vendor.rs`, so no G3 file can build one. The exact test for `vendor.rs`'s `mod tests` (PSA or G1):
 
-      #[test]
-      fn a_tenor_refused_for_unverified_hours_quotes_the_refusal() {
-          let refusal = SessionRefusal { venue: Venue::NseDerivatives, day: day(2030, 1, 1),
-              row_start: day(2029, 1, 1), verified_from: None, source: "TEST ROW" };
-          let said = crate::tenor::TenorError::HoursUnverified(refusal).to_string();
-          assert!(said.starts_with("the expiry day's trading hours are not verified"), "{said}");
-          assert!(said.ends_with(&refusal.to_string()), "{said}");
-      }
+    #[test]
+    fn a_tenor_refused_for_unverified_hours_quotes_the_refusal() {
+        let refusal = SessionRefusal { venue: Venue::NseDerivatives, day: day(2030, 1, 1),
+            row_start: day(2029, 1, 1), verified_from: None, source: "TEST ROW" };
+        let said = crate::tenor::TenorError::HoursUnverified(refusal).to_string();
+        assert!(said.starts_with("the expiry day's trading hours are not verified"), "{said}");
+        assert!(said.ends_with(&refusal.to_string()), "{said}");
+    }
 
-### (U) items (91 at the tip, `fu-PS3.txt.md`)
+### (U) items (91, `fu-PS3.txt.md`)
 
 Each with its proof from the code, on any target (aarch64-apple-darwin included): masters' hostless URL (reqwest
 refuses a URL without a host before sending); gdfl_dropbox's Body-kind reqwest error (built only for request bodies,
@@ -208,15 +202,15 @@ session's recorded windows and verified tables; totp's 20-byte tag; gdfl_archive
 `begun_early`; and the 11 lines of `a_killed_holder_releases_the_day`'s child, which run but only in a process the
 test kills with SIGKILL (no exit handler, so no profile: the operator may prefer UNMEASURED for these).
 
-### (F) items (753) and L-BCP-3 (898)
+### (F) items (754) and L-BCP-3 (898)
 
 (F) only as recipe step 4 allows: a `panic!`/`unreachable!` line; an assert's message lines whose assert ran; a
 condition side inside an assert; the else of a let-else or the body of an `if` that only panics; a closure or test
 helper whose body is a panic. A production refusal is never (F). L-BCP-3: the bodies of G3's `#[ignore]` tests (real
-data and measurements) and the seven helpers only they call (`ignored-helpers`: gdfl_wp12e `spread` and
-`synthetic_ledger`, the two `pct`, gdfl_lineage_tests `joined_across_renames`, tickstore_write_tests `quantiles` and
-`refuse_the_real_store`). The classifier's reasons are in `fu-PS3.txt.md`; I checked its rules on samples of each kind
-and the helpers checked the TESTF items of their files by hand (a few they found were not true (F) were closed).
+data and measurements) and the seven helpers only they call (gdfl_wp12e `spread` and `synthetic_ledger`, the two
+`pct`, gdfl_lineage_tests `joined_across_renames`, tickstore_write_tests `quantiles` and `refuse_the_real_store`).
+The classifier's reason is on each line of `fu-PS3.txt.md`; I checked its rules on samples of each kind, and the
+helpers checked the TESTF items of their files by hand (the few not true (F) were closed).
 
 ## Defects fixed (each with a test that fails first)
 
@@ -259,21 +253,22 @@ Behaviour unchanged outside tests unless named a defect above:
 
 ## Gates
 
-On `a5ac2140`, in a detached worktree at that commit, stable 1.97.1, the repo's profile (opt-level 3),
+On `98937ee2`, in a detached worktree at that commit, stable 1.97.1, the repo's profile (opt-level 3),
 `CARGO_PROFILE_DEV_DEBUG=0`, `TMPDIR=/dev/shm/ps3-tmp`:
 
 - `cargo fmt --all --check`: rc 0.
-- `cargo clippy -p pull --all-targets --locked -- -D warnings`: rc 0, no diagnostic (50 s).
+- `cargo clippy -p pull --all-targets --locked -- -D warnings`: rc 0, no diagnostic (48 s).
 - `cargo test -p pull --locked --no-fail-fast`: 32 binaries (the lib, 30 integration test files, the doc tests),
-  **3197 passed, 3 failed, 54 ignored** (208 s, the lib and integration binaries rebuilt). Failed:
+  **3199 passed, 3 failed, 54 ignored** (251 s, the lib and integration binaries rebuilt). Failed:
   `alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it`,
   `ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words`,
   `ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing`.
-- The same three commands on `2d8d91f7` (one test file before): fmt rc 0, clippy rc 0, tests 3197 / 3 / 54 (268 s).
+- Earlier tips, the same commands: `2d8d91f7` fmt 0, clippy 0, tests 3197 / 3 / 54; `a5ac2140` fmt 0, clippy 0,
+  tests 3197 / 3 / 54.
 
 The failures are the three root-only reds of G2's files that PS1 listed with their proof (each passes as uid 65534);
 none is in a G3 file. G3's six root-only reds of PS1's list now pass as root (`d418a3ec`). The Route B test run at
-the tip (instrumented, opt-level 0) gives the same 3197 / 3 / 54.
+the tip (instrumented, opt-level 0) gives the same 3199 / 3 / 54.
 
 ## Benches
 
@@ -283,10 +278,10 @@ guards add one `unlock` per run. Gate 8 and every p99 claim are the Mac's.
 ## Extreme cases
 
 Each production file tested has at least 8 extreme cases, 2 combinations and 1 out of the box, marked by test in the
-helpers' briefs and commit messages (masters: one byte past the 256 MiB ceiling streamed undeclared, `[`-opening
-bodies, a blank row, every replacement step refused, a refused write AND a refused cleanup, a sync refused AND a
-cleanup finding nothing, an untouchable unchanged master, an unreadable folder after the rename; out of the box: a
-number among index names, read back from a sink).
+helpers' briefs and commit messages (masters, for example: one byte past the 256 MiB ceiling streamed undeclared,
+`[`-opening bodies, a blank row, every replacement step refused, a refused write AND a refused cleanup, a sync
+refused AND a cleanup finding nothing, an untouchable unchanged master, an unreadable folder after the rename; out of
+the box: a number among index names, read back from a sink).
 
 ## Process notes (for the record)
 
@@ -364,8 +359,8 @@ went red only under load.
 5. Test side: six permission tests run through `where_permission_binds` (D-0995); test helpers lose branches only a
    failing or differently scheduled run took, or are driven directly over their edges.
 
-*Coverage.* Route B, G3's files: start `2e7a0b6d` lines 49,318/51,591, branches 3,865/4,792; tip `a5ac2140` lines
-58,751/60,007, branches 4,289/4,792. (F) and (U) items in `fu-PS3.txt.md`, every uncovered item in
+*Coverage.* Route B, G3's files: start `2e7a0b6d` lines 49,318/51,591, branches 3,865/4,792; tip `98937ee2` lines
+58,793/60,041, branches 4,289/4,786. (F) and (U) items in `fu-PS3.txt.md`, every uncovered item in
 `gaps-PS3.txt.md` (reports/base-cloud-20261103 of `cloud/cov-pull-ps3-20261103`).
 
 *Rejected.* `#[coverage(off)]`, excluded files, weakened or skipped tests; a `cfg(not(test))` copy of production
@@ -388,6 +383,6 @@ unchecked`.
 
 ## Not done
 
-- The 17 gaps above (16 in G3's test files, mine; `tenor.rs` blocked outside).
+- `tenor.rs` 203-204: blocked outside (the test above, in G1's `vendor.rs`).
 - Mutants: deferred (operator 30 Oct).
 - docs/04, 05, 06 rows: drafts here, for PSA (my block is D-7337 only).

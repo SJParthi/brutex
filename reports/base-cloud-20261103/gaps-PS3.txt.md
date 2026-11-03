@@ -1,19 +1,19 @@
 # gaps-PS3.txt.md
 
-BASE-COV-PULL-PS3, group G3: Route B (kit d3-route-b-cloud.sh, pin rustc 1.99.0-nightly (1a98b1e13 2026-08-07), LLVM 23.1.0) on `a5ac2140fcac02e6b123b5661cab56ecbd731405`, the whole pull test suite run, G3's files shown. One fenced block: the per-file table, the totals, then every uncovered line and side with its class (from fu.mjs, checked by hand where the report says so) and its text. Classes: GAP (owed), F (a failing arm in test code, recipe v4 step 4), U (unreachable, proof in fu-PS3.txt.md), IGNORED (inside an #[ignore] real-data or measurement test, or a helper only those call: L-BCP-3, the operator's).
+BASE-COV-PULL-PS3, group G3: Route B (kit d3-route-b-cloud.sh, pin rustc 1.99.0-nightly (1a98b1e13 2026-08-07), LLVM 23.1.0) on `98937ee2c85a7c7ed89ebbed6df2ac9cb33c16f6`, the whole pull test suite run, G3's files shown. One fenced block: the per-file table, the totals, then every uncovered line and side with its class (from fu.mjs, checked by hand where the report says so) and its text. Classes: GAP (owed), F (a failing arm in test code, recipe v4 step 4), U (unreachable, proof in fu-PS3.txt.md), IGNORED (inside an #[ignore] real-data or measurement test, or a helper only those call: L-BCP-3, the operator's).
 
 `````text
-route-b 2026-11-03 18:51:21 IST tree /home/user/ps3-deep tip a5ac2140fcac02e6b123b5661cab56ecbd731405 packages pull K /home/user/ps3-K P /home/user/ps3-prof/a5ac2140fcac-5-B (entries before: 0)
+route-b 2026-11-03 19:23:30 IST tree /home/user/ps3-deep tip 98937ee2c85a7c7ed89ebbed6df2ac9cb33c16f6 packages pull K /home/user/ps3-K P /home/user/ps3-prof/98937ee2c85a-6-B (entries before: 0)
 versions: rustc 1.99.0-nightly (1a98b1e13 2026-08-07) | llvm-cov  LLVM version 23.1.0-rust-1.99.0-nightly | llvm-profdata  LLVM version 23.1.0-rust-1.99.0-nightly
-== build START 2026-11-03 18:51:21 IST: cargo test -p pull --locked --no-run --message-format=json (RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch', opt-level 0, CARGO_TARGET_DIR=/home/user/ps3-K/cov)
-== build rc=0 END 2026-11-03 18:52:23 IST (1 min); 166 artifacts, 129 reused
-== test pull START 2026-11-03 18:52:23 IST
-== test pull rc=101 END 2026-11-03 18:56:08 IST (3 min); tests passed 3197 failed 3 ignored 54
+== build START 2026-11-03 19:23:30 IST: cargo test -p pull --locked --no-run --message-format=json (RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch', opt-level 0, CARGO_TARGET_DIR=/home/user/ps3-K/cov)
+== build rc=0 END 2026-11-03 19:24:25 IST (0 min); 166 artifacts, 129 reused
+== test pull START 2026-11-03 19:24:25 IST
+== test pull rc=101 END 2026-11-03 19:28:06 IST (3 min); tests passed 3199 failed 3 ignored 54
 
 per file:
 crates/pull/src/archive.rs lines 481/484, branches 31/32
 crates/pull/src/archive_cov_tests.rs lines 84/84, branches 0/0
-crates/pull/src/cash_session_cache_lock_tests.rs lines 291/302, branches 15/22
+crates/pull/src/cash_session_cache_lock_tests.rs lines 296/306, branches 15/22
 crates/pull/src/corporate_actions.rs lines 1000/1000, branches 166/166
 crates/pull/src/corporate_actions_cov_tests.rs lines 289/291, branches 9/12
 crates/pull/src/corporate_actions_tests.rs lines 1279/1293, branches 52/84
@@ -36,10 +36,10 @@ crates/pull/src/gdfl_import_journal.rs lines 791/791, branches 207/208
 crates/pull/src/gdfl_import_journal_cov_tests.rs lines 323/323, branches 2/2
 crates/pull/src/gdfl_import_lineage.rs lines 380/380, branches 78/78
 crates/pull/src/gdfl_import_lineage_cov_tests.rs lines 265/265, branches 0/0
-crates/pull/src/gdfl_import_split_tests.rs lines 427/433, branches 37/44
+crates/pull/src/gdfl_import_split_tests.rs lines 462/463, branches 38/40
 crates/pull/src/gdfl_lineage.rs lines 822/822, branches 154/154
 crates/pull/src/gdfl_lineage_tests.rs lines 1116/1212, branches 13/26
-crates/pull/src/gdfl_nfo_attack_tests.rs lines 1302/1329, branches 153/176
+crates/pull/src/gdfl_nfo_attack_tests.rs lines 1304/1329, branches 152/174
 crates/pull/src/gdfl_run_ia2_tests.rs lines 782/946, branches 40/74
 crates/pull/src/gdfl_run_scope.rs lines 62/62, branches 8/8
 crates/pull/src/gdfl_run_scope_cov_tests.rs lines 157/157, branches 2/2
@@ -83,32 +83,31 @@ crates/pull/tests/integration.rs lines 237/238, branches 0/0
 crates/pull/tests/no_scheduler_delete.rs lines 318/318, branches 112/112
 crates/pull/tests/pipeline.rs lines 1047/1060, branches 16/24
 
-totals: 71 files, 52 with an uncovered line or side; lines 58751/60007 (1256 uncovered), branches 4289/4792 (503 uncovered sides)
-classes: F 753 IGNORED 898 U 91 GAP 17
+totals: 71 files, 52 with an uncovered line or side; lines 58793/60041 (1248 uncovered), branches 4289/4786 (497 uncovered sides)
+classes: F 754 IGNORED 898 U 91 GAP 2
 
 every uncovered item (class, file:line[:col side], text, reason):
 F	crates/pull/src/archive.rs:1333	walked.len()	(the message of an assert! that ran (evaluated only on failure))
 F	crates/pull/src/archive.rs:1349	sentence.len()	(the message of an assert! that ran (evaluated only on failure))
 F	crates/pull/src/archive.rs:1384	matches!(	(inside an assert! that ran: its failing side)
 F	crates/pull/src/archive.rs:1132:77:False	matches!(why, ArchiveError::MemberMalformed { ref path, .. } if *path == odd),	(a condition side inside assert! (its failing side))
-GAP	crates/pull/src/cash_session_cache_lock_tests.rs:232	(_, Ok(answer)) => assert_eq!(answer, whole, "reader {nth}"),
-U	crates/pull/src/cash_session_cache_lock_tests.rs:372	let held = PathBuf::from(held);	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:373	let file = OpenOptions::new()	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:374	.read(true)	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:375	.write(true)	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:376	.open(&held)	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:377	.expect("the parent's lock file");	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:378	file.try_lock().expect("the child holds the day alone");	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:379	fs::write(held.with_extension("ready"), b"held").expect("ready marker");	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:380	thread::sleep(Duration::from_mins(2));	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
-U	crates/pull/src/cash_session_cache_lock_tests.rs:382	std::process::exit(3);	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:378	let held = PathBuf::from(held);	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:379	let file = OpenOptions::new()	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:380	.read(true)	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:381	.write(true)	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:382	.open(&held)	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:383	.expect("the parent's lock file");	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:384	file.try_lock().expect("the child holds the day alone");	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:385	fs::write(held.with_extension("ready"), b"held").expect("ready marker");	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:386	thread::sleep(Duration::from_mins(2));	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+U	crates/pull/src/cash_session_cache_lock_tests.rs:388	std::process::exit(3);	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
 F	crates/pull/src/cash_session_cache_lock_tests.rs:130:53:False	assert!(solo.iter().all(|&(_, hindalco, micro)| hindalco && !micro));	(a condition side inside assert! (its failing side))
 F	crates/pull/src/cash_session_cache_lock_tests.rs:193:9:False	why.contains("unavailable")	(a condition side inside assert! (its failing side))
 F	crates/pull/src/cash_session_cache_lock_tests.rs:194:16:False	&& why.contains("an installer held it exclusively")	(a condition side inside assert! (its failing side))
 F	crates/pull/src/cash_session_cache_lock_tests.rs:195:16:False	&& why.contains("40 ms bound")	(a condition side inside assert! (its failing side))
 F	crates/pull/src/cash_session_cache_lock_tests.rs:196:16:False	&& why.contains("not read as absent"),	(a condition side inside assert! (its failing side))
-F	crates/pull/src/cash_session_cache_lock_tests.rs:234:50:False	why.contains("is absent") || why.contains("missing locally"),	(a condition side inside assert! (its failing side))
-U	crates/pull/src/cash_session_cache_lock_tests.rs:371:12:True	if let Some(held) = std::env::var_os("BRUTEX_AF03_HOLD") {	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
+F	crates/pull/src/cash_session_cache_lock_tests.rs:233:46:False	why.contains("is absent") || why.contains("missing locally"),	(a condition side inside assert! (its failing side))
+U	crates/pull/src/cash_session_cache_lock_tests.rs:377:12:True	if let Some(held) = std::env::var_os("BRUTEX_AF03_HOLD") {	(runs only in the child process a_killed_holder_releases_the_day spawns and then kills with SIGKILL (child.kill()); a killed process runs no exit handler and the LLVM profile runtime writes its counters at exit, so no instrumented run can count these lines (they run: the parent's assertion that the child held the day proves it).)
 F	crates/pull/src/corporate_actions_cov_tests.rs:177	refused(&backwards)	(the message of an assert! that ran (evaluated only on failure))
 F	crates/pull/src/corporate_actions_cov_tests.rs:408	panic!("{found:#?}");	(the panic! arm)
 F	crates/pull/src/corporate_actions_cov_tests.rs:134:9:False	said.contains("\"BCO\"") && said.contains("share-days"),	(a condition side inside assert! (its failing side))
@@ -633,19 +632,9 @@ F	crates/pull/src/gdfl_import_ia2_tests.rs:225:77:False	matches!(&got, ImportRef
 F	crates/pull/src/gdfl_import_ia2_tests.rs:225:93:False	matches!(&got, ImportRefusal::Stopped { day: Some(d), done, .. } if *d == day(1) && done.days_imported == 1),	(a condition side inside assert! (its failing side))
 F	crates/pull/src/gdfl_import_ia2_tests.rs:267:9:False	let ImportRefusal::Stopped {	(the else of a let-else that only panics)
 U	crates/pull/src/gdfl_import_journal.rs:1089:28:False	&& let Some((before, _)) = self.begun_early.remove(&key)	(own is true only when begun_early.get(&key) matched Some(&(_, Some(_))) just before; nothing touches begun_early between that get and this remove under one &mut self, and && evaluates own first, so remove returns Some.)
-GAP	crates/pull/src/gdfl_import_split_tests.rs:911	String::from_utf8(here).unwrap()
-GAP	crates/pull/src/gdfl_import_split_tests.rs:916	println!(
-GAP	crates/pull/src/gdfl_import_split_tests.rs:921	return;
-GAP	crates/pull/src/gdfl_import_split_tests.rs:931	gone.push(line);
-GAP	crates/pull/src/gdfl_import_split_tests.rs:937	new.push(line);
-GAP	crates/pull/src/gdfl_import_split_tests.rs:954	}
-GAP	crates/pull/src/gdfl_import_split_tests.rs:910:23:True	let text = if sha256_hex(&here) == *sha {
-GAP	crates/pull/src/gdfl_import_split_tests.rs:912:23:False	} else if let Some(text) = blob(blob_id) {
-GAP	crates/pull/src/gdfl_import_split_tests.rs:925:12:False	if let Some(before_text) = blob(BEFORE_BLOB) {
-GAP	crates/pull/src/gdfl_import_split_tests.rs:930:16:True	if have < *n {
-GAP	crates/pull/src/gdfl_import_split_tests.rs:936:16:True	if before.kept.get(line).copied().unwrap_or(0) < *n {
-F	crates/pull/src/gdfl_import_split_tests.rs:941:13:False	gone.is_empty() && new.is_empty(),	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_import_split_tests.rs:941:32:False	gone.is_empty() && new.is_empty(),	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_import_split_tests.rs:998	panic!("the history is asked")	(the panic! arm)
+F	crates/pull/src/gdfl_import_split_tests.rs:933:13:False	gone.is_empty() && new.is_empty(),	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_import_split_tests.rs:933:32:False	gone.is_empty() && new.is_empty(),	(a condition side inside assert! (its failing side))
 F	crates/pull/src/gdfl_lineage_tests.rs:1093	panic!("an old name on its change day");	(the panic! arm)
 IGNORED	crates/pull/src/gdfl_lineage_tests.rs:1148	fn the_unchanged_lot_arm_costs_one_pass_on_an_ordinary_day() {	(inside an #[ignore] test (L-BCP-3))
 IGNORED	crates/pull/src/gdfl_lineage_tests.rs:1149	let strikes: Vec<i64> = (0..50).map(|i| 1_000_000 + i * 5_000).collect();	(inside an #[ignore] test (L-BCP-3))
@@ -774,14 +763,12 @@ F	crates/pull/src/gdfl_nfo_attack_tests.rs:855	matches!(	(inside an assert! that
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:997	matches!(	(inside an assert! that ran: its failing side)
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:1099	got.contract.as_str(),	(the message of an assert! that ran (evaluated only on failure))
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:1100	reencode(&got)	(the message of an assert! that ran (evaluated only on failure))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1435	NfoRefusal::HeaderUnknown { .. } => panic!("the header was intact"),	(the panic! arm)
-GAP	crates/pull/src/gdfl_nfo_attack_tests.rs:1440	| NfoRefusal::OpenInterestRefused { line } => {
-GAP	crates/pull/src/gdfl_nfo_attack_tests.rs:1448	}
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1450	other => panic!("{other:?}"),	(the panic! arm)
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1793	matches!(	(inside an assert! that ran: its failing side)
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1801	matches!(	(inside an assert! that ran: its failing side)
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1983	matches!(	(inside an assert! that ran: its failing side)
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:2002	matches!(	(inside an assert! that ran: its failing side)
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1438	NfoRefusal::HeaderUnknown { .. } => panic!("the header was intact"),	(the panic! arm)
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1454	other => panic!("{other:?}"),	(the panic! arm)
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1797	matches!(	(inside an assert! that ran: its failing side)
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1805	matches!(	(inside an assert! that ran: its failing side)
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1987	matches!(	(inside an assert! that ran: its failing side)
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:2006	matches!(	(inside an assert! that ran: its failing side)
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:301:27:False	} else if is_index(got.underlying.as_str())	(inside a closure that ends in a panic)
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:302:24:False	&& on >= d(2018, 9, 3)	(inside a closure that ends in a panic)
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:303:24:False	&& got.form == TickerForm::Day	(inside a closure that ends in a panic)
@@ -794,17 +781,16 @@ F	crates/pull/src/gdfl_nfo_attack_tests.rs:1115:28:False	&& expiry.days_from_epo
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:1136:25:False	assert!(why.to_string().contains(ticker.as_str()) || ticker.is_empty());	(a condition side inside assert! (its failing side))
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:1136:70:True	assert!(why.to_string().contains(ticker.as_str()) || ticker.is_empty());	(a condition side inside assert! (its failing side))
 F	crates/pull/src/gdfl_nfo_attack_tests.rs:1136:70:False	assert!(why.to_string().contains(ticker.as_str()) || ticker.is_empty());	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1426:29:False	assert!(row.ltp >= 0 && row.oi >= 0);	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1426:45:False	assert!(row.ltp >= 0 && row.oi >= 0);	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1427:45:False	assert!(row.ltq == 0 || row.ltp >= costs::rate::TICK.raw());	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1442:33:False	assert!(at >= 2 && at <= n + 2, "line {line} of {n} rows");	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1442:44:False	assert!(at >= 2 && at <= n + 2, "line {line} of {n} rows");	(a condition side inside assert! (its failing side))
-GAP	crates/pull/src/gdfl_nfo_attack_tests.rs:1443:32:False	if let Some(first) = bent_at {
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1455:13:False	assert!(ok > 1_000 && refused > 1_000, "{ok} {refused}");	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1455:27:False	assert!(ok > 1_000 && refused > 1_000, "{ok} {refused}");	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1567:17:False	!ticker.is_empty() && !ticker.contains(['\\', '/']),	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1567:39:False	!ticker.is_empty() && !ticker.contains(['\\', '/']),	(a condition side inside assert! (its failing side))
-F	crates/pull/src/gdfl_nfo_attack_tests.rs:1573:24:False	|| entry.ends_with(&format!("{ticker}.NFO.CSV")),	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1429:29:False	assert!(row.ltp >= 0 && row.oi >= 0);	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1429:45:False	assert!(row.ltp >= 0 && row.oi >= 0);	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1430:45:False	assert!(row.ltq == 0 || row.ltp >= costs::rate::TICK.raw());	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1445:33:False	assert!(at >= 2 && at <= n + 2, "line {line} of {n} rows");	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1445:44:False	assert!(at >= 2 && at <= n + 2, "line {line} of {n} rows");	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1459:13:False	assert!(ok > 1_000 && refused > 1_000, "{ok} {refused}");	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1459:27:False	assert!(ok > 1_000 && refused > 1_000, "{ok} {refused}");	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1571:17:False	!ticker.is_empty() && !ticker.contains(['\\', '/']),	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1571:39:False	!ticker.is_empty() && !ticker.contains(['\\', '/']),	(a condition side inside assert! (its failing side))
+F	crates/pull/src/gdfl_nfo_attack_tests.rs:1577:24:False	|| entry.ends_with(&format!("{ticker}.NFO.CSV")),	(a condition side inside assert! (its failing side))
 F	crates/pull/src/gdfl_run_ia2_tests.rs:431	panic!("{api:?}");	(the panic! arm)
 F	crates/pull/src/gdfl_run_ia2_tests.rs:554	other => panic!("{other:?}"),	(the panic! arm)
 F	crates/pull/src/gdfl_run_ia2_tests.rs:591	panic!("{seen:?}");	(the panic! arm)

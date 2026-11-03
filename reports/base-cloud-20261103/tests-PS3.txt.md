@@ -1,6 +1,6 @@
 # tests-PS3.txt.md
 
-BASE-COV-PULL-PS3, group G3: every #[test] or #[tokio::test] fn added between the start `2e7a0b6d` and the code tip `a5ac2140`, by file (read from `git diff -U0 2e7a0b6d a5ac2140 -- crates/pull`: an added test attribute followed by an added `fn`). Tests that were only changed are not listed; the commit messages name them. One fenced block.
+BASE-COV-PULL-PS3, group G3: every #[test] or #[tokio::test] fn added between the start `2e7a0b6d` and the code tip `98937ee2`, by file (read from `git diff -U0 2e7a0b6d 98937ee2 -- crates/pull`: an added test attribute followed by an added `fn`). Tests that were only changed are not listed; the commit messages name them. One fenced block.
 
 `````text
 crates/pull/src/archive_cov_tests.rs: 4
@@ -13,7 +13,7 @@ crates/pull/src/gdfl_dropbox_tests.rs: 32
 crates/pull/src/gdfl_ia16_tests.rs: 1
 crates/pull/src/gdfl_import_journal_cov_tests.rs: 15
 crates/pull/src/gdfl_import_lineage_cov_tests.rs: 9
-crates/pull/src/gdfl_import_split_tests.rs: 1
+crates/pull/src/gdfl_import_split_tests.rs: 3
 crates/pull/src/gdfl_lineage_tests.rs: 8
 crates/pull/src/gdfl_nfo_attack_tests.rs: 1
 crates/pull/src/gdfl_run_scope_cov_tests.rs: 6
@@ -136,6 +136,8 @@ crates/pull/src/gdfl_import_lineage_cov_tests.rs a_merge_of_an_action_that_retir
 crates/pull/src/gdfl_import_lineage_cov_tests.rs a_relisting_verdict_keeps_the_pairs_and_the_kind_they_show
 crates/pull/src/gdfl_import_lineage_cov_tests.rs a_reread_the_source_refused_refuses_the_merge_before_anything_is_noted
 crates/pull/src/gdfl_import_lineage_cov_tests.rs the_warm_up_stops_at_the_first_day_there_is
+crates/pull/src/gdfl_import_split_tests.rs the_split_proof_reads_the_tree_the_history_or_nothing
+crates/pull/src/gdfl_import_split_tests.rs lines_lost_and_added_are_each_named
 crates/pull/src/gdfl_import_split_tests.rs the_split_proofs_helpers_hold_at_their_edges
 crates/pull/src/gdfl_lineage_tests.rs a_zero_lot_reduces_to_no_factor_and_reads_back_only_as_such
 crates/pull/src/gdfl_lineage_tests.rs a_stitched_partner_that_names_another_underlying_is_refused
@@ -145,7 +147,7 @@ crates/pull/src/gdfl_lineage_tests.rs an_unwritable_pre_ex_key_is_passed_over_by
 crates/pull/src/gdfl_lineage_tests.rs a_sourced_relisting_day_that_relists_nothing_is_no_event
 crates/pull/src/gdfl_lineage_tests.rs the_rename_census_counts_each_key_by_its_symbols_in_life_order
 crates/pull/src/gdfl_lineage_tests.rs the_rename_census_refuses_two_lives_of_one_key_that_overlap
-crates/pull/src/gdfl_nfo_attack_tests.rs dpn_14_the_oracles_refuse_what_is_not_canonical
+crates/pull/src/gdfl_nfo_attack_tests.rs dpn_24_the_oracles_refuse_what_is_not_canonical
 crates/pull/src/gdfl_run_scope_cov_tests.rs an_index_runs_filter_is_every_index_row_the_scope_adds
 crates/pull/src/gdfl_run_scope_cov_tests.rs a_share_runs_filter_is_each_share_and_the_symbol_its_changes_reach
 crates/pull/src/gdfl_run_scope_cov_tests.rs an_old_symbols_options_folder_is_named_with_the_symbol_it_became
