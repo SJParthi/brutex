@@ -1169,3 +1169,164 @@ fn a_month_another_writer_filled_after_the_check_is_counted_already() {
     assert_eq!(held(&root, "NIFTY", SETTLED, ym(2020, 7)).len(), 1);
     assert_eq!(done.moved.len(), 1);
 }
+
+// ═══ The (U) audit: arms a direct call reaches (recipe v4: a direct call is
+// an input). `Stored`, `Month`, `Move` and `Plan` have public fields, so a
+// hand-built key or plan reaches what the survey's own never do. ═══════════
+
+/// A hand-built NIFTY put of `contract`, expiring `expiry`, at `strike` paisa,
+/// holding `days` over `months`.
+fn hand_built(
+    contract: &str,
+    expiry: Day,
+    strike: i64,
+    months: Vec<Month>,
+    days: &[(Day, u64)],
+) -> Stored {
+    Stored {
+        underlying: sym("NIFTY"),
+        contract: c(contract),
+        expiry,
+        strike,
+        side: OptionSide::Put,
+        months,
+        days: days.iter().copied().collect(),
+    }
+}
+
+/// June 2020 as a key holds it: `rows` bars from `first` to `last`.
+fn june_held(rows: u64, first: i64, last: i64) -> Month {
+    Month {
+        month: ym(2020, 6),
+        rows,
+        first_ts_micros: first,
+        last_ts_micros: last,
+    }
+}
+
+/// The move of `STATED` into `SETTLED`, its June 2020.
+fn stated_to_settled() -> Move {
+    Move {
+        underlying: sym("NIFTY"),
+        from: c(STATED),
+        to: c(SETTLED),
+        kind: AliasKind::VendorRedated,
+        months: vec![ym(2020, 6)],
+        bars: 2,
+    }
+}
+
+/// Keys by their own name, as the survey hands them to the plan.
+fn by_name<'a>(keys: &[&'a Stored]) -> HashMap<(Symbol, Contract), &'a Stored> {
+    keys.iter()
+        .map(|key| ((key.underlying, key.contract), *key))
+        .collect()
+}
+
+/// A KEY WHOSE SETTLED CONTRACT DOES NOT RENDER is unresolved, in its words:
+/// at 10,000,000,000 paisa the every-underlying alias row's 2023-06-28 makes a
+/// contract segment past the store's 24 bytes. At a strike that renders, the
+/// same key moves.
+#[test]
+fn a_key_whose_settled_contract_does_not_render_is_unresolved() {
+    let day = [(d(2020, 6, 15), 1)];
+    let wide = hand_built(STATED, d(2023, 6, 29), 10_000_000_000, Vec::new(), &day);
+    let Verdict::Unresolved(why) = judge(&wide, &HashMap::new()) else {
+        panic!("a contract past the store's width is not moved");
+    };
+    assert_eq!(
+        why,
+        "the settled expiry 2023-06-28 does not render as a store contract segment"
+    );
+    let narrow = hand_built(STATED, d(2023, 6, 29), 1_000_000, Vec::new(), &day);
+    let Verdict::Move(to, kind) = judge(&narrow, &HashMap::new()) else {
+        panic!("a contract that renders moves");
+    };
+    assert_eq!((to, kind), (c(SETTLED), AliasKind::VendorRedated));
+}
+
+/// A MONTH WHOSE DAYS AGREE BUT WHICH THE TARGET DOES NOT LIST is never
+/// counted copied, even with the same bars on disk: the target's months are
+/// asked, not inferred from its days. Listed, the same month is copied.
+#[test]
+fn a_month_the_target_does_not_list_is_never_counted_copied() {
+    let scratch = Scratch::new("ps2-copied");
+    let root = scratch.root();
+    let june = [
+        bar(d(2020, 6, 15), 34_000, 333),
+        bar(d(2020, 6, 15), 34_001, 334),
+    ];
+    put(root, "NIFTY", STATED, &june);
+    put(root, "NIFTY", SETTLED, &june);
+    let days = [(d(2020, 6, 15), 2)];
+    let span = || vec![june_held(2, june[0].ts_micros, june[1].ts_micros)];
+    let source = hand_built(STATED, d(2023, 6, 29), 1_000_000, span(), &days);
+    let listed = hand_built(SETTLED, d(2023, 6, 28), 1_000_000, span(), &days);
+    let unlisted = hand_built(SETTLED, d(2023, 6, 28), 1_000_000, Vec::new(), &days);
+    let plan = Plan {
+        moves: vec![stated_to_settled()],
+        ..Plan::default()
+    };
+    assert_eq!(
+        copied_months(root, &plan, &by_name(&[&source, &listed])),
+        HashSet::from([(sym("NIFTY"), c(STATED), ym(2020, 6))])
+    );
+    assert!(copied_months(root, &plan, &by_name(&[&source, &unlisted])).is_empty());
+}
+
+/// A MOVE WHOSE SOURCE THE PLAN WAS NOT HANDED spans nothing, names nothing
+/// twice, and stays planned: neither check invents a key it was not given.
+#[test]
+fn a_move_whose_source_is_not_held_is_neither_spanned_nor_named_twice() {
+    let mut plan = Plan {
+        moves: vec![stated_to_settled()],
+        ..Plan::default()
+    };
+    held_months(&mut plan, &HashMap::new(), Path::new(""));
+    named_twice(
+        &mut plan,
+        &HashMap::new(),
+        &Withdrawn::default(),
+        &HashSet::new(),
+    );
+    assert_eq!(plan.moves.len(), 1);
+    assert!(plan.unresolved.is_empty());
+}
+
+/// A TARGET MONTH THAT HOLDS NO BAR contests no move into it, whatever span
+/// its header states: only rows the target holds can be preceded or
+/// contradicted.
+#[test]
+fn a_target_month_with_no_rows_contests_no_move() {
+    let source = hand_built(
+        STATED,
+        d(2023, 6, 29),
+        1_000_000,
+        vec![june_held(2, 10, 30)],
+        &[(d(2020, 6, 15), 2)],
+    );
+    let target = hand_built(
+        SETTLED,
+        d(2023, 6, 28),
+        1_000_000,
+        vec![june_held(0, 0, 100)],
+        &[],
+    );
+    let mut plan = Plan {
+        moves: vec![stated_to_settled()],
+        ..Plan::default()
+    };
+    held_months(&mut plan, &by_name(&[&source, &target]), Path::new(""));
+    assert_eq!(plan.moves.len(), 1);
+    assert!(plan.unresolved.is_empty());
+}
+
+/// A LOCK PATH WITH NO PARENT makes no directory and, naming no regular file,
+/// is refused by name.
+#[test]
+fn a_lock_path_with_no_parent_is_refused_by_name() {
+    assert_eq!(
+        open_ledger_lock(Path::new("/")).unwrap_err(),
+        "/ is not a regular file; nothing was written"
+    );
+}
