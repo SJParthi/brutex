@@ -1241,7 +1241,9 @@ fn a_stub_cut_between_its_open_and_its_read_is_no_stub() {
     fs::write(&at, sealed_stub(Vendor::Zerodha)).expect("the stub");
     seam::plant("stub.opened", |path| {
         let file = fs::OpenOptions::new().write(true).open(path).expect("open");
-        file.set_len(0).expect("cut");
+        // The magic and the version survive the cut: only the short read
+        // tells this from a stub.
+        file.set_len(10).expect("cut to the magic and the version");
     });
     assert!(!holds_sealed_stub(&at));
 }
