@@ -296,9 +296,17 @@ fn intersect_and_the_hit_path_carry_every_word_including_the_highest() {
 #[test]
 fn adding_a_required_bit_can_only_remove_hits_at_every_position() {
     let mut rng = Lcg(0xA117);
-    for _ in 0..40 {
-        let bar = rng.next_mask();
+    for trial in 0..40 {
         let base = rng.next_sparse();
+        // Half the bars hold their base. A random bar alone never held a random
+        // base here, so every trial was a miss before and after, and the case
+        // that matters -- a hit that a wider candidate must not keep for free --
+        // had no run. BASE-COV-LIBS-LS3.
+        let bar = if trial % 2 == 0 {
+            rng.next_mask()
+        } else {
+            rng.next_mask().union(&base)
+        };
         let before = bar.hits(&base);
         for b in 0..ConditionMask::BITS {
             let wider = base.with_bit(b);

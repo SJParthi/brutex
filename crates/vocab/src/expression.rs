@@ -914,5 +914,15 @@ mod cover_tests {
             *looped.get_mut(2).expect("the And node") = link;
             assert_eq!(rendered(&join, &looped), Err(std::fmt::Error), "{link:?}");
         }
+
+        // A negation and a join pointing at each other: the stack grows by one
+        // token a step, so it is full within the 3N bound, and a negation's
+        // push is the one that meets its end (a negation cycling on itself
+        // alone grows too slowly to fill it before the bound stops the walk).
+        let crossed = program(&[Instruction::Bit(7), Instruction::Not, Instruction::And]);
+        let mut links = [(0, 0); MAX_INSTRUCTIONS];
+        *links.get_mut(1).expect("the Not node") = (2, 0);
+        *links.get_mut(2).expect("the And node") = (1, 1);
+        assert_eq!(rendered(&crossed, &links), Err(std::fmt::Error));
     }
 }

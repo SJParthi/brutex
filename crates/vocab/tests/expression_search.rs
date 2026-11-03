@@ -55,28 +55,36 @@ fn grammar_prefix_equals_independent_nested_infix_enumeration_without_duplicates
         (vec![0, 63, 64, 127, 128, 192, 274, 320, 369], 3),
     ] {
         let expected = reference(&live, limit);
-        let mut cursor = Cursor::new(&live).unwrap();
-        let mut observed = BTreeSet::new();
-        let mut work = 0;
-        loop {
-            match cursor.advance(50_000, &mut work).unwrap() {
-                Step::Candidate(expression) => {
-                    if size(&expression) > limit {
-                        break;
+        // BASE-COV-LIBS-LS3: and with a budget small enough to pause the search
+        // over and over, which must find exactly the same programs: a pause
+        // loses nothing and repeats nothing. (At 50,000 alone the search never
+        // paused here, so the `Paused` arm had no run.)
+        for budget in [50_000, 3] {
+            let mut cursor = Cursor::new(&live).unwrap();
+            let mut observed = BTreeSet::new();
+            let mut work = 0;
+            loop {
+                match cursor.advance(budget, &mut work).unwrap() {
+                    Step::Candidate(expression) => {
+                        if size(&expression) > limit {
+                            break;
+                        }
+                        let encoded = expression.encode();
+                        assert_eq!(Expression::decode(&encoded).unwrap(), expression);
+                        assert!(
+                            observed.insert(encoded.to_vec()),
+                            "duplicate syntax program"
+                        );
                     }
-                    let encoded = expression.encode();
-                    assert_eq!(Expression::decode(&encoded).unwrap(), expression);
-                    assert!(
-                        observed.insert(encoded.to_vec()),
-                        "duplicate syntax program"
-                    );
+                    Step::Paused => {
+                        assert!(work < 5_000_000, "finite fixture exceeded work ceiling");
+                    }
+                    Step::Exhausted => panic!("wire language cannot end inside this tiny prefix"),
                 }
-                Step::Paused => assert!(work < 5_000_000, "finite fixture exceeded work ceiling"),
-                Step::Exhausted => panic!("wire language cannot end inside this tiny prefix"),
             }
+            assert_eq!(observed, expected, "budget {budget}");
+            assert!(work > u64::try_from(observed.len()).unwrap());
         }
-        assert_eq!(observed, expected);
-        assert!(work > u64::try_from(observed.len()).unwrap());
     }
 }
 
