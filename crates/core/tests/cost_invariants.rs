@@ -67,7 +67,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The workspace root, derived from this crate's own manifest directory.
 ///
@@ -99,8 +99,13 @@ fn invariants() -> String {
 /// [`every_crate_carries_a_ratio_bench`], which is gate 8's own premise checked
 /// where it can be read.
 fn bench_sources() -> BTreeMap<String, String> {
-    let crates_dir = workspace_root().join("crates");
-    let entries = std::fs::read_dir(&crates_dir).unwrap_or_else(|why| {
+    bench_sources_in(&workspace_root().join("crates"))
+}
+
+/// [`bench_sources`] of any `crates/` directory, so a synthetic tree can
+/// prove the walk skips what is not a crate with a bench.
+fn bench_sources_in(crates_dir: &Path) -> BTreeMap<String, String> {
+    let entries = std::fs::read_dir(crates_dir).unwrap_or_else(|why| {
         panic!(
             "crates/ must be readable at {}: {why}",
             crates_dir.display()
@@ -113,9 +118,12 @@ fn bench_sources() -> BTreeMap<String, String> {
         if !path.is_dir() {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
+        // A crate directory with a name that is not UTF-8 is refused by name:
+        // skipping it would let a bench go unread with every check green.
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_else(|| panic!("{} is not a UTF-8 crate name", path.display()));
         let bench = path.join("benches/ratio.rs");
         if let Ok(source) = std::fs::read_to_string(&bench) {
             out.insert(name.to_owned(), source);
@@ -144,9 +152,13 @@ fn bench_sources() -> BTreeMap<String, String> {
 /// Top-level files only: a file under `benches/ratio/` is a module of
 /// `ratio.rs`, not a binary of its own.
 fn every_bench_source() -> BTreeMap<String, String> {
-    let crates_dir = workspace_root().join("crates");
+    every_bench_source_in(&workspace_root().join("crates"))
+}
+
+/// [`every_bench_source`] of any `crates/` directory.
+fn every_bench_source_in(crates_dir: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for entry in std::fs::read_dir(&crates_dir)
+    for entry in std::fs::read_dir(crates_dir)
         .expect("crates/ is readable")
         .flatten()
     {
@@ -160,13 +172,13 @@ fn every_bench_source() -> BTreeMap<String, String> {
             }
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|why| panic!("{} must be readable: {why}", path.display()));
-            let key = path.strip_prefix(&crates_dir).unwrap_or(&path);
+            let key = path.strip_prefix(crates_dir).unwrap_or(&path);
             out.insert(key.display().to_string(), source);
         }
     }
     // Every `ratio.rs` is among them: this walk is a superset of the other one,
     // never a replacement that could quietly read less.
-    let ratios = bench_sources().len();
+    let ratios = bench_sources_in(crates_dir).len();
     let read = out
         .keys()
         .filter(|k| k.ends_with("/benches/ratio.rs"))
@@ -225,9 +237,8 @@ fn declared_rows(doc: &str) -> BTreeMap<String, BTreeSet<String>> {
         let Some(rest) = line.strip_prefix("| ") else {
             continue;
         };
-        let Some(id) = rest.split(" |").next().map(str::trim) else {
-            continue;
-        };
+        // The first cell: what precedes the first ` |`, or the whole rest.
+        let id = rest.split_once(" |").map_or(rest, |(id, _)| id).trim();
         if !is_cost_id(id) {
             continue;
         }
@@ -407,4 +418,90 @@ fn the_document_declares_the_five_operations_rule_4_names() {
              makes constant, and docs/04-invariants.md does not mention it"
         );
     }
+}
+
+/// A new scratch directory of this test binary's own.
+fn scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("cost-invariants-{name}-{}", std::process::id()));
+    let _stale = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    dir
+}
+
+/// BASE-COV-LIBS-LS4: **THE WALKS SKIP EXACTLY WHAT IS NOT A CRATE'S BENCH.**
+/// The real `crates/` holds only crate directories, each with a `ratio.rs`
+/// and no stray file, so neither walk's skips ever ran there. A synthetic tree
+/// holds one of each thing they must pass over.
+#[test]
+fn the_bench_walks_pass_over_what_is_not_a_crates_bench() {
+    let crates = scratch("walk");
+    let alpha = crates.join("alpha/benches");
+    std::fs::create_dir_all(alpha.join("ratio")).unwrap();
+    std::fs::write(alpha.join("ratio.rs"), "println!(\"C-01 one\");\n").unwrap();
+    std::fs::write(alpha.join("stack.rs"), "println!(\"C-02 two\");\n").unwrap();
+    // 1. A file beside the benches that is not Rust, and 2. a module folder.
+    std::fs::write(alpha.join("notes.txt"), "\"C-99 not a bench\"\n").unwrap();
+    std::fs::write(alpha.join("ratio/inner.rs"), "\"C-98 a module\"\n").unwrap();
+    // 3. A crate with no benches at all.
+    std::fs::create_dir_all(crates.join("beta/src")).unwrap();
+    // 4. A crate whose benches folder holds no ratio.rs.
+    std::fs::create_dir_all(crates.join("gamma/benches")).unwrap();
+    // 5. A plain file where a crate directory would be.
+    std::fs::write(crates.join("README.md"), "not a crate\n").unwrap();
+
+    let ratios = bench_sources_in(&crates);
+    assert_eq!(ratios.keys().collect::<Vec<_>>(), ["alpha"]);
+    let roots = every_bench_source_in(&crates);
+    assert_eq!(
+        roots.keys().cloned().collect::<Vec<_>>(),
+        ["alpha/benches/ratio.rs", "alpha/benches/stack.rs"]
+    );
+    // 6. COMBINED: what the walks read is what the ids are taken from.
+    let printed: Vec<String> = printed_ids(&roots).into_iter().collect();
+    assert_eq!(printed, ["C-01", "C-02"]);
+    std::fs::remove_dir_all(&crates).expect("the scratch tree is removed");
+}
+
+/// BASE-COV-LIBS-LS4: the id reader, the row reader and the reachability walk
+/// at their edges.
+#[test]
+fn the_id_row_and_reach_readers_hold_at_their_edges() {
+    // 7. Ids: a letter before any digit, a capital after one, no digit, a
+    //    trailing sub-row letter, punctuation, and another prefix.
+    for (token, is_id) in [
+        ("C-02", true),
+        ("C-E-02b", true),
+        ("C-a1", false),
+        ("C-1A", false),
+        ("C-E-", false),
+        ("C-", false),
+        ("C-04.", false),
+        ("D-0001", false),
+    ] {
+        assert_eq!(is_cost_id(token), is_id, "{token}");
+    }
+    // 8. Rows: a row with no second cell is still a row, a mention in prose
+    //    is not, and a row cites what it names beside its own id.
+    let rows = declared_rows("| C-01 |\n| C-02 | see C-01 |\nC-03 is prose\n| C-x | no id |\n");
+    assert_eq!(rows.keys().collect::<Vec<_>>(), ["C-01", "C-02"]);
+    assert!(rows["C-01"].is_empty());
+    assert_eq!(rows["C-02"].iter().collect::<Vec<_>>(), ["C-01"]);
+    // 9. COMBINED: reach over two hops, and an orphan that cites only another
+    //    orphan is never admitted, however many passes the walk takes.
+    let cites = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| (*id).to_owned())
+            .collect::<BTreeSet<_>>()
+    };
+    let rows = BTreeMap::from([
+        ("C-01".to_owned(), cites(&["C-02"])),
+        ("C-02".to_owned(), cites(&["C-P"])),
+        ("C-08".to_owned(), cites(&["C-09"])),
+        ("C-09".to_owned(), cites(&[])),
+    ]);
+    let reached = proven(&rows, &cites(&["C-P"]));
+    assert_eq!(reached, cites(&["C-01", "C-02", "C-P"]));
+    // 10. OUT OF THE BOX: nothing printed reaches nothing.
+    assert!(proven(&rows, &BTreeSet::new()).is_empty());
 }
