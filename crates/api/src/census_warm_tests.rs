@@ -400,11 +400,20 @@ fn twenty_restarts(store: &Store, feeds: &[Vendor], caches: usize) {
 /// for its five-second read. Interference only adds time, and a design that
 /// makes a request wait for the read pays the five seconds in every run, so
 /// it fails them all; every other assertion holds in every run.
+///
+/// THE RUNS ARE [`NEVER_BLOCKS_APART`] APART (BASE-REDS-1023 repair 8). Since
+/// repair 7 ended the held read at zero a run lasts well under a second, so
+/// seven runs fell inside a few seconds and one burst of load failed them all
+/// (the verifier's connection storm: "a request waited in every run", max 63
+/// to 97 ms, and 0 of about 400 runs outside it). Each run that does not hold
+/// now waits the read's five seconds before the next, as every run did
+/// before, so the seven sample the machine across more than half a minute.
 #[tokio::test(flavor = "current_thread")]
 async fn a_census_change_never_blocks_a_request() {
     let held = first_run_within(
         Duration::from_millis(50),
         NEVER_BLOCKS_RUNS,
+        NEVER_BLOCKS_APART,
         one_change_beside_a_thousand_requests,
     )
     .await;
@@ -415,9 +424,17 @@ async fn a_census_change_never_blocks_a_request() {
 }
 
 /// How many runs [`a_census_change_never_blocks_a_request`] may make before
-/// it fails: each run that does not hold costs about the census read's five
-/// seconds more.
+/// it fails: each run that does not hold costs its own time, well under a
+/// second since its held read ends at zero, and [`NEVER_BLOCKS_APART`] more.
 pub(in crate::server) const NEVER_BLOCKS_RUNS: u32 = 7;
+
+/// How long [`a_census_change_never_blocks_a_request`] waits after a run that
+/// does not hold before the next: the census read's pause, which every run
+/// lasted until repair 7 ended that read at zero (L-BRED23-14). The cut test
+/// of `head_deadline_body_tests` spaces its runs by it too: a run of that test
+/// lasts about its 300 ms stall deadline, so its seven fell inside seconds.
+pub(in crate::server) const NEVER_BLOCKS_APART: Duration =
+    Duration::from_millis(NEVER_BLOCKS_READ_PAUSE_MS);
 
 /// A run's (p50, p99, max) of `took`, sorted: the 500th, 990th and last of
 /// 1,000, the same ranks scaled for any other count.
@@ -434,9 +451,14 @@ fn ranks(took: &[Duration]) -> (Duration, Duration, Duration) {
 /// slowest time is under `bound`, at most `runs` times: that run's number,
 /// or every run's [`ranks`] when none held. Each run's times must come back
 /// sorted. A run that timed nothing measured nothing, so it never holds.
+/// After each run that does not hold it waits `apart`, so the runs sample the
+/// machine at instants at least that far apart and a burst of load shorter
+/// than their spread cannot fail them all. The /db view asks pass zero: a
+/// read held for a minute bounds them, and waiting would let it run out.
 pub(in crate::server) async fn first_run_within<F, R>(
     bound: Duration,
     runs: u32,
+    apart: Duration,
     mut run: F,
 ) -> Result<u32, Vec<(Duration, Duration, Duration)>>
 where
@@ -451,6 +473,7 @@ where
             return Ok(n);
         }
         every.push(measured);
+        tokio::time::sleep(apart).await;
     }
     Err(every)
 }
@@ -461,7 +484,7 @@ where
 async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with_every_run() {
     let ms = Duration::from_millis;
     let mut made = Vec::new();
-    let held = first_run_within(ms(50), 7, |n| {
+    let held = first_run_within(ms(50), 7, Duration::ZERO, |n| {
         made.push(n);
         let max = if n == 0 { ms(53) } else { ms(3) };
         async move { vec![ms(1), max] }
@@ -469,11 +492,14 @@ async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with
     .await;
     assert_eq!(held, Ok(1));
     assert_eq!(made, vec![0, 1], "no run after the one that held");
-    let blocked = first_run_within(ms(50), 7, |_| async { vec![ms(1), ms(5_000)] }).await;
+    let blocked = first_run_within(ms(50), 7, Duration::ZERO, |_| async {
+        vec![ms(1), ms(5_000)]
+    })
+    .await;
     assert_eq!(blocked, Err(vec![(ms(1), ms(1), ms(5_000)); 7]));
-    let at_bound = first_run_within(ms(50), 1, |_| async { vec![ms(50)] }).await;
+    let at_bound = first_run_within(ms(50), 1, Duration::ZERO, |_| async { vec![ms(50)] }).await;
     assert_eq!(at_bound, Err(vec![(ms(50), ms(50), ms(50))]));
-    let timed_nothing = first_run_within(ms(50), 2, |_| async { Vec::new() }).await;
+    let timed_nothing = first_run_within(ms(50), 2, Duration::ZERO, |_| async { Vec::new() }).await;
     assert_eq!(
         timed_nothing,
         Err(vec![(Duration::ZERO, Duration::ZERO, Duration::ZERO); 2]),
@@ -487,6 +513,40 @@ async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with
             Duration::from_micros(990),
             Duration::from_millis(1)
         )
+    );
+}
+
+/// [`first_run_within`] waits `apart` after each run that does not hold, so
+/// no two of its runs start closer than that, and the run that holds ends the
+/// runs at once: a minute apart would show if it waited after that run too.
+#[tokio::test(flavor = "current_thread")]
+async fn the_runs_after_a_miss_are_apart_and_the_run_that_holds_ends_them_at_once() {
+    let ms = Duration::from_millis;
+    let mut began = Vec::new();
+    let held = first_run_within(ms(50), 3, ms(20), |n| {
+        began.push(Instant::now());
+        let max = if n < 2 { ms(53) } else { ms(3) };
+        async move { vec![max] }
+    })
+    .await;
+    assert_eq!(held, Ok(2));
+    let gaps: Vec<Duration> = began
+        .windows(2)
+        .map(|pair| pair[1].duration_since(pair[0]))
+        .collect();
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+    assert!(
+        gaps.iter().all(|gap| *gap >= ms(20)),
+        "each run after a miss began 20 ms or more after it: {gaps:?}"
+    );
+    let asked = Instant::now();
+    let at_once =
+        first_run_within(ms(50), 2, Duration::from_mins(1), |_| async { vec![ms(3)] }).await;
+    let took = asked.elapsed();
+    assert_eq!(at_once, Ok(0));
+    assert!(
+        took < Duration::from_secs(30),
+        "no wait after the run that held: {took:?}"
     );
 }
 
@@ -840,19 +900,24 @@ async fn serve_site(
 /// on what it says, whatever the clock.
 async fn ask_every(addr: std::net::SocketAddr, views: &[String], refreshing: u8) {
     for view in views {
-        let held = first_run_within(Duration::from_millis(900), NEVER_BLOCKS_RUNS, |_| async {
-            let began = Instant::now();
-            let reply = crate::server::tests::get(addr, view).await;
-            let took = began.elapsed();
-            assert!(answered(view, &reply), "{view}: {reply:.400}");
-            if census_backed(view) {
-                assert!(
-                    reply.contains(&format!("x-brutex-census-refreshing: {refreshing}")),
-                    "{view} says how current it is: {reply:.600}"
-                );
-            }
-            vec![took]
-        })
+        let held = first_run_within(
+            Duration::from_millis(900),
+            NEVER_BLOCKS_RUNS,
+            Duration::ZERO,
+            |_| async {
+                let began = Instant::now();
+                let reply = crate::server::tests::get(addr, view).await;
+                let took = began.elapsed();
+                assert!(answered(view, &reply), "{view}: {reply:.400}");
+                if census_backed(view) {
+                    assert!(
+                        reply.contains(&format!("x-brutex-census-refreshing: {refreshing}")),
+                        "{view} says how current it is: {reply:.600}"
+                    );
+                }
+                vec![took]
+            },
+        )
         .await;
         assert!(
             held.is_ok(),
@@ -883,17 +948,22 @@ async fn no_db_view_reads_the_whole_census() {
     std::fs::write(&catalogue, "index_name,category\nNIFTY 50,broad\n").expect("invented");
     let nse = crate::indexmap::Published::read(&catalogue).expect("reads");
     let index_map = || {
-        first_run_within(Duration::from_millis(900), NEVER_BLOCKS_RUNS, |_| async {
-            let began = Instant::now();
-            let code = crate::indexmap::answer(&site, &nse, Vendor::Gdfl, Vec::new()).0;
-            let took = began.elapsed();
-            assert_eq!(
-                code,
-                axum::http::StatusCode::OK,
-                "the index map's census half"
-            );
-            vec![took]
-        })
+        first_run_within(
+            Duration::from_millis(900),
+            NEVER_BLOCKS_RUNS,
+            Duration::ZERO,
+            |_| async {
+                let began = Instant::now();
+                let code = crate::indexmap::answer(&site, &nse, Vendor::Gdfl, Vec::new()).0;
+                let took = began.elapsed();
+                assert_eq!(
+                    code,
+                    axum::http::StatusCode::OK,
+                    "the index map's census half"
+                );
+                vec![took]
+            },
+        )
     };
 
     let mark = store.reads().len();

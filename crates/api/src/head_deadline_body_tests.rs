@@ -21,7 +21,7 @@
     clippy::panic
 )]
 
-use super::census_cache::warm_tests::{NEVER_BLOCKS_RUNS, first_run_within};
+use super::census_cache::warm_tests::{NEVER_BLOCKS_APART, NEVER_BLOCKS_RUNS, first_run_within};
 use super::{ConnectionLimits, HeadDeadline, HeadState, Slot, Slots, serve_limited};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -333,11 +333,20 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
 /// rule, BASE-REDS-1023 repair 7): 1.15 s against 1 s in one whole copy under
 /// this repair's overload, a slot the cut had freed and the machine had not yet
 /// answered on. A reader that is never cut holds its slot past the next client's
-/// six seconds in every run; every other assertion holds in every run.
+/// six seconds in every run; every other assertion holds in every run. A run
+/// that does not hold waits [`NEVER_BLOCKS_APART`] before the next (repair 8):
+/// a run lasts about the 300 ms deadline, so seven unspaced runs fell inside
+/// seconds, where one burst of load could fail them all.
 #[tokio::test]
 async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
     let _sink = crate::emitted::sink();
-    let held = first_run_within(T + SLACK, NEVER_BLOCKS_RUNS, one_stopped_reader).await;
+    let held = first_run_within(
+        T + SLACK,
+        NEVER_BLOCKS_RUNS,
+        NEVER_BLOCKS_APART,
+        one_stopped_reader,
+    )
+    .await;
     assert!(
         held.is_ok(),
         "a stopped reader held its slot in every run, (p50, p99, max) each: {held:?}"

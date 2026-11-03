@@ -244,6 +244,59 @@ fn held_now(journal: &Journal) -> bool {
     !lock_is_free(journal)
 }
 
+/// Whether a sample that read "not this process" stays wrong through both
+/// re-checks: `recheck` answers (the lock is held, its note names no holder
+/// here) and is asked at most twice. Both answers are taken at every
+/// re-check and joined without a short circuit (BASE-REDS-1023 repair 8): a
+/// lock let go inside the re-check's pause is a pass that a run of the
+/// hand-off test reaches only by timing, so the judgement keeps no side that
+/// hangs on it, and [`a_lock_let_go_inside_a_recheck_names_no_lost_holder`]
+/// drives every side of it by hand.
+fn still_unnamed(mut recheck: impl FnMut() -> (bool, bool)) -> bool {
+    (0..2).all(|_| {
+        let (held, wrong) = recheck();
+        held & wrong
+    })
+}
+
+/// [`still_unnamed`] over scripted re-checks: only a lock held AND unnamed at
+/// both is the defect; one let go, or named, at either re-check is not, and
+/// a re-check that already cleared the sample is not asked again.
+#[test]
+fn a_lock_let_go_inside_a_recheck_names_no_lost_holder() {
+    let judged = |script: &[(bool, bool)]| {
+        let mut asked = 0;
+        let still = still_unnamed(|| {
+            asked += 1;
+            script[asked - 1]
+        });
+        (still, asked)
+    };
+    let (held_unnamed, let_go, named) = ((true, true), (false, true), (true, false));
+    assert_eq!(
+        judged(&[held_unnamed, held_unnamed]),
+        (true, 2),
+        "the defect"
+    );
+    assert_eq!(
+        judged(&[let_go]),
+        (false, 1),
+        "let go at the first re-check"
+    );
+    assert_eq!(
+        judged(&[held_unnamed, let_go]),
+        (false, 2),
+        "let go at the second"
+    );
+    assert_eq!(judged(&[named]), (false, 1), "named at the first re-check");
+    assert_eq!(
+        judged(&[held_unnamed, named]),
+        (false, 2),
+        "named at the second"
+    );
+    assert_eq!(judged(&[(false, false)]), (false, 1), "free and named");
+}
+
 #[test]
 fn the_holder_is_named_through_every_in_process_hand_off() {
     // AG-06 repair 1, the verifier's blocking item 2. A registry kept beside
@@ -290,13 +343,11 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
                 if !wrong() {
                     continue;
                 }
-                let still = (0..2).all(|_| {
+                let still = still_unnamed(|| {
                     std::thread::sleep(Duration::from_millis(1));
-                    held_now(&journal) && wrong()
+                    (held_now(&journal), wrong())
                 });
-                if still {
-                    unnamed += 1;
-                }
+                unnamed += u64::from(still);
             }
             (held, unnamed)
         })

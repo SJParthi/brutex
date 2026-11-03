@@ -590,23 +590,6 @@ fn a_windows_max_is_never_below_its_slowest_request() {
     );
 }
 
-/// **TWO FREEZES AT ONCE NEVER COUNT BACKWARDS** (R3-14). The minute thread
-/// and the shutdown flush can roll together. Without `Speed::rolling` two
-/// rolls could interleave on a row: the first freezes its counts and waits
-/// for the row's copies, the second freezes LATER counts and pushes them
-/// first, and the first then takes its difference against the later copy,
-/// backwards, which wraps to about four billion requests on a row that had
-/// six. With the lock the second roll cannot start until the first is done.
-///
-/// Driven here as far as a test can: the test holds the row's copies while
-/// the first roll waits on them and the second is started after five more
-/// requests, twenty rounds, and every request must be counted once. A GUARD,
-/// said plainly: on this Mac a waiter that queued first took the lock first
-/// in twenty rounds of twenty with the one-roll lock removed, so the bad
-/// order needs a preemption between a freeze and its lock that no test can
-/// force, and this test's failure without the lock was NOT demonstrated
-/// (R3-14's report). The lock is correct by construction: a roll holds it
-/// for its whole walk.
 /// **A ROLL THAT HAS RETURNED HAS EVERY EARLIER ROLL'S LINES WRITTEN**
 /// (BASE-REDS-1023 repair 7). The first roll's write waits for word that the
 /// second has returned. With lines written after the lock, as they were, the
@@ -676,6 +659,23 @@ fn a_roll_writes_one_line_for_each_asked_row_at_a_cost_it_prints() {
     );
 }
 
+/// **TWO FREEZES AT ONCE NEVER COUNT BACKWARDS** (R3-14). The minute thread
+/// and the shutdown flush can roll together. Without `Speed::rolling` two
+/// rolls could interleave on a row: the first freezes its counts and waits
+/// for the row's copies, the second freezes LATER counts and pushes them
+/// first, and the first then takes its difference against the later copy,
+/// backwards, which wraps to about four billion requests on a row that had
+/// six. With the lock the second roll cannot start until the first is done.
+///
+/// Driven here as far as a test can: the test holds the row's copies while
+/// the first roll waits on them and the second is started after five more
+/// requests, twenty rounds, and every request must be counted once. A GUARD,
+/// said plainly: on this Mac a waiter that queued first took the lock first
+/// in twenty rounds of twenty with the one-roll lock removed, so the bad
+/// order needs a preemption between a freeze and its lock that no test can
+/// force, and this test's failure without the lock was NOT demonstrated
+/// (R3-14's report). The lock is correct by construction: a roll holds it
+/// for its whole walk.
 #[test]
 fn two_freezes_at_once_never_count_backwards() {
     let speed = Speed::new(0, 4);
