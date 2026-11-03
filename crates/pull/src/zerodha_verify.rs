@@ -4571,3 +4571,9 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 #[path = "zerodha_verify_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL repair 2 (D-7334): a vendor stamp in each encoding, and the
+// days that permit no minute.
+#[cfg(test)]
+#[path = "zerodha_verify_cov_tests.rs"]
+mod cov_tests;
