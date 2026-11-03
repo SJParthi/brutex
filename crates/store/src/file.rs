@@ -10618,6 +10618,12 @@ mod sealed_door_tests;
 #[path = "file_fault_tests.rs"]
 mod file_fault_tests;
 
+/// The write door's words and sentences no other test reached
+/// (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "file_cover_tests.rs"]
+mod cover_tests;
+
 /// Mutation-survivor tests for this module's private items (cloud session
 /// 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
 #[cfg(test)]

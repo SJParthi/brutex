@@ -353,3 +353,9 @@ fn note_summary_built(path: &Path, why: &str, n_valid: u64) {
             .with("n_valid", telemetry::Value::Uint(n_valid)),
     );
 }
+
+/// The writer's step for every kept summary it must not extend, and the
+/// existing-month door's quiet answers and refusals (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "month_summary_writer_cover_tests.rs"]
+mod cover_tests;
