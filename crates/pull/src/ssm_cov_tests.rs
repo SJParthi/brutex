@@ -192,32 +192,31 @@ const DISCOVERY: &str =
 /// invented credentials file; the operator's own is never read.
 #[test]
 fn the_discovery_doors_read_this_processs_environment_and_home() {
-    match std::env::var(CASE).ok() {
-        Some(case) => discovery_case(&case),
-        None => {
-            let home = crate::gdfl_fixtures::scratch("ssm-cov-home");
-            std::fs::create_dir_all(home.join(".aws")).unwrap();
-            std::fs::write(
-                home.join(".aws").join("credentials"),
-                "[default]\naws_access_key_id = ZQFILEKEY\naws_secret_access_key = ZQFILESECRET\n",
-            )
-            .unwrap();
-            let relative = std::path::Path::new("relative-home");
-            let pair = [
-                ("AWS_ACCESS_KEY_ID", std::ffi::OsStr::new("ZQKEY")),
-                ("AWS_SECRET_ACCESS_KEY", std::ffi::OsStr::new("ZQSECRET")),
-            ];
-            let not_utf8 = {
-                use std::os::unix::ffi::OsStrExt as _;
-                [("AWS_PROFILE", std::ffi::OsStr::from_bytes(&[0xFF, 0xFE]))]
-            };
-            child("env", &pair, Some(&home));
-            child("file", &[], Some(&home));
-            child("no-home", &[], None);
-            child("relative-home", &[], Some(relative));
-            child("not-utf8", &not_utf8, Some(&home));
-            std::fs::remove_dir_all(home).unwrap();
-        }
+    if let Ok(case) = std::env::var(CASE) {
+        discovery_case(&case);
+    } else {
+        let home = crate::gdfl_fixtures::scratch("ssm-cov-home");
+        std::fs::create_dir_all(home.join(".aws")).unwrap();
+        std::fs::write(
+            home.join(".aws").join("credentials"),
+            "[default]\naws_access_key_id = ZQFILEKEY\naws_secret_access_key = ZQFILESECRET\n",
+        )
+        .unwrap();
+        let relative = std::path::Path::new("relative-home");
+        let pair = [
+            ("AWS_ACCESS_KEY_ID", std::ffi::OsStr::new("ZQKEY")),
+            ("AWS_SECRET_ACCESS_KEY", std::ffi::OsStr::new("ZQSECRET")),
+        ];
+        let not_utf8 = {
+            use std::os::unix::ffi::OsStrExt as _;
+            [("AWS_PROFILE", std::ffi::OsStr::from_bytes(&[0xFF, 0xFE]))]
+        };
+        child("env", &pair, Some(&home));
+        child("file", &[], Some(&home));
+        child("no-home", &[], None);
+        child("relative-home", &[], Some(relative));
+        child("not-utf8", &not_utf8, Some(&home));
+        std::fs::remove_dir_all(home).unwrap();
     }
 }
 
