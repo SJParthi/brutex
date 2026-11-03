@@ -234,6 +234,11 @@ pub mod masters;
 /// Read-only decoders over bytes somebody else fetched — no socket here, the
 /// same seam `fetch::BarSource` draws for vendor bars.
 pub mod nse;
+/// Each stock's dated intraday leverage from NSE's daily margin files
+/// (`C_VAR1`, batch 1): a fixed-stride dated table and an O(1) lookup under
+/// three readings (FNO-LEVERAGE, D-8150). No socket: the download is an
+/// operations step.
+pub mod nse_margin;
 pub mod nseindex;
 /// VENDOR-PADDED MINUTES -- a cash share's flat zero-volume minute that only
 /// repeats the minute before it: defined, counted per day, and never read as
