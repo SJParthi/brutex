@@ -1155,6 +1155,8 @@ fn open_regular(path: &Path, write: bool) -> Result<Option<File>, KeepError> {
     // MISSING, AND THIS IS A WRITER UNDER THE PACK LOCK (or creating the lock
     // itself): born `O_EXCL`, so a name that appeared meanwhile is opened by
     // the door above on the second try, never by this create.
+    #[cfg(test)]
+    seam::at("keep.missing", path);
     let created = OpenOptions::new()
         .read(true)
         .write(true)
@@ -2363,6 +2365,40 @@ fn place_receipt_only(
     // that took its own segment lost which of the first month's segments
     // held that receipt once the month had rolled (repair round 2).
     write_refusals_then_receipt(&at, &state, ordinal, pointer, &[], segment, month, rolled)
+}
+
+/// Test seams between two host calls that another process could split
+/// (D-7336, the pattern of `ingest::census_store::seam`): a test plants one
+/// step under a name, and the next pass of that name on this thread runs it,
+/// once, with the path the code is at, the way another creator landing
+/// between the two calls would. Per thread, and absent from every build but
+/// this crate's own tests.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Step = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Plants `step` for the next pass of `name` on this thread.
+    pub(crate) fn plant(name: &'static str, step: impl FnOnce(&Path) + 'static) {
+        STEPS.with_borrow_mut(|held| held.push((name, Box::new(step))));
+    }
+
+    /// Runs the step planted for `name`, once.
+    pub(super) fn at(name: &'static str, path: &Path) {
+        let step = STEPS.with_borrow_mut(|held| {
+            let found = held.iter().position(|(at, _)| *at == name)?;
+            Some(held.remove(found).1)
+        });
+        if let Some(step) = step {
+            step(path);
+        }
+    }
 }
 
 #[cfg(test)]

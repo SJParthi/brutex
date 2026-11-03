@@ -3181,3 +3181,24 @@ fn a_window_whose_open_record_is_refused_writes_nothing() {
         text
     );
 }
+
+/// PS2 (D-7336): A NAME ANOTHER CREATOR PUT THERE BETWEEN THE MISSING ANSWER
+/// AND THE CREATE is opened as the file it is, never created over: the `O_EXCL`
+/// create meets it and the door opens it on the second try.
+#[test]
+fn a_name_created_between_the_look_and_the_create_is_opened_not_created_over() {
+    let scratch = Scratch::new("created-between");
+    let path = scratch.root().join("keep.lock");
+    seam::plant("keep.missing", |at| {
+        fs::write(at, b"invented: the other creator's bytes").unwrap();
+    });
+    let file = open_regular(&path, true).unwrap().expect("opened");
+    let mut held = String::new();
+    std::io::Read::read_to_string(&mut &file, &mut held).unwrap();
+    assert_eq!(held, "invented: the other creator's bytes");
+    drop(file);
+    // With no other creator the same call makes the file, empty.
+    let fresh = scratch.root().join("fresh.lock");
+    let made = open_regular(&fresh, true).unwrap().expect("made");
+    assert_eq!(made.metadata().unwrap().len(), 0);
+}
