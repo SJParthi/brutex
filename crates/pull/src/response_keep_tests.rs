@@ -3204,3 +3204,83 @@ fn a_name_created_between_the_look_and_the_create_is_opened_not_created_over() {
     let made = open_regular(&fresh, true).unwrap().expect("made");
     assert_eq!(made.metadata().unwrap().len(), 0);
 }
+
+/// PS2 (the (U) audit: a direct call is an input): A BODY NO EMPTY SEGMENT
+/// COULD HOLD IS NEVER ROLLED FOR. Past `MAX_PACK_BYTES` deflated,
+/// `roll_if_full` keeps the segment it was given, leaving the refusal to the
+/// body's own size; a body that fits an empty segment but not this one rolls.
+/// `append` refuses a raw body past `MAX_RESPONSE_BYTES` first, so only a
+/// direct call reaches the first case.
+#[test]
+fn a_body_no_empty_segment_could_hold_is_not_rolled_for() {
+    let scratch = Scratch::new("ps2-roll-huge");
+    let dir = scratch.root().to_path_buf();
+    let month = YearMonth::new(2019, 6).unwrap();
+    let empty = (0, names(&dir, month, 0), super::Segment::default());
+    let (index, at, _, rolled) = roll_if_full(&dir, month, MAX_PACK_BYTES + 1, 0, empty).unwrap();
+    assert_eq!((index, rolled), (0, false), "kept where it was");
+    assert_eq!(at, names(&dir, month, 0));
+    let half_full = super::Segment {
+        body_end: MAX_PACK_BYTES / 2,
+        ..super::Segment::default()
+    };
+    let given = (0, names(&dir, month, 0), half_full);
+    let (index, at, _, rolled) = roll_if_full(&dir, month, MAX_PACK_BYTES, 0, given).unwrap();
+    assert_eq!((index, rolled), (1, true), "fits an empty segment: rolls");
+    assert_eq!(at, names(&dir, month, 1));
+}
+
+/// PS2 (the (U) audit: a direct call is an input): A ROLL OF A PACK NO STORE
+/// PATH CAN HOLD IS SAID BY ITS KEY. `note_rolled` names the segment's
+/// receipts file through `pack_dir`, and names the key itself when `pack_dir`
+/// refuses it; every append asks `pack_dir` before it can roll, so only a
+/// direct call reaches that. Run in a child, which installs its own sink.
+#[test]
+fn a_roll_of_a_pack_no_path_can_hold_is_said_by_its_key() {
+    crate::support::where_permission_binds(
+        "response_keep::tests::a_roll_of_a_pack_no_path_can_hold_is_said_by_its_key",
+        roll_said_by_its_key,
+    );
+}
+
+fn roll_said_by_its_key() {
+    let home = Scratch::new("ps2-roll-sink");
+    let sink = telemetry::install(
+        &telemetry::Config::new(home.root()).with_min_level(telemetry::Level::Trace),
+    )
+    .unwrap();
+    let scratch = Scratch::new("ps2-roll-key");
+    let mut key = nifty();
+    key.segment = Segment::Fno;
+    key.kind = Kind::Option {
+        expiry: Expiry::new(2019, 6, 27).unwrap(),
+        strike: Paisa::from_raw(10_000_000_000),
+        side: OptionSide::Put,
+    };
+    assert!(
+        pack_dir(scratch.root(), pack(&key)).is_err(),
+        "no path holds it"
+    );
+    let placed = Placed {
+        month: YearMonth::new(2019, 6).unwrap(),
+        segment: 1,
+        ordinal: 0,
+        receipt: crafted(1, 0, 0),
+        rolled: true,
+    };
+    note_rolled(scratch.root(), pack(&key), "the invented key", &placed);
+    let said = telemetry::tail(
+        home.root(),
+        sink.keep_files(),
+        &telemetry::Query::last(telemetry::MAX_LIMIT).from_target("pull.keep"),
+    )
+    .records;
+    let line = said
+        .iter()
+        .find(|record| record.message.starts_with("response pack segment full"))
+        .unwrap();
+    assert_eq!(
+        line.field("pack"),
+        Some(&telemetry::OwnedValue::Str("the invented key".to_owned()))
+    );
+}
