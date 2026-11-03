@@ -40,6 +40,7 @@
 //!   to be argued into that table. D-1435.
 //! * Anything in `web/`, which `CLAUDE.md` §2 exempts by path.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Every dependency known to ship non-Rust source, with what it ships and
@@ -281,11 +282,14 @@ fn reachable_from_workspace(
     pkgs: &[LockPackage],
     skip: &[LockOnlyEdge],
 ) -> Result<BTreeSet<String>, String> {
-    let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (i, p) in pkgs.iter().enumerate() {
-        by_name.entry(p.name.as_str()).or_default().push(i);
+    // Each package is filed beside its own seen flag, so reaching a target is
+    // no lookup by index: a lookup that could not miss left its other side
+    // with no run. BASE-COV-LIBS-LS3.
+    let seen: Vec<Cell<bool>> = pkgs.iter().map(|p| Cell::new(p.workspace)).collect();
+    let mut by_name: BTreeMap<&str, Vec<(&Cell<bool>, &LockPackage)>> = BTreeMap::new();
+    for (flag, p) in seen.iter().zip(pkgs) {
+        by_name.entry(p.name.as_str()).or_default().push((flag, p));
     }
-    let mut seen: Vec<bool> = pkgs.iter().map(|p| p.workspace).collect();
     let mut stack: Vec<&LockPackage> = pkgs.iter().filter(|p| p.workspace).collect();
     let mut out = BTreeSet::new();
     while let Some(parent) = stack.pop() {
@@ -300,12 +304,12 @@ fn reachable_from_workspace(
             {
                 continue;
             }
-            let targets: Vec<usize> = by_name
+            let targets: Vec<(&Cell<bool>, &LockPackage)> = by_name
                 .get(name)
                 .into_iter()
                 .flatten()
                 .copied()
-                .filter(|&j| version.is_none_or(|v| pkgs.get(j).is_some_and(|p| p.version == v)))
+                .filter(|(_, p)| version.is_none_or(|v| p.version == v))
                 .collect();
             if targets.is_empty() {
                 return Err(format!(
@@ -313,11 +317,8 @@ fn reachable_from_workspace(
                     parent.name
                 ));
             }
-            for j in targets {
-                if let (Some(flag), Some(child)) = (seen.get_mut(j), pkgs.get(j))
-                    && !*flag
-                {
-                    *flag = true;
+            for (flag, child) in targets {
+                if !flag.replace(true) {
                     stack.push(child);
                 }
             }
@@ -1406,10 +1407,8 @@ fn semver_precedence_is_the_specs() {
     assert!(parsed.is_ok(), "{parsed:?}");
     let parsed = parsed.unwrap_or_default();
     assert_eq!(parsed.len(), chain.len());
-    for pair in parsed.windows(2) {
-        if let [a, b] = pair {
-            assert!(a < b, "{a:?} must sort below {b:?}");
-        }
+    for (a, b) in parsed.iter().zip(parsed.iter().skip(1)) {
+        assert!(a < b, "{a:?} must sort below {b:?}");
     }
     let bounds: Result<Vec<Semver>, String> =
         ["0.103.16", "0.104.0-alpha.1", "0.104.0-alpha.8", "0.104.0"]
@@ -1418,10 +1417,8 @@ fn semver_precedence_is_the_specs() {
             .collect();
     let bounds = bounds.unwrap_or_default();
     assert_eq!(bounds.len(), 4);
-    for pair in bounds.windows(2) {
-        if let [a, b] = pair {
-            assert!(a < b, "{a:?} must sort below {b:?}");
-        }
+    for (a, b) in bounds.iter().zip(bounds.iter().skip(1)) {
+        assert!(a < b, "{a:?} must sort below {b:?}");
     }
     // D-7205's bounds in order: the advisory's own, and 1.37.0 from its
     // affected functions.
@@ -1431,10 +1428,8 @@ fn semver_precedence_is_the_specs() {
         .collect();
     let tokio = tokio.unwrap_or_default();
     assert_eq!(tokio.len(), 5);
-    for pair in tokio.windows(2) {
-        if let [a, b] = pair {
-            assert!(a < b, "{a:?} must sort below {b:?}");
-        }
+    for (a, b) in tokio.iter().zip(tokio.iter().skip(1)) {
+        assert!(a < b, "{a:?} must sort below {b:?}");
     }
     assert_eq!(
         parse_semver("0.11.1+wasi-snapshot-preview1"),
@@ -1545,10 +1540,14 @@ fn an_empty_lock_is_named_as_checking_nothing() {
 /// is refused here rather than read as a set that never holds; an operator it
 /// does not read is refused by name.
 #[test]
+#[expect(
+    clippy::expect_used,
+    reason = "a test that cannot panic cannot fail; `expect` panics inside core and leaves no region behind"
+)]
 fn every_comparator_in_the_table_is_read_and_others_are_refused() {
-    let probe = parse_semver("1.0.0");
-    assert!(probe.is_ok(), "{probe:?}");
-    let Ok(probe) = probe else { return };
+    // `expect`, not an `else { return }` after asserting the same thing: that
+    // return had no run. BASE-COV-LIBS-LS3.
+    let probe = parse_semver("1.0.0").expect("1.0.0 is a version");
     let mut read = 0;
     for floor in FLOORS {
         for set in floor.patched.iter().chain(floor.unaffected) {
@@ -1571,4 +1570,38 @@ fn every_comparator_in_the_table_is_read_and_others_are_refused() {
             "`{foreign}` must be refused"
         );
     }
+}
+
+/// **THE LOCK PARSER KEEPS WHAT IT UNDERSTANDS AND SKIPS THE REST.**
+/// BASE-COV-LIBS-LS3: the real lockfile holds only `[[package]]` tables and
+/// quoted dependency lines, so the parser's other paths had no run. Extremes:
+/// a key before any package, a table that is not a package, a bracketed line
+/// and an unquoted line inside a dependency list, a source line, and a key
+/// after the last package.
+#[test]
+fn the_lock_parser_keeps_what_it_understands_and_skips_the_rest() {
+    let text = "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n\
+                dependencies = [\n \"b 2.0.0\",\n [weird]\n not quoted\n]\n\n\
+                [[package]]\nname = \"b\"\nversion = \"2.0.0\"\nsource = \"registry+x\"\n\n\
+                [metadata]\n\"k\" = \"v\"\n";
+    let pkgs = parse_lock(text);
+    let got: Vec<(&str, &str, bool, &[String])> = pkgs
+        .iter()
+        .map(|p| {
+            (
+                p.name.as_str(),
+                p.version.as_str(),
+                p.workspace,
+                p.deps.as_slice(),
+            )
+        })
+        .collect();
+    let a_deps = ["b 2.0.0".to_owned()];
+    assert_eq!(
+        got,
+        [
+            ("a", "1.0.0", true, &a_deps[..]),
+            ("b", "2.0.0", false, &[][..])
+        ]
+    );
 }
