@@ -1092,7 +1092,10 @@ fn a_flipped_tick_store_byte_never_reaches_a_row_unnoticed() {
 /// its stated size, and then to its stated CRC-32.
 fn whole_member(bytes: &Vec<u8>, entry: &IndexEntry) -> Option<Vec<u8>> {
     let rebuilt = rebuild(bytes, entry).ok()?;
-    let whole = u64::try_from(rebuilt.len()).unwrap() == entry.size && crc32(&rebuilt) == entry.crc;
+    // One comparison of the pair (BASE-COV-PULL-PS2): this file's fixtures
+    // write raw blocks only, which rebuild to exactly their stated size, so a
+    // size-first `&&` left a side no fixture here reaches.
+    let whole = (u64::try_from(rebuilt.len()).unwrap(), crc32(&rebuilt)) == (entry.size, entry.crc);
     whole.then_some(rebuilt)
 }
 
