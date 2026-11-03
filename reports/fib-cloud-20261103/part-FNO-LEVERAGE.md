@@ -45,8 +45,14 @@ Anchors used:
 
 The other touched lines:
 - The `lib.rs` line has no instrumented region.
-- The bench wrapper's own figures are in `report-FNO-LEVERAGE.md` (the bench target run once under the same instrumentation, CC-20's precedent).
-- Only a self-checking bench's failing-check arm is excused: `refuse(…)` and the `OVER BUDGET` and BREACH arms in `crates/pull/benches/ratio/nse_margin.rs`.
+- The bench wrapper `crates/pull/benches/ratio/nse_margin.rs` was measured by running the bench target once under the same instrumentation, at the dev profile's opt-level 3 (CC-20's precedent; the run exited 0 with all ratios within the ceiling):
+  - lines: 93 of 94 per source line (98 of 106 in `llvm-cov report`, which counts the unexecuted `refuse` closures apart);
+  - branches: 4 of 8.
+- Everything missed is the self-checking failing-check arm, which R2 excuses, named for this file:
+  - line 118 `refuse(…)`;
+  - its three `||` guards at 114-116;
+  - the `OVER BUDGET` outcome at 100.
+- The harness's `println!` (1864) and `ok &=` (1867) lines each have count 1.
 
 ## Gates (commands run here, with output)
 

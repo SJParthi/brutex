@@ -137,7 +137,32 @@ llvm-profdata merge -sparse … ; llvm-cov report <binary> -instr-profile=… --
 The other touched lines:
 - The `crates/pull/src/lib.rs` line is a module declaration: there is no instrumented region.
 - The `gates_tree.rs` group is a `const` and a list entry, proved by gate 1d's run and the tool's own tests.
-- The bench wrapper (`benches/ratio/nse_margin.rs`) and the 3 harness lines are covered by running the bench target once under the same instrumentation (CC-20's precedent). That result is in the last section.
+- The bench wrapper (`crates/pull/benches/ratio/nse_margin.rs`) and the harness lines it adds were measured by running the bench target once under the same instrumentation (CC-20's precedent).
+
+How the bench run was made:
+- **Flags:** `RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch'`, the pinned nightly, `--profile dev`.
+- **Opt-level:** the dev profile's own 3. An opt-level 0 run of the whole harness was started first. It reached and ran C-FNO-LEV-01, but its profile is written only when the whole harness exits, which takes far longer at opt-level 0, so the figures below are from the opt-level 3 run. A coverage counter counts executions whatever the optimisation. That run printed "all ratios within the ceiling" and exited 0 in 6 min.
+- **Report:** `llvm-cov report` and an `llvm-cov export -format=lcov` of the merged profile.
+
+Results, `crates/pull/benches/ratio/nse_margin.rs`:
+
+| Measure | Covered | Missed | Cover |
+|---|---|---|---|
+| Lines, per source line (lcov `DA`) | 93 of 94 | 1 | 98.94% |
+| Lines, `llvm-cov report` | 98 of 106 | 8 | 92.45% |
+| Branches | 4 of 8 | 4 | 50.00% |
+
+The two line figures differ because the report also counts, as separate functions, the seven `refuse(…)` closures that never ran, on lines whose other code did run.
+
+Every missed line and branch is the self-checking bench's own failing-check arm, which R2 excuses, named for this file:
+- line 118, `refuse("the invented table does not answer as built")`;
+- branches 114:12, 115:16 and 116:16, the three `||` checks that guard it, never true;
+- branch 100:12's false outcome, the `OVER BUDGET` arm. The opt-level 0 run did take this arm (its held-day p99 was 1,582 ns, as printed), but that profile was not merged;
+- the seven `unwrap_or_else(|…| refuse(…))` closures (functions, not lines).
+
+Harness lines in `crates/pull/benches/ratio.rs`:
+- the `println!` at 1864 and the `ok &=` at 1867 each have count 1;
+- the `mod` line at 58 has no region.
 
 Only the module's tests were run under instrumentation (`… pull-<hash> nse_margin`, 2,226 other tests filtered out). No other module calls `nse_margin`, so the other tests cannot reach the file. The Mac's Route B runs the whole crate and re-measures before anything counts.
 
