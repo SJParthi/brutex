@@ -1678,8 +1678,11 @@ fn an_underlying_held_on_two_exchanges_is_refused_until_one_is_named() {
                 april,
             ),
             2,
-            0,
-            60,
+            // APRIL'S OWN STAMPS (2019-04-02, five days after [`MARCH`]): the
+            // newest close is the one stamped last, so a row of April stamped
+            // in March would tie with March and leave it to the order of a map.
+            5 * 86_400,
+            5 * 86_400 + 60,
             4_323,
         ),
         held(
