@@ -343,6 +343,9 @@ fn an_item_after_the_first_gate_without_its_own_is_named() {
                 fn gated() {}\n\
                 const AFTER_A_BRACE: u8 = 1;\n\
                 #[cfg(test)]\n\
+                use std::fmt;\n\
+                fn after_a_use() {}\n\
+                #[cfg(test)]\n\
                 #[allow(\n    clippy::all,\n)]\n\
                 fn gated_over_lines() {}\n";
     let (ungated, checked) = ungated_after_the_first_gate(text);
@@ -351,9 +354,13 @@ fn an_item_after_the_first_gate_without_its_own_is_named() {
         [
             (7, "fn after_a_blank() {}".to_owned()),
             (11, "const AFTER_A_BRACE: u8 = 1;".to_owned()),
+            (14, "fn after_a_use() {}".to_owned()),
         ]
     );
-    assert_eq!(checked, 3, "mod tests, gated and gated_over_lines");
+    assert_eq!(
+        checked, 4,
+        "mod tests, gated, the gated use and gated_over_lines"
+    );
     // COMBINED: no gate at all checks nothing and names nothing.
     assert_eq!(
         ungated_after_the_first_gate(
