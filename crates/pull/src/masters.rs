@@ -971,15 +971,16 @@ enum Step {
     Remove,
 }
 
-/// The refusal a test planted for `temporary` at `step`, taken once.
-#[cfg(test)]
+/// The refusal a test planted for `temporary` at `step`, taken once; outside
+/// tests nothing is planted, so every step is the host's own answer. One
+/// function for both builds, so no line exists only in the build the
+/// integration tests link (where no master is landed).
 fn planted(temporary: &Path, step: Step) -> Option<std::io::Error> {
-    inject::take(temporary, step)
-}
-
-/// Outside tests nothing is planted, so every step is the host's own answer.
-#[cfg(not(test))]
-const fn planted(_temporary: &Path, _step: Step) -> Option<std::io::Error> {
+    #[cfg(test)]
+    if let Some(refusal) = inject::take(temporary, step) {
+        return Some(refusal);
+    }
+    let _ = (temporary, step);
     None
 }
 
