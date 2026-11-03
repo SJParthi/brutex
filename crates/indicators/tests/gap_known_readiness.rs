@@ -68,7 +68,11 @@ fn expected(
         .iter()
         .filter(|bar| day_of(bar) == today && span_of(bar) == opening)
         .collect();
-    if span_of(current) == opening || tolerance.base() != Some(Base::SessionRange) {
+    // A bar inside the opening span is measured against nothing. (This also
+    // answered `Unknown` for a band of another base, which no evaluator can carry:
+    // `Widths::new` refuses it, D-1553, so that side had no run.
+    // BASE-COV-LIBS-LS3.)
+    if span_of(current) == opening {
         return [Truth::Unknown; 11];
     }
     let Some(yesterday) = prior
@@ -115,9 +119,13 @@ fn expected(
         _ => return [Truth::Unknown; 11],
     };
     let length = (x1 - x2).abs();
-    if length == 0 || length > i128::from(i64::MAX) {
-        return [Truth::Unknown; 11];
-    }
+    // The leg is a strict extension past yesterday's edge, so it has length; and
+    // two positive prices are never further apart than `i64::MAX`. Asserted: this
+    // answered `Unknown` for both, a side no fixture reached. BASE-COV-LIBS-LS3.
+    assert!(
+        (1..=i128::from(i64::MAX)).contains(&length),
+        "a gap leg spans the gap: {length}"
+    );
     RUNGS.map(|rung| {
         let level = x2 + (rung * (x1 - x2)).div_euclid(1000);
         if i64::try_from(level).is_err() {

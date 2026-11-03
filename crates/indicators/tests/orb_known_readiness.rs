@@ -72,14 +72,15 @@ fn expected(prior: &[Sample], current: Sample, window: i64, tolerance: Tolerance
     let (high, low) = bars.fold((first.candle.high, first.candle.low), |(high, low), row| {
         (high.max(row.candle.high), low.min(row.candle.low))
     });
+    // Two positive prices are never further apart than `i64::MAX`; this answered
+    // `Unknown` for a wider span, and a band of another base, neither of which
+    // any run reached (`Widths::new` refuses the base, D-1553).
+    // BASE-COV-LIBS-LS3.
     let range = i128::from(high) - i128::from(low);
-    if range > i128::from(i64::MAX) {
-        return [Truth::Unknown; 5];
-    }
     let close = current.candle.close;
     let truth = |value| if value { Truth::True } else { Truth::False };
     let near = |level| {
-        if range == 0 || tolerance.base() != Some(Base::SessionRange) {
+        if range == 0 {
             Truth::Unknown
         } else {
             truth(

@@ -114,6 +114,21 @@ pub enum Refused {
     AccumulatorTooLarge,
 }
 
+impl Refused {
+    /// The aggregate evaluator's name for this refusal: the record's own fault
+    /// as it was named, or the accumulator's. One conversion for both, so the
+    /// evaluator maps a refusal with `?` rather than a match whose `Corrupt` arm
+    /// no bar it accepts can reach (D-8565); proved for both refusals by
+    /// `vwap_cover_tests::each_refusal_keeps_its_own_name_through_the_evaluator`.
+    #[must_use]
+    pub(crate) const fn into_corrupt(self) -> crate::Corrupt {
+        match self {
+            Self::Corrupt(why) => why,
+            Self::AccumulatorTooLarge => crate::Corrupt::AccumulatorTooLarge,
+        }
+    }
+}
+
 /// The band multipliers, in sigma. The design source ships exactly these three.
 pub const BAND_SIGMA: [i128; 3] = [1, 2, 3];
 
@@ -1742,6 +1757,25 @@ mod tests {
         }
     }
 
+    /// **AN IMPOSSIBLE STATE: THE ORACLE REFUSES IT AND `sigma` CLAMPS IT TO
+    /// ZERO.** `pv² > v·p2v` is a negative variance, which no folded state holds
+    /// (Cauchy-Schwarz over the bars folded), so the oracle's own `fits(0)`
+    /// refusal had no run. The production formula clamps rather than taking the
+    /// root of a negative, and never reports a negative sigma. BASE-COV-LIBS-LS3.
+    /// Extremes: one unit of volume, a remainder that borrows, and a mean at
+    /// `i64::MAX` with no second moment at all.
+    #[test]
+    fn an_impossible_state_is_refused_by_the_oracle_and_clamped_by_sigma() {
+        for (pv, v, p2v) in [(10, 1, 1), (3, 2, 4), (i128::from(i64::MAX), 1, 0)] {
+            assert_eq!(oracle::sigma(pv, v, p2v), None, "pv {pv} v {v} p2v {p2v}");
+            assert_eq!(
+                primed(0, pv, v, p2v).sigma(),
+                Some(0),
+                "pv {pv} v {v} p2v {p2v}"
+            );
+        }
+    }
+
     /// A deterministic generator, so every fixture is reproducible byte for byte.
     struct Lcg(u64);
 
@@ -1837,16 +1871,18 @@ mod tests {
             let p2 = i128::from(3 + rng.below(3_000_000_000));
             let a = i128::from(rng.next()) * i128::from(rng.next() >> 20) + 1;
             let b_cap = (ACC_CEILING - p1 * p1 * a) / (p2 * p2);
-            if b_cap < 1 {
-                continue;
-            }
+            // Asserted, not skipped: no state this generator draws leaves the
+            // second class without room, and a skip that never fires was a line no
+            // run executed (BASE-COV-LIBS-LS3).
+            assert!(
+                b_cap >= 1,
+                "the first class filled the ceiling: p1 {p1} a {a}"
+            );
             let b = i128::from(rng.next()).rem_euclid(b_cap) + 1;
             let (pv, v, p2v) = (p1 * a + p2 * b, a + b, p1 * p1 * a + p2 * p2 * b);
             assert!(p2v <= ACC_CEILING, "fixture left the fold's own ceiling");
             let r = pv.rem_euclid(v);
-            if r.checked_mul(r).is_none() {
-                wide += 1;
-            }
+            wide += u32::from(r.checked_mul(r).is_none());
             assert_eq!(
                 primed(0, pv, v, p2v).sigma(),
                 oracle::sigma(pv, v, p2v),
@@ -1963,3 +1999,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "vwap_cover_tests.rs"]
+mod vwap_cover_tests;

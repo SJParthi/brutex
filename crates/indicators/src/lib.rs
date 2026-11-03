@@ -880,7 +880,12 @@ mod tests {
     #[test]
     fn the_session_day_floors_for_negative_stamps() {
         assert_eq!(ist_day(0), 0, "epoch is inside IST day 0");
-        assert!(ist_day(-1) < 0 || ist_day(-1) == 0);
+        // One microsecond before the epoch is 05:29:59.999999 IST on 1970-01-01:
+        // still day 0. (This accepted either sign; the answer is exact.) The last
+        // microsecond of the IST day before is day -1.
+        assert_eq!(ist_day(-1), 0);
+        assert_eq!(ist_day(-IST_OFFSET_MICROS), 0, "IST midnight starts day 0");
+        assert_eq!(ist_day(-IST_OFFSET_MICROS - 1), -1);
         assert!(
             ist_day(-MICROS_PER_DAY * 3) < 0,
             "three days before the epoch is a negative day number"
@@ -2013,15 +2018,9 @@ mod candle {
         let monday = 1_787_000_000_000_000_i64;
         // Walk a whole week from a known Monday and check the sequence.
         let day = 86_400_000_000_i64;
-        let base = (monday / day) * day + 4 * 3_600_000_000; // mid-session IST
-        // Find a Monday by scanning at most a week.
-        let mut start = base;
-        for _ in 0..7 {
-            if crate::weekday_bit(start) == Some(365) {
-                break;
-            }
-            start = start.saturating_add(day);
-        }
+        // Mid-session IST on that Monday. (A scan for a Monday used to sit here; it
+        // never stepped, because the anchor IS one, and the assertion below says so.)
+        let start = (monday / day) * day + 4 * 3_600_000_000;
         assert_eq!(crate::weekday_bit(start), Some(365), "monday");
         assert_eq!(crate::weekday_bit(start + day), Some(366), "tuesday");
         assert_eq!(crate::weekday_bit(start + 2 * day), Some(367), "wednesday");

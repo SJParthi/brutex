@@ -838,16 +838,17 @@ fn overlay_exact_minute(
     let mut gap = GapFib::new();
     let mut orb = Orb::new();
     let mut minute_masks = Vec::with_capacity(exact_minute.len());
+    // The previous minute's stamp is carried, not looked up again: a lookup of
+    // `index - 1` inside `index > 0` had an arm no slice could reach (D-8565).
+    let mut previous_ts: Option<i64> = None;
     for (index, bar) in exact_minute.iter().enumerate() {
-        if index > 0 {
-            let Some(previous) = exact_minute.get(index.saturating_sub(1)) else {
-                return Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index });
-            };
-            let delta = bar.ts_micros.saturating_sub(previous.ts_micros);
+        if let Some(previous) = previous_ts {
+            let delta = bar.ts_micros.saturating_sub(previous);
             if delta < MINUTE_MICROS || delta.rem_euclid(MINUTE_MICROS) != 0 {
                 return Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index });
             }
         }
+        previous_ts = Some(bar.ts_micros);
         let mask = families
             .step(bar, &mut gap, &mut orb, widths, &calendar)
             .map_err(|why| ExactMinuteGapRefusal::CorruptMinute { index, why })?;
@@ -869,7 +870,14 @@ fn overlay_exact_minute(
         {
             cursor = cursor.saturating_add(1);
         }
-        let Some(minute) = exact_minute.get(cursor) else {
+        // The minute and its masks in ONE lookup: `minute_masks` holds one entry
+        // per minute (the loop above pushes or refuses), so a second lookup of the
+        // masks after the minute was found had an arm no slice could reach
+        // (D-8565).
+        let Some((minute, mask)) = exact_minute
+            .get(cursor)
+            .zip(minute_masks.get(cursor).copied())
+        else {
             return Err(ExactMinuteGapRefusal::MissingClosingMinute {
                 source,
                 expected_ts_micros: expected,
@@ -888,9 +896,6 @@ fn overlay_exact_minute(
                 minute_close: minute.close,
             });
         }
-        let Some(mask) = minute_masks.get(cursor).copied() else {
-            return Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index: cursor });
-        };
         exact_by_source.push(mask);
     }
 
@@ -1480,6 +1485,54 @@ mod tests {
         );
     }
 
+    /// **A CLOSING MINUTE ON THE NEXT IST DAY IS NOT THE SIGNAL'S, EVEN WHEN IT
+    /// EXISTS AND CARRIES THE CLOSE.** BASE-COV-LIBS-LS3.
+    ///
+    /// A two-minute signal bar opening at 23:59 IST, with no session close
+    /// known for its day, demands the minute stamped 00:00 the next day. That
+    /// minute is present at exactly the demanded stamp, so only the day check
+    /// can refuse it, and it must: the join reads the signal's own day and no
+    /// other. Extremes: the last minute of a day, a one-minute and a two-minute
+    /// bar from it, and (the combination) a stamp that matches while the day
+    /// does not.
+    #[test]
+    fn a_closing_minute_on_the_next_ist_day_is_refused_even_when_it_exists() {
+        let day = 1_000_i64;
+        let last = signal_bar(day, 1_439, 2_500_000);
+        let midnight = signal_bar(day + 1, 0, 2_500_000);
+        let minute = [last, midnight];
+        let widths = Widths::pinned().expect("pinned widths");
+        assert_eq!(
+            overlay_exact_minute_gapfib(
+                &[last],
+                &minute,
+                2 * MINUTE_MICROS,
+                widths,
+                Calendar::charter(),
+                |_| None,
+                &mut crate::column::Column::default(),
+            ),
+            Err(ExactMinuteGapRefusal::MissingClosingMinute {
+                source: 0,
+                expected_ts_micros: ts(day + 1, 0),
+            })
+        );
+        // The sound half: a one-minute bar from the same 23:59 closes on its own
+        // minute, on its own day, and is joined.
+        assert!(
+            overlay_exact_minute_gapfib(
+                &[last],
+                &minute,
+                MINUTE_MICROS,
+                widths,
+                Calendar::charter(),
+                |_| None,
+                &mut crate::column::Column::default(),
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn signal_aggregate_close_must_equal_its_exact_final_minute() {
         let (signal, references, mut minute) = coarse_overlay_fixture();
@@ -1978,6 +2031,23 @@ mod tests {
         Some((OPEN_IST_MINUTE, CLOSE_MINUTE))
     }
 
+    /// **A DAY WHOSE EVERY MINUTE IS PUNCHED OUT GIVES THE RESAMPLER NO BAR**,
+    /// and leaks no bucket into the next day. BASE-COV-LIBS-LS3: the fixture's
+    /// own end-of-day flush, which no other test asked of it with nothing left
+    /// to flush. A 375-minute session on the 15-minute rung is 25 buckets.
+    #[test]
+    fn the_resampler_gives_a_fully_punched_day_no_bar() {
+        let days = |bars: &[Candle]| {
+            bars.iter()
+                .map(|bar| crate::ist_day(bar.ts_micros))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let (signal, minute) = resampled(1_100..1_103, 15, regular, |day, _| day != 1_101);
+        assert_eq!(days(&signal), [1_100, 1_102].into());
+        assert_eq!(days(&minute), [1_100, 1_102].into());
+        assert_eq!((signal.len(), minute.len()), (50, 750));
+    }
+
     fn overlay(
         signal: &[Candle],
         minute: &[Candle],
@@ -2327,7 +2397,15 @@ mod tests {
                 close,
                 &mut crate::column::Column::default(),
             );
-            if opens.saturating_add(rung).saturating_sub(1) >= SHORT_CLOSE && opens <= SHORT_CLOSE {
+            // The short day's last bucket holds a stored minute, and every stored
+            // minute is before the punched close, so it always opens before the
+            // close. (The branch below used to test this too, as a second clause
+            // that was true on every rung.)
+            assert!(
+                opens < SHORT_CLOSE,
+                "{rung}min: the last bucket opens at {opens}"
+            );
+            if opens.saturating_add(rung).saturating_sub(1) >= SHORT_CLOSE {
                 assert_eq!(
                     result,
                     Err(ExactMinuteGapRefusal::MissingClosingMinute {
@@ -2656,7 +2734,11 @@ mod tests {
                 let bar = match roll {
                     0..=59 => {
                         minute = minute.saturating_add(1);
-                        if minute > OPEN_IST_MINUTE + 374 || roll < 6 {
+                        // The day rolls on one roll in ten, long before a session
+                        // fills: asserted rather than enforced, because a clause
+                        // rolling the day at the session's end never fired.
+                        assert!(minute <= OPEN_IST_MINUTE + 374, "step {step}: past 15:29");
+                        if roll < 6 {
                             day = day.saturating_add(1 + i64::from(roll.is_multiple_of(3)));
                             minute = OPEN_IST_MINUTE;
                         }

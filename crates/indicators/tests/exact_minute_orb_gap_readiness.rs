@@ -492,3 +492,30 @@ fn the_bridge_refuses_bad_lengths_empty_unaligned_and_repeated_minutes_and_a_sho
         })
     );
 }
+
+/// **A FLAT OPENING RANGE ANSWERS ITS EXACT RELATIONS AND LEAVES ITS NEAR
+/// BANDS UNKNOWN.** BASE-COV-LIBS-LS3: every minute of the day prints one
+/// price, so each window spans nothing, and a band that is a fraction of no
+/// span is no band; the oracle's zero-range side, which no fixture above
+/// reached, decides every near answer here and the bridge must agree on every
+/// bar, on the one-, five- and sixty-minute rungs.
+#[test]
+fn a_flat_opening_range_answers_its_exact_relations_and_leaves_near_unknown() {
+    let exact: Vec<Candle> = (0..375)
+        .map(|minute| bar(FIRST_DAY, minute, 100, 100, 100))
+        .collect();
+    for rung in [1, 5, 60] {
+        let signal = aggregate(&exact, usize::try_from(rung).expect("small rung"));
+        let mut combined = column(&signal);
+        overlay(&signal, &exact, rung, &mut combined);
+        let counts = assert_oracle(&signal, &exact, rung, &combined);
+        for (bit, [trues, falses, _]) in (86_u32..106).zip(counts) {
+            let near = (bit - 86) % 5 >= 3;
+            assert_eq!(
+                (near, trues + falses == 0),
+                (near, near),
+                "{rung}min bit {bit}: a near band on no span is never answered"
+            );
+        }
+    }
+}

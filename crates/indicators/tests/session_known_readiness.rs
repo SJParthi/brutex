@@ -165,11 +165,18 @@ fn expected(prefix: &[Candle], current: &Candle, tolerance: Tolerance) -> [Truth
                 _ if day_open == pc => Truth::Unknown,
                 66 => answer(close > (day_open + pc) / 2),
                 67 => answer(close < (day_open + pc) / 2),
-                68 if tolerance.base() == Some(Base::SessionRange) => answer(
-                    (close - (day_open + pc) / 2).abs() * 1000
-                        <= (day_open - pc).abs() * i128::from(tolerance.milli()),
-                ),
-                _ => Truth::Unknown,
+                // 68, the last of `POSITIONS`. This arm used to check the band's
+                // base and fall to an `Unknown` arm no position reached: no band
+                // of another base reaches an evaluator (`Widths::new` refuses it,
+                // D-1553), and every other position has its own arm above.
+                // BASE-COV-LIBS-LS3.
+                _ => {
+                    assert_eq!(position, 68, "every other position has its own arm");
+                    answer(
+                        (close - (day_open + pc) / 2).abs() * 1000
+                            <= (day_open - pc).abs() * i128::from(tolerance.milli()),
+                    )
+                }
             }
         }
     })

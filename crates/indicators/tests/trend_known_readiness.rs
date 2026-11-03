@@ -74,10 +74,13 @@ impl Oracle {
         let direction = match (broken_high, broken_low) {
             (Some(_), None) => Some(true),
             (None, Some(_)) => Some(false),
-            (Some(high), Some(low)) if high.confirmed != low.confirmed => {
-                Some(high.confirmed > low.confirmed)
-            }
-            _ => None,
+            // Both broken: the newer reference speaks. The two were confirmed by
+            // different windows, because one window's high is never below its own
+            // low; this arm's guard `high.confirmed != low.confirmed` therefore had
+            // no other side. BASE-COV-LIBS-LS3, driven by
+            // `a_close_between_a_lower_swing_high_and_a_higher_swing_low_breaks_the_newer`.
+            (Some(high), Some(low)) => Some(high.confirmed > low.confirmed),
+            (None, None) => None,
         };
         if let Some(up) = direction {
             let reversal = self.prior_up.is_some_and(|prior| prior != up);
@@ -86,8 +89,12 @@ impl Oracle {
             self.prior_up = Some(up);
         }
         for (slot, level) in answer.iter_mut().skip(4).zip([self.high, self.low]) {
+            // A confirmed swing always spans a range (its middle is a strict extreme
+            // of five bars, so some other bar sits inside it), and no band of another
+            // base reaches an evaluator (`Widths::new`, D-1553): the guard this arm
+            // carried for both had no other side. BASE-COV-LIBS-LS3.
             *slot = match level {
-                Some(level) if band.base() == Some(Base::SessionRange) && level.range > 0 => {
+                Some(level) => {
                     let distance = (i128::from(candle.close) - i128::from(level.price)).abs();
                     if distance * 1000 <= i128::from(band.milli()) * level.range {
                         Truth::True
@@ -95,7 +102,7 @@ impl Oracle {
                         Truth::False
                     }
                 }
-                _ => Truth::Unknown,
+                None => Truth::Unknown,
             };
         }
         self.history.push(candle);
@@ -115,10 +122,9 @@ impl Oracle {
         let middle = window.get(2).expect("middle");
         let high = window.iter().map(|bar| bar.high).max().expect("nonempty");
         let low = window.iter().map(|bar| bar.low).min().expect("nonempty");
+        // Two positive prices are never further apart than `i64::MAX`; the early
+        // return this carried for a wider span had no run. BASE-COV-LIBS-LS3.
         let range = i128::from(high) - i128::from(low);
-        if range > i128::from(i64::MAX) {
-            return;
-        }
         let reference = |price| Reference {
             price,
             range,
@@ -418,4 +424,52 @@ fn refused_widths() {
             })
         ));
     }
+}
+
+/// **A CLOSE BETWEEN A LOWER SWING HIGH AND A HIGHER SWING LOW BREAKS BOTH, AND
+/// THE NEWER ONE SPEAKS.** BASE-COV-LIBS-LS3.
+///
+/// A swing high is confirmed at 100; the market then rises without making
+/// another swing high, dips to confirm a swing low at 300, and closes at 200:
+/// above the old high AND below the newer low. No fixture above put a swing
+/// high under a swing low, so the oracle's both-broken arm had never run, and
+/// neither had the evaluator's answer to it. The evaluator must agree with the
+/// oracle on every bar, and on the last the oracle reports a DOWN break that
+/// reverses the up run. Extremes: two references from different windows
+/// broken at once (the combination), a gap of 200 paisa between them, and the
+/// last close exactly midway.
+#[test]
+fn a_close_between_a_lower_swing_high_and_a_higher_swing_low_breaks_the_newer() {
+    let bars: Vec<Candle> = [
+        (90, 80, 85),
+        (95, 85, 90),
+        (100, 88, 95),
+        (96, 86, 90),
+        (91, 81, 85),
+        (150, 140, 145),
+        (200, 190, 195),
+        (330, 310, 320),
+        (335, 305, 320),
+        (340, 300, 320),
+        (345, 305, 320),
+        (350, 310, 320),
+        (201, 199, 200),
+    ]
+    .into_iter()
+    .zip(0_i64..)
+    .map(|((high, low, close), index)| bar(index, high, low, close))
+    .collect();
+    let mut oracle = Oracle::default();
+    let answers: Vec<_> = bars
+        .iter()
+        .map(|candle| oracle.answer(*candle, tolerance(10)))
+        .collect();
+    let last = answers.last().expect("a last bar");
+    // 59, a change of character downward: index 3 of the four events.
+    assert_eq!(
+        last.get(..4),
+        Some(&[Truth::False, Truth::False, Truth::False, Truth::True][..]),
+        "the newer reference, the swing low, is the one broken"
+    );
+    exercise(&bars, tolerance(10));
 }

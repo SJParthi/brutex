@@ -1330,3 +1330,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "session_cover_tests.rs"]
+mod session_cover_tests;

@@ -144,9 +144,9 @@ fn splice_differences(withheld: &Column, spliced: &Column, kept: &[Candle]) -> (
             continue;
         }
         after_rows += 1;
-        let Some(old) = spliced_at(source) else {
-            continue;
-        };
+        // Every source after the held day was spliced (the skip this replaced had
+        // no run). BASE-COV-LIBS-LS3.
+        let old = spliced_at(source).expect("a spliced row for every later source");
         let new = withheld.bits()[row];
         let mut differs = false;
         for (slot, &bit) in TREND_BITS.iter().enumerate() {
