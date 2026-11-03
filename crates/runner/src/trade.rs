@@ -2772,13 +2772,19 @@ mod tests {
                         let prior = dirty
                             .get(victim.saturating_sub(1))
                             .map_or(0, |bar| bar.ts_micros);
-                        if let Some(bar) = dirty.get_mut(victim) {
+                        {
+                            let bar = dirty
+                                .get_mut(victim)
+                                .expect("a fixture index inside the collection");
                             bar.ts_micros = prior;
                         }
                     }
                     Poison::Accumulator => {
                         let stamp = dirty.get(victim).map_or(0, |bar| bar.ts_micros);
-                        if let Some(bar) = dirty.get_mut(victim) {
+                        {
+                            let bar = dirty
+                                .get_mut(victim)
+                                .expect("a fixture index inside the collection");
                             *bar = indicators::Candle::new(
                                 stamp,
                                 5_000_000_000_000_000_000,

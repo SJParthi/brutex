@@ -552,13 +552,19 @@ mod tests {
             bar(1, 10, 10, 10, 10, 1),
             bar(2, 10, 10, 10, 10, 1),
         ];
-        if let Some(b) = bars.first_mut() {
+        {
+            let b = bars
+                .first_mut()
+                .expect("a fixture index inside the collection");
             b.open_interest = 500;
         }
         if let Some(b) = bars.get_mut(1) {
             b.open_interest = OI_NULL; // absent, and must not erase 500
         }
-        if let Some(b) = bars.get_mut(2) {
+        {
+            let b = bars
+                .get_mut(2)
+                .expect("a fixture index inside the collection");
             b.open_interest = 0; // a genuine zero, and must overwrite
         }
         let out = run(&bars, five());
@@ -570,7 +576,10 @@ mod tests {
 
         // And an absent value at the end leaves the last known one standing.
         let mut tail = bars;
-        if let Some(b) = tail.get_mut(2) {
+        {
+            let b = tail
+                .get_mut(2)
+                .expect("a fixture index inside the collection");
             b.open_interest = OI_NULL;
         }
         assert_eq!(
