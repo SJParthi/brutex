@@ -178,3 +178,55 @@ two-rows test. The vocab test modules are inline in the files they test, because
 `cargo clippy -p vocab --all-targets --locked -- -D warnings`: EXIT 0.
 
 Red checks: 8 of 8 RED (`scratchpad red-vocab.txt`): the operand count never dropped; the body split one byte late; the work stack seeded empty; overflow ignored with the loop ending `Ok`; a (below, above) band compatible at equal rank; the second restatement test removed; the name index probing by two; an uncarried length clamped to `u16::MAX`.
+
+## Lists
+
+`gaps-LS3.txt.md` (every uncovered row of the three crates with its class, the per-file table and
+the totals) and `fu-LS3.txt.md` (the (F) rows with their rule, the (U) rows with their proofs, the
+Mac's rows with their reasons), regenerated from each Route B run by the scratchpad classifier
+(a brace-matching reader of every `assert!`/`panic!` invocation in test code, the GAP rows then
+read by hand, and a hand-checked override list for the (U) and Mac rows).
+
+## Decision drafts (for LSA; ids from this session's block)
+
+**D-8564 (lake): two refusal paths restructured so that what reaches them is what they name.**
+(1) `reader::Columns::{int64, int32, double}` pass the type they ask for to `mismatch`, which now
+reports `ColumnTypeMismatch { want: <asked>, got: <held> }`; it reported the layout spec's type as
+`want`, which for every call that can reach the arm (a read asking for a column as the wrong type;
+no file reaches it, `schema::detect` refuses a wrongly typed column at open) is the type the file
+holds, so the refusal read "should be DOUBLE but the file holds DOUBLE". Proved by
+`lake::reader::tests::a_column_read_as_the_wrong_type_names_the_type_asked_for_and_the_type_held`
+(red under `Int64` -> `Double`). (2) `page::read_header` takes the header length as how far the
+`&[u8]` advanced (`rest.len() - unread.len()`), replacing a `Cursor` position turned from `u64`
+into `usize` through a refusal no 64-bit target reaches. Proved by
+`lake::page::tests::a_header_length_is_exactly_the_bytes_the_parse_consumed` (red under `+ 1`).
+Behaviour for every file is unchanged. Suggested docs/04 row: "a wrong-type column read names the
+type asked for and the type held" beside the first test.
+
+**D-8565 (indicators, vocab): guard arms no input can reach, restructured away; each equivalent
+for every reachable input and proved by the crates' suites and a red check.** indicators: the
+exact-minute bridge carries the previous minute's stamp and fetches the closing minute with its
+masks in one lookup; `Evaluator::crossings_of` zips `CROSSINGS`, `last_side` and
+`crossings_seen` (both `[_; CROSSINGS.len()]`) and chooses the crossing edge with its side; the
+evaluator maps a VWAP refusal through `vwap::Refused::into_corrupt` (proved for both refusals by
+`vwap::vwap_cover_tests::each_refusal_keeps_its_own_name_through_the_evaluator`). vocab: an
+`And`/`Or` step takes both operands in one slice pattern; `Expression::encode` splits its
+fixed-size buffer once; `render_program` seeds its work stack with the root. The kept-on-purpose
+documenting conjuncts (`Evaluator::warmed_up`'s `previous`, `known_after`'s `seeded`, the
+not-live clauses of `Orb`, `SessionState` and `Vwap`) are NOT removed: each is shown deciding on
+its own by a white-box state test, so a later edit cannot delete it unseen.
+
+## (U) items (proofs in fu-LS3.txt.md)
+
+`crates/lake/src/schema.rs` the `i >= n` refusal of `detect` (two rows);
+`crates/vocab/src/table.rs` the `None` after `index_of`'s probe loop;
+`crates/indicators/src/vwap.rs` the exhaustion of `isqrt_i128_counted`'s Newton loop.
+
+## NEEDS THE MAC
+
+Route B on its pin (this host's figures are the builder's); the `#[ignore]`d real-lake tests
+(`crates/lake/tests/real_lake.rs`, `real_lake_regression.rs`, and
+`refusals.rs::no_real_lake_file_triggers_either_defect`: they need `~/.brutex/lake`, L-BCL-3;
+the scan's helpers are covered here on synthetic files, so only those bodies wait); the three
+`benches/ratio.rs` (`test = false`, L-BCL-1; gate 8 and every p99 are the Mac's); macOS rows
+(none of these crates has a `cfg(target_os)` line); non-root 14-core runs; the D1 landing.
