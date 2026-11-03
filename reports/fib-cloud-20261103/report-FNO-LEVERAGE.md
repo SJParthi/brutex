@@ -165,7 +165,7 @@ C-FNO-LEV-01 one margin lookup at 1x, 10x, 100x the months held (FNO-LEVERAGE, D
   C-FNO-LEV-01 margin(symbol, day), before the span, 100x p50       44 ns  p99      138 ns  max      25394 ns  n=20000  p99 budget 1000 ns  ok
 ```
 
-All six ratios are within the 3x ceiling and all three p99 figures are within 1 µs. The largest ratio, 2.086x, is the no-file case at 100x, a path of about 5 ns a call, where one clock tick is a large share of the cost. It is under the ceiling, and it is not explained here. Each max (25 to 61 µs) is a single call that took the scheduler's slice, and is printed rather than gated, as the harness's own spread lines are.
+The whole `pull` harness, every bench in `crates/pull/benches/ratio.rs` with this part's included, printed "all ratios within the ceiling" and exited 0 (1 min 44 s wall). All six of this part's ratios are within the 3x ceiling and all three p99 figures are within 1 µs. The largest ratio, 2.086x, is the no-file case at 100x, a path of about 5 ns a call, where one clock tick is a large share of the cost. It is under the ceiling, and it is not explained here. Each max (25 to 61 µs) is a single call that took the scheduler's slice, and is printed rather than gated, as the harness's own spread lines are.
 
 ## Decisions drafted (this part's block, D-8150 to D-8159; six used)
 
