@@ -9668,6 +9668,116 @@ mod tests {
         );
         assert_ne!(evidence2.digest(), evidence3.digest());
     }
+
+    /// EVERY EXACT PROBABILITY OF AN EVIDENCE RECORD IS NAMED WHEN ITS FRACTION
+    /// IS MALFORMED: a numerator one past its denominator, written into each
+    /// of the five probability slots in turn, is refused as that field's
+    /// probability, in both the V3 decoder and the V2 one beside it.
+    #[test]
+    fn an_evidence_record_names_each_malformed_probability_field() {
+        // Header, values, the identities, then seven counts before the five
+        // probabilities: V2 carries thirteen identities, V3 nine.
+        const PROBABILITY_OFFSET_V3: usize = 12 + 340 + 9 * 32 + 7 * 8;
+        const PROBABILITY_OFFSET_V2: usize = 12 + 340 + 13 * 32 + 7 * 8;
+        let (_, base, _, _) = v2_parts();
+        let fields = |s: &AdmissionStatisticsDraftV3| {
+            [
+                (
+                    super::AdmissionStatisticsProbabilityV2::CscvPbo,
+                    s.pbo_probability,
+                ),
+                (
+                    super::AdmissionStatisticsProbabilityV2::WhiteReality,
+                    s.white_probability,
+                ),
+                (
+                    super::AdmissionStatisticsProbabilityV2::Spa,
+                    s.spa_probability,
+                ),
+                (
+                    super::AdmissionStatisticsProbabilityV2::FamilywiseRomanoWolf,
+                    s.familywise_romano_wolf_probability,
+                ),
+                (
+                    super::AdmissionStatisticsProbabilityV2::CandidateRomanoWolf,
+                    s.candidate_romano_wolf_probability,
+                ),
+            ]
+        };
+        let statistics = statistics_v3(1);
+        let v3 = v3_evidence(&base, &anchored_v3(), &statistics).canonical_bytes();
+        let v2 = v2_evidence(&base, &anchored_v2(), &statistics_v2(1)).canonical_bytes();
+        assert!(super::decode_evidence_v3(&v3).is_ok());
+        assert!(super::decode_evidence_v2(&v2).is_ok());
+        let malform = |bytes: &mut [u8], at: usize, exact: AdmissionExactProbabilityV2| {
+            assert_eq!(
+                bytes.get(at..at + 16),
+                Some(
+                    [
+                        exact.numerator.to_le_bytes(),
+                        exact.denominator.to_le_bytes()
+                    ]
+                    .concat()
+                    .as_slice()
+                ),
+                "the fixture's own fraction sits at {at}"
+            );
+            bytes
+                .get_mut(at..at + 8)
+                .expect("inside the record")
+                .copy_from_slice(&(exact.denominator + 1).to_le_bytes());
+            AdmissionExactProbabilityV2::new(exact.denominator + 1, exact.denominator)
+                .expect_err("a numerator past its denominator")
+        };
+        for (index, (field, exact)) in fields(&statistics).into_iter().enumerate() {
+            let mut bytes = v3;
+            let kind = malform(&mut bytes, PROBABILITY_OFFSET_V3 + index * 16, exact);
+            assert_eq!(
+                super::decode_evidence_v3(&bytes).map(|_| ()),
+                Err(AdmissionCanonicalRefusalV3::Statistics(
+                    AdmissionStatisticsRefusalV3::Probability { field, kind }
+                )),
+                "V3 {field:?}"
+            );
+            let mut bytes = v2;
+            let kind = malform(&mut bytes, PROBABILITY_OFFSET_V2 + index * 16, exact);
+            assert_eq!(
+                super::decode_evidence_v2(&bytes).map(|_| ()),
+                Err(AdmissionCanonicalRefusalV2::Statistics(
+                    AdmissionStatisticsRefusalV2::Probability { field, kind }
+                )),
+                "V2 {field:?}"
+            );
+        }
+    }
+
+    /// AN AUTHORITY SLOT IS A PROJECTION, NEVER A STORED CLAIM: a record whose
+    /// values carry a bootstrap draw count other than its statistics' decodes
+    /// every field and is still refused, because the projection recomputed from
+    /// the statistics differs from what the record says.
+    #[test]
+    fn an_evidence_record_whose_authority_slot_is_not_its_projection_is_refused() {
+        let (_, base, _, _) = v2_parts();
+        let statistics = statistics_v3(1);
+        let honest = v3_evidence(&base, &anchored_v3(), &statistics);
+        assert_eq!(
+            super::decode_evidence_v3(&super::canonical_evidence_bytes_v3(&honest)),
+            Ok(honest)
+        );
+        let mut forged = honest;
+        forged.values.bootstrap_draws = ObservedU64V1::Measured(statistics.bootstrap_draws + 1);
+        assert_eq!(
+            super::decode_evidence_v3(&super::canonical_evidence_bytes_v3(&forged)).map(|_| ()),
+            Err(AdmissionCanonicalRefusalV3::AuthorityProjectionMismatch)
+        );
+        let honest = v2_evidence(&base, &anchored_v2(), &statistics_v2(1));
+        let mut forged = honest;
+        forged.values.bootstrap_draws = ObservedU64V1::Measured(statistics.bootstrap_draws + 1);
+        assert_eq!(
+            super::decode_evidence_v2(&super::canonical_evidence_bytes_v2(&forged)).map(|_| ()),
+            Err(AdmissionCanonicalRefusalV2::AuthorityProjectionMismatch)
+        );
+    }
 }
 
 #[cfg(test)]
