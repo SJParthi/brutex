@@ -1029,31 +1029,77 @@ fn the_settlement_facts_the_unreachable_verdict_arms_rest_on_hold() {
 }
 
 /// A target month that no longer opens when apply reads it (spoilt after
-/// the survey) refuses its move by name, naming the file; nothing is
-/// written there and the move is not recorded.
+/// the survey) refuses its move by name, at the check before any month of
+/// the group is written: the month before it, whose target is free, is not
+/// written either, and nothing is recorded.
 #[test]
-fn a_target_month_spoilt_after_the_survey_refuses_its_move() {
+fn a_target_month_spoilt_after_the_survey_refuses_its_move_before_any_write() {
     let scratch = Scratch::new("ps2-target-spoilt");
     let root = scratch.root();
-    put(root, "NIFTY", STATED, &[bar(d(2020, 6, 15), 34_000, 333)]);
-    put(root, "NIFTY", SETTLED, &[bar(d(2020, 6, 1), 34_000, 222)]);
+    put(
+        root,
+        "NIFTY",
+        STATED,
+        &[
+            bar(d(2020, 6, 15), 34_000, 333),
+            bar(d(2020, 7, 10), 34_000, 334),
+        ],
+    );
+    put(root, "NIFTY", SETTLED, &[bar(d(2020, 7, 1), 34_000, 222)]);
     let found = counted_now(root);
     let ledger = Withdrawn::default();
     let decided = plan(&found, &ledger);
     assert_eq!(decided.moves.len(), 1, "{:?}", decided.unresolved);
-    let target = month_file(root, SETTLED, ym(2020, 6));
-    std::fs::write(&target, b"no longer a bar file").unwrap();
+    let july = month_file(root, SETTLED, ym(2020, 7));
+    std::fs::write(&july, b"no longer a bar file").unwrap();
     let done = apply(root, &found, &decided, &ledger).unwrap();
     assert_eq!(done.refused.len(), 1);
     assert!(
         done.refused[0]
             .why
-            .starts_with(&format!("{}: ", target.display())),
+            .starts_with(&format!("{}: ", july.display())),
         "{}",
         done.refused[0].why
     );
     assert!(done.moved.is_empty() && done.lines_written == 0);
-    assert_eq!(std::fs::read(&target).unwrap(), b"no longer a bar file");
+    assert!(
+        !month_file(root, SETTLED, ym(2020, 6)).exists(),
+        "the free month of the group is not written"
+    );
+    assert_eq!(std::fs::read(&july).unwrap(), b"no longer a bar file");
+}
+
+/// A target month holding exactly the first moved bar and no other: the
+/// moved bars do not fit there, so they are not its copy, and the move is
+/// refused naming both spans, never compared past the last bar it holds.
+#[test]
+fn a_target_month_holding_the_first_moved_bar_alone_is_refused_not_merged() {
+    let scratch = Scratch::new("ps2-first-alone");
+    let root = scratch.root();
+    let moved = [
+        bar(d(2020, 6, 15), 34_000, 333),
+        bar(d(2020, 6, 15), 34_001, 334),
+    ];
+    put(root, "NIFTY", STATED, &moved);
+    put(root, "NIFTY", SETTLED, &moved[..1]);
+    let found = counted_now(root);
+    let hand = Plan {
+        moves: vec![hand_move(STATED, SETTLED, &[ym(2020, 6)], 2)],
+        census: CensusStep::Clear,
+        ..Plan::default()
+    };
+    let done = apply(root, &found, &hand, &Withdrawn::default()).unwrap();
+    assert_eq!(done.refused.len(), 1);
+    let why = &done.refused[0].why;
+    assert!(
+        why.contains(&format!(
+            "already holds bars from {0} to {0} that these 2 bar(s) from {0} to {1} would \
+             precede or contradict",
+            moved[0].ts_micros, moved[1].ts_micros
+        )),
+        "{why}"
+    );
+    assert_eq!(held(root, "NIFTY", SETTLED, ym(2020, 6)), moved[..1]);
 }
 
 /// No bars to place is nothing to write: `Already`, whether the target
