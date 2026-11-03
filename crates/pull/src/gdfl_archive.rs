@@ -2192,6 +2192,137 @@ mod tests {
         assert_eq!((cause.code, cause.closes), ("archive_prefixed", false));
     }
 
+    // ── BASE-COV-PULL-PS3 (G3): where a ZIP64 end record is not, and an empty
+    //    zip behind a prefix ────────────────────────────────────────────────
+
+    /// A ZIP64 end record of an empty central directory at offset 0, with
+    /// `extensible` bytes of extensible data after its fixed 56 (APPNOTE
+    /// 4.3.14: its size field states 44 plus them).
+    fn empty_zip64_record(extensible: usize) -> Vec<u8> {
+        let mut out = 0x0606_4b50_u32.to_le_bytes().to_vec();
+        out.extend((44 + extensible as u64).to_le_bytes());
+        out.extend([45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.extend([0; 32]);
+        out.extend(vec![0xEE; extensible]);
+        out
+    }
+
+    /// A ZIP64 locator naming a ZIP64 end record at `record`.
+    fn zip64_locator(record: u64) -> Vec<u8> {
+        let mut out = 0x0706_4b50_u32.to_le_bytes().to_vec();
+        out.extend([0; 4]);
+        out.extend(record.to_le_bytes());
+        out.extend(1_u32.to_le_bytes());
+        out
+    }
+
+    /// OUT OF THE BOX: an end record too near the start for a ZIP64 end record
+    /// to sit before its locator (20 bytes in; and 75, one short of the 76 a
+    /// bare record and its locator take), the record the locator names lying
+    /// in the end record's own comment. Nothing is where APPNOTE puts it, so
+    /// no prefix is measured, and the locator's word is the only one: the
+    /// zip opens, empty. At 76 bytes in, padding where the record would be
+    /// is not a record either. COMBINED with extensible data in the record
+    /// the comment holds, the same.
+    #[test]
+    fn an_end_record_too_near_the_start_for_a_zip64_record_reads_its_locator_alone() {
+        for (padding, extensible) in [(0_usize, 0_usize), (55, 0), (56, 0), (0, 8)] {
+            let mut bytes = vec![0x5A; padding];
+            bytes.extend(zip64_locator(padding as u64 + 42));
+            bytes.extend(0x0605_4b50_u32.to_le_bytes());
+            bytes.extend([0; 4]);
+            bytes.extend([0xFF; 4]);
+            bytes.extend([0; 4]);
+            bytes.extend([0xFF; 4]);
+            bytes.extend(u16le(56 + extensible));
+            bytes.extend(empty_zip64_record(extensible));
+            let end_at = padding as u64 + 20;
+            let span = Span::of(&bytes, bytes.len() as u64);
+            let case = format!("padding={padding} extensible={extensible}");
+            assert_eq!(zip64_record_at(&span, end_at), Ok(None), "{case}");
+            assert_eq!(directory_bounds(&span), Ok((0, 0, 0)), "{case}");
+            let archive = archive(bytes).unwrap();
+            assert_eq!(archive.ignored(), 0);
+            assert_eq!(archive.day(CmKind::Indices, at()), Ok(None));
+        }
+    }
+
+    /// `bytes`, a ZIP64 zip from [`zip`], with `extensible` bytes of
+    /// extensible data in its ZIP64 end record, its size field saying so.
+    fn with_extensible_data(bytes: &[u8], extensible: usize) -> Vec<u8> {
+        let record = eocd(bytes) - 20 - 56;
+        let mut out = bytes[..record + 56].to_vec();
+        patch(
+            &mut out,
+            record + 4,
+            &(44 + extensible as u64).to_le_bytes(),
+        );
+        out.extend(vec![0xEE; extensible]);
+        out.extend_from_slice(&bytes[record + 56..]);
+        out
+    }
+
+    /// A ZIP64 end record carrying extensible data (APPNOTE 4.3.14) is not
+    /// where a bare one would sit before the locator: nothing is taken from
+    /// there, and the record is read where the locator points. The day reads
+    /// end to end.
+    #[test]
+    fn a_zip64_record_with_extensible_data_is_read_where_its_locator_points() {
+        let day_zip = inner(&csv());
+        let plain = zip(&[put(DAY_ZIP, &day_zip)], Wide::Offset, true);
+        let bytes = with_extensible_data(&plain, 8);
+        let span = Span::of(&bytes, bytes.len() as u64);
+        assert_eq!(
+            zip64_record_at(&span, eocd(&bytes) as u64),
+            Ok(None),
+            "no bare record before the locator"
+        );
+        let archive = archive(bytes).unwrap();
+        let read = read_day(&archive, &nifty_key(), at()).unwrap().unwrap();
+        assert_eq!(read.file, decode(&csv(), &nifty_expect()).unwrap());
+    }
+
+    /// COMBINED: extensible data AND a prefix. The prefix cannot be measured
+    /// from a record not where APPNOTE puts it, and the locator's offset is
+    /// short by the prefix: the zip is refused as malformed, never read
+    /// through offsets the prefix moved. The same zip with no extensible data
+    /// is refused by its prefix, measured.
+    #[test]
+    fn a_prefixed_zip_whose_zip64_record_carries_extensible_data_is_refused() {
+        let day_zip = inner(&csv());
+        let plain = zip(&[put(DAY_ZIP, &day_zip)], Wide::Offset, true);
+        let extended = with_extensible_data(&plain, 8);
+        assert_eq!(malformed(prefixed(&extended, 9)), bad(NO_ZIP64_RECORD));
+        assert_eq!(
+            malformed(prefixed(&plain, 9)),
+            CmRefusal::ArchivePrefixed { bytes: 9 }
+        );
+    }
+
+    /// An EMPTY zip behind a prefix is refused by the prefix, plain and ZIP64:
+    /// a directory of no records stated at offset 0 while its end record
+    /// lies further in has those bytes before it whether or not a record is
+    /// where the prefix would put one. With no prefix it opens; the ZIP64 one
+    /// then has its record at offset 0, exactly 76 bytes before its end
+    /// record.
+    #[test]
+    fn an_empty_zip_behind_a_prefix_is_refused_by_the_prefix() {
+        for zip64 in [false, true] {
+            let empty = zip(&[], Wide::No, zip64);
+            assert!(archive(empty.clone()).is_ok(), "zip64={zip64}");
+            for n in [1, 22, 4_096] {
+                assert_eq!(
+                    malformed(prefixed(&empty, n)),
+                    CmRefusal::ArchivePrefixed { bytes: n as u64 },
+                    "zip64={zip64} n={n}"
+                );
+            }
+        }
+        let span_of = zip(&[], Wide::No, true);
+        let span = Span::of(&span_of, span_of.len() as u64);
+        assert_eq!(zip64_record_at(&span, 76), Ok(Some(0)));
+    }
+
     /// B13 (F27): every outer day zip of the operator's archives carries a
     /// data descriptor, its local CRC and sizes zero. Built that way here,
     /// with the local sizes deliberately wrong and a descriptor after the

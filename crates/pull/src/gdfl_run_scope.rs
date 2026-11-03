@@ -130,3 +130,9 @@ pub fn for_request(
     );
     Ok((Arc::new(scope), Some(words)))
 }
+
+// BASE-COV-PULL-PS3 (G3): `--stored`'s filter over a stored scope, and a
+// request that narrows to it.
+#[cfg(test)]
+#[path = "gdfl_run_scope_cov_tests.rs"]
+mod cov_tests;

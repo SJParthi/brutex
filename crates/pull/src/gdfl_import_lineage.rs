@@ -600,17 +600,18 @@ impl LineageRun {
         let mut events: Vec<EventRecord> = Vec::new();
         let mut written = Written::default();
         self.aliases(day, contracts, &mut lines);
-        let mut by: BTreeMap<String, Vec<&DayContract>> = BTreeMap::new();
+        // Each underlying's files under the symbol the first of them names:
+        // a group is made with its first file, so none is ever empty.
+        let mut by: BTreeMap<String, (Symbol, Vec<&DayContract>)> = BTreeMap::new();
         for c in contracts {
             by.entry(c.ticker.underlying.as_str().to_owned())
-                .or_default()
+                .or_insert_with(|| (c.ticker.underlying, Vec::new()))
+                .1
                 .push(c);
         }
         let today = day.days_from_epoch();
-        for todays in by.values() {
-            let Some(underlying) = todays.first().map(|c| c.ticker.underlying) else {
-                continue;
-            };
+        for (underlying, todays) in by.values() {
+            let underlying = *underlying;
             let mut state = self.underlyings.remove(&underlying).unwrap_or_default();
             state
                 .latest
@@ -647,14 +648,14 @@ impl LineageRun {
                 // over days before its ex-date) has retired nothing yet: the
                 // range stops at today.
                 for (_, retired) in state.retired.range_mut(..=today) {
-                    if !retired.holds(contract) {
+                    // A key the event retired has its `stitched` record; any
+                    // other key has none, and no lot to restart.
+                    let Some(record) = retired.stitched(underlying, contract) else {
                         continue;
-                    }
-                    if let Some(record) = retired.stitched(underlying, contract) {
-                        let line = record.line();
-                        if self.seen.insert(line.clone()) {
-                            lines.push(line);
-                        }
+                    };
+                    let line = record.line();
+                    if self.seen.insert(line.clone()) {
+                        lines.push(line);
                     }
                     if retired.restarted.insert(contract) {
                         self.lots.restart(underlying, contract);
@@ -701,3 +702,10 @@ pub fn warmup_days(day: Day, after: Option<Day>) -> Vec<Day> {
     out.reverse();
     out
 }
+
+// BASE-COV-PULL-PS3 (G3): unparsed and unreadable ledgers, an unrecorded
+// event's kind, a merge that retires nothing or keeps its pairs, and the
+// warm-up at the first day there is.
+#[cfg(test)]
+#[path = "gdfl_import_lineage_cov_tests.rs"]
+mod cov_tests;

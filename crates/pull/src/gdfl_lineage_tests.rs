@@ -1443,3 +1443,280 @@ fn a_stopped_record_reads_back_exactly_and_refuses_any_other_text() {
     assert_eq!(StitchedRecord::parse(event), None);
     assert_eq!(LineageRecord::parse(event), None);
 }
+
+// ── BASE-COV-PULL-PS3 (G3): a zero lot, the records' last refusals, keys no
+//    contract segment holds, and the name census's own helper. Every symbol
+//    here is invented (`ZZQ...`); the one sourced ex-date is read from its
+//    table, never copied. ─────────────────────────────────────────────────
+
+/// Two contracts of `ZZQA` expiring 2020-03-26, at 1,200.00 and 600.00.
+fn two_keys() -> (Contract, Contract) {
+    let e = d(2020, 3, 26);
+    (
+        cd(e, 120_000, OptionSide::Call, 1, 0, 0)
+            .contract()
+            .unwrap(),
+        cd(e, 60_000, OptionSide::Call, 1, 0, 0).contract().unwrap(),
+    )
+}
+
+/// A ZERO LOT HAS NO FACTOR: `0/1`, never a division, whichever side is zero
+/// (a lot `day_lot` never yields, which a ledger line may still state); a
+/// lineage record with a zero lot reads back with that factor only, and
+/// COMBINED with an unreduced spelling of it, is refused.
+#[test]
+fn a_zero_lot_reduces_to_no_factor_and_reads_back_only_as_such() {
+    assert_eq!(reduced(0, 7), (0, 1));
+    assert_eq!(reduced(7, 0), (0, 1));
+    assert_eq!(reduced(0, 0), (0, 1));
+    assert_eq!(reduced(4_800, 4_000), (6, 5));
+    let (old, new) = two_keys();
+    for (lot_old, lot_new) in [(0, 75), (75, 0)] {
+        let record = LineageRecord {
+            underlying: sym("ZZQA"),
+            old,
+            new,
+            ex_date: d(2020, 3, 2),
+            factor: (0, 1),
+            lot_old,
+            lot_new,
+            oi_unadjusted_until: 0,
+        };
+        assert_eq!(LineageRecord::parse(&record.line()), Some(record));
+        let unreduced = LineageRecord {
+            factor: (0, 75),
+            ..record
+        };
+        assert_eq!(LineageRecord::parse(&unreduced.line()), None);
+        let pair = Lineage {
+            underlying: sym("ZZQA"),
+            ex_date: d(2020, 3, 2),
+            old,
+            new,
+            lot_before: lot_old,
+            lot_after: lot_new,
+            pre_close_oi: None,
+            oi: OiCarry::Missing,
+            reused: false,
+        };
+        assert_eq!(pair.factor(), (0, 1));
+    }
+}
+
+/// OUT OF THE BOX: a `stitched` line whose partner segment carries one dash
+/// more (`X-<segment>`) reads, under its underlying, as the key of another
+/// underlying (`ZZQA-X`, since an underlying may hold a dash): refused on
+/// either side, never filed under the line's own underlying.
+#[test]
+fn a_stitched_partner_that_names_another_underlying_is_refused() {
+    let (key, partner) = two_keys();
+    let good = StitchedRecord {
+        underlying: sym("ZZQA"),
+        key,
+        ex_date: d(2020, 3, 2),
+        before: Some(partner),
+        after: Some(partner),
+    };
+    let line = good.line();
+    assert_eq!(StitchedRecord::parse(&line), Some(good));
+    let other = format!("X-{}", partner.as_str());
+    assert_eq!(
+        parse_option_key(&format!("NSE-FNO-ZZQA-{other}")).map(|(under, _)| under),
+        Some(sym("ZZQA-X")),
+        "the premise: the dash moves into the underlying"
+    );
+    // Refused where the field is read, not only by the line's round trip.
+    assert_eq!(dash_or(sym("ZZQA"), &other), Err(()));
+    assert_eq!(dash_or(sym("ZZQA"), partner.as_str()), Ok(Some(partner)));
+    for side in ["before=", "after="] {
+        let bad = line.replacen(
+            &format!("{side}{}", partner.as_str()),
+            &format!("{side}{other}"),
+            1,
+        );
+        assert_ne!(bad, line);
+        assert_eq!(StitchedRecord::parse(&bad), None, "{bad}");
+    }
+}
+
+/// A `lot` line and a `retired` line of another record version are refused,
+/// whatever else they hold; so is a retired reason no reader knows.
+#[test]
+fn a_lot_or_retired_line_of_another_version_is_refused() {
+    let (key, _) = two_keys();
+    let lot = LotRecord {
+        underlying: sym("ZZQA"),
+        contract: key,
+        from: d(2020, 3, 2),
+        lot: 75,
+    };
+    assert_eq!(LotRecord::parse(&lot.line()), Some(lot));
+    assert_eq!(LotRecord::parse(&lot.line().replace(" v=1", " v=2")), None);
+    let retired = RetiredRecord {
+        underlying: sym("ZZQA"),
+        key,
+        why: RetiredWhy::ExpiryUnsettled,
+        day: d(2020, 3, 2),
+        median: None,
+        days: 1,
+        bars: 3,
+    };
+    let line = retired.line();
+    assert_eq!(RetiredRecord::parse(&line), Some(retired));
+    assert_eq!(RetiredRecord::parse(&line.replace(" v=1", " v=2")), None);
+    assert_eq!(
+        RetiredRecord::parse(&line.replace("why=expiry_unsettled", "why=delisted")),
+        None
+    );
+    assert_eq!(RetiredWhy::parse("delisted"), None);
+    assert_eq!(
+        RetiredWhy::parse("expiry_unsettled"),
+        Some(RetiredWhy::ExpiryUnsettled)
+    );
+}
+
+/// COMBINED: a consolidation (the lot 2 to 1, every strike doubled) meets the
+/// longest strike a segment holds (9,999,999,995 paisa, ten digits). Its
+/// partner, at eleven digits, has no segment a store path could hold, so
+/// the pre-ex key is left UNPAIRED, never paired with a key no store holds;
+/// the keys beside it pair.
+#[test]
+fn a_partner_whose_segment_cannot_be_written_leaves_its_key_unpaired() {
+    let (e, ex) = (d(2026, 9, 24), d(2026, 9, 3));
+    let strikes = [10_000, 20_000, 9_999_999_995];
+    let before: Vec<ContractDay> = strikes
+        .iter()
+        .map(|&k| cd(e, k, OptionSide::Call, 2, 100, 100))
+        .collect();
+    let after: Vec<ContractDay> = strikes
+        .iter()
+        .map(|&k| cd(e, k * 2, OptionSide::Call, 1, 50, 50))
+        .collect();
+    assert!(
+        before[2].contract().is_some(),
+        "the premise: ten digits fit"
+    );
+    assert_eq!(after[2].contract(), None, "the premise: eleven do not");
+    let action = detect(sym("ZZQA"), ex, &before, &after).expect("a lot step");
+    assert_eq!(action.kind, EventKind::LotStep);
+    assert_eq!((action.lot_before, action.lot_after), (2, 1));
+    let olds: Vec<Contract> = action.lineage.iter().map(|pair| pair.old).collect();
+    assert_eq!(
+        olds,
+        [before[0].contract().unwrap(), before[1].contract().unwrap()]
+    );
+    assert_eq!(action.unpaired, [before[2].contract().unwrap()]);
+}
+
+/// An unchanged-lot event's pre-ex key whose segment cannot be written (an
+/// eleven-digit strike) is neither paired nor stopped: no store key holds
+/// it, so there is nothing to retire. The key beside it pairs at the shift.
+#[test]
+fn an_unwritable_pre_ex_key_is_passed_over_by_the_pairing() {
+    let (e, ex) = (d(2026, 9, 24), d(2026, 9, 3));
+    let before = [
+        cd(e, 19_999_999_990, OptionSide::Put, 75, 10, 10),
+        cd(e, 12_000, OptionSide::Put, 75, 10, 10),
+    ];
+    let after = [
+        cd(e, 19_999_999_090, OptionSide::Put, 75, 10, 10),
+        cd(e, 11_100, OptionSide::Put, 75, 10, 10),
+    ];
+    assert_eq!(before[0].contract(), None, "the premise");
+    let (lineage, unpaired) = pairs_at(sym("ZZQA"), ex, 75, Some(900), &before, &after);
+    assert_eq!(lineage.len(), 1, "the key after it still pairs");
+    assert_eq!(
+        (lineage[0].old, lineage[0].new),
+        (before[1].contract().unwrap(), after[1].contract().unwrap())
+    );
+    assert!(unpaired.is_empty());
+}
+
+/// A SOURCED RE-LISTING DAY THAT RE-LISTS NOTHING IS NO EVENT: on the ex-date
+/// a circular names (read from [`crate::expiry_alias::EARLY_SETTLEMENTS`]),
+/// a day whose contracts share no expiry with the pre-ex state, with no
+/// offset, declares nothing; the same strikes under a shared expiry are the
+/// re-listing.
+#[test]
+fn a_sourced_relisting_day_that_relists_nothing_is_no_event() {
+    let row = &crate::expiry_alias::EARLY_SETTLEMENTS[0];
+    let ex = d(row.ex_date.0, row.ex_date.1, row.ex_date.2);
+    let underlying = sym(row.underlying);
+    let later = |days: u32| Day::from_days(ex.days_from_epoch() + days).unwrap();
+    let (e1, e2) = (later(20), later(48));
+    let before = ladder(e1, &[100_000, 101_000], 300);
+    let fresh = ladder(e2, &[50_000, 51_000], 300);
+    assert_eq!(detect(underlying, ex, &before, &fresh), None);
+    let shared = ladder(e1, &[50_000, 51_000], 300);
+    assert_eq!(
+        detect(underlying, ex, &before, &shared).map(|action| action.kind),
+        Some(EventKind::Relisted)
+    );
+}
+
+/// One invented symbol's life: its name, its first and its last vendor day
+/// as `(year, month, day)`.
+type Life<'a> = (&'a str, (u16, u8, u8), (u16, u8, u8));
+
+/// Invented lives of invented symbols, by name.
+fn lives(of: &[Life<'_>]) -> std::collections::BTreeMap<String, (Day, Day)> {
+    of.iter()
+        .map(|(stem, first, last)| {
+            (
+                (*stem).to_owned(),
+                (d(first.0, first.1, first.2), d(last.0, last.1, last.2)),
+            )
+        })
+        .collect()
+}
+
+/// The name census's own helper, on invented names: a key one symbol named
+/// is passed over, and each key two or three symbols named is counted under
+/// its symbols in the order of their lives, whatever order the map holds.
+#[test]
+fn the_rename_census_counts_each_key_by_its_symbols_in_life_order() {
+    let mut keys: HashMap<String, std::collections::BTreeMap<String, (Day, Day)>> = HashMap::new();
+    let pair = [
+        ("ZZQOLD", (2019, 1, 1), (2020, 8, 19)),
+        ("ZZQNEW", (2020, 8, 20), (2021, 1, 1)),
+    ];
+    keys.insert("K1".to_owned(), lives(&pair));
+    keys.insert("K2".to_owned(), lives(&pair));
+    keys.insert(
+        "K3".to_owned(),
+        lives(&[("ZZQONE", (2019, 1, 1), (2019, 2, 1))]),
+    );
+    keys.insert(
+        "K4".to_owned(),
+        lives(&[
+            ("ZZQB", (2018, 1, 1), (2018, 12, 31)),
+            ("ZZQA", (2019, 1, 1), (2019, 12, 31)),
+            ("ZZQC", (2020, 1, 1), (2020, 12, 31)),
+        ]),
+    );
+    let joined = joined_across_renames(&keys);
+    assert_eq!(
+        joined,
+        std::collections::BTreeMap::from([
+            ("ZZQB->ZZQA->ZZQC".to_owned(), 1),
+            ("ZZQOLD->ZZQNEW".to_owned(), 2),
+        ])
+    );
+}
+
+/// The helper refuses a key whose two lives overlap: the old symbol's last
+/// day on or after the new one's first is one name on the wrong side of a
+/// change, which the census exists to rule out.
+#[test]
+#[should_panic(expected = "overlap")]
+fn the_rename_census_refuses_two_lives_of_one_key_that_overlap() {
+    let mut keys: HashMap<String, std::collections::BTreeMap<String, (Day, Day)>> = HashMap::new();
+    keys.insert(
+        "K1".to_owned(),
+        lives(&[
+            ("ZZQOLD", (2019, 1, 1), (2020, 8, 20)),
+            ("ZZQNEW", (2020, 8, 20), (2021, 1, 1)),
+        ]),
+    );
+    let _ = joined_across_renames(&keys);
+}

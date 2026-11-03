@@ -539,6 +539,9 @@ pub const TICKSTORE_NAMED: usize = 16;
 /// name files it at under the root)` for a day file's name, else `None`.
 pub type DayFileName = dyn Fn(&str) -> Option<(u8, Day, String)>;
 
+/// One entry of a directory listing as [`DayTable::walk_within`] reads it on.
+type Listed = dyn Fn(std::io::Result<std::fs::DirEntry>) -> std::io::Result<std::fs::DirEntry>;
+
 /// A tree of the tick store as one walk found it (D-4866): every `.bts`
 /// filed where its own name says it belongs, every one found elsewhere, and
 /// the stray entries, which are counted by name and never opened. Built once
@@ -582,6 +585,15 @@ impl DayTable {
     /// empty, as a store that never ingested it is.
     #[must_use]
     pub fn walk(root: &Path, top: &str, own: &DayFileName) -> Self {
+        Self::walk_within(root, top, own, TICKSTORE_WALK_CAP, &|entry| entry)
+    }
+
+    /// [`DayTable::walk`] with its cap given, and each entry of a listing as
+    /// `listed` hands it on (a test seam, BASE-COV-PULL-PS3): production
+    /// passes [`TICKSTORE_WALK_CAP`] and every entry as it was read; a test
+    /// passes a cap of a few entries, and a listing that fails part way,
+    /// which no local file system yields on demand.
+    fn walk_within(root: &Path, top: &str, own: &DayFileName, cap: usize, listed: &Listed) -> Self {
         let mut table = Self::default();
         let mut stack = vec![(root.join(top), top.to_owned())];
         let mut visited = 0_usize;
@@ -596,13 +608,13 @@ impl DayTable {
             };
             for entry in entries {
                 visited += 1;
-                if visited > TICKSTORE_WALK_CAP {
+                if visited > cap {
                     table.fault = Some(CmRefusal::TickStoreMalformed {
                         what: WALK_OVER_CAP,
                     });
                     break 'walk;
                 }
-                let found = entry.and_then(|entry| Ok((entry.file_type()?, entry)));
+                let found = listed(entry).and_then(|entry| Ok((entry.file_type()?, entry)));
                 let (kind, entry) = match found {
                     Ok(found) => found,
                     Err(why) => {
@@ -852,6 +864,11 @@ impl CmSource for TickStore {
 #[cfg(test)]
 #[path = "../../lake/src/zstd_v082_frames.rs"]
 mod zstd_v082_frames;
+
+// BASE-COV-PULL-PS3 (G3): the day table's walk at its edges.
+#[cfg(test)]
+#[path = "gdfl_tickstore_cov_tests.rs"]
+mod cov_tests;
 
 #[cfg(test)]
 #[expect(
@@ -1685,12 +1702,18 @@ mod tests {
                     let _unheard_after_a_timeout = send.send((cm, nfo));
                 });
                 let answered = answer.recv_timeout(std::time::Duration::from_secs(10));
-                if answered.is_err() {
-                    // RELEASE a reader stuck on the pipe, so the failure
-                    // below is reported rather than the test hanging.
-                    for path in [&cm_day, &nfo_day] {
-                        let _release = std::fs::OpenOptions::new().write(true).open(path);
-                    }
+                // RELEASE a reader stuck on the pipe, so a failure below is
+                // reported rather than the test hanging. A writer that does
+                // not wait (`O_NONBLOCK`) wakes a reader blocked on the pipe
+                // and is refused at once when none is, as when the reader
+                // answered; at a link it creates and truncates nothing. Done
+                // every time, so no arm of the test runs only when it fails.
+                for path in [&cm_day, &nfo_day] {
+                    let _release = std::os::unix::fs::OpenOptionsExt::custom_flags(
+                        std::fs::OpenOptions::new().write(true),
+                        store::open_flags::O_NONBLOCK,
+                    )
+                    .open(path);
                 }
                 assert!(answered.is_ok(), "a day reader waited on the {kind}");
                 answered.unwrap()
@@ -1722,9 +1745,11 @@ mod tests {
 
     use super::zstd_v082_frames as v082;
 
-    /// The refusal `unzstd` gives for every frame it will not read.
+    /// The refusal `unzstd` gives for every frame it will not read, and no
+    /// other: compared whole, so a malformed refusal naming anything but
+    /// [`FRAME`] is not it.
     fn refused(answer: &Result<Vec<u8>, CmRefusal>) -> bool {
-        matches!(answer, Err(CmRefusal::TickStoreMalformed { what }) if *what == FRAME)
+        *answer == Err(bad(FRAME))
     }
 
     /// **EVERY FRAME 0.8.2 WROTE DECODES THROUGH `unzstd` TO THE BYTES IT WAS
@@ -1867,6 +1892,29 @@ mod cloud_mutant_tests {
         let body = one_text_column(b"A", 2, b"1\n2");
         assert_eq!(columnar(&body, 2, 4).unwrap_err(), bad(PAST_SIZE));
         assert_eq!(columnar(&body, 2, 5).unwrap(), b"A\n1\n2");
+    }
+
+    /// A column too long for a one-byte content size (RFC 8878 §3.1.1.1.4:
+    /// two bytes then, holding the size less 256) rebuilds byte for byte, at
+    /// the first length that needs two bytes and at the last two bytes hold;
+    /// one byte of stated size short of either is refused as it passes.
+    #[test]
+    fn a_column_framed_with_a_two_byte_content_size_rebuilds() {
+        for len in [256_usize, 65_791] {
+            let field: Vec<u8> = (0..len)
+                .map(|i| b'A' + u8::try_from(i % 26).unwrap())
+                .collect();
+            let body = one_text_column(b"H", 1, &field);
+            let mut want = b"H\n".to_vec();
+            want.extend_from_slice(&field);
+            let size = u64::try_from(want.len()).unwrap();
+            assert_eq!(columnar(&body, 1, size).unwrap(), want, "{len}");
+            assert_eq!(
+                columnar(&body, 1, size - 1).unwrap_err(),
+                bad(PAST_SIZE),
+                "{len}"
+            );
+        }
     }
 
     /// A numeric column renders each value from its shape and is refused as
