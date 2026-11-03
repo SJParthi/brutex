@@ -2658,8 +2658,16 @@ fn day_band_timed(histories: [u32; 3], counts: [usize; 3], ceiling: u128) {
             copy_tree(&root, &copy);
             let asked = ask(TIMED[1]);
             let started = std::time::Instant::now();
-            let _ = answer(&copy, &asked);
+            let said = answer(&copy, &asked);
             cold.push(started.elapsed().as_micros());
+            // A COLD PAGE IS THE WHOLE SPAN, one record a day (D-7346): a
+            // timing of a page that dropped a day times a cheaper wrong page.
+            assert_eq!(
+                said["days"].as_array().map(Vec::len),
+                Some(92),
+                "{}",
+                TIMED[1]
+            );
             // ITS OWN FIXTURE, RELEASED: twenty copies of a 100x store would
             // otherwise fill a small scratch disk.
             let _ = std::fs::remove_dir_all(&copy);
@@ -2674,6 +2682,11 @@ fn day_band_timed(histories: [u32; 3], counts: [usize; 3], ceiling: u128) {
                     started.elapsed().as_micros()
                 })
                 .collect();
+            assert_eq!(
+                answer(&root, &asked)["days"].as_array().map(Vec::len),
+                Some(92),
+                "{query}: the warm page is the whole span"
+            );
             let page = spread(one);
             eprintln!(
                 "R3-13 timing history={history}x warm page {query}: p50 {} us, p99 {} us, max {} us, n {}",
@@ -2940,6 +2953,13 @@ fn cold_share_pages_timed(
             })
             .collect();
         let read = days.iter().filter(|(_, open, _)| *open).count();
+        // THE PAGE IS THE WHOLE SPAN, one record a day (D-7346): timing an
+        // answer that dropped a day would time a cheaper wrong page.
+        assert_eq!(
+            warmed["days"].as_array().map(Vec::len),
+            Some(days.len()),
+            "{query}"
+        );
         let time = |cold: bool| {
             if cold {
                 forget_flags(&root.join("session-masters"));
