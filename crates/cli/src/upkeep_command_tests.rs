@@ -2324,35 +2324,40 @@ fn step_running(command: &str) -> Option<&'static str> {
 /// names the run on all the workers it was rehearsed at, waits for no import
 /// or pull, carries its measured time and bytes, and stays pending: the live
 /// run is the operator's (D-7430).
+///
+/// Every part a row owes is listed at once, a missing row reading as an empty
+/// one, so the failure names all that is owed rather than the first.
 #[test]
 fn the_msum_store_half_is_a_pending_step_for_each_feed() {
+    let mut owed: Vec<String> = Vec::new();
     for (feed, command) in [
         ("gdfl", "cli upkeep run msum gdfl NSE/INDEX --workers 8"),
         ("zerodha", "cli upkeep run msum zerodha --workers 8"),
     ] {
-        let step = step_running(command).unwrap_or_else(|| panic!("no step runs `{command}`"));
-        assert!(step.contains("state = \"pending\""), "{feed}: {step}");
-        for word in [
-            "rehearsed_ms",
-            "rehearsed_bytes",
-            "rehearsed_on",
-            "rehearsed_result",
-            "prerequisites",
-            "disk",
+        let step = step_running(command).unwrap_or_default();
+        for part in [
+            format!("\"{command}\""),
+            "state = \"pending\"".to_owned(),
+            "rehearsed_ms".to_owned(),
+            "rehearsed_bytes".to_owned(),
+            "rehearsed_on".to_owned(),
+            "rehearsed_result".to_owned(),
+            "prerequisites".to_owned(),
+            "disk".to_owned(),
+            format!("cli upkeep plan {feed}"),
+            format!("cli upkeep status msum {feed}"),
+            "/gaps.json".to_owned(),
         ] {
-            assert!(step.contains(word), "{feed} names no {word}: {step}");
+            let said = format!("{feed}: no step running `{command}` names {part}");
+            owed.extend((!step.contains(part.as_str())).then_some(said));
         }
-        assert!(
-            step.contains(&format!("cli upkeep plan {feed}"))
-                && step.contains(&format!("cli upkeep status msum {feed}")),
-            "{feed}: its check reads the plan and the run: {step}"
-        );
-        assert!(step.contains("/gaps.json"), "{feed}: {step}");
-        assert!(
-            step.contains("no import") || step.contains("no pull"),
-            "{feed}: {step}"
-        );
+        let waits = ["no import", "no pull"]
+            .iter()
+            .any(|wait| step.contains(wait));
+        let said = format!("{feed}: no step running `{command}` waits for no import or pull");
+        owed.extend((!waits).then_some(said));
     }
+    assert!(owed.is_empty(), "{owed:#?}");
 }
 
 /// **A PLAN NAMES THE MONTHS LACKING A SUMMARY, AND NONE AFTER THE STEP.** A
