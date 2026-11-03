@@ -1135,6 +1135,9 @@ the first was closed in code afterwards.
 <!-- slot FNO-DAYMASK -->
 
 <!-- slot FNO-LEVERAGE -->
+| Part | State | What it gives | What is next, and what blocks it |
+|---|---|---|---|
+| FNO-LEVERAGE (F1, D-8150 to D-8155) | Built on `cloud/fib-fno-leverage-20261103`, not landed | `pull::nse_margin`: the `C_VAR1` batch-1 parser, the dated `nse-margin-v1` table, `margin(symbol, day)` in O(1), `leverage` exact under three readings, `file_digest_hex` for the run identity | **NEXT:** the Mac's independent check (Route B re-measured, gates 1d and 28, C-FNO-LEV-01 on the Mac), then F1's family landing. **BLOCKED:** real margin files: the operator's yes to the `C_VAR1` download is recorded (PARTS decision 9.3, 30 Oct 2026); the download, a read of one real file from each side of 1 Jun 2020 (D-8153), and FNO-RUN's `cli fno margin build` are operations and FNO-RUN steps; until they run, the leverage clock of every result is UNVERIFIED |
 
 <!-- slot FNO-RANK -->
 

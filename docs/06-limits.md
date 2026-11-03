@@ -22157,6 +22157,14 @@ stack peak is not a timing; these rows bound memory, not time.
 <!-- slot FNO-DAYMASK -->
 
 <!-- slot FNO-LEVERAGE -->
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-FNO-LEV-1 | Building the table is O(batch-1 files × rows + months × 31 × symbols), not O(1) | every file is parsed once and every month of the span is written whole, a dense 31-slot grid of one 12-byte cell per dictionary symbol, so the table is O(1) to read | exact size of the format: `56 + 31 × 12 × symbols + 32` bytes a month, so 98 months cost 36,456 bytes per dictionary symbol, plus `24 + 24 × symbols + 32` for the dictionary. UNMEASURED on real files: no `C_VAR1` file is held in the cloud build, and how many `EQ` symbols a real file lists is UNVERIFIED here | FNO-LEVERAGE |
+| L-FNO-LEV-2 | Opening reads every month of the span whole into memory, O(months × 31 × symbols) | the reader checks each file's digest and decodes its cells once, so a lookup reads one cell and no file | the same bytes as L-FNO-LEV-1 in memory; UNMEASURED on real files | FNO-LEVERAGE |
+| L-FNO-LEV-3 | The column positions of the symbol (2) and the series (3), and a header record's shape, are UNVERIFIED in this build | the design names columns 7, 8 and 9 and the `EQ` series only; its source, `sources-leverage-execution.md` section 1, is on the operator's Mac (D-8153) | a line whose third column is not `EQ` is counted and skipped; any `EQ` row this reader cannot hold refuses its file by line and column; the Mac's operations step reads a real file from each side of 1 Jun 2020 before the build verb runs | FNO-LEVERAGE |
+| L-FNO-LEV-4 | Whether Dhan's intraday limit counts NSE's additional margin (column 9) is UNVERIFIED (T01-22) | no Dhan statement was read | read as the third reading, `Reading::WithExtra`, inside the minimum the quantity uses (SPEC 11.2, OP-17) | FNO-LEVERAGE |
+| L-FNO-LEV-5 | The build takes no lock: one build may write one `out` at a time | staging names hold the build's process id, so two builds never share a staging file, but two builds renaming into one directory at once can leave months of one beside the dictionary of the other, which `open` refuses by name when the dictionaries differ | a killed build leaves at most one staging file, `.<name>.<pid>.tmp`, which no reader opens and the next build under that process id clears and names; nothing fsyncs the directory after a rename, and a rebuild over the same files writes the same bytes | FNO-LEVERAGE |
+| L-FNO-LEV-6 | C-FNO-LEV-01 has been measured only in the cloud build, on a 4-core shared container | the Mac's slots were busy (3 Nov 2026), so the bench ran beside other work and its figures are advisory | the 3x ratio ceiling and the 1 µs p99 budget are gated; the Mac's independent check measures them again before they count | FNO-LEVERAGE |
 
 <!-- slot FNO-RANK -->
 

@@ -87611,6 +87611,116 @@ unused.
 <!-- slot FNO-DAYMASK -->
 
 <!-- slot FNO-LEVERAGE -->
+### D-8150 — FNO-LEVERAGE reads NSE's `C_VAR1` batch-1 files: the `EQ` rows' columns 7, 8 and 9, held exactly, and `L = min(5, 100 / max(20, M))` as a reduced ratio — 2026-11-03
+
+`pull::nse_margin` is each stock's dated intraday leverage (SPEC 11.1 and
+11.2; PARTS FNO-LEVERAGE; OP-16, OP-17). It reads `C_VAR1_DDMMYYYY_1.DAT`,
+the first batch of each trading day (SPEC 11.1, "batch 1 of D"); a file of
+another batch is named in the build's report and not read. Of each row whose
+series column is `EQ` it keeps columns 7, 8 and 9 as the design gives them
+(the `VaR` margin, the extreme loss margin and NSE's additional margin) as
+parts per million of the position, so `22.11` is 221,100 and no float is
+formed (`CLAUDE.md` section 7). A percentage with more than four fraction
+digits cannot be held exactly and is refused, never rounded. A malformed `EQ`
+row refuses the whole file by line and column (`ParseError`), a second `EQ`
+row for one symbol is refused, and a file with no `EQ` row is refused as an
+empty or truncated download, never read as a day that listed nothing. A line
+of any other series is counted and not read further.
+
+`M = VaR + ELM` and `leverage(m, reading)` is `1,000,000 / max(200,000, M)`
+in parts per million, reduced: `M = 25%` is `4/1`, `22.11%` is `10000/2211`
+(exactly `100 / 22.11`), `12.5%` caps at `5/1`. The cap is the floor, since
+`max(20, M) >= 20` puts the quotient at most 5, so the code holds one
+comparison and a compile-time assertion that the two constants agree.
+
+No socket and no clock: the module reads files already on disk. The download
+of NSE's files is an operations step (PARTS decision 9.3, which the operator
+answered yes on 30 Oct 2026) and the build verb is FNO-RUN's
+(`cli fno margin build`).
+
+### D-8151 — The dated table `nse-margin-v1`: one sealed month file per month of the span and a sorted dictionary, a pure function of the set of batch-1 files — 2026-11-03
+
+`build_from_dir(src, out)` writes `<out>/nse-margin-v1/`. `symbols.nsd` holds a
+24-byte header (magic `BRXNSD01`, version 1, the first and last year-month,
+the symbol count), every `EQ` symbol any file listed as 24 zero-padded bytes
+in sorted order, and a BLAKE3 trailer. `<YYYY-MM>.nsm` holds a 56-byte header
+(magic `BRXNSM01`, version 1, year, month, the symbol count, a 31-bit map of
+the day slots that had a file, the BLAKE3 of the dictionary file it was built
+against), then 31 day slots of one 12-byte cell per dictionary symbol
+(columns 7, 8, 9 as little-endian `u32` parts per million, all three
+`u32::MAX` where the day's file did not list the symbol), then a BLAKE3
+trailer. Every month of the span is written, a month with no file included.
+
+Sorted, so the bytes depend on the set of files and rows, not on the order a
+directory or a file lists them in; a rebuild over the same files writes the
+same bytes. Each file is born through `store::staging::create` (gate 28's
+door) under a hidden name holding the build's process id, synced and renamed
+into place, the dictionary last; a dead writer's leftover the door clears is
+named in `Report::cleared`. One build writes one `out` at a time: the build
+takes no lock. `MarginTable::open` refuses by name a file it cannot read and
+every failed check (length, digest, magic, version, the month a header names,
+the symbol count, the dictionary a month was built against, a day bit past
+the month's end, a span month outside 1 to 12, a reversed span, a name that
+is not a symbol as written, names not strictly sorted). `file_digest()` is
+BLAKE3 over the dictionary's trailer and every month's, in month order: the
+term FNO-SEC-WIRE's run identity calls `leverage_digest`. The format is here
+and in the module's documentation rather than in `docs/02-store-format.md`,
+which has no FNO slot (PARTS 4.1): moving it there is the main session's, at
+landing.
+
+### D-8152 — Three readings; the caller names the trade day, today, and the symbol each was listed under; no reading falls back to another day's file — 2026-11-03
+
+`Reading::Day` reads columns 7 and 8 of the trade day's file, `Reading::Today`
+the same columns of today's file (operator rule 7's second clock), and
+`Reading::WithExtra` columns 7, 8 and 9 of the trade day's file, because
+whether Dhan counts NSE's additional margin is UNVERIFIED (T01-22).
+`MarginTable::readings(symbol, day, today_symbol, today)` returns all three and
+`Readings::smallest` the one the quantity uses (SPEC 11.2). Today is an
+argument, never "the newest file held": a missing today's file is
+`MarginUnknown::NoFile` for today. `margin(symbol, day)` answers from that
+day's file only; a day outside the span, a day with no file, text that is no
+symbol, a symbol no file listed and a symbol the day's file did not list are
+five named refusals. Across a rename the two symbols are two keys and neither
+answers for the other: the caller supplies the dated symbol.
+
+### D-8153 — UNVERIFIED in the cloud build: the symbol and series columns, a header record's shape, and the layout either side of 1 Jun 2020 — 2026-11-03
+
+The design names columns 7, 8 and 9 and the `EQ` series; its source,
+`sources-leverage-execution.md` section 1, is on the operator's Mac and was
+not read by the cloud build. So the symbol in column 2 and the series in
+column 3 are this build's reading of NSE's layout and are UNVERIFIED here,
+and so is the shape of any header record: a line whose third column is not
+`EQ` is counted and skipped without being parsed further, so a header needs
+no assumed shape, while a line of fewer than three columns refuses the file
+loudly. T01-21 records a change of method on 1 Jun 2020 with the same totals;
+`M` is the sum of columns 7 and 8 on both sides and the reader holds no date
+switch (`the_first_of_june_2020_method_change_reads_the_same_totals`). Before
+`cli fno margin build` runs on real files, the Mac's operations step reads one
+real file from each side of 1 Jun 2020 against these positions; a layout that
+differs refuses by line and column rather than misreading.
+
+### D-8154 — The lookup is O(1) and C-FNO-LEV-01 measures it: flat at 1x, 10x and 100x the months held, with a p99 budget of 1 µs — 2026-11-03
+
+`margin(symbol, day)` is one month subtraction, one bit of the month's day map,
+one symbol hash probe and one cell read at
+`((month * 31 + day - 1) * symbols + symbol)`. C-FNO-LEV-01
+(`crates/pull/benches/ratio.rs`, `nse_margin::margin_lookup_is_flat`) times it
+on a held day, a day with no file and a day before the span, over tables of 1,
+10 and 100 months built in memory, fails on a ratio above the harness's 3x
+ceiling, and fails on a p99 above 1 µs, the design's target (PARTS section 11,
+an ESTIMATE until measured on the Mac). Opening and building are not O(1) and
+are bounded in `docs/06-limits.md` (L-FNO-LEV-1, L-FNO-LEV-2).
+
+### D-8155 — Gate 1d declares `nse_margin`'s three words; `DECLARED` becomes a slice — 2026-11-03
+
+`FNO_LEVERAGE_LITERAL` in `.github/gates_tree.rs` declares `nse-margin-v1` (the
+table's directory), `nsm` (its month files' extension) and `2211` (the
+denominator a test prints, cut from `10000/2211` by the joined-literal split),
+inserted at READINESS ADDENDUM item 12's anchors, and the length line is
+exactly `const DECLARED: &[&str] = &[`, the line the data parts wrote, so
+equal edits merge clean. Gate 1d is red on this part's base on the base's own
+481 words; with this change its refused list is identical to the base's, and
+over the two new files alone it passes.
 
 <!-- slot FNO-RANK -->
 
