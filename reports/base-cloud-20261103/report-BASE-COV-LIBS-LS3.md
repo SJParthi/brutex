@@ -179,6 +179,78 @@ two-rows test. The vocab test modules are inline in the files they test, because
 
 Red checks: 8 of 8 RED (`scratchpad red-vocab.txt`): the operand count never dropped; the body split one byte late; the work stack seeded empty; overflow ignored with the loop ending `Ok`; a (below, above) band compatible at equal rank; the second restatement test removed; the name index probing by two; an uncarried length clamped to `u16::MAX`.
 
+### Step 5: vocab test code (commits `8275882e`, `f9355fdc`, `7ae41f8a`, `70d241e2`, `7f422402`, `4a853e80`, `6d34cf19`)
+
+What was left in vocab after step 4 was test code: the workspace gates `tests/no_runtime_spawn.rs`
+(141 rows), `tests/no_py_language.rs` (20) and `tests/workspace_is_rust.rs` (11), and one row
+each in `src/expression.rs`, `tests/expression_search.rs` and `tests/no_float.rs`, three in
+`tests/mask.rs`. No production line changed in this step, and no gate's verdict changed.
+
+- `expression::cover_tests::a_child_link_back_to_its_own_node_ends_the_render_in_an_error_not_a_loop`
+  also hands the renderer a negation and a join linked to each other: the stack fills within the
+  3N bound and the negation's push is the one that meets its end.
+- `tests/expression_search.rs` runs the enumeration at a budget of 3 as well as 50,000, so it
+  pauses every few nodes, and must find exactly the same programs (at 50,000 alone it never paused).
+- `tests/mask.rs`: half the anti-monotonicity trials use a bar that holds its base (no random bar
+  did, so no trial was a hit), and every trial now states exactly when a wider candidate hits:
+  where the base hits and the bar holds the added bit.
+- `tests/no_float.rs`: the directory listing is a helper, tested on a scratch directory holding an
+  upper-case extension, a file with none, a backup of a source and a document.
+- `tests/workspace_is_rust.rs`: the lock's reachability walk files each package beside its own
+  `Cell<bool>` seen flag (its two lookups by index could not miss, and the walk stays O(V + E) as
+  its doc says); the semver order checks zip neighbours instead of matching `windows(2)`; the
+  comparator probe uses `expect`; `the_lock_parser_keeps_what_it_understands_and_skips_the_rest`
+  hands the parser a key before any package, a table that is not a package, a bracketed and an
+  unquoted line inside a dependency list, a source line and a key after the last package.
+- `tests/no_py_language.rs` (D-5250's gate): the program it runs as `git` is a parameter, `GIT` at
+  every real call, so `a_host_that_cannot_run_git_walks_the_tree_and_the_git_proofs_skip_by_name`
+  hands the file lister and both git-backed proofs a program path that cannot exist: the fallback
+  walk still steps over `.git`, and each proof names why it skipped. The gate prints its
+  absent-file line whatever the count, through `absent_line`, which
+  `the_absent_file_line_counts_every_one_shows_ten_and_masks_them` feeds none and twelve, the name
+  in the first. `a_listed_path_that_cannot_be_inspected_is_a_failure_not_an_absence` shows a listed
+  path whose metadata fails for any reason but absence (a path through a regular file) stops the
+  walk instead of shrinking it.
+- `tests/no_runtime_spawn.rs` (D-5240's gate): seven tests hand the gate's own readers the input
+  that takes each one's other side, with the answer stated exactly:
+  `the_lexer_reads_the_rarer_spellings_as_rustc_does` (nine shebang shapes, `r##x`, `r#1`, three
+  escapes `rustc` refuses, a continuation over a blank line),
+  `the_cfg_and_attribute_readers_answer_at_their_edges`,
+  `items_and_macro_inputs_end_where_the_model_says`,
+  `the_needles_readers_answer_at_their_edges`, `a_pass_records_what_the_rarer_placements_hold`,
+  `manifests_are_read_as_toml_reads_them` and
+  `the_verdict_is_silent_where_the_model_has_nothing_to_refuse`.
+
+`cargo test -p vocab --locked --no-fail-fast`: EXIT 0 (lib 74; expression 11, expression_search
+8, readiness 3, implication_pointers 4, mask 8, no_float 4, no_py_language 12, no_runtime_spawn
+17, stale_claims 10, table 20, workspace_is_rust 19; 0 failed). `cargo clippy -p vocab
+--all-targets --locked -- -D warnings`: EXIT 0.
+
+Red checks (`scratchpad red-vocab.log`), 40 hand changes: 36 RED, 4 green and each equivalent on
+every input the code can be handed. Two of the 36 were green at first, so the test's case was
+sharpened until the rule changed its answer (a literal TOML string ending in a backslash; a string
+after a `members` that is no array), and the inner doc-comment shebang case now ends at `[` for the
+same reason. RED: `hits` ignoring its sixth word; a pause that skips a
+choice; the listing matching `rs` in one case only; the lock parser's source line and its bracket
+rule; the walk's seen test inverted; the absent line showing eleven, and showing the name; the
+metadata guard taking every error as absence; the fallback walk returning nothing, and not stepping
+over `.git`; each skip line reworded; and 23 changes across the spawn gate's readers (a doc
+comment after `#!`, `r#` with no name after it, a refused `\x` escape, the blank line of a
+continuation, an empty `any()`, a trailing comma in `cfg_attr`, `extern` without an ABI, a
+visibility's path, `const` with block values, a gated `mod name` with neither `;` nor body, the
+type as the first token, a plain name before `::`, an import group through a variable, a later
+attribute dropping the first `#[path]`, an inner attribute's naming taken as test code,
+`in_module_body` ignoring a pending signature, the `\e` escape, a literal string's backslash,
+`members` that is no array, a `Cargo.toml` outside `crates/`, a manifest naming a manifest, a
+pasted file that is test code whole, a test file that is never scanned). Green, equivalent: the
+walk's `!flag.get()` for `!flag.replace(true)` (the lock graph is acyclic, so the flag bounds the
+work, not the answer); `macro_input_end` without its `extern crate` clause (such an item holds no
+brace); the bare-`#[test]` exemption without `statement` (on a parameter, the pending signature
+already refuses it); the `_tests.rs` rule without `!under_tests_dir` (every file under `tests/` is
+already in the test set). The crossed-links render case extends a test already red-checked; no
+change to the negation's overflow alone turns its answer, since the walk's bound answers `Err`
+too.
+
 ## Lists
 
 `gaps-LS3.txt.md` (every uncovered row of the three crates with its class, the per-file table and
@@ -214,13 +286,19 @@ evaluator maps a VWAP refusal through `vwap::Refused::into_corrupt` (proved for 
 fixed-size buffer once; `render_program` seeds its work stack with the root. The kept-on-purpose
 documenting conjuncts (`Evaluator::warmed_up`'s `previous`, `known_after`'s `seeded`, the
 not-live clauses of `Orb`, `SessionState` and `Vwap`) are NOT removed: each is shown deciding on
-its own by a white-box state test, so a later edit cannot delete it unseen.
+its own by a white-box state test, so a later edit cannot delete it unseen. In vocab's own gate
+tests, three test-only restructures with no verdict changed: `tests/no_py_language.rs` (D-5250)
+runs `git` through a named program, `GIT`, so a test can hand it one that cannot run, and prints
+its absent-file line whatever the count; `tests/workspace_is_rust.rs` files each lock package
+beside its own seen flag (O(V + E), as its doc states).
 
 ## (U) items (proofs in fu-LS3.txt.md)
 
 `crates/lake/src/schema.rs` the `i >= n` refusal of `detect` (two rows);
 `crates/vocab/src/table.rs` the `None` after `index_of`'s probe loop;
 `crates/indicators/src/vwap.rs` the exhaustion of `isqrt_i128_counted`'s Newton loop.
+Each proof is from the code's own arithmetic and tables, with no word size, endianness or
+platform in it, so each holds for aarch64-apple-darwin as CLOUD.md item 8 asks.
 
 ## NEEDS THE MAC
 
