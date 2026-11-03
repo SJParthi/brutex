@@ -1827,3 +1827,7 @@ mod tests {
     /// IPFT from 2026-03-01; D-5131).
     const DATED_FINGERPRINT: u64 = 11_353_183_212_436_303_133;
 }
+
+#[cfg(test)]
+#[path = "schedule_cover_tests.rs"]
+mod cover_tests;
