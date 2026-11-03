@@ -1429,6 +1429,15 @@ pub(crate) fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> 
 /// `NotFound` naming the parent when it is not a directory; the host's
 /// refusal of the `mkdir`.
 pub(crate) fn make_leaf_dir(dir: &Path) -> std::io::Result<()> {
+    make_leaf_dir_with(dir, |dir| std::fs::create_dir(dir))
+}
+
+/// [`make_leaf_dir`] with its `mkdir` given (a test seam, BASE-COV-PULL-PS3):
+/// production passes [`std::fs::create_dir`]; a test passes one that loses
+/// the race to another writer that made the directory between the check
+/// above it and the `mkdir`, which no test can stage between two calls of
+/// the host's.
+fn make_leaf_dir_with(dir: &Path, mkdir: fn(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
     if dir.is_dir() {
         return Ok(());
     }
@@ -1444,7 +1453,7 @@ pub(crate) fn make_leaf_dir(dir: &Path) -> std::io::Result<()> {
             ),
         ));
     }
-    match std::fs::create_dir(dir) {
+    match mkdir(dir) {
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
         made => made,
     }
@@ -1591,3 +1600,10 @@ fn restated_of(filters: &HashMap<String, Ended>) -> Option<AuctionRestated> {
         || !restated.whole_every.is_empty())
     .then_some(restated)
 }
+
+// BASE-COV-PULL-PS3 (G3): the journal's whole-tree auction keys, a load past
+// its stated size, refreshes, writes of nothing, a lock not taken, a path
+// with no folder and a `mkdir` refused or raced.
+#[cfg(test)]
+#[path = "gdfl_import_journal_cov_tests.rs"]
+mod cov_tests;
