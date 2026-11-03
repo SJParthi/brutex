@@ -1172,12 +1172,12 @@ mod tests {
                 (
                     "status",
                     block_on(super::status_json(axum::extract::State(
-                        std::sync::Arc::clone(&site),
+                        std::sync::Arc::clone(site),
                     ))),
                 ),
                 (
                     "refresh",
-                    block_on(super::refresh_work(std::sync::Arc::clone(&site))),
+                    block_on(super::refresh_work(std::sync::Arc::clone(site))),
                 ),
             ] {
                 assert_eq!(
@@ -1192,7 +1192,7 @@ mod tests {
             }
         } else {
             let (status, _, body) = block_on(super::status_json(axum::extract::State(
-                std::sync::Arc::clone(&site),
+                std::sync::Arc::clone(site),
             )));
             assert_eq!(status, axum::http::StatusCode::OK, "{mode}: {body}");
             let rows: serde_json::Value = serde_json::from_str(&body).expect("the status JSON");
