@@ -2164,3 +2164,40 @@ fn every_quarantine_refusal_renders_its_code_its_path_and_its_figures() {
         }
     }
 }
+
+/// **A LEDGER HOLDING TWO SERIES ANSWERS EACH ONLY ITS OWN DROPPED STAMPS**
+/// (BASE-COV-LIBS-LS1). One feed, one ledger, two series dropped in the
+/// same month: each series' stamps are its own lines', never the other's.
+#[test]
+fn a_ledger_holding_two_series_answers_each_only_its_own_dropped_stamps() {
+    let store = Store::new("two-series-stamps");
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 4_501)).collect();
+    let first = minute("QFIXS1", march());
+    let second = minute("QFIXS2", march());
+    store.month(first, &rows);
+    store.month(second, &rows);
+    apply_month(
+        &store.root,
+        first,
+        SYMBOL,
+        &[rows[1].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("the first series drops one bar");
+    apply_month(
+        &store.root,
+        second,
+        SYMBOL,
+        &[rows[4].ts_micros, rows[5].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("the second series drops two");
+    assert_eq!(
+        ledger_stamps(&store.root, first).expect("reads"),
+        vec![rows[1].ts_micros]
+    );
+    assert_eq!(
+        ledger_stamps(&store.root, second).expect("reads"),
+        vec![rows[4].ts_micros, rows[5].ts_micros]
+    );
+}
