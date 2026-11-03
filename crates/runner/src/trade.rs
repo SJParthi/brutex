@@ -3703,6 +3703,32 @@ mod tests {
         );
     }
 
+    /// WITH NO KNOWN CADENCE NO SIGNAL IS IMMEDIATE: walked over a slice of the
+    /// same bars spaced one per day (no same-day gap, so no step is ever
+    /// measured), every signal of a warm column is refused as not immediate
+    /// and counted too late; nothing trades, and the run reconciles.
+    #[test]
+    fn with_no_measured_cadence_no_signal_is_entered() {
+        let (bars, column) = swept();
+        let daily: Vec<indicators::Candle> = bars
+            .iter()
+            .zip(0_i64..)
+            .map(|(bar, day)| {
+                let mut moved = *bar;
+                moved.ts_micros = crate::synthetic::bar(day, 0).ts_micros;
+                moved
+            })
+            .collect();
+        let facts = super::SliceFacts::of(&daily, &column);
+        assert!(facts.covers(&daily));
+        assert!((0..daily.len()).all(|index| facts.step_at(index) == 0));
+        let walked = walk(&daily, &column, &ConditionMask::ZERO, h(5), Direction::Long);
+        assert!(walked.signals > 0 && walked.reconciles());
+        assert_eq!(walked.too_late, walked.signals);
+        assert!(walked.trades.is_empty() && walked.eligible.is_empty());
+        assert!(walked.occupancy.is_empty());
+    }
+
     #[test]
     fn a_range_or_entry_outside_the_slice_facts_is_answered_no() {
         let (bars, column) = swept();
