@@ -8014,6 +8014,152 @@ mod tests {
             "another evaluation of the same grid"
         );
     }
+    /// BASE-COV-LIBS-LS2: EVERY INPUT VALIDATOR REFUSES BY NAME: a run with no
+    /// feed or commit, an evaluated slice that runs past its minute context, a
+    /// plan axis past its percentile limit, negative open interest, a column
+    /// with no or short acceptance, a column whose rows precede the first
+    /// permitted bar, and each accumulator of the arithmetic envelope.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one refusal per validator, read as one list"
+    )]
+    fn every_input_validator_refuses_by_name() {
+        let input = crate::synthetic::sessions(6);
+        let instrument = nifty();
+        let run = |feed, commit| crate::identity::Run {
+            mask: ConditionMask::ZERO,
+            direction: crate::identity::Direction::Long,
+            instrument: &instrument,
+            timeframe: "1min",
+            params: crate::identity::Params {
+                min_hits: 1,
+                ceiling: 1,
+                pair_budget: 1,
+                policy: 0,
+            },
+            data_digest: crate::identity::data_digest(&input),
+            commit,
+            feed,
+        };
+        assert!(ExecutionRunV1::new(&run("test-feed", "test-commit"), &input, None).is_ok());
+        assert_eq!(
+            ExecutionRunV1::new(&run("", "test-commit"), &input, None).map(|_| ()),
+            Err(ExitGridErrorV1::MissingRunIdentity("feed"))
+        );
+        assert_eq!(
+            ExecutionRunV1::new(&run("test-feed", ""), &input, None).map(|_| ()),
+            Err(ExitGridErrorV1::MissingRunIdentity("commit"))
+        );
+
+        let whole = bars(10);
+        assert_eq!(
+            require_exact_execution_subslice(&whole[..5], &whole[1..4]),
+            Ok(())
+        );
+        assert_eq!(
+            require_exact_execution_subslice(&whole[..5], &whole[3..8]),
+            Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
+        );
+
+        assert_eq!(
+            validate_percentiles("stop", &[pctl(1, 4), pctl(1, 2)], 1),
+            Err(ExitGridErrorV1::PercentileLimitExceeded {
+                axis: "stop",
+                supplied: 2,
+                max: 1
+            })
+        );
+
+        let mut interest = bars(3);
+        interest[1].open_interest = -5;
+        assert_eq!(
+            validate_execution_bars(&interest),
+            Err(ExitGridErrorV1::InvalidOpenInterest {
+                index: 1,
+                value: -5
+            })
+        );
+        interest[1].open_interest = 5;
+        assert_eq!(validate_execution_bars(&interest), Ok(()));
+
+        assert_eq!(
+            require_complete_acceptance(&Column::default(), 3),
+            Err(ExitGridErrorV1::IncompleteExecutionAcceptance {
+                bars: 3,
+                refused_or_missing: 3
+            })
+        );
+        let column = test_column(&input);
+        assert_eq!(require_complete_acceptance(&column, input.len()), Ok(()));
+        assert!(require_complete_acceptance(&column, input.len() + 1).is_err());
+        let first = *column
+            .sources()
+            .first()
+            .expect("six sessions warm the evaluator");
+        assert_eq!(
+            validate_column_sources(&column, input.len(), first + 1),
+            Err(ExitGridErrorV1::ColumnSourceBeforeOos {
+                source: first,
+                first_oos: first + 1
+            })
+        );
+
+        let mut resolved = unreachable_resolved();
+        let envelope = |resolved: &ResolvedExitGridV1, bars: usize, max: i64, min_open: i64| {
+            validate_envelope_extremes(bars, Ok((max, min_open)), &resolved.view())
+        };
+        assert_eq!(envelope(&resolved, 10, 1_000_000, 1_000_000), Ok(()));
+        assert_eq!(
+            envelope(&resolved, 10, i64::MAX / 8, 1),
+            Err(ExitGridErrorV1::ArithmeticEnvelopeExceeded(
+                "aggregate paisa accumulator"
+            ))
+        );
+        assert_eq!(
+            envelope(&resolved, 10, 1_000_000_000_000, 1),
+            Err(ExitGridErrorV1::ArithmeticEnvelopeExceeded(
+                "excursion accumulator"
+            ))
+        );
+        // A 500% rung on a 2e18-paisa bar is past i64 on its own; a 320% rung
+        // on a 2.2e18-paisa bar is inside i64 alone and past it once added.
+        for (rung, price) in [
+            (5_000_000, 2_000_000_000_000_000_000),
+            (3_200_000, 2_200_000_000_000_000_000),
+        ] {
+            resolved.stop_levels_ppm = vec![rung];
+            assert_eq!(
+                envelope(&resolved, 1, price, price),
+                Err(ExitGridErrorV1::ArithmeticEnvelopeExceeded(
+                    "resolved level price"
+                )),
+                "{rung}"
+            );
+        }
+    }
+
+    /// AN OOS RUN SEALED OVER ANOTHER FEED IS NOT THIS SERIES' RUN.
+    #[test]
+    fn a_replay_run_of_another_feed_is_refused() {
+        let (resolved, selected, execution) = replay_fixture();
+        let instrument = nifty();
+        let column = test_column(&execution);
+        let (oos, _) = oos_and_run(&instrument, &execution, resolved.side());
+        let foreign = test_execution_run_for_feed(
+            &instrument,
+            &ConditionMask::ZERO,
+            resolved.side(),
+            &execution,
+            "another-feed",
+        )
+        .expect("a run of another feed seals on its own");
+        assert!(
+            resolved
+                .replay_selected_universe(oos, &column, &selected, foreign)
+                .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
