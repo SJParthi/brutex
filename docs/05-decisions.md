@@ -87622,3 +87622,49 @@ reading `whole:api`, set `state/fix/round2/deep-BASE-COV-API-4beea8da837b-set.tx
 
 **Proof.** `scratch/deep-BASE-COV-API-logs/4beea8da837b-routeb-r1.log`, 02:07-02:50 IST on 3 Nov, ending with the
 `NOT PROVED` lines of the 22 benches and `lib.rs` only.
+
+### D-7346 — Repair 2: the part's own test rows as assertions, every new test shown red by hand, eight extremes per tested file, crowds alone in a child, and what it closed (BASE-COV-API, repair 2) — 2026-11-03
+
+**Status: locked as a record; the bar is still NOT met** (D-7347 has the figures). Check r2 of this part
+(`state/fix/round2/verify-BASE-COV-API-r2.json`) failed it on four blocking items; this entry answers each.
+
+1. **The part's own test code had rows it could close (r2 blocking 2).** `served_routes_tests`'s two door loops
+   collected failures into a list, so their failing sides were no assertion arm and could never be (F): each check is
+   now an `assert!`/`assert_eq!`. `sweeprun_accepted_tests` read an attempt as a string or else a number: the
+   acceptance always writes a string (`sweeprun::command_acceptance`), so the number arm was a fallback that would have
+   hidden a change of the answer; a number now fails, and the slot holding the press it waits for is asserted, not
+   waited round. `basis_route_tests` counts corporate-action notes through one helper with no untaken branch, which
+   has its own test (BCA-24).
+2. **Every pool has its slots back (r2 follow-up on BCA-07).** The lost pass ends by reading `/pools.json`: all nine
+   pools at `running` 0 and `waiting` 0. Four more doors stand in its table: `/folder.json`, `/provenance.json`,
+   `/calendar.json` and `/backtest/audit.json`.
+3. **A crowd of a shared pool runs alone.** Every test this repair added that takes every slot of a shared pool runs
+   in a child process (`crate::isolated`): the served routes, the sources questions and the two press-door tests.
+   This repair's own first run proved why: its sources test crowded the store-read pool in the shared process and
+   three other sources tests answered `429` ("all sources timeline not admitted (Saturated)"); the crowd moved into a
+   child before any commit counted it. The round 1 tests that read the operations pool in the shared process (the
+   disk timing, the basis handler and router tests) take `apart_from_slot_owners`, as the r2 follow-up asked.
+4. **Failing first, by hand (r2 blocking 4a).** One behaviour change per new test of rounds 1 and 2, applied in two
+   scratch trees and never committed (`state/fix/round2/repair-BASE-COV-API-r2-red.diff`, 42 changes, and
+   `-r2-red2.diff`, 6): in the first, 44 of 45 tests failed at the assertion their change breaks
+   (`-r2-red-tests.log`, `-r2-red-summary.txt`); the 45th, `a_receipt_nobody_saved_is_refused_by_name_on_every_door`,
+   stayed green because the candidate door answers its missing receipt from `render`'s own `Ok`, not the arm changed,
+   and failed in the second under a change of that answer, beside the 5 tests added after the first tree.
+5. **Eight extremes per tested file (r2 blocking 4b).** `frontierjson`: `every_edge_of_a_page_answers_or_refuses_by_name`
+   (10 edges, 2 combined, 2 out of the box). `mastersrun`: the refresh child under 9 `HOME` and transport
+   configurations (2 combined; out of the box, a credential "file" that is a folder). The presses: attempt edges at
+   both ends of `u64`, seven `400`s, and all three doors pressed at once while an attempt is in flight.
+6. **The (F)/(U) list is rebuilt strictly (r2 blocking 3).** From this repair's Route B, (F) only for the failing side
+   of an `assert!`/`assert_eq!`/`assert_ne!`/`panic!`/`unreachable!` whose statement ran; a row inside an `#[ignore]`d
+   test is a GAP marked `ignored` (L-BCA-3), never (F); every (F) row is read by hand (D-7347). The counts D-7340 item
+   3 (1,857 provisional) and D-7345 item 2 (577 lines, 1,172 sides) gave are superseded by D-7347's.
+7. **A test that asserted nothing.** The small-size day-band and cold share-page timings (D-7344 item 1) discarded
+   every answer they timed; each now asserts its page is the whole span, one record a day (BCA-20).
+8. **New rows covered**, each with its invariant: the press doors (BCA-12), attempts (BCA-13), frontier pages (BCA-14),
+   masters refresh, status and page doors (BCA-15), two-exchange underlyings (BCA-16), quarantine rows and the public
+   `census_delta` (BCA-17), month-summary refusals (BCA-18), emit matchers (BCA-19), sources questions and full pool
+   (BCA-21), a log directory that is a file (BCA-22), a pool made at run time (BCA-23).
+9. **No production line changed.** Public functions nothing in the workspace calls, so no test can reach them through
+   a caller, are reported and not removed (L-BCA-7): `detail::run_scan`, `ingest::discovery_ask`,
+   `settings_route::snapshot_off_worker`, `census::Since::read_back`, `census::Manifests::partitions` and
+   `census::Manifests::closes`.
