@@ -9,7 +9,8 @@
 //! descriptor the host will not `flock` (Linux `O_PATH`). Through
 //! `open_lock` the first is reached only when another process removes the
 //! file between the open and the check, and `hold` is only ever handed the
-//! descriptor `open_lock` opened itself. No vendor byte is used.
+//! descriptor `open_lock` opened itself. And a publication the host will not
+//! write or sync, handed to `write_new_with`. No vendor byte is used.
 
 use super::*;
 use crate::gdfl_fixtures::scratch;
@@ -74,5 +75,30 @@ fn a_lock_descriptor_the_host_will_not_flock_is_refused_in_its_words() {
             "{kind:?}"
         );
     }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A publication the host will not write or sync is refused as incomplete,
+/// naming its path, and the file it began is retained, never removed and
+/// never overwritten: `write_new` refuses the name the next time. The write
+/// and sync `write_new` hands `write_new_with`, refused by a test.
+#[test]
+fn a_publication_the_host_will_not_write_is_retained_and_named() {
+    let root = scratch("ps1-cash-write-refused");
+    let path = root.join("2026-08-03.csv.gz");
+    let refused = write_new_with(&path, b"ZQ invented", &|_, _| {
+        Err(std::io::Error::other("ZQ invented: no room"))
+    });
+    assert_eq!(
+        refused,
+        Err(format!(
+            "incomplete publication at {} retained: ZQ invented: no room",
+            path.display()
+        ))
+    );
+    assert!(path.is_file(), "the begun file is retained");
+    let again = write_new(&path, b"other").unwrap_err();
+    assert!(again.starts_with("cannot create "), "{again}");
+    assert_eq!(fs::read(&path).unwrap(), b"");
     fs::remove_dir_all(root).unwrap();
 }

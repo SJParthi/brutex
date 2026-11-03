@@ -7,8 +7,8 @@
 //! this test reads. The identity is invented and the parameter is the generic
 //! shape `CLAUDE.md` §8 writes, not a path.
 //!
-//! Two TESTFIX edits for this file's test rows apply IN PLACE to the inline
-//! `tests` module of `ssm.rs`, not here: see `rows.md`.
+//! And the signature's stamp at an instant before 1970, which no clock of a
+//! test host reads on demand, handed to `stamp_at`.
 
 #![allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
 
@@ -130,4 +130,21 @@ fn head_of(stream: &mut std::net::TcpStream) -> String {
             return head;
         }
     }
+}
+
+/// **A CLOCK BEFORE 1970 SCOPES NO SIGNATURE.** `now_stamp` hands the system
+/// clock to `stamp_at`. An instant one second before the epoch is refused as
+/// a read that cannot reach AWS, naming the clock; one hour, one minute and
+/// one second into 1970's second day is stamped by the closed form.
+#[test]
+fn a_clock_before_1970_scopes_no_signature() {
+    let epoch = std::time::UNIX_EPOCH;
+    let refused = stamp_at(epoch - std::time::Duration::from_secs(1)).unwrap_err();
+    assert_eq!(refused.kind, SecretError::Unreachable);
+    assert!(
+        refused.detail.contains("clock reads before 1970"),
+        "{refused}"
+    );
+    let later = epoch + std::time::Duration::from_secs(86_400 + 3_661);
+    assert_eq!(stamp_at(later).unwrap(), "19700102T010101Z");
 }

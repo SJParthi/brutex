@@ -4798,23 +4798,18 @@ fn calendar_filter() {
         let window = Window::new(day, day).expect("one day");
         for venue in Venue::ALL {
             let mut census = DropCensus::new();
-            let mut stored = 0_u32;
-            // A whole session's worth of minute bars plus one daily bar.
+            // A whole session's worth of minute bars plus one daily bar, and
+            // a closed day stores none of them.
             for minute in 0..375_i64 {
                 let secs = ist_epoch(y, m, dd, 9, 15, 0) + minute * SECS_PER_MINUTE;
-                match window.verdict(secs, Cadence::Minute, venue).expect("real") {
-                    None => stored += 1,
-                    Some(why) => census.count(why),
-                }
+                let why = window.verdict(secs, Cadence::Minute, venue).expect("real");
+                census
+                    .count(why.unwrap_or_else(|| panic!("{venue} {day}: minute {minute} stored")));
             }
-            match window
+            let why = window
                 .verdict(ist_epoch(y, m, dd, 0, 0, 0), Cadence::Daily, venue)
-                .expect("real")
-            {
-                None => stored += 1,
-                Some(why) => census.count(why),
-            }
-            assert_eq!(stored, 0, "{venue} {day}: a closed day stores nothing");
+                .expect("real");
+            census.count(why.unwrap_or_else(|| panic!("{venue} {day}: the daily bar stored")));
             assert_eq!(census.of(DropReason::OnClosedDay), 376, "{venue} {day}");
             assert_eq!(census.total(), 376, "{venue} {day}: every drop is counted");
             assert_eq!(census.unclassified_kept(), 0);

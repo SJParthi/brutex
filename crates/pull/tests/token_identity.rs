@@ -358,7 +358,6 @@ fn the_module_list_is_closed_over_every_definition_of_a_key() {
         !own.contains(&root.join("crates/pull/Cargo.toml")),
         "{own:?}"
     );
-    let mut strays = Vec::new();
     for path in files {
         let module = path
             .strip_prefix(&root)
@@ -371,21 +370,17 @@ fn the_module_list_is_closed_over_every_definition_of_a_key() {
             continue;
         }
         let code = code_only(&std::fs::read_to_string(&path).unwrap());
-        let defines = TYPES.iter().any(|name| {
-            ["struct", "enum", "type"]
-                .iter()
-                .any(|keyword| !word_positions(&code, &format!("{keyword} {name}")).is_empty())
-        }) || FUNCTIONS.iter().any(|(_, name)| {
-            !word_positions(&code, &format!("fn {name}(")).is_empty() && *name != "new"
-        });
-        if defines {
-            strays.push(module);
-        }
+        assert!(
+            !(TYPES.iter().any(|name| {
+                ["struct", "enum", "type"]
+                    .iter()
+                    .any(|keyword| !word_positions(&code, &format!("{keyword} {name}")).is_empty())
+            }) || FUNCTIONS.iter().any(|(_, name)| {
+                !word_positions(&code, &format!("fn {name}(")).is_empty() && *name != "new"
+            })),
+            "{module} defines a key type or builder this test does not read; list it"
+        );
     }
-    assert!(
-        strays.is_empty(),
-        "these files define a key type or builder this test does not read; list them: {strays:?}"
-    );
 }
 
 /// A fixture module whose census key holds a token, and a key builder that

@@ -404,10 +404,9 @@ fn run_stocks_on(store: &Path) -> Result<Report, ImportRefusal> {
         only: &[],
         store_root: store,
     };
-    drive(&run, |_, _| DayRead {
-        held: true,
-        ..DayRead::default()
-    })
+    // Day 1 is done in every journal this is run on, or the journal is
+    // refused: no run of it reads a day.
+    drive(&run, |on, _| unreachable!("{on:?} read: day 1 is done"))
 }
 
 /// A crash tears a line to `d`; the next load closes it with ` (torn)`, and
