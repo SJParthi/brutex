@@ -1401,10 +1401,10 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
     // used to walk as an empty list, and a run of no item ends `done`.
     let why = months(&root.0, Vendor::Gdfl, &other).unwrap_err();
     assert!(
-        why.starts_with("NSE/FNO/NIFTY/2019-03-28-1160000-CE names nothing under bars/gdfl: ")
-            && why.ends_with("2019-03-28-1160000-CE is absent"),
+        why.starts_with("NSE/FNO/NIFTY/2019-03-28-1160000-CE names nothing under bars/gdfl: "),
         "{why}"
     );
+    assert!(why.ends_with("2019-03-28-1160000-CE is absent"), "{why}");
     let spot_and_contracts = Scope {
         prefix: ["NSE", "FNO", "NIFTY"].map(str::to_owned).to_vec(),
         ..Scope::default()
@@ -1518,10 +1518,8 @@ fn the_walk_lists_every_month_and_what_it_lacks() {
         ..Scope::default()
     };
     let why = months(&root.0, Vendor::Gdfl, &under_file).unwrap_err();
-    assert!(
-        why.starts_with("cannot read ") && why.contains("bars/gdfl/MCX/INDEX: "),
-        "{why}"
-    );
+    assert!(why.starts_with("cannot read "), "{why}");
+    assert!(why.contains("bars/gdfl/MCX/INDEX: "), "{why}");
     std::os::unix::fs::symlink(base.join("NSE"), base.join("NSE2")).unwrap();
     let link = Scope {
         prefix: vec!["NSE2".to_owned()],
@@ -1564,10 +1562,11 @@ fn a_sidecar_name_held_by_anything_is_not_lacking() {
     assert_eq!(walked.sum_small, 0, "{walked:?}");
     let lacks = walked.months[0].lacks;
     assert_eq!(lacks.kinds().collect::<Vec<_>>(), [Kind::MonthSummary]);
-    assert!(
-        lacks.has(Kind::MonthSummary) && !lacks.has(Kind::DayIndex) && !lacks.has(Kind::SortIndex)
-    );
-    assert!(!Lacks::of(Kind::ALL).has(Kind::Recount) && !Lacks::of(Kind::ALL).has(Kind::Rekey));
+    assert!(lacks.has(Kind::MonthSummary));
+    assert!(!lacks.has(Kind::DayIndex));
+    assert!(!lacks.has(Kind::SortIndex));
+    assert!(!Lacks::of(Kind::ALL).has(Kind::Recount));
+    assert!(!Lacks::of(Kind::ALL).has(Kind::Rekey));
     assert_eq!(Lacks::of([Kind::Recount, Kind::Rekey]), Lacks::default());
     assert_eq!(Lacks::of(Kind::ALL).kinds().count(), 3);
     // A kind named twice is still lacked: a set, never a toggle.

@@ -1000,3 +1000,86 @@ fn a_staging_name_the_host_refuses_is_the_doors_refusal() {
         },
     );
 }
+
+/// **A MONTH FILED UNDER ANOTHER NAME GETS NO SIDECAR FROM THE DOOR (DB-B65,
+/// D-7430).** A GDFL month copied under Zerodha's name is refused by every
+/// reader; the door the summary and the sort index share refuses it too,
+/// under either hold, naming the bar file asked for, the `.prv` that says
+/// otherwise and the field, before a byte is written beside it. The month it
+/// was copied from keeps its own summary.
+#[test]
+fn a_month_filed_under_another_name_is_refused_by_the_door() {
+    use crate::provenance::{self, Day, Landing, Source, SourceKind};
+    let root = root("door-misfiled");
+    let gdfl = path(Timeframe::SECOND_1);
+    let zerodha = StorePath::new(PathParts {
+        vendor: Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: may(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    let mut writer = BarFile::open_or_create(&root, gdfl, SYMBOL).unwrap();
+    let appended = writer.append(&session(12, 1_500, 1, 9)).unwrap();
+    let landing = Landing {
+        source: Source {
+            kind: SourceKind::ArchiveMember,
+            name: "2031.zip!INVENTED.csv",
+            bytes: 4_242,
+            crc32: 0x0BAD_F00D,
+        },
+        day: Day::new(2031, 5, 12).unwrap(),
+        bar_definition: 2,
+        journal_ordinal: 7,
+        commit: None,
+        landed_at_micros: 1_940_000_000_000_000,
+    };
+    provenance::record(&root, &writer, gdfl, appended, &landing).unwrap();
+    drop(writer);
+    for kind in [
+        FileKind::Bars,
+        FileKind::Checksums,
+        FileKind::TimeIndex,
+        FileKind::SortIndex,
+        FileKind::Lock,
+        FileKind::Provenance,
+    ] {
+        let to = zerodha.with_file(kind).to_path_buf(&root);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(gdfl.with_file(kind).to_path_buf(&root), &to).unwrap();
+    }
+    let misfiled = StoreError::Misfiled {
+        path: zerodha.to_path_buf(&root),
+        sidecar: zerodha.with_file(FileKind::Provenance).to_path_buf(&root),
+        field: "vendor",
+    };
+    assert_eq!(
+        BarFile::open_existing(&root, zerodha, SYMBOL).err(),
+        Some(misfiled.clone()),
+        "every reader refuses it"
+    );
+    assert_eq!(
+        BarFile::month_summary_existing(&root, zerodha, SYMBOL),
+        Err(misfiled.clone())
+    );
+    assert_eq!(
+        BarFile::sort_index_existing(&root, zerodha, SYMBOL).err(),
+        Some(misfiled)
+    );
+    let sum = zerodha.with_file(FileKind::MonthSummary).to_path_buf(&root);
+    assert!(!sum.exists(), "no summary beside it");
+    assert!(!sum.with_extension("new.sum").exists(), "nothing staged");
+    assert_eq!(
+        fs::read(zerodha.with_file(FileKind::SortIndex).to_path_buf(&root)).unwrap(),
+        fs::read(gdfl.with_file(FileKind::SortIndex).to_path_buf(&root)).unwrap(),
+        "its sort index is left as it was copied"
+    );
+    assert_eq!(
+        BarFile::month_summary_existing(&root, gdfl, SYMBOL),
+        Ok(Summarized::Kept)
+    );
+}

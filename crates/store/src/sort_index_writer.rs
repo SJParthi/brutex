@@ -51,7 +51,7 @@ use std::sync::PoisonError;
 use super::{
     Access, Action, BarFile, DurableBatch, StoreError, VerifiedBlock, fault, fsync_dir, lock_fault,
     no_follow_through, open_read, open_rw, open_rw_through, refuse_link, refuse_links_below,
-    sync_hooked, table_of, time_index_path, write_fully, writer_open,
+    refuse_misfiled, sync_hooked, table_of, time_index_path, write_fully, writer_open,
 };
 use crate::flock::Flock;
 use crate::format::Bar;
@@ -370,7 +370,8 @@ impl BarFile {
 
     /// [`Self::open_to_sort`] under the hold `hold` names: the one door the
     /// sort index and the month summary share, so the two resolve one
-    /// generation and refuse one set of links.
+    /// generation, refuse one set of links and refuse a month filed under
+    /// another name as every reader does ([`StoreError::Misfiled`]).
     pub(super) fn open_held(
         store_root: &Path,
         path: StorePath<'_>,
@@ -395,6 +396,10 @@ impl BarFile {
         }
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
         let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+        // A MONTH FILED UNDER ANOTHER NAME GETS NO SIDECAR (DB-B65): every
+        // reader refuses it, so an index or a summary written beside it is a
+        // write no reader reads, under a name its own files deny (D-7430).
+        refuse_misfiled(root, path, &bars_path)?;
         let file = Self::validated(
             bars,
             bars_path,

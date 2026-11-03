@@ -125,11 +125,7 @@ impl Line {
 
 /// How a reader sees the month: its committed rows, and the summary it finds
 /// or why it finds none. Writes nothing.
-fn reader_view(
-    root: &Path,
-    path: StorePath<'_>,
-    symbol_id: u32,
-) -> Result<(u64, PathBuf, Result<(), Refused>), StoreError> {
+fn reader_view(root: &Path, path: StorePath<'_>, symbol_id: u32) -> ReaderView {
     // THE GENERATION EVERY READER OPENS (D-3350): the `.sum` a reader reads
     // sits beside the bar file it opened.
     let file = BarFile::open_existing(root, path, symbol_id)?;
@@ -138,9 +134,24 @@ fn reader_view(
     Ok((header.n_valid, path_beside(file.path()), found))
 }
 
+/// What [`reader_view`] answers.
+type ReaderView = Result<(u64, PathBuf, Result<(), Refused>), StoreError>;
+
 /// One month, built or confirmed, then checked from the read side.
 fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
-    let done = match BarFile::month_summary_existing(root, path, symbol_id) {
+    checked(
+        BarFile::month_summary_existing(root, path, symbol_id),
+        &|| reader_view(root, path, symbol_id),
+    )
+}
+
+/// The month's line from what the door answered, checked from the read side:
+/// `read_back` is the reader's view, asked only once the door is done. A
+/// writer or a repair can land between the two, so a read-back that is
+/// refused, or that refuses the summary the door kept or wrote, is said by
+/// name and never counted clean (D-7430).
+fn checked(door: Result<Summarized, StoreError>, read_back: &dyn Fn() -> ReaderView) -> Line {
+    let done = match door {
         Ok(done) => done,
         Err(StoreError::Missing { .. }) => return Line::NotHeld,
         Err(StoreError::Locked { path }) => {
@@ -162,7 +173,7 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         Summarized::Kept => None,
         Summarized::Built(because) => Some(because),
         Summarized::Empty => return Line::Empty,
-        Summarized::BelowThreshold => match reader_view(root, path, symbol_id) {
+        Summarized::BelowThreshold => match read_back() {
             Ok((n_valid, _, _)) => return Line::Small { n_valid },
             Err(why) => {
                 return Line::Refused {
@@ -176,7 +187,7 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
             };
         }
     };
-    match reader_view(root, path, symbol_id) {
+    match read_back() {
         Ok((n_valid, _, Ok(()))) => because.map_or(Line::Kept { n_valid }, |because| Line::Built {
             n_valid,
             because,
@@ -429,3 +440,7 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
 #[cfg(test)]
 #[path = "msum_builder_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "msum_builder_read_back_tests.rs"]
+mod read_back_tests;

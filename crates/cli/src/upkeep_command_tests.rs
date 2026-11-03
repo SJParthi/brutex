@@ -2370,10 +2370,8 @@ fn a_plan_names_the_lacking_months_and_none_after_the_step() {
     assert!(out.contains("SMALL: 1 month(s) with no .sum"), "{out}");
     let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--workers", "2"]);
     assert_eq!(code, OK, "{out}");
-    assert!(
-        out.contains("3 of the 4 month file(s)") && out.contains("1 under 1,024 bars owe none"),
-        "{out}"
-    );
+    assert!(out.contains("3 of the 4 month file(s)"), "{out}");
+    assert!(out.contains("1 under 1,024 bars owe none"), "{out}");
     assert!(out.contains("(3 built, 3 clean, 0 left)"), "{out}");
     let (code, out) = plain(&root.0, &["plan", "gdfl"]);
     assert_eq!(code, OK, "{out}");
@@ -2747,11 +2745,12 @@ fn an_import_during_a_run_stops_it_and_a_resume_finishes_the_same_bytes() {
         sidecar: None,
     };
     let held = Mutex::new(None);
+    // The import's lock is taken once, after the first item, and held.
     let after = |_: &str, _: &Outcome| {
-        let mut lock = held.lock().unwrap();
-        if lock.is_none() {
-            *lock = Some(RunLock::take(&root.0, &import).unwrap());
-        }
+        let _ = held
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| RunLock::take(&root.0, &import).unwrap());
     };
     let (code, out) = call(
         &root.0,
@@ -2837,12 +2836,10 @@ fn a_clock_stepped_back_gives_a_resume_its_own_id() {
     let _ = spot_months(&root.0, 3);
     let owned = root.0.clone();
     let store = move || Ok(owned.clone());
-    let (stop, seen) = (AtomicBool::new(false), AtomicUsize::new(0));
-    let after = |_: &str, _: &Outcome| {
-        if seen.fetch_add(1, Ordering::AcqRel) == 0 {
-            stop.store(true, Ordering::Release);
-        }
-    };
+    // One worker (the default): a stop asked after the first item ends the
+    // run there.
+    let stop = AtomicBool::new(false);
+    let after = |_: &str, _: &Outcome| stop.store(true, Ordering::Release);
     let host = Host {
         store: &store,
         commit: Some("0123456789abcdef0123456789abcdef01234567"),
