@@ -345,9 +345,17 @@ fn a_full_disk_or_a_kill_mid_install_renames_nothing_and_the_next_install_lands(
 }
 
 /// **A READ-ONLY PARTITION DIRECTORY IS NAMED, NOT HIDDEN.** The host's
-/// `EACCES` comes back with the staging name; nothing is written.
+/// `EACCES` comes back with the staging name; nothing is written. Run where the
+/// permission bits bind (D-0995): root writes a 0o555 directory anyway.
 #[test]
 fn a_read_only_partition_directory_is_refused_with_the_host_s_words() {
+    crate::support::where_permission_binds(
+        "ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words",
+        read_only_partition_body,
+    );
+}
+
+fn read_only_partition_body() {
     let scratch = Scratch::new("EACCES");
     let root = scratch.root();
     let one = epoch_one(root, 8, 4);
@@ -667,9 +675,17 @@ fn the_requires_append_never_writes_through_a_link() {
 /// made read-only (`chmod 444`) failed a re-seal that had nothing to write
 /// with the host's `EACCES`. Now the line in force answers `Ok(false)`
 /// through a read-only open, and a line still to write on a read-only file
-/// is refused with the path and the host's words, the file unchanged.
+/// is refused with the path and the host's words, the file unchanged. Run
+/// where the permission bits bind (D-0995): root writes a 0o444 file anyway.
 #[test]
 fn an_idempotent_requirement_opens_nothing_for_writing() {
+    crate::support::where_permission_binds(
+        "ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing",
+        idempotent_requirement_body,
+    );
+}
+
+fn idempotent_requirement_body() {
     let scratch = Scratch::new("REQRO");
     let root = scratch.root();
     let at = requires_path(root);

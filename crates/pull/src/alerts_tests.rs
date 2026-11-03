@@ -2320,8 +2320,18 @@ fn a_stopped_replacement_keeps_the_queues_own_second_name_and_no_other() {
 // made again; any other refusal is the host's own, returned as it came. A
 // directory this process may not write gives PermissionDenied, which the
 // mutant turned into the NotFound of removing a name that was never there.
+//
+// Run where the permission bits bind (D-0995): as root the 0o555 directory is
+// written anyway, so the refusal under test runs only in the uid 65534 child.
 #[test]
 fn create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it() {
+    crate::support::where_permission_binds(
+        "alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it",
+        create_fresh_refusal_body,
+    );
+}
+
+fn create_fresh_refusal_body() {
     let scratch = Scratch::new("fresh");
     let shut = scratch.root().join("SHUT");
     fs::create_dir_all(&shut).unwrap();
