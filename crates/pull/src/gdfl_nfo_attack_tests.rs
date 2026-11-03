@@ -434,7 +434,7 @@ fn monthly_reference(ticker: &str, on: Day) -> Option<(String, String)> {
 /// its window and refuses one before the trade's month and one whose first
 /// day lies past the horizon.
 #[test]
-fn dpn_14_the_oracles_refuse_what_is_not_canonical() {
+fn dpn_24_the_oracles_refuse_what_is_not_canonical() {
     assert_eq!(canonical_strike("100.5"), Some(10_050));
     assert_eq!(canonical_strike("195"), Some(19_500));
     for refused in [
@@ -1359,7 +1359,10 @@ fn good_row(sod: u32) -> String {
 fn dpn_13_a_hundred_thousand_bent_files_never_panic_and_refuse_at_a_line() {
     let mut rng = Rng(0x726f_7773_6466_6c31);
     let on = d(2024, 4, 1);
-    let mutate: [fn(&mut Rng, String) -> String; 9] = [
+    // An all-digit open interest past i64 is the one bend whose refusal is
+    // `OpenInterestRefused` (BASE-COV-PULL PS3: none of the others drew it).
+    let mutate: [fn(&mut Rng, String) -> String; 10] = [
+        |_, r| r.replacen(",300", ",99999999999999999999", 1),
         |_, r| r.replace(',', ",,"),
         |_, r| r.replacen("10.05", "10.055", 1),
         |_, r| r.replacen("10.05", "", 1),
@@ -1440,12 +1443,13 @@ fn dpn_13_a_hundred_thousand_bent_files_never_panic_and_refuse_at_a_line() {
                     | NfoRefusal::OpenInterestRefused { line } => {
                         let at = usize::try_from(line).unwrap();
                         assert!(at >= 2 && at <= n + 2, "line {line} of {n} rows");
-                        if let Some(first) = bent_at {
-                            assert!(
-                                at >= first,
-                                "refused line {at} before the first bent line {first}"
-                            );
-                        }
+                        // A file refused at a line had a bent line: an intact
+                        // file refused by a line is a failure, never skipped.
+                        let first = bent_at.expect("a line is refused only in a bent file");
+                        assert!(
+                            at >= first,
+                            "refused line {at} before the first bent line {first}"
+                        );
                     }
                     other => panic!("{other:?}"),
                 }

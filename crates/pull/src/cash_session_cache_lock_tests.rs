@@ -226,16 +226,22 @@ fn an_installer_beside_readers_installs_once() {
         thread::sleep(Duration::from_millis(60));
         reader.release().expect("the reader leaves");
         let whole = vec![(day(date).days_from_epoch(), true, false)];
+        let judge = |nth: usize, answer: Result<Answer, String>| match (nth % 3, answer) {
+            (0, installed) => assert_eq!(installed, Ok(Vec::new()), "installer {nth}"),
+            (_, Ok(answer)) => assert_eq!(answer, whole, "reader {nth}"),
+            (_, Err(why)) => assert!(
+                why.contains("is absent") || why.contains("missing locally"),
+                "reader {nth} may only find the day not yet installed: {why}"
+            ),
+        };
         for (nth, answer) in racing.join().expect("race").into_iter().enumerate() {
-            match (nth % 3, answer) {
-                (0, installed) => assert_eq!(installed, Ok(Vec::new()), "installer {nth}"),
-                (_, Ok(answer)) => assert_eq!(answer, whole, "reader {nth}"),
-                (_, Err(why)) => assert!(
-                    why.contains("is absent") || why.contains("missing locally"),
-                    "reader {nth} may only find the day not yet installed: {why}"
-                ),
-            }
+            judge(nth, answer);
         }
+        // A reader after the race is judged by the same rule, so the
+        // whole-master answer is checked whatever order the racers ran in
+        // (BASE-COV-PULL PS3: on a loaded host every racing reader may come
+        // first and find the day absent).
+        judge(1, lifecycle(&temp.0, day(date)));
         let (payload, metadata) = paths(&temp.0, day(date));
         assert_eq!(fs::read(&payload).expect("payload"), *bytes);
         assert_eq!(
