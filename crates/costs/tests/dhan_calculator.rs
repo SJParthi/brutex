@@ -725,6 +725,18 @@ fn precise_total(case: &Case) -> Result<Paisa, ChargeError> {
     Ok(paisa(total))
 }
 
+/// One precise-total cell of the printed table: the rupee figure, or the
+/// refusal in words.
+fn shown(precise: &Result<i64, ChargeError>) -> String {
+    match precise {
+        Ok(raw) => format!("{}", costs::exact::Rupees(paisa(*raw))),
+        Err(ChargeError::OpenIntradayPosition { .. }) => {
+            "refused: open intraday position".to_owned()
+        }
+        Err(other) => format!("refused: {other}"),
+    }
+}
+
 #[test]
 fn every_golden_case_has_a_precise_figure_or_a_named_refusal() {
     let got: Vec<(&str, Result<i64, ChargeError>)> = GOLDEN
@@ -735,20 +747,13 @@ fn every_golden_case_has_a_precise_figure_or_a_named_refusal() {
         "| case | Dhan page total | Dhan-mode total | precise total |\n|---|---|---|---|\n",
     );
     for (case, (_, precise)) in GOLDEN.iter().zip(&got) {
-        let shown = match precise {
-            Ok(raw) => format!("{}", costs::exact::Rupees(paisa(*raw))),
-            Err(ChargeError::OpenIntradayPosition { .. }) => {
-                "refused: open intraday position".to_owned()
-            }
-            Err(other) => format!("refused: {other}"),
-        };
         writeln!(
             table,
             "| {} | {} | {} | {} |",
             case.name,
             costs::exact::Rupees(paisa(case.page[7])),
             costs::exact::Rupees(quoted(case).total().expect("in range")),
-            shown
+            shown(precise)
         )
         .expect("a String takes every write");
     }
@@ -1213,4 +1218,67 @@ fn every_golden_case_closes_in_the_day_ledger_exactly_as_both_modes_price_it() {
         }
         assert_eq!(total, *precise, "{}", case.name);
     }
+}
+
+/// BASE-COV-LIBS-LS4: a case built at run time (the `const fn` that fills
+/// [`GOLDEN`] otherwise only ever runs at compile time) that the precise path
+/// refuses at its first step: BSE futures, for which no rate is recorded. Both
+/// precise helpers name that refusal, and the printed table says it in words.
+/// No golden reading is refused this way, so without this case neither
+/// helper's refusal nor the table's general refusal cell ever ran.
+#[test]
+fn a_case_with_no_rate_card_is_refused_by_every_precise_helper() {
+    let no_rate = ChargeError::NoRate {
+        charge: "futures exchange transaction charge (BSE)",
+        reason: "no BSE futures rate is recorded in this repository",
+    };
+    // 1. The builder, run at run time, keeps every part it is given.
+    let refused = case(
+        "BSE FUT 1 100->101",
+        FUT,
+        BSE,
+        1,
+        Some(100_00),
+        Some(101_00),
+        [1, 2, 3, 4, 5, 6, 7, 8],
+    );
+    assert_eq!(refused.name, "BSE FUT 1 100->101");
+    assert_eq!((refused.kind, refused.exchange), (FUT, BSE));
+    assert_eq!(refused.quantity, 1);
+    assert_eq!((refused.buy, refused.sell), (Some(100_00), Some(101_00)));
+    assert_eq!(refused.page, [1, 2, 3, 4, 5, 6, 7, 8]);
+    // 2. The day's total and 3. the net trade both refuse at the card.
+    assert_eq!(precise_total(&refused), Err(no_rate));
+    assert_eq!(precise_net(&refused).err(), Some(no_rate));
+    // 4. The table cell says the refusal, not a figure.
+    assert_eq!(
+        shown(&Err(no_rate)),
+        "refused: no rate for futures exchange transaction charge (BSE): \
+         no BSE futures rate is recorded in this repository"
+    );
+    // 5. CONTROL: the same trade on NSE prices through both helpers.
+    let priced = case(
+        "NSE FUT 1 100->101",
+        FUT,
+        NSE,
+        1,
+        Some(100_00),
+        Some(101_00),
+        [0; 8],
+    );
+    assert!(precise_total(&priced).is_ok());
+    assert!(precise_net(&priced).is_ok());
+    // 6. COMBINED: a buy-only BSE futures case refuses at the card before
+    //    anything could ask whether it is squared off.
+    let buy_only = case("BSE FUT buy only", FUT, BSE, 1, Some(100_00), None, [0; 8]);
+    assert_eq!(precise_total(&buy_only), Err(no_rate));
+    // 7. The two named cells: a figure, and the open intraday refusal.
+    assert_eq!(shown(&Ok(74_28)), "₹74.28");
+    assert_eq!(
+        shown(&Err(ChargeError::OpenIntradayPosition {
+            bought: 50,
+            sold: 0
+        })),
+        "refused: open intraday position"
+    );
 }
