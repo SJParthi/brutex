@@ -4120,7 +4120,10 @@ mod tests {
         let mut bars = ramp_with_no_truncated_window(8, 1);
         // One bar lifted by a single paisa, which moves the two windows that
         // end on it and nothing else.
-        if let Some(b) = bars.get_mut(2_000) {
+        {
+            let b = bars
+                .get_mut(2_000)
+                .expect("a fixture index inside the collection");
             *b = Candle::new(
                 b.ts_micros,
                 b.close + 1,
@@ -4296,7 +4299,10 @@ mod refused_bar_tests {
         // that refused everything would satisfy the assertion above and be
         // useless, which is the mutant this second half kills.
         let mut healthy = bars.clone();
-        if let Some(slot) = healthy.get_mut(2) {
+        {
+            let slot = healthy
+                .get_mut(2)
+                .expect("a fixture index inside the collection");
             *slot = ok(2, 2_600_150);
         }
         let g = forward_of(&healthy, Horizon::bars(2).expect("a non-zero horizon"));
@@ -4345,7 +4351,10 @@ mod refused_bar_tests {
         let mut clean: Vec<Candle> = (0..6).map(|m| ok(m, 2_600_000 + m * 100)).collect();
         clean.extend((6..16).map(|m| ok(m, 2_600_500)));
         let mut dirty = clean.clone();
-        if let Some(slot) = dirty.get_mut(3) {
+        {
+            let slot = dirty
+                .get_mut(3)
+                .expect("a fixture index inside the collection");
             *slot = bad(3);
         }
 
@@ -4427,7 +4436,10 @@ mod refusal_coverage {
         let prior = dirty
             .get(victim.saturating_sub(1))
             .map_or(0, |bar| bar.ts_micros);
-        if let Some(bar) = dirty.get_mut(victim) {
+        {
+            let bar = dirty
+                .get_mut(victim)
+                .expect("a fixture index inside the collection");
             bar.ts_micros = prior;
         }
         assert!(dirty.get(victim).is_some_and(|bar| bar.check().is_ok()));
@@ -4444,7 +4456,10 @@ mod refusal_coverage {
         let mut dirty = clean.clone();
         let victim = dirty.len().saturating_sub(100);
         let stamp = dirty.get(victim).map_or(0, |bar| bar.ts_micros);
-        if let Some(bar) = dirty.get_mut(victim) {
+        {
+            let bar = dirty
+                .get_mut(victim)
+                .expect("a fixture index inside the collection");
             *bar = Candle::new(
                 stamp,
                 5_000_000_000_000_000_000,
@@ -5417,7 +5432,10 @@ mod missing_minute_tests {
         let mut dirty = clean.clone();
         let victim = dirty.len() - 100;
         let stamp = dirty.get(victim).map_or(0, |bar| bar.ts_micros);
-        if let Some(bar) = dirty.get_mut(victim) {
+        {
+            let bar = dirty
+                .get_mut(victim)
+                .expect("a fixture index inside the collection");
             // `high` below `open`: `Candle::check` refuses it.
             *bar = Candle::new(
                 stamp, 2_500_000, 2_499_000, 2_498_000, 2_498_500, 1, OI_NULL,

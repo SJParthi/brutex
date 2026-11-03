@@ -2688,7 +2688,10 @@ mod tests {
     #[test]
     fn the_prefix_sum_refuses_a_draw_past_the_exact_bound() {
         let mut series = vec![0_i64; 8];
-        if let Some(first) = series.first_mut() {
+        {
+            let first = series
+                .first_mut()
+                .expect("a fixture index inside the collection");
             *first = 1_i64 << 50;
         }
         let prefix = super::ExactPrefix::new(&series, 8).expect("8 x 2^50 is the limit itself");
