@@ -498,3 +498,40 @@ fn a_table_directory_that_is_a_file_is_refused_by_every_door() {
     let slot = load_one(&store, Table::Calendar, CalendarTable::build);
     assert!(slot.table().is_err(), "refused, never served compiled");
 }
+
+// ───── BASE-COV-PULL repair 2 (D-7334) ─────
+
+/// A table directory holding more names than the bound is refused by name
+/// before any is read past it, at exactly the bound it is read whole, and a
+/// hidden name that is not a staging file is a stray named first in name
+/// order (extremes at once: the bound, one past it, a dot-name and a staging
+/// name side by side).
+#[test]
+fn a_table_directory_past_its_bound_is_refused_and_a_hidden_name_is_a_stray() {
+    let store = crate::gdfl_fixtures::scratch("ref-cov-generations");
+    let table = Table::SymbolChanges;
+    let dir = table.dir(&store);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(table.path(&store, 1), b"x").unwrap();
+    std::fs::write(table.path(&store, 2), b"x").unwrap();
+    std::fs::write(dir.join(".zq-hidden"), b"x").unwrap();
+    std::fs::write(dir.join(".1.2.3.staging"), b"x").unwrap();
+    let refused = newest_within(&store, table, 3).unwrap_err();
+    assert_eq!(refused.kind, RefusalKind::TooMany);
+    assert_eq!(refused.detail, "more than 3 names");
+    let (found, strays) = newest_within(&store, table, 4).unwrap();
+    assert_eq!(found, Some((2, table.path(&store, 2))));
+    assert_eq!((strays.staging, strays.other), (1, 1));
+    assert_eq!(strays.first_other.as_deref(), Some(".zq-hidden"));
+    assert_eq!(newest(&store, table).unwrap().0, found);
+}
+
+/// A seed field is the text as the grammar carries it: trimmed, its
+/// separators and line breaks turned to spaces, and an empty value written
+/// `-` so a seed never fails on an empty compiled value.
+#[test]
+fn a_seed_field_is_trimmed_carried_or_a_dash() {
+    assert_eq!(field(""), "-");
+    assert_eq!(field("  \t "), "-");
+    assert_eq!(field(" a|b\nc\rd "), "a b c d");
+}

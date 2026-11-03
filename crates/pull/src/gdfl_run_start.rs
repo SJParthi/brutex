@@ -180,3 +180,9 @@ mod answer_tests {
         );
     }
 }
+
+// BASE-COV-PULL repair 2 (D-7334): the api child's own gate over its real
+// stdin and stdout, in a child of the test binary, and `await_go` itself.
+#[cfg(test)]
+#[path = "gdfl_run_start_cov_tests.rs"]
+mod cov_tests;

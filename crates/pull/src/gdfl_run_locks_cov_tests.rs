@@ -305,3 +305,78 @@ fn a_probe_of_what_is_no_lock_file_is_unprobed_by_name() {
     assert!(matches!(gone, LockState::Unprobed { .. }), "{gone:?}");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ───── BASE-COV-PULL repair 2 (D-7334) ─────
+
+/// A stop file a dead run left beside the lock is removed by the next run
+/// that takes it; the locks say the layout they were taken for; a claim past
+/// [`CLAIM_MAX`] is refused before a byte is written; and a release that
+/// cannot remove its stop (a directory stands there) names it, frees the
+/// lock all the same, and the next take leaves that directory as it is
+/// (extremes at once: a claim one byte past the bound, and a stop that is
+/// not a file).
+#[test]
+fn a_take_clears_a_dead_stop_and_a_release_names_what_it_could_not_remove() {
+    let store = scratch("cov-locks-stop");
+    std::fs::create_dir_all(store.join("manifest/v4/gdfl")).unwrap();
+    let first = RunLocks::take(&store, "indices", 0).unwrap();
+    assert_eq!(first.layout(), GdflLayout::V4);
+    let stop = first.stop_path();
+    first.release().unwrap();
+    std::fs::write(&stop, b"a stop no live run asked for").unwrap();
+    let second = RunLocks::take(&store, "indices", 0).unwrap();
+    assert!(
+        !stop.exists(),
+        "a dead run's stop is removed by the next take"
+    );
+    let mut long = Claim::parse(&claim_line()).unwrap();
+    let line = long.line().len();
+    long.host = format!("{}{}", long.host, "z".repeat(CLAIM_MAX + 1 - line));
+    assert_eq!(long.line().len(), CLAIM_MAX + 1);
+    let refused = second.write_claim(&long).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "a claim of {} bytes is past the {CLAIM_MAX}-byte bound",
+            CLAIM_MAX + 1
+        )
+    );
+    std::fs::create_dir_all(stop.join("in-the-way")).unwrap();
+    let said = second.release().unwrap_err();
+    assert!(said.starts_with(&stop.display().to_string()), "{said}");
+    let third = RunLocks::take(&store, "indices", 0).unwrap();
+    assert!(
+        stop.join("in-the-way").is_dir(),
+        "a directory is never removed"
+    );
+    std::fs::remove_dir_all(&stop).unwrap();
+    third.release().unwrap();
+}
+
+/// What the store lock's refusal names for each kind lock a v4 run holds: a
+/// claim being written, and a claim that does not parse, each by its lock.
+#[test]
+fn the_shared_holders_name_a_claim_being_written_and_one_that_is_not_one() {
+    let store = scratch("cov-locks-holders");
+    std::fs::create_dir_all(store.join("manifest/v4/gdfl")).unwrap();
+    let empty = RunLocks::take(&store, "indices", 0).unwrap();
+    let garbled = RunLocks::take(&store, "stocks", 0).unwrap();
+    std::fs::write(store.join(kind_lock("stocks")), b"not a claim").unwrap();
+    let said = shared_holders(&store);
+    assert!(
+        said.contains(&format!(
+            "{}: a run whose claim is being written",
+            kind_lock("indices")
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "{}: a claim that is not one: ",
+            kind_lock("stocks")
+        )),
+        "{said}"
+    );
+    empty.release().unwrap();
+    garbled.release().unwrap();
+}

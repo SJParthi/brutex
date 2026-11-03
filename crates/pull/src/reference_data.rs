@@ -2432,6 +2432,17 @@ impl Strays {
 /// `store`, the names that are not generations, or `Ok(None)` when the
 /// directory holds no generation.
 fn newest(store: &Path, table: Table) -> Result<(Option<(u64, PathBuf)>, Strays), Refusal> {
+    newest_within(store, table, MAX_GENERATIONS)
+}
+
+/// [`newest`] with its bound on the names a directory may hold as an
+/// argument (BASE-COV-PULL repair 2, D-7334: a test reaches the bound with
+/// three names, not a million); production passes [`MAX_GENERATIONS`].
+fn newest_within(
+    store: &Path,
+    table: Table,
+    cap: usize,
+) -> Result<(Option<(u64, PathBuf)>, Strays), Refusal> {
     let dir = table.dir(store);
     let refuse = |kind, detail: String| Refusal {
         table,
@@ -2450,10 +2461,10 @@ fn newest(store: &Path, table: Table) -> Result<(Option<(u64, PathBuf)>, Strays)
     let mut best: Option<u64> = None;
     let mut strays = Strays::default();
     for (seen, entry) in entries.enumerate() {
-        if seen >= MAX_GENERATIONS {
+        if seen >= cap {
             return Err(refuse(
                 RefusalKind::TooMany,
-                format!("more than {MAX_GENERATIONS} names"),
+                format!("more than {cap} names"),
             ));
         }
         let entry = entry.map_err(|why| refuse(RefusalKind::Read, why.to_string()))?;
