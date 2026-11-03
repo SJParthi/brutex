@@ -347,17 +347,35 @@ fn store_variants() -> usize {
     let end = block.find("\n}\n").unwrap();
     block[..end]
         .lines()
-        .filter(|line| {
-            line.strip_prefix("    ").is_some_and(|rest| {
-                rest.starts_with(|c: char| c.is_ascii_uppercase())
-                    && (rest.ends_with(" {") || rest.ends_with(','))
-                    && rest
-                        .trim_end_matches([' ', '{', ','])
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric())
-            })
-        })
+        .filter(|line| declares_a_variant(line))
         .count()
+}
+
+/// Whether `line` of the enum's block declares a variant: four spaces, a
+/// capitalised name of letters and digits, and ` {` or `,` after it.
+fn declares_a_variant(line: &str) -> bool {
+    line.strip_prefix("    ").is_some_and(|rest| {
+        rest.starts_with(|c: char| c.is_ascii_uppercase())
+            && (rest.ends_with(" {") || rest.ends_with(','))
+            && rest
+                .trim_end_matches([' ', '{', ','])
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+/// The variant counter reads declaration lines only: a struct variant, a unit
+/// variant, and nothing that merely looks like one — a name with no `{` or
+/// `,` after it, a lower-case field, a nested line, or words that are not a
+/// name.
+#[test]
+fn the_variant_counter_reads_declaration_lines_only() {
+    assert!(declares_a_variant("    Locked {"));
+    assert!(declares_a_variant("    EmptyBatch,"));
+    assert!(!declares_a_variant("    Unterminated"));
+    assert!(!declares_a_variant("    path: PathBuf,"));
+    assert!(!declares_a_variant("        Nested {"));
+    assert!(!declares_a_variant("    Not A Name,"));
 }
 
 fn invented_bar() -> Bar {
