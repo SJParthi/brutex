@@ -1150,3 +1150,9 @@ mod cloud_mutant_tests {
 #[cfg(test)]
 #[path = "gdfl_cm_auction_v2_tests.rs"]
 mod v2_tests;
+
+// BASE-COV-PULL-PS1 (D-7335): the auction sidecar's lock and sync refusals
+// and a relative root's first folder, driven.
+#[cfg(test)]
+#[path = "gdfl_cm_auction_ps1_tests.rs"]
+mod ps1_tests;
