@@ -869,3 +869,60 @@ fn unknown_document_members_do_not_enter_the_graph() {
         ])
     );
 }
+
+/// BASE-COV-LIBS-LS4: the key-path reader and the inline-table reader at
+/// shapes no manifest in this workspace writes: a four-part key that is not
+/// under `target`, a `target` key whose table is no dependency table, and an
+/// inline table nested inside an inline table.
+#[test]
+fn the_key_and_inline_table_readers_hold_at_shapes_no_manifest_writes() {
+    let path = |parts: &[&str]| -> Vec<String> { parts.iter().map(|p| (*p).to_owned()).collect() };
+    // 1. Four parts, not under `target`: no dependency.
+    assert_eq!(
+        dependency_of(&path(&["package", "metadata", "docs", "rs"])),
+        None
+    );
+    // 2. Under `target`, but its table is no dependency table.
+    assert_eq!(
+        dependency_of(&path(&["target", "cfg(unix)", "lints", "clippy"])),
+        None
+    );
+    // 3. CONTROL: the same shape with a dependency table is one, and so is
+    //    the plain `dependencies.NAME`.
+    let under = path(&["target", "cfg(unix)", "dependencies", "libc", "version"]);
+    assert_eq!(dependency_of(&under), Some(("libc", &under[4..])));
+    let plain = path(&["dev-dependencies", "vocab"]);
+    assert_eq!(dependency_of(&plain), Some(("vocab", &plain[2..])));
+    // 4. Too short to name anything; and a dependency table third, but not
+    //    under `target`.
+    assert_eq!(dependency_of(&path(&["dependencies"])), None);
+    assert_eq!(
+        dependency_of(&path(&["package", "x", "dependencies", "y"])),
+        None
+    );
+    // 5. COMBINED: a `package` key one table down is no rename; the
+    //    top-level one is, whatever nests beside it.
+    assert_eq!(
+        package_of(r#"{ path = "../x", features = { package = "inner" } }"#),
+        None
+    );
+    assert_eq!(
+        package_of(r#"{ f = { a = 1, package = "inner", c = 3 } }"#),
+        None,
+        "a comma inside the nested table splits nothing"
+    );
+    assert_eq!(
+        package_of(r#"{ meta = { a = [1, { b = 2 }] }, package = "outer" }"#),
+        Some("outer".to_owned())
+    );
+    // 6. OUT OF THE BOX: a comma inside a nested table does not split the
+    //    outer one, and a closing brace never takes the depth below zero.
+    assert_eq!(
+        package_of(r#"{ x = { y = 1, z = 2 }, package = "kept" }"#),
+        Some("kept".to_owned())
+    );
+    assert_eq!(
+        package_of(r#"{ } }, package = "after" }"#),
+        Some("after".to_owned())
+    );
+}
