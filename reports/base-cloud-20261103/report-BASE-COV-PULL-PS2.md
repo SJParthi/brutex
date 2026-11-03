@@ -2,7 +2,7 @@ STATUS: IN PROGRESS
 
 # report-BASE-COV-PULL-PS2 (TOKEN BASE-COV-PULL-PS2-20261103-1)
 
-Interim report, 3 Nov 2026 18:03 IST. Session BASE-COV-PULL-PS2 of the 3 Nov 2026 cloud wave, group G2 of
+Interim report, 3 Nov 2026 18:03 IST, updated 22:40 IST. Session BASE-COV-PULL-PS2 of the 3 Nov 2026 cloud wave, group G2 of
 `SHARDS.md`. Branch `cloud/cov-pull-ps2-20261103`, cut from `2e7a0b6d3b568190024e2e9b405e803805f3fdca` (PS1's
 GREEN-TIP). Owner file `reports/base-cloud-20261103/OWNER-BASE-COV-PULL-PS2.md` (commit `4f0ffe7c`).
 This file is replaced by the final report; until then it says what is on the branch.
@@ -30,7 +30,23 @@ plus `nse::tests::deduplicating_index_links_costs_one_probe_each_rather_than_a_s
 file, under instrumentation); reading 30 min. `ROUTE-B DONE ... every package measured and read (pull)`, exit 0.
 
 - whole `pull`: lines 153,379/160,118 (6,739 uncovered), branches 11,562/14,244 (2,682 sides).
-- G2's 77 files: lines 52,247/54,617 (2,370 uncovered), branches 3,800/4,622 (822 sides).
+- G2's 77 files: lines 52,247/54,617 (2,370 uncovered), branches 3,800/4## Update, 3 Nov 2026 22:40 IST (code tip e7b53679)
+
+- Route B at c1ff1cc9 (run of 21:00-21:40 IST): G2's 92 files (the 77 of SHARDS.md and 15 new test files) leave
+  1,836 lines and 599 sides, every one classified: (F) 610, (U) 162, IGNORED 1,597 (L-BCP-3), FAULT 35, HARNESS 24,
+  HOST 4, RACE 3. START had 1,079 unclassified G2 rows.
+- Since then: an audit of every (U) proof against recipe v4 ("a direct call is an input") found 16 rows reachable by
+  a direct call; all are now driven by tests (0604be13, 5d1c366a). 23 (U) rows rest on a private-field type invariant
+  and are marked so.
+- The rows once left to G1's import harness are driven by direct calls of a hand-built Filing and DayFiler
+  (e7b53679): the one-thread fallback, the not-writable stop (the four HOST rows), the refused begin with the root
+  gone, the member-less new generation.
+- In progress: the FAULT and RACE rows (flock, fstat, read and write faults on open descriptors) through D-7336 test
+  seams; then the final Route B, the lists and this report's final form.
+- Gates at ef09f6f2: fmt and clippy -D warnings clean (pull all targets and the workspace); pull suite 3,144 passed,
+  6 failed (G3's root-only host reds, all six passing as uid 65534), 54 ignored.
+
+,622 (822 sides).
 
 ## Work so far (all pushed)
 
