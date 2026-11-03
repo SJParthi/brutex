@@ -172,9 +172,18 @@ fn a_write_refuses_each_body_url_and_root_it_cannot_receipt() {
 }
 
 /// A root the writer can enter and not list: the lock opens, the listing
-/// under it does not, and both answers carry the same reason.
+/// under it does not, and both answers carry the same reason. Run where the
+/// permission bits bind (D-0995): as root a root of mode 0o300 lists anyway,
+/// so the refusal under test would never run.
 #[test]
 fn a_root_that_will_not_list_under_the_lock_is_refused_on_both_counts() {
+    crate::support::where_permission_binds(
+        "master_snapshots::cov_tests::a_root_that_will_not_list_under_the_lock_is_refused_on_both_counts",
+        a_root_that_will_not_list_under_the_lock_is_refused_on_both_counts_body,
+    );
+}
+
+fn a_root_that_will_not_list_under_the_lock_is_refused_on_both_counts_body() {
     let root = scratch("cov-write-unlisted");
     fs::write(root.join(LOCK_FILE), b"").unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).unwrap();
