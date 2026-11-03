@@ -9127,8 +9127,6 @@ report, NEEDS THE MAC).
 <!-- slot FNO-PAUSE -->
 
 <!-- slot FNO-PORTFOLIO -->
-### FNO-PORTFOLIO: one account's money rules and order-rate rules (D-8180 to D-8183)
-
 | Id | Invariant | Proof | |
 |---|---|---|---|
 | FNO-PORT-I01 | **At most twenty positions at once.** A slot is taken when an entry is sent and freed only after the second of the exit's last fill or of a zero-fill cancel; through that second the 21st entry is refused `position_cap` and counted (SPEC 11.4, OP-19) | `the_twentieth_position_is_admitted_and_the_twenty_first_refused`, `the_slot_is_taken_at_send_and_freed_at_the_last_fill_or_a_zero_fill_cancel`, `after_any_random_sequence_slots_exposure_trades_and_locks_hold` in `crates/runner/src/fno_portfolio.rs` | ✓ |

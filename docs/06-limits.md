@@ -22163,8 +22163,6 @@ stack peak is not a timing; these rows bound memory, not time.
 <!-- slot FNO-PAUSE -->
 
 <!-- slot FNO-PORTFOLIO -->
-### FNO-PORTFOLIO: what the account does not bound or has not measured (D-8180 to D-8183)
-
 | ID | Limit | Why it is not O(1) / not closed | Bound | Package |
 |---|---|---|---|---|
 | L-FNO-PORT-01 | `Account::schedule_second` sorts one second's batch | exits before entries, then start second, then the tie-break order (D-8182), so the batch is sorted before it is acted on: O(n log n) in that second's orders, the second's exits and every entry signalled or queued for it. Every other call is fixed work over twenty slots and three rings | n is the second's own orders, never the history: the exit orders of at most twenty positions, plus the second's entries | FNO-PORTFOLIO |
