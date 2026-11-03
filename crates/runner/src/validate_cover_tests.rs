@@ -1770,3 +1770,53 @@ fn the_v4_walk_refuses_no_fold_a_halted_search_and_an_empty_training_execution()
         ))
     );
 }
+
+/// A FOLD WITH NO TEST WINDOW IS REFUSED, not walked: with one split over
+/// sixteen sessions the fold's test window starts one horizon after its
+/// training boundary, and a horizon that spans the rest of the series leaves
+/// it empty. Refused as `DiscontiguousTraining` for that fold, before any search.
+#[test]
+fn a_fold_whose_horizon_spans_the_rest_of_the_series_is_refused() {
+    let bars = crate::synthetic::sessions(16);
+    let column = built(&bars);
+    let nifty = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("an allowed index");
+    let execution = crate::exit_grid_policy::ExecutionSeriesV1::new(
+        &nifty,
+        "test-feed",
+        "test-commit",
+        [0xA5; 32],
+        &bars,
+    )
+    .expect("complete identity");
+    let (long, short) = grid_pair_v4(&nifty, "test-feed", "test-commit", [0xA5; 32], &bars);
+    let complete = crate::Sweeper::new(engine::Ladder::with_min_hits(2_200).with_ceiling(20_000));
+    let halfway = u32::try_from(bars.len() / 2).expect("a small series");
+    assert_eq!(
+        crate::split::anchored_folds(bars.len(), super::tests::h(halfway), 1)
+            .first()
+            .map(|fold| fold.test.is_empty()),
+        Some(true),
+        "the premise: one split, and a horizon of half the series"
+    );
+    let mut builder = |slice: &[indicators::Candle]| Ok(built(slice));
+    assert_eq!(
+        super::walk_forward_projected_prepared_anchored_search_v4(
+            &bars,
+            &column,
+            execution,
+            60_000_000,
+            super::tests::h(halfway),
+            1,
+            &complete,
+            &mut builder,
+            &long,
+            &short,
+        )
+        .map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV4::DiscontiguousTraining { fold: 0 })
+    );
+}
