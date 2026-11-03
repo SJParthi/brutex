@@ -101,6 +101,83 @@ green as root the way D-0995 does it (`where_permission_binds`), by the group th
 Also for the Mac: Route B whole:pull on its pin, the shadow GET re-check, macOS rows, non-root 14-core tests, the
 54 ignored real-data tests (L-BCP-3), the D1 landing.
 
-## Step (2): G1 coverage
+## Step (2): G1 coverage (interim; the final figures replace this section)
 
-In progress (next entries below).
+### The instrument on this host
+
+The pinned nightly installs here and every pin matches: `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`
+(`nightly-2026-08-08`), `llvm-cov` and `llvm-profdata` `LLVM version 23.1.0-rust-1.99.0-nightly`. Route B is the
+kit's `d3-route-b-cloud.sh` unchanged (sha256 `f032b525...`), called with `D3_NIGHTLY`, `D3_LLVM_BIN`, `D3_DIR` (the
+kit's `d3-covset.mjs`) and `D3_CARGO` set to a wrapper that runs the nightly cargo under umask 0022, the script's
+own folders being made under umask 0000. `CARGO_TARGET_DIR=$K/cov` is a link to the one target dir.
+
+**Two host traps, both of which silently drop coverage on a root host** (for PS2, PS3 and the cloud kit):
+
+1. `where_permission_binds` children run as uid 65534 and write their profiles into the same folder as the
+   parent. Under the scratchpad (`/tmp/claude-0`, mode 0700) they could not reach it and wrote nothing: run 1
+   (stopped) had 10 root-owned profiles and none of uid 65534. The profile folder must be on a path uid 65534
+   can traverse and write (here `/home/user/ps1-prof`, mode 0777).
+2. umask 0000 for the whole run (my first fix for 1) made a test's config file 0666 and turned
+   `gdfl_dropbox::tests::a_missing_link_is_a_named_wait` red (`dropbox_config_too_open`); hence the wrapper.
+
+### Route B on the GREEN-TIP (run 2, `2e7a0b6d3b56`)
+
+`routeb.sh /home/user/ps1-deep 2e7a0b6d3b56-2` (a worktree at the GREEN-TIP; set = the kit's f98a899398f6 set's
+206 coverage lines, every pull file the tool reports, which are this tip's files exactly). Build 1 min, tests 4
+min (2939 passed, 10 failed: the 9 host reds and the umask one above, 54 ignored), 73 profiles, read 30 min.
+`ROUTE-B DONE ... EXIT 0`.
+
+- **whole:pull: lines 153,352/160,118 (6,766 uncovered), branches 11,561/14,244 (2,683 uncovered sides);**
+  173 of 206 files with a gap.
+- **G1 (66 files: SHARDS.md's 64 plus repair 2's `fno_membership_cov_tests.rs` and `manifest_cov_tests.rs`):
+  lines 51,738/53,838 (2,100 uncovered), branches 3,896/4,830 (934 sides);** 62 files with a gap. The same 64
+  files held 2,258 lines + 957 sides at c9d653d5f914 (SHARDS.md).
+- G1's 3,034 rows by kind (a node classifier, scratchpad `classify.mjs` + `assertcond.mjs`, read-only): 1,306
+  inside the bodies of G1's 17 `#[ignore]` real-data tests (L-BCP-3, the operator's); 639 (F) by pattern (the
+  failing side of an assert's condition decided by enumerating every truth assignment under short-circuit
+  evaluation, panic lines, message lines, let-else elses); 48 branches inside `matches!` guards and closures
+  of assert conditions, checked by hand; **777 production rows and 264 other test-code rows: the work.**
+
+### Done so far (each batch committed and pushed; every new test passes on stable and was shown red)
+
+| batch | commit | G1 files | new tests | rows reached / left |
+|---|---|---|---|---|
+| 1 | `24b53762` | fetch, nse, capture, request_minutes, pricing | 10 | the drivable rows; the rest (U) |
+| 2 | `e944865d` | vendor, gdfl_import causes, gdfl_run stop (+ `tests/gdfl_run_stop.rs`) | 7 | idem |
+| 3 | `b16623fc` | manifest, master_snapshots first_listed | 23 | 38/39 and 50/53; 4 (U) |
+| 4 | `8d6731f1` | fno_membership (+ the defect below) | 25 | 107/128; 17 (U), 4 seam |
+| 5 | `20f67de4` | gdfl_import day loop | 26 | 124/132; 7 (U), 1 seam |
+| 6 | `ba28378c` | reference_data, gdfl_run locks | 33 | 66/85 and 60/77; (U) and seams |
+
+Batches 3-6 were drafted by read-only helper agents (no repository write, no cargo; brief in the scratchpad)
+and integrated, linted, run and red-checked here. **Red checks** (one production line changed by hand per test,
+all applied at once, `git checkout` after): batch 1 10/10 red, each at its own assertion; batch 2 7/7; batch 3
+23/23; batch 4 24/24 (plus the defect test, red on the old code); batch 5 26/26; batch 6 33/33.
+
+Left out on purpose: three drafted tests that won a timing race by retrying it (up to 32 or 16 rounds), because
+a retried race is not deterministic; their 9 rows (`reference_data.rs:2915, 2933, 2933:21 both, 2934, 2936`,
+`gdfl_run_locks.rs:433-435`) are seams. A macOS branch of a flock-refusal fixture that nobody ran: the test is
+Linux-only.
+
+### DEFECT FIXED (D-7335 draft below)
+
+`fno_membership::MonthTable` decode checked a day row with no listing by `row.names + row.refused > 0`, two `u32`
+fields of the month file. A row holding `names = u32::MAX, refused = 1` overflowed; with overflow checks on in
+every profile the decoder panicked on the file's bytes (and the release build, `panic = "abort"`, aborts).
+Each count is now asked on its own (`row.names > 0 || row.refused > 0`), the same refusal. Test
+`fno_membership::ps1_tests::a_row_with_no_listing_whose_counts_pass_the_field_is_refused_never_a_panic`, red
+first: `panicked at crates/pull/src/fno_membership.rs:1461:63: attempt to add with overflow`.
+
+### Follow-ups found (not changed)
+
+- `master_snapshots::first_listed::listing` has no `carried(route)` guard where `absorb_held` has one: a route
+  whose exchange holds `|` writes commit lines no reader parses and damages the next generations. No live route
+  reaches it (the one route is `ZERODHA_CONTINUOUS`, NFO/FUT); a guard would turn its test into a refusal.
+- `fno_membership`'s reader-thread-panic arm (the "refused, named, never absent" promise) only runs in an
+  unwinding build: release aborts on the panic before `join` returns.
+
+### Still to do in step (2)
+
+ssm, master_snapshots, gdfl_import, gdfl_cm_auction, cash_session_cache, rehearsal, gdfl_nfo, refusal and five
+small files (helpers drafting), the 264 test-code rows (two helpers on 217 of them), seams, and the final Route B
+over G1 with the (F)/(U) list.
