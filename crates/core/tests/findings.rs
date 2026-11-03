@@ -42,6 +42,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// The ledger. Read at compile time so a rename fails the build rather than skipping.
 const LEDGER: &str = include_str!("../../../docs/11-findings.md");
@@ -352,7 +353,9 @@ fn every_killed_finding_carries_its_reason() {
         .next()
         .unwrap_or(section)
         .lines()
-        .filter(|l| l.starts_with("| ") && !l.starts_with("|---") && !l.starts_with("| Finding"))
+        // A table row: `| ` at the margin. The separator `|---` cannot start
+        // so, and the heading row is named.
+        .filter(|l| l.starts_with("| ") && !l.starts_with("| Finding"))
         .collect();
     assert_eq!(
         rows.len(),
@@ -440,19 +443,24 @@ fn the_rows_are_the_rows_the_digest_covers() {
 /// the one disposition where the reason IS the content. Caught nothing until now.
 #[test]
 fn every_refuted_finding_carries_its_reason() {
-    for row in rows()
-        .iter()
+    let rows = rows();
+    let bare = refuted_without_reason(&rows);
+    assert!(
+        bare.is_empty(),
+        "these findings say REFUTED and give no reason: {bare:?}. A refutation without one \
+         cannot be checked, and the next reader will raise the finding again."
+    );
+}
+
+/// The `(id, disposition)` of every REFUTED row whose reason is shorter than
+/// 20 bytes. A function of the rows, so the rule is checked on rows that break
+/// it even while the ledger refutes nothing (BASE-COV-LIBS-LS4).
+fn refuted_without_reason(rows: &[Row]) -> Vec<(&str, &str)> {
+    rows.iter()
         .filter(|r| r.disposition.starts_with("REFUTED"))
-    {
-        let reason = row.disposition.trim_start_matches("REFUTED").trim();
-        assert!(
-            reason.len() >= 20,
-            "finding {} says {:?} and gives no reason. A refutation without one cannot be \
-             checked, and the next reader will raise the finding again.",
-            row.id,
-            row.disposition
-        );
-    }
+        .filter(|r| r.disposition.trim_start_matches("REFUTED").trim().len() < 20)
+        .map(|r| (r.id.as_str(), r.disposition.as_str()))
+        .collect()
 }
 
 /// Whether history can be asked about in the tree whose root is `root`.
@@ -543,6 +551,168 @@ fn only_a_tree_with_no_git_dir_skips_the_history() {
         "{said}"
     );
     std::fs::remove_dir_all(&dangling).expect("the scratch root is removed");
+
+    // BASE-COV-LIBS-LS4: a root that is a FILE. Its `.git` is not merely
+    // absent (the host answers "not a directory"), so it is no tree to skip:
+    // it fails with git's own words, like any `.git` git cannot read.
+    let holder = scratch("file");
+    let file = holder.join("plain");
+    std::fs::write(&file, b"a file, not a tree\n").expect("a plain file");
+    let refused = std::panic::catch_unwind(|| history_is_at(&file))
+        .expect_err("a root that is a file must fail, not skip");
+    let said = refused.downcast_ref::<String>().map_or("", String::as_str);
+    assert!(
+        said.contains("holds a `.git`, and `git rev-parse --git-dir` failed there"),
+        "{said}"
+    );
+    std::fs::remove_dir_all(&holder).expect("the scratch root is removed");
+}
+
+/// BASE-COV-LIBS-LS4: **THE EMPTY ROOT IS THE WORKING DIRECTORY, AND NOTHING
+/// FENCES IT.** `Path::new("")` has no parent, so no ceiling is set and git
+/// is asked where the process stands. Cargo runs this binary in `crates/core`,
+/// which holds no `.git`, so the test runs itself again in a child standing in
+/// a scratch tree whose `.git` is the three entries git looks for. Where git
+/// cannot run at all, the skip is the right answer and the child says so.
+#[test]
+fn the_empty_root_is_asked_in_the_working_directory_unfenced() {
+    const CHILD: &str = "BRUTEX_FINDINGS_EMPTY_ROOT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let git_runs = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok();
+        assert_eq!(history_is_at(Path::new("")), git_runs);
+        return;
+    }
+    let tree = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("findings-empty-root-{}", std::process::id()));
+    let _stale = std::fs::remove_dir_all(&tree);
+    std::fs::create_dir_all(tree.join(".git/objects")).expect("a scratch .git");
+    std::fs::create_dir_all(tree.join(".git/refs")).expect("a scratch .git");
+    std::fs::write(tree.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("a HEAD");
+    let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+        .args([
+            "--exact",
+            "the_empty_root_is_asked_in_the_working_directory_unfenced",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .current_dir(&tree)
+        .output()
+        .expect("the child test process starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the child failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child ran no test:\n{stdout}"
+    );
+    std::fs::remove_dir_all(&tree).expect("the scratch tree is removed");
+}
+
+/// A row of the ledger, invented.
+fn row(id: &str, disposition: &str) -> Row {
+    Row {
+        id: id.to_owned(),
+        severity: "gap".to_owned(),
+        disposition: disposition.to_owned(),
+    }
+}
+
+/// BASE-COV-LIBS-LS4: the three history checks skip a tree with no `.git`
+/// without asking anything, the sha reader keeps exactly the rows that name
+/// seven hex digits or more, and the REFUTED rule refuses a bare refutation
+/// even while the ledger refutes nothing.
+#[test]
+fn the_history_checks_skip_a_bare_tree_and_the_readers_hold_at_their_edges() {
+    // 1. A tree with no `.git`: every history check skips, asking nothing.
+    let bare = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("findings-bare-{}", std::process::id()));
+    let _stale = std::fs::remove_dir_all(&bare);
+    std::fs::create_dir_all(&bare).expect("a scratch tree");
+    let fixed = [("F-000001".to_owned(), "0123456".to_owned())];
+    assert_eq!(named_commits_exist(&bare, &fixed), None);
+    assert_eq!(named_commits_in_history(&bare, &fixed), None);
+    assert_eq!(named_commits_on_main(&bare, &fixed), None);
+    std::fs::remove_dir_all(&bare).expect("the scratch tree is removed");
+
+    // 2. Shas: seven digits, more, upper case, after PARTLY, and too few.
+    for (disposition, sha) in [
+        ("FIXED 0123abc", Some("0123abc")),
+        (
+            "FIXED   0123456789abcdef and more",
+            Some("0123456789abcdef"),
+        ),
+        ("PARTLY FIXED ABCDEF0", Some("ABCDEF0")),
+        ("FIXED 0123ab", None),
+        ("FIXED", None),
+        ("FIXED by the next commit", None),
+        ("OPEN", None),
+    ] {
+        assert_eq!(fixed_sha(disposition).as_deref(), sha, "{disposition}");
+    }
+    // 3. COMBINED: only FIXED rows, only whole shas, in row order.
+    let ledger = [
+        row("F-1", "FIXED 0123456"),
+        row("F-2", "OPEN"),
+        row("F-3", "FIXED 01"),
+        row("F-4", "FIXED ffffffffff"),
+    ];
+    assert_eq!(
+        fixed_commits(&ledger),
+        [
+            ("F-1".to_owned(), "0123456".to_owned()),
+            ("F-4".to_owned(), "ffffffffff".to_owned())
+        ]
+    );
+    // 4. COMBINED: a bare REFUTED and a short reason are refused; a reason
+    //    of twenty bytes or more, and every other disposition, are not.
+    let refuted = [
+        row("F-5", "REFUTED"),
+        row("F-6", "REFUTED too short"),
+        row("F-7", "REFUTED: no caller ever reaches the line it names"),
+        row("F-8", "FIXED 0123456"),
+    ];
+    assert_eq!(
+        refuted_without_reason(&refuted),
+        [("F-5", "REFUTED"), ("F-6", "REFUTED too short")]
+    );
+    // 5. OUT OF THE BOX: no rows at all is nothing to refuse and nothing fixed.
+    assert!(refuted_without_reason(&[]).is_empty());
+    assert!(fixed_commits(&[]).is_empty());
+}
+
+/// The repository root: `crates/core` is two levels below it.
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/core is two levels below the repository root")
+        .to_owned()
+}
+
+/// The sha a FIXED disposition names: the hex digits straight after `FIXED`,
+/// when there are at least seven. Fewer is no sha at all, and
+/// [`every_fixed_finding_names_a_commit`] owns that case.
+fn fixed_sha(disposition: &str) -> Option<String> {
+    let after = disposition
+        .split_once("FIXED")
+        .map_or("", |(_, rest)| rest.trim_start());
+    let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
+    (sha.len() >= 7).then_some(sha)
+}
+
+/// The `(row, sha)` of every FIXED row that names a sha.
+fn fixed_commits(rows: &[Row]) -> Vec<(String, String)> {
+    rows.iter()
+        .filter(|r| r.disposition.contains("FIXED"))
+        .filter_map(|row| fixed_sha(&row.disposition).map(|sha| (row.id.clone(), sha)))
+        .collect()
 }
 
 /// Every commit a row names actually exists in this repository.
@@ -555,12 +725,18 @@ fn only_a_tree_with_no_git_dir_skips_the_history() {
 /// missing is the fallback §4 bans, so the absence is printed rather than swallowed.
 #[test]
 fn every_named_commit_exists() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("crates/core is two levels below the repository root")
-        .to_owned();
+    let checked = named_commits_exist(&repository_root(), &fixed_commits(&rows()));
+    assert!(
+        checked.is_none_or(|checked| checked > 0),
+        "no commit was verified, so this test proves nothing — either every FIXED row lost its \
+         sha or git could not run at all"
+    );
+}
 
+/// [`every_named_commit_exists`] in the tree at `repo`, over the `(row, sha)` pairs
+/// `fixed`: `None` where `repo` has no history to ask (the one skip
+/// [`history_is_at`] allows), else how many commits were verified.
+fn named_commits_exist(repo: &Path, fixed: &[(String, String)]) -> Option<u32> {
     // THREE ENVIRONMENTS, and they need three different answers. This test reads git
     // history, and `cargo test` runs in places where that history is absent for reasons
     // that are nothing to do with the ledger.
@@ -577,15 +753,15 @@ fn every_named_commit_exists() {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo)
             .args(args)
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
     };
-    if !history_is_at(&repo) {
-        return;
+    if !history_is_at(repo) {
+        return None;
     }
     assert_ne!(
         git(&["rev-parse", "--is-shallow-repository"]).as_deref(),
@@ -595,42 +771,25 @@ fn every_named_commit_exists() {
     );
 
     let mut checked = 0_u32;
-    for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
-        let after = row
-            .disposition
-            .split_once("FIXED")
-            .map_or("", |(_, rest)| rest.trim_start());
-        let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
-        if sha.len() < 7 {
-            continue; // the sha-presence test owns this case
-        }
+    for (id, sha) in fixed {
         let out = std::process::Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo)
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("{sha}^{{commit}}"))
-            .output();
-        let Ok(out) = out else {
-            println!(
-                "SKIPPED: git is not runnable here, so {} was not verified",
-                row.id
-            );
-            continue;
-        };
+            .output()
+            // `history_is_at` ran git a moment ago: one that cannot start now is
+            // a broken host, refused by name, never a skipped row.
+            .expect("`git` ran a moment ago, in `history_is_at`");
         assert!(
             out.status.success(),
-            "finding {} names commit {sha} and `git rev-parse` cannot resolve it. A row marked \
+            "finding {id} names commit {sha} and `git rev-parse` cannot resolve it. A row marked \
              FIXED against a commit that does not exist is the worst failure this ledger can \
-             have: it reads as done and points at nothing.",
-            row.id
+             have: it reads as done and points at nothing."
         );
         checked += 1;
     }
-    assert!(
-        checked > 0,
-        "no commit was verified, so this test proves nothing — either every FIXED row lost its \
-         sha or git could not run at all"
-    );
+    Some(checked)
 }
 
 /// A named commit is in THIS branch's history, not merely an object that resolves.
@@ -654,12 +813,17 @@ fn every_named_commit_exists() {
 /// rows gets an exemption list, and an exemption list is where guarantees go to die.
 #[test]
 fn every_named_commit_is_in_this_branchs_history() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("crates/core is two levels below the repository root")
-        .to_owned();
+    let checked = named_commits_in_history(&repository_root(), &fixed_commits(&rows()));
+    assert!(
+        checked.is_none_or(|checked| checked > 0),
+        "no commit was checked for ancestry, so this test proves nothing"
+    );
+}
 
+/// [`every_named_commit_is_in_this_branchs_history`] in the tree at `repo`, over the `(row, sha)` pairs
+/// `fixed`: `None` where `repo` has no history to ask (the one skip
+/// [`history_is_at`] allows), else how many commits were checked for ancestry.
+fn named_commits_in_history(repo: &Path, fixed: &[(String, String)]) -> Option<u32> {
     // THREE ENVIRONMENTS, and they need three different answers. This test reads git
     // history, and `cargo test` runs in places where that history is absent for reasons
     // that are nothing to do with the ledger.
@@ -676,15 +840,15 @@ fn every_named_commit_is_in_this_branchs_history() {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo)
             .args(args)
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
     };
-    if !history_is_at(&repo) {
-        return;
+    if !history_is_at(repo) {
+        return None;
     }
     assert_ne!(
         git(&["rev-parse", "--is-shallow-repository"]).as_deref(),
@@ -694,42 +858,26 @@ fn every_named_commit_is_in_this_branchs_history() {
     );
 
     let mut checked = 0_u32;
-    for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
-        let after = row
-            .disposition
-            .split_once("FIXED")
-            .map_or("", |(_, rest)| rest.trim_start());
-        let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
-        if sha.len() < 7 {
-            continue; // the sha-presence test owns this case
-        }
+    for (id, sha) in fixed {
         let out = std::process::Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo)
             .args(["merge-base", "--is-ancestor"])
-            .arg(&sha)
+            .arg(sha)
             .arg("HEAD")
-            .output();
-        let Ok(out) = out else {
-            println!(
-                "SKIPPED: git is not runnable here, so {} was not verified",
-                row.id
-            );
-            continue;
-        };
+            .output()
+            // `history_is_at` ran git a moment ago: one that cannot start now is
+            // a broken host, refused by name, never a skipped row.
+            .expect("`git` ran a moment ago, in `history_is_at`");
         assert!(
             out.status.success(),
-            "finding {} says it was fixed by {sha}, and that commit is not an ancestor of \
+            "finding {id} says it was fixed by {sha}, and that commit is not an ancestor of \
              HEAD. It exists somewhere -- a dropped branch, a revert, a stash -- but the fix \
-             is not in the history this ledger describes.",
-            row.id
+             is not in the history this ledger describes."
         );
         checked += 1;
     }
-    assert!(
-        checked > 0,
-        "no commit was checked for ancestry, so this test proves nothing"
-    );
+    Some(checked)
 }
 
 /// A named commit is on `main`, not only on the branch being tested.
@@ -748,25 +896,30 @@ fn every_named_commit_is_in_this_branchs_history() {
 /// that `main` rejects.
 #[test]
 fn every_named_commit_is_on_main() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("crates/core is two levels below the repository root")
-        .to_owned();
+    let checked = named_commits_on_main(&repository_root(), &fixed_commits(&rows()));
+    assert!(
+        checked.is_none_or(|checked| checked > 0),
+        "no commit was checked against refs/remotes/origin/main, so this test proves nothing"
+    );
+}
 
+/// [`every_named_commit_is_on_main`] in the tree at `repo`, over the `(row, sha)` pairs
+/// `fixed`: `None` where `repo` has no history to ask (the one skip
+/// [`history_is_at`] allows), else how many commits were checked against `main`.
+fn named_commits_on_main(repo: &Path, fixed: &[(String, String)]) -> Option<u32> {
     // The same three environments as the two tests above, with the same three answers.
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo)
             .args(args)
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
     };
-    if !history_is_at(&repo) {
-        return;
+    if !history_is_at(repo) {
+        return None;
     }
     assert_ne!(
         git(&["rev-parse", "--is-shallow-repository"]).as_deref(),
@@ -782,42 +935,26 @@ fn every_named_commit_is_on_main() {
     );
 
     let mut checked = 0_u32;
-    for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
-        let after = row
-            .disposition
-            .split_once("FIXED")
-            .map_or("", |(_, rest)| rest.trim_start());
-        let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
-        if sha.len() < 7 {
-            continue; // the sha-presence test owns this case
-        }
+    for (id, sha) in fixed {
         let out = std::process::Command::new("git")
             .arg("-C")
-            .arg(&repo)
+            .arg(repo)
             .args(["merge-base", "--is-ancestor"])
-            .arg(&sha)
+            .arg(sha)
             .arg(main)
-            .output();
-        let Ok(out) = out else {
-            println!(
-                "SKIPPED: git is not runnable here, so {} was not verified",
-                row.id
-            );
-            continue;
-        };
+            .output()
+            // `history_is_at` ran git a moment ago: one that cannot start now is
+            // a broken host, refused by name, never a skipped row.
+            .expect("`git` ran a moment ago, in `history_is_at`");
         assert!(
             out.status.success(),
-            "finding {} says it was fixed by {sha}, and that commit is not an ancestor of \
+            "finding {id} says it was fixed by {sha}, and that commit is not an ancestor of \
              {main}. `main` takes squash merges, so a commit on a pull request's branch never \
              reaches it. Mark the row IN PROGRESS naming {sha}, and name the squash commit \
              once it merges. If the fix is already on `main`, fetch it: `git fetch origin \
-             main`.",
-            row.id
+             main`."
         );
         checked += 1;
     }
-    assert!(
-        checked > 0,
-        "no commit was checked against {main}, so this test proves nothing"
-    );
+    Some(checked)
 }
