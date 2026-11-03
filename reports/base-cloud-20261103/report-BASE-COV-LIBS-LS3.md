@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: DONE
 
 # report-BASE-COV-LIBS-LS3 (session BASE-COV-LIBS-LS3, 3 Nov 2026 cloud wave)
 
@@ -179,7 +179,7 @@ two-rows test. The vocab test modules are inline in the files they test, because
 
 Red checks: 8 of 8 RED (`scratchpad red-vocab.txt`): the operand count never dropped; the body split one byte late; the work stack seeded empty; overflow ignored with the loop ending `Ok`; a (below, above) band compatible at equal rank; the second restatement test removed; the name index probing by two; an uncarried length clamped to `u16::MAX`.
 
-### Step 5: vocab test code (commits `8275882e`, `f9355fdc`, `7ae41f8a`, `70d241e2`, `7f422402`, `4a853e80`, `6d34cf19`)
+### Step 5: vocab test code (commits `8275882e`, `f9355fdc`, `7ae41f8a`, `70d241e2`, `7f422402`, `4a853e80`, `6d34cf19`, `dc363270`)
 
 What was left in vocab after step 4 was test code: the workspace gates `tests/no_runtime_spawn.rs`
 (141 rows), `tests/no_py_language.rs` (20) and `tests/workspace_is_rust.rs` (11), and one row
@@ -226,7 +226,7 @@ each in `src/expression.rs`, `tests/expression_search.rs` and `tests/no_float.rs
 17, stale_claims 10, table 20, workspace_is_rust 19; 0 failed). `cargo clippy -p vocab
 --all-targets --locked -- -D warnings`: EXIT 0.
 
-Red checks (`scratchpad red-vocab.log`), 40 hand changes: 36 RED, 4 green and each equivalent on
+Red checks (`scratchpad red-vocab.log`), 41 hand changes: 37 RED, 4 green and each equivalent on
 every input the code can be handed. Two of the 36 were green at first, so the test's case was
 sharpened until the rule changed its answer (a literal TOML string ending in a backslash; a string
 after a `members` that is no array), and the inner doc-comment shebang case now ends at `[` for the
@@ -234,12 +234,14 @@ same reason. RED: `hits` ignoring its sixth word; a pause that skips a
 choice; the listing matching `rs` in one case only; the lock parser's source line and its bracket
 rule; the walk's seen test inverted; the absent line showing eleven, and showing the name; the
 metadata guard taking every error as absence; the fallback walk returning nothing, and not stepping
-over `.git`; each skip line reworded; and 23 changes across the spawn gate's readers (a doc
+over `.git`; each skip line reworded; and 24 changes across the spawn gate's readers (a doc
 comment after `#!`, `r#` with no name after it, a refused `\x` escape, the blank line of a
 continuation, an empty `any()`, a trailing comma in `cfg_attr`, `extern` without an ABI, a
 visibility's path, `const` with block values, a gated `mod name` with neither `;` nor body, the
 type as the first token, a plain name before `::`, an import group through a variable, a later
-attribute dropping the first `#[path]`, an inner attribute's naming taken as test code,
+attribute dropping the first `#[path]`, an inner attribute's naming taken as test code, a naming
+in an attribute within a test module taken as shipped (commit `dc363270`, after the final run
+before it showed that one side open),
 `in_module_body` ignoring a pending signature, the `\e` escape, a literal string's backslash,
 `members` that is no array, a `Cargo.toml` outside `crates/`, a manifest naming a manifest, a
 pasted file that is test code whole, a test file that is never scanned). Green, equivalent: the
@@ -251,11 +253,60 @@ already in the test set). The crossed-links render case extends a test already r
 change to the negation's overflow alone turns its answer, since the walk's bound answers `Err`
 too.
 
+## Route B final, code tip `dc3632704fdb`
+
+The baseline's route and instrument on the code tip (`scratchpad tools/measure.sh final2 lake
+indicators vocab`: the kit's `d3-route-b-cloud.sh`, the pinned `nightly-2026-08-08` whose `rustc
+-V` prints exactly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, a new empty profile folder, a
+detached worktree at the tip). Set: every `.rs` of the three crates whole, 79 files (the
+baseline's 71 and the eight test module files this session added). 17:02:26-17:09:26 IST: build 0
+min; lake tests 0 min (150 passed, 6 ignored), indicators 4 min (528 passed), vocab 1 min (190
+passed); 0 failed.
+
+| crate | lines | uncovered lines | branch sides | uncovered sides |
+|---|---|---|---|---|
+| indicators | 16909/16914 | 5 | 1892/2078 | 186 |
+| lake | 5678/6135 | 457 | 305/364 | 59 |
+| vocab | 8185/8205 | 20 | 1240/1298 | 58 |
+| shard | 30772/31254 | 482 | 3437/3740 | 303 |
+
+At START the shard was 29121/29904 lines (783 uncovered) and 3315/3838 sides (523 uncovered).
+
+Every one of the 785 uncovered rows is classified, and **none is a GAP**: 428 (F), 4 (U) with their
+proofs, and 353 NEEDS THE MAC, which are the `#[ignore]`d real-lake tests (`real_lake.rs`,
+`real_lake_regression.rs`, `refusals.rs::no_real_lake_file_triggers_either_defect`; L-BCL-3). The
+(F) rows by rule: 256 failing sides of an `assert!` condition, 114 `panic!` failing arms, 22
+`assert!` and 5 `assert_eq!` message arguments, 21 lines of arms whose last statement is a
+`panic!`, 3 let-else blocks whose `else` panics, 3 `assert!(matches!(..))` failing regions, 2
+`if let Err` sides that panic, 1 `unreachable!`, and 1 `match` region whose only zero-count arm is
+a panic (`reader.rs`, by hand). Every (F) row is in test code: a `#[test]` body, a file under
+`tests/`, a `#[cfg(test)]` module or a test-only helper such as `zstd_v082_frames::input` (lake
+declares that file `#[cfg(test)]`).
+
+NOT READ by the route, exactly as at baseline (exit 3 for these four only): the three
+`benches/ratio.rs` (`[[bench]] test = false`, so `cargo test --no-run` builds none: L-BCL-1, the
+Mac's) and `crates/lake/src/lib.rs` (nine `mod` lines and no function, so no object holds a line
+of it).
+
+## Gates at the code tip `dc3632704fdb` (pinned stable `rustc 1.97.1`)
+
+`cargo fmt --all --check`: EXIT 0. `cargo clippy -p lake -p indicators -p vocab --all-targets
+--locked -- -D warnings`: EXIT 0. `cargo test -p lake -p indicators -p vocab --locked
+--no-fail-fast`: EXIT 0, 868 passed, 0 failed, 6 ignored (the real-lake tests, L-BCL-3), over 42
+test targets and doc-test runs. No host red: nothing failed.
+
+## Benches
+
+None run here. No production change alters a step's cost: each replaces a lookup or a match with
+one lookup, slice pattern or `zip` per step, O(1) as before, and none touches the sweep's bar,
+condition or mask path (CLAUDE.md section 3 rule 4). The three crates' `benches/ratio.rs` and every
+p99 are the Mac's (gate 8; `test = false`, L-BCL-1).
+
 ## Lists
 
 `gaps-LS3.txt.md` (every uncovered row of the three crates with its class, the per-file table and
 the totals) and `fu-LS3.txt.md` (the (F) rows with their rule, the (U) rows with their proofs, the
-Mac's rows with their reasons), regenerated from each Route B run by the scratchpad classifier
+Mac's rows with their reasons), regenerated from the final run at `dc3632704fdb` by the scratchpad classifier
 (a brace-matching reader of every `assert!`/`panic!` invocation in test code, the GAP rows then
 read by hand, and a hand-checked override list for the (U) and Mac rows).
 
@@ -307,4 +358,12 @@ Route B on its pin (this host's figures are the builder's); the `#[ignore]`d rea
 `refusals.rs::no_real_lake_file_triggers_either_defect`: they need `~/.brutex/lake`, L-BCL-3;
 the scan's helpers are covered here on synthetic files, so only those bodies wait); the three
 `benches/ratio.rs` (`test = false`, L-BCL-1; gate 8 and every p99 are the Mac's); macOS rows
-(none of these crates has a `cfg(target_os)` line); non-root 14-core runs; the D1 landing.
+(none of these crates has a `cfg(target_os)` line; their `cfg(unix)` and 64-bit-pointer lines hold
+on the Mac as here); non-root 14-core runs; the D1 landing.
+
+## Not done here
+
+Mutants: deferred (operator 30 Oct). The docs/05 entries D-8564 and D-8565 and the suggested
+docs/04 row are drafts above for LSA, since `docs/` is the assembly's. Nothing else is open: no
+GAP row, no failing test, no file outside the shard (43 code files changed, all under
+`crates/lake`, `crates/indicators` and `crates/vocab`; no file deleted).

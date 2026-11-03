@@ -3,16 +3,16 @@
 One fenced block: the list as plain text (CLOUD.md item 10).
 
 `````text
-BASE-COV-LIBS-LS3 Route B on tip 68d588fc34f6e327219ddc26b420b22f7eb44439: crates lake, indicators, vocab, every .rs file whole (SET OVERRIDE).
+BASE-COV-LIBS-LS3 Route B on tip dc3632704fdbc9a33f40145d2e6b23a8fbe719d0: crates lake, indicators, vocab, every .rs file whole (SET OVERRIDE).
 Pinned nightly rustc 1.99.0-nightly (1a98b1e13 2026-08-07), llvm-cov/llvm-profdata LLVM 23.1.0-rust-1.99.0-nightly, Linux x86_64 (the Mac re-measures).
 NOT READ by the route: crates/{lake,indicators,vocab}/benches/ratio.rs ([[bench]] test = false: cargo test --no-run builds none; L-BCL-1) and crates/lake/src/lib.rs (module declarations only).
 
 TOTALS per crate (lines covered/counted; branch sides covered/counted; files read)
   indicators  lines 16909/16914 (uncovered 5)  branches 1892/2078 (uncovered 186)  files 39
   lake        lines 5678/6135 (uncovered 457)  branches 305/364 (uncovered 59)  files 17
-  vocab       lines 7725/7819 (uncovered 94)  branches 1131/1280 (uncovered 149)  files 19
+  vocab       lines 8185/8205 (uncovered 20)  branches 1240/1298 (uncovered 58)  files 19
 
-Uncovered rows 950: (F) 415, (U) 4, NEEDS THE MAC (#[ignore]d real-lake tests, L-BCL-3) 353, GAP 178.
+Uncovered rows 785: (F) 428, (U) 4, NEEDS THE MAC (#[ignore]d real-lake tests, L-BCL-3) 353, GAP 0.
 
 Rule (recipe v4 step 4): (F) is only the failing side of assert!/assert_eq!/assert_ne!/panic!/unreachable! in test code: a
 failing branch side of an assert condition (a side that decides the condition false), a message argument (evaluated only on
@@ -36,7 +36,7 @@ NEEDS THE MAC: 353 rows, for these reasons:
   - as real_lake.rs: #[ignore]d, needs ~/.brutex/lake.
   - the #[ignore]d real-lake scan; its helpers (scan_file, page_values, month_files, sample_dirs) are driven on synthetic files by the_real_lake_scan_finds_each_defect_in_a_file_made_to_carry_it and the_real_lake_walk_finds_month_files_and_samples_by_stride, so only this body waits for the lake.
 
-(F) ITEMS: 415
+(F) ITEMS: 428
 (F) assert! condition (failing side)  BRANCH crates/indicators/src/anchored.rs:2247:28 False  if expected_ts_micros == ts(truncated, if rung == 10 { 15 * 60 + 24 } else { CLOSE_MINUTE })
 (F) assert! condition (failing side)  BRANCH crates/indicators/src/anchored.rs:2813:17 False  accepted > 500 && refused > 500,
 (F) assert! condition (failing side)  BRANCH crates/indicators/src/anchored.rs:2813:35 False  accepted > 500 && refused > 500,
@@ -415,24 +415,37 @@ NEEDS THE MAC: 353 rows, for these reasons:
 (F) assert_eq! message argument  LINE   crates/vocab/tests/expression.rs:403  bytes.get(..16)
 (F) assert! condition (failing side)  BRANCH crates/vocab/tests/expression.rs:414:13 False  assert!(accepted > 0 && refused > accepted);
 (F) assert! condition (failing side)  BRANCH crates/vocab/tests/expression.rs:414:29 False  assert!(accepted > 0 && refused > accepted);
-(F) panic! (failing arm)  LINE   crates/vocab/tests/expression_search.rs:75  Step::Exhausted => panic!("wire language cannot end inside this tiny prefix"),
-(F) assert! condition (failing side)  BRANCH crates/vocab/tests/expression_search.rs:193:13 False  assert!(saw_candidate && saw_backtrack);
-(F) assert! condition (failing side)  BRANCH crates/vocab/tests/expression_search.rs:193:30 False  assert!(saw_candidate && saw_backtrack);
+(F) panic! (failing arm)  LINE   crates/vocab/tests/expression_search.rs:82  Step::Exhausted => panic!("wire language cannot end inside this tiny prefix"),
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/expression_search.rs:201:13 False  assert!(saw_candidate && saw_backtrack);
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/expression_search.rs:201:30 False  assert!(saw_candidate && saw_backtrack);
 (F) panic! (failing arm)  LINE   crates/vocab/tests/expression_search_readiness.rs:127  panic!("the last NOT must finish the maximum-capacity program");
 (F) let-else in test (the else side panics)  BRANCH crates/vocab/tests/expression_search_readiness.rs:126:9 False  let Step::Candidate(expression) = cursor.advance(1, &mut work).unwrap() else {
-(F) assert! condition (failing side)  BRANCH crates/vocab/tests/mask.rs:307:27 False  before || !after,
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/mask.rs:315:27 False  before || !after,
 (F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_float.rs:145:36 False  *module == "lib.rs" || declared.contains(*module),
-(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:276  root.display(),
-(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:277  String::from_utf8_lossy(&listed.stderr).trim()
-(F) panic! (failing arm)  LINE   crates/vocab/tests/no_py_language.rs:437  panic!("{why}");
-(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:646  String::from_utf8_lossy(&init.stderr)
-(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:659  String::from_utf8_lossy(&add.stderr)
-(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:754  String::from_utf8_lossy(&init.stderr)
-(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:786  String::from_utf8_lossy(&add.stderr)
-(F) if-let Err in test (the taken side panics)  BRANCH crates/vocab/tests/no_py_language.rs:436:12 True  if let Err(why) = verdict(&found) {
+(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:282  root.display(),
+(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:283  String::from_utf8_lossy(&listed.stderr).trim()
+(F) panic! (failing arm)  LINE   crates/vocab/tests/no_py_language.rs:448  panic!("{why}");
+(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:666  String::from_utf8_lossy(&init.stderr)
+(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:679  String::from_utf8_lossy(&add.stderr)
+(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:783  String::from_utf8_lossy(&init.stderr)
+(F) assert! message argument  LINE   crates/vocab/tests/no_py_language.rs:815  String::from_utf8_lossy(&add.stderr)
+(F) if-let Err in test (the taken side panics)  BRANCH crates/vocab/tests/no_py_language.rs:447:12 True  if let Err(why) = verdict(&found) {
 (F) assert! message argument  LINE   crates/vocab/tests/no_runtime_spawn.rs:2560  sources.len()
 (F) assert! message argument  LINE   crates/vocab/tests/no_runtime_spawn.rs:2585  failures.join("\n  ")
 (F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2910:26 False  .any(|f| f.starts_with("crates/x/src/lib.rs:") && f.contains("outside test code")),
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4219:13 False  assert!(out.found.is_empty() && out.in_tests == 0);
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4219:37 False  assert!(out.found.is_empty() && out.in_tests == 0);
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4270:13 False  assert!(declared.decls[0].also.is_empty() && !declared.decls[0].test);
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4270:50 False  assert!(declared.decls[0].also.is_empty() && !declared.decls[0].test);
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4303:13 False  assert!(block.found.is_empty() && block.in_tests == 0);
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4303:39 False  assert!(block.found.is_empty() && block.in_tests == 0);
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4406:13 False  assert!(named.targets.is_empty() && named.every.is_empty() && named.unread.is_empty());
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4406:41 False  assert!(named.targets.is_empty() && named.every.is_empty() && named.unread.is_empty());
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4406:67 False  assert!(named.targets.is_empty() && named.every.is_empty() && named.unread.is_empty());
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4407:13 False  assert!(is_manifest("Cargo.toml") && is_manifest("crates/x/Cargo.toml"));
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4407:42 False  assert!(is_manifest("Cargo.toml") && is_manifest("crates/x/Cargo.toml"));
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4408:13 False  assert!(!is_manifest("web/Cargo.toml") && !is_manifest("crates/x/a.toml"));
+(F) assert! condition (failing side)  BRANCH crates/vocab/tests/no_runtime_spawn.rs:4408:47 False  assert!(!is_manifest("web/Cargo.toml") && !is_manifest("crates/x/a.toml"));
 (F) assert! message argument  LINE   crates/vocab/tests/stale_claims.rs:158  with_commas(count)
 (F) assert! message argument  LINE   crates/vocab/tests/table.rs:125  doc.len(),
 (F) unreachable! (failing arm)  LINE   crates/vocab/tests/table.rs:271  unreachable!("235..=273 are void")
@@ -450,6 +463,6 @@ NEEDS THE MAC: 353 rows, for these reasons:
 (F) assert! condition (failing side)  BRANCH crates/vocab/tests/table.rs:843:36 False  retired_rows >= retired && void_rows >= void,
 (F) assert! condition (failing side)  BRANCH crates/vocab/tests/table.rs:1012:13 False  !name.contains("vix") && !name.contains("volatility_index"),
 (F) assert! condition (failing side)  BRANCH crates/vocab/tests/table.rs:1012:38 False  !name.contains("vix") && !name.contains("volatility_index"),
-(F) assert! message argument  LINE   crates/vocab/tests/workspace_is_rust.rs:396  out.len()
-(F) assert! message argument  LINE   crates/vocab/tests/workspace_is_rust.rs:752  named.join("\n  ")
+(F) assert! message argument  LINE   crates/vocab/tests/workspace_is_rust.rs:397  out.len()
+(F) assert! message argument  LINE   crates/vocab/tests/workspace_is_rust.rs:753  named.join("\n  ")
 `````

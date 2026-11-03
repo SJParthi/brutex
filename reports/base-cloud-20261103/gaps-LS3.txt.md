@@ -3,16 +3,16 @@
 One fenced block: the list as plain text (CLOUD.md item 10).
 
 `````text
-BASE-COV-LIBS-LS3 Route B on tip 68d588fc34f6e327219ddc26b420b22f7eb44439: crates lake, indicators, vocab, every .rs file whole (SET OVERRIDE).
+BASE-COV-LIBS-LS3 Route B on tip dc3632704fdbc9a33f40145d2e6b23a8fbe719d0: crates lake, indicators, vocab, every .rs file whole (SET OVERRIDE).
 Pinned nightly rustc 1.99.0-nightly (1a98b1e13 2026-08-07), llvm-cov/llvm-profdata LLVM 23.1.0-rust-1.99.0-nightly, Linux x86_64 (the Mac re-measures).
 NOT READ by the route: crates/{lake,indicators,vocab}/benches/ratio.rs ([[bench]] test = false: cargo test --no-run builds none; L-BCL-1) and crates/lake/src/lib.rs (module declarations only).
 
 TOTALS per crate (lines covered/counted; branch sides covered/counted; files read)
   indicators  lines 16909/16914 (uncovered 5)  branches 1892/2078 (uncovered 186)  files 39
   lake        lines 5678/6135 (uncovered 457)  branches 305/364 (uncovered 59)  files 17
-  vocab       lines 7725/7819 (uncovered 94)  branches 1131/1280 (uncovered 149)  files 19
+  vocab       lines 8185/8205 (uncovered 20)  branches 1240/1298 (uncovered 58)  files 19
 
-Uncovered rows 950: (F) 415, (U) 4, NEEDS THE MAC (#[ignore]d real-lake tests, L-BCL-3) 353, GAP 178.
+Uncovered rows 785: (F) 428, (U) 4, NEEDS THE MAC (#[ignore]d real-lake tests, L-BCL-3) 353, GAP 0.
 
 PER FILE (lines a/b, branches c/d; the marks count what is left in that file)
   crates/indicators/src/anchored.rs lines 1682/1682 branches 103/106
@@ -72,7 +72,7 @@ PER FILE (lines a/b, branches c/d; the marks count what is left in that file)
   crates/lake/tests/refusals.rs lines 1154/1269 branches 58/68  MAC 61
   crates/lake/tests/synthetic.rs lines 847/871 branches 24/24
   crates/vocab/src/error.rs lines 103/103 branches 0/0
-  crates/vocab/src/expression.rs lines 553/554 branches 78/78  GAP 1
+  crates/vocab/src/expression.rs lines 559/559 branches 78/78
   crates/vocab/src/expression_search.rs lines 459/459 branches 86/96
   crates/vocab/src/implication.rs lines 157/158 branches 25/26
   crates/vocab/src/lib.rs lines 55/55 branches 0/0
@@ -80,196 +80,18 @@ PER FILE (lines a/b, branches c/d; the marks count what is left in that file)
   crates/vocab/src/table.rs lines 434/435 branches 53/60
   crates/vocab/src/tolerance.rs lines 171/171 branches 17/18
   crates/vocab/tests/expression.rs lines 382/383 branches 24/26
-  crates/vocab/tests/expression_search.rs lines 219/221 branches 10/12  GAP 1
+  crates/vocab/tests/expression_search.rs lines 221/222 branches 10/12
   crates/vocab/tests/expression_search_readiness.rs lines 122/123 branches 1/2
   crates/vocab/tests/implication_pointers.rs lines 72/72 branches 2/2
-  crates/vocab/tests/mask.rs lines 207/208 branches 17/20  GAP 3
-  crates/vocab/tests/no_float.rs lines 63/63 branches 4/6  GAP 1
-  crates/vocab/tests/no_py_language.rs lines 458/480 branches 52/58  GAP 20
-  crates/vocab/tests/no_runtime_spawn.rs lines 2531/2586 branches 605/694  GAP 141
+  crates/vocab/tests/mask.rs lines 211/211 branches 23/24
+  crates/vocab/tests/no_float.rs lines 79/79 branches 5/6
+  crates/vocab/tests/no_py_language.rs lines 516/523 branches 55/56
+  crates/vocab/tests/no_runtime_spawn.rs lines 2889/2891 branches 706/720
   crates/vocab/tests/stale_claims.rs lines 287/288 branches 14/14
   crates/vocab/tests/table.rs lines 498/501 branches 55/68
-  crates/vocab/tests/workspace_is_rust.rs lines 681/686 branches 74/82  GAP 11
+  crates/vocab/tests/workspace_is_rust.rs lines 697/699 branches 72/72
 
 GAP ROWS (every uncovered line or side that is neither (F), (U) nor the Mac's):
-GAP production  LINE   crates/vocab/src/expression.rs:440  )?,
-GAP test code  LINE   crates/vocab/tests/expression_search.rs:74  Step::Paused => assert!(work < 5_000_000, "finite fixture exceeded work ceiling"),
-GAP test code  LINE   crates/vocab/tests/mask.rs:312  assert!(before);
-GAP assert! condition: an uncovered PASSING side (a clause no case reaches)  BRANCH crates/vocab/tests/mask.rs:307:17 True  before || !after,
-GAP test code  BRANCH crates/vocab/tests/mask.rs:311:16 True  if after {
-GAP test code  BRANCH crates/vocab/tests/no_float.rs:178:16 False  if std::path::Path::new(&name)
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:264  Err(why) => {
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:265  let how = format!(
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:269  return (walk(root), how);
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:424  println!(
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:427  found.absent.len(),
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:428  found
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:429  .absent
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:430  .iter()
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:431  .take(10)
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:432  .map(|path| masked(path.as_bytes()))
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:433  .collect::<Vec<_>>()
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:639  println!("SKIPPING the git half: `git` cannot be run here ({why}).");
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:640  return;
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:747  println!("SKIPPING: `git` cannot be run here ({why}).");
-GAP test code  LINE   crates/vocab/tests/no_py_language.rs:748  return;
-GAP test code  BRANCH crates/vocab/tests/no_py_language.rs:238:21 True  name == ".git" || name == "node_modules" || (at_root && name == "target");
-GAP test code  BRANCH crates/vocab/tests/no_py_language.rs:296:21 False  Err(why) if why.kind() == std::io::ErrorKind::NotFound => return None,
-GAP test code  BRANCH crates/vocab/tests/no_py_language.rs:423:8 True  if !found.absent.is_empty() {
-GAP test code  BRANCH crates/vocab/tests/no_py_language.rs:638:12 True  if let Err(why) = git(&repo, &["--version"]) {
-GAP test code  BRANCH crates/vocab/tests/no_py_language.rs:746:12 True  if let Err(why) = git(&repo, &["--version"]) {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:422  (Some('/'), Some('/'), third) => {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:423  if third == Some('!') || (third == Some('/') && at(i + 3) != Some('/')) {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:424  break;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:425  }
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:426  while at(i).is_some_and(|x| x != '\n') {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:427  i += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:428  }
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:435  _ => break,
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:538  Err(_) => value.push('x'),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:553  None => value.push('u'),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:562  *line += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:664  None
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:672  return (false, i + 1);
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:779  return true;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:834  k += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:835  if matches!(t.get(k).map(|x| &x.tok), Some(Tok::Str(_))) {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:836  k += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:837  }
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:864  false
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:964  k += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:965  if punct(t, k, '(') {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:966  k = matching(t, k).map_or(t.len(), |close| close + 1);
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:967  }
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1027  i
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1041  k += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1042  if punct(t, k, '(') {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1043  k = matching(t, k).map_or(t.len(), |close| close + 1);
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1044  }
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1064  return i;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1078  i
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1189  Tok::Punct('$') => Some("imports from the process module through a macro variable"),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1367  _ => {}
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1599  return None;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1678  (Some(_), None) => {}
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1700  out.record(test, line, at.function(), what);
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1701  }
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1953  k += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1954  if punct(item, k, '(') {
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1955  k = matching(item, k).map_or(item.len(), |close| close + 1);
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:1956  }
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2067  line += 1;
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2070  2
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2112  None | Some('\n') => return (Toml::Unread, i),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2116  Some('b') => (Some('\u{8}'), 2),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2117  Some('t') => (Some('\t'), 2),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2118  Some('n') => (Some('\n'), 2),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2119  Some('f') => (Some('\u{c}'), 2),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2120  Some('r') => (Some('\r'), 2),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2121  Some('e') => (Some('\u{1b}'), 2),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2123  Some('U') => (hex(i + 2, 8), 10),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2124  other => (other, 2),
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2208  _ => {}
-GAP test code  LINE   crates/vocab/tests/no_runtime_spawn.rs:2287  | ["crates", _, "src", "bin", _, "main.rs"]
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:423:20 True  if third == Some('!') || (third == Some('/') && at(i + 3) != Some('/')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:423:20 False  if third == Some('!') || (third == Some('/') && at(i + 3) != Some('/')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:423:43 True  if third == Some('!') || (third == Some('/') && at(i + 3) != Some('/')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:423:43 False  if third == Some('!') || (third == Some('/') && at(i + 3) != Some('/')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:423:65 True  if third == Some('!') || (third == Some('/') && at(i + 3) != Some('/')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:423:65 False  if third == Some('!') || (third == Some('/') && at(i + 3) != Some('/')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:426:23 True  while at(i).is_some_and(|x| x != '\n') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:426:23 False  while at(i).is_some_and(|x| x != '\n') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:431:27 True  let doc = third == Some('!')
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:432:25 True  || (third == Some('*') && !matches!(at(i + 3), Some('*' | '/')));
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:434:35 False  Some(next) if !doc => i = next,
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:490:29 False  ("r", Some('#')) if hashes == 1 && get(i + 1).is_some_and(is_ident_start) => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:490:44 False  ("r", Some('#')) if hashes == 1 && get(i + 1).is_some_and(is_ident_start) => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:541:28 False  'u' if c.get(i) == Some(&'{') => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:561:32 True  if skipped == '\n' {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:671:9 False  let Some(name) = ident(t.get(i)) else {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:682:11 False  while k < t.len() && !punct(t, k, ')') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:692:18 False  "any" => !members.is_empty() && members.iter().all(|&m| m),
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:704:32 False  keyword(attr, 0, "cfg") && punct(attr, 1, '(') && predicate(attr, 2).0
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:770:42 False  if !(keyword(attr, 0, "cfg_attr") && punct(attr, 1, '(')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:778:12 True  if !punct(attr, k, ',') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:784:44 True  while k < close && !(depth == 0 && punct(attr, k, ',')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:792:12 False  if k > from && may_be_macro(&attr[from..k], rebinds_test, rebinds_derive) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:833:19 True  } else if keyword(t, k, "extern") {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:855:28 False  return punct(t, k, '[')
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:856:29 True  && (hash(before)
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:857:33 False  || (before.is_some_and(|at| punct(t, at, '!'))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:926:71 False  Some(Tok::Str(file)) if ident(attr.get(k)) == Some("path") && punct(attr, k + 1, '=') => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:963:8 True  if keyword(t, k, "pub") {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:965:12 True  if punct(t, k, '(') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:965:12 False  if punct(t, k, '(') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:972:41 False  && (punct(t, k + 2, '{') || punct(t, k + 2, '<') || keyword(t, k + 2, "where")))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:972:65 True  && (punct(t, k + 2, '{') || punct(t, k + 2, '<') || keyword(t, k + 2, "where")))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:972:65 False  && (punct(t, k + 2, '{') || punct(t, k + 2, '<') || keyword(t, k + 2, "where")))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:973:38 True  || (keyword(t, k, "auto") && keyword(t, k + 1, "trait"))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1000:15 False  while let Some(tok) = t.get(i) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1013:71 True  Tok::Punct(',') if depth == 0 && (!item || (angle == 0 && !clause)) => return i + 1,
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1021:46 False  Tok::Punct('|') if depth == 0 && !item => return i,
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1040:8 True  if keyword(t, k, "pub") {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1042:12 True  if punct(t, k, '(') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1042:12 False  if punct(t, k, '(') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1047:12 False  && !fn_item(t, k)
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1048:12 False  && !punct(t, k + 1, '{'))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1049:12 True  || keyword(t, k, "type")
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1050:12 True  || keyword(t, k, "use")
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1051:13 True  || (keyword(t, k, "extern") && keyword(t, k + 1, "crate"));
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1056:15 False  while let Some(tok) = t.get(i) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1063:20 True  if depth == 0 {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1103:26 True  if !is_type(t, i) || i == 0 {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1106:21 False  let joined = if i >= 2 && path_sep(t, i - 2) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1107:26 False  let plain_name = i >= 3 && ident(t.get(i - 3)).is_some() && !(i >= 4 && variable(t, i - 4));
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1107:71 False  let plain_name = i >= 3 && ident(t.get(i - 3)).is_some() && !(i >= 4 && variable(t, i - 4));
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1108:26 False  !(plain_name || (i >= 3 && punct(t, i - 3, '>')))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1110:65 False  matches!(t[i - 1].tok, Tok::Punct('*' | '+' | '?')) || (i >= 2 && variable(t, i - 2))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1464:9 False  self.pending.is_none()
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1551:19 False  while let Some(tok) = t.get(k) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1565:15 False  while let Some(tok) = t.get(k) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1598:8 True  if !punct(t, open, '[') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1615:18 False  let pasted = includes(t, i) && matching(t, i + 2) == Some(i + 4);
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1617:27 False  Tok::Str(file) if pasted => Some(file),
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1706:26 True  if path.is_some() || !also.is_empty() {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1784:16 False  && statement
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1796:24 True  out.record(test || gate_here, line, at.function(), what);
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1798:58 False  if attrs.macro_use && keyword(t, i, "extern") && keyword(t, i + 1, "crate") {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1800:17 True  test || gate_here,
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1846:75 True  if matches!(scope, Scope::Mod(_)) && (attrs.path.is_some() || !attrs.also.is_empty()) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1952:8 True  if keyword(item, k, "pub") {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1954:12 True  if punct(item, k, '(') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1954:12 False  if punct(item, k, '(') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:1967:23 False  Some(name) if punct(item, k + 2, '{') => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2021:30 False  path == "Cargo.toml" || (path.starts_with("crates/") && path.ends_with("/Cargo.toml"))
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2058:56 False  '"' | '\'' if c.get(i + 1) == Some(&ch) && c.get(i + 2) == Some(&ch) => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2061:27 False  while let Some(&x) = c.get(i) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2062:35 False  if x == ch && c.get(i + 1) == Some(&ch) && c.get(i + 2) == Some(&ch) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2062:64 False  if x == ch && c.get(i + 1) == Some(&ch) && c.get(i + 2) == Some(&ch) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2066:24 True  if x == '\n' {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2069:29 True  i += if x == '\\' && ch == '"' && c.get(i + 1) != Some(&'\n') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2069:42 True  i += if x == '\\' && ch == '"' && c.get(i + 1) != Some(&'\n') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2069:42 False  i += if x == '\\' && ch == '"' && c.get(i + 1) != Some(&'\n') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2069:55 True  i += if x == '\\' && ch == '"' && c.get(i + 1) != Some(&'\n') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2069:55 False  i += if x == '\\' && ch == '"' && c.get(i + 1) != Some(&'\n') {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2082:48 True  _ if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2114:27 False  Some('\\') if quote == '"' => {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2211:32 False  if key == "members" && is(k + 2, &Toml::Punct('[')) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2265:20 False  && let Some(scan) = scans.get(file.as_str())
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2404:58 False  } else if files.contains_key(target.as_str()) && !is_manifest(&target) {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2427:64 False  if pasted.contains(path) && shipped.contains(*path) && !scan.whole_file_test {
-GAP test code  BRANCH crates/vocab/tests/no_runtime_spawn.rs:2439:43 False  if path.ends_with("_tests.rs") && !under_tests_dir(path) && !tests.contains(*path) {
-GAP test code  LINE   crates/vocab/tests/workspace_is_rust.rs:1412  }
-GAP test code  LINE   crates/vocab/tests/workspace_is_rust.rs:1424  }
-GAP test code  LINE   crates/vocab/tests/workspace_is_rust.rs:1437  }
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:241:34 False  if t.starts_with('[') && !in_deps {
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:243:16 False  if in_package {
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:259:27 False  } else if let Some(dep) = quoted(t) {
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:317:24 False  if let (Some(flag), Some(child)) = (seen.get_mut(j), pkgs.get(j))
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:1410:16 False  if let [a, b] = pair {
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:1422:16 False  if let [a, b] = pair {
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:1435:16 False  if let [a, b] = pair {
-GAP test code  BRANCH crates/vocab/tests/workspace_is_rust.rs:1551:9 False  let Ok(probe) = probe else { return };
 
 NEEDS THE MAC (L-BCL-3), every row:
 MAC  LINE   crates/lake/tests/real_lake.rs:57  fn lake_path(rel: &str) -> Option<PathBuf> {
