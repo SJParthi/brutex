@@ -604,17 +604,19 @@ fn two_runs_at_once_each_see_the_others_days() {
                     let mut tries = 0_u32;
                     let got = loop {
                         match record_kept(&mut kept, &root, Vendor::Gdfl, &rows) {
-                            Err(why) if why.contains("another ingest holds the census lock") => {
+                            Ok(got) => break got,
+                            Err(why) => {
+                                assert!(
+                                    why.contains("another ingest holds the census lock"),
+                                    "{why}"
+                                );
                                 tries += 1;
                                 assert!(tries < 10_000, "{why}");
                                 std::thread::sleep(std::time::Duration::from_millis(1));
                             }
-                            other => break other.unwrap(),
                         }
                     };
-                    if got[0].read == CensusRead::Whole("length_moved") {
-                        moved += 1;
-                    }
+                    moved += u32::from(got[0].read == CensusRead::Whole("length_moved"));
                 }
                 moved
             })
@@ -672,7 +674,7 @@ fn a_symlinked_segment_directory_is_refused_by_name_on_install() {
         Segment::Fno,
         2,
         &image,
-        &mut |_: WholeStep| Ok(()),
+        &mut |step: WholeStep| panic!("refused before any step, yet {step:?} ran"),
     )
     .expect_err("refused");
     drop(lock);
@@ -726,7 +728,7 @@ fn a_file_where_a_segment_directory_belongs_is_refused_by_name() {
         Segment::Fno,
         1,
         &image,
-        &mut |_: WholeStep| Ok(()),
+        &mut |step: WholeStep| panic!("refused before any step, yet {step:?} ran"),
     )
     .expect_err("refused");
     drop(lock);
@@ -804,10 +806,16 @@ fn a_fifo_swapped_in_after_the_look_never_blocks_the_stub_check() {
     };
     start.recv().expect("the check started");
     let got = answer.recv_timeout(std::time::Duration::from_millis(100));
-    if got.is_err() {
-        // Release the open that waits, so the suite does not hang; then fail.
-        let _ = std::fs::OpenOptions::new().write(true).open(&stub);
-    }
+    // Release an open that waits, so the suite never hangs: a writer's
+    // non-blocking open of the FIFO wakes a blocked reader, and with no reader
+    // it is refused at once (ENXIO) and changes nothing.
+    let _ = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+            .open(&stub)
+    };
     checking.join().expect("the check ends");
     assert!(
         !got.expect("answered within 100 ms, never waiting on the FIFO"),
@@ -839,6 +847,29 @@ fn a_link_swapped_in_after_the_look_is_not_a_stub() {
             .is_symlink(),
         "the swap happened"
     );
+}
+
+/// THE BASELINE AND THE DOOR BOTH REFUSE A STUB-LENGTH FILE THAT CANNOT BE
+/// OPENED, where the permission bits bind (D-0995): neither reads it as a stub.
+#[test]
+fn an_unreadable_file_of_the_stub_s_length_is_no_stub() {
+    crate::support::where_permission_binds(
+        "ingest::census_store::kept_tests::an_unreadable_file_of_the_stub_s_length_is_no_stub",
+        unreadable_stub_body,
+    );
+}
+
+fn unreadable_stub_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = Scratch::new("STUBSHUT");
+    let stub = manifest_path(scratch.root(), Vendor::Gdfl);
+    std::fs::write(&stub, sealed_stub(Vendor::Gdfl)).unwrap();
+    assert!(holds_sealed_stub_as_before(&stub) && holds_sealed_stub(&stub));
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (before, door) = (holds_sealed_stub_as_before(&stub), holds_sealed_stub(&stub));
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!before, "the baseline");
+    assert!(!door, "the door");
 }
 
 /// The stub check as it was before R3-19 — `lstat`, then `File::open`, then
@@ -892,6 +923,25 @@ fn the_stub_check_costs_one_open_measured() {
         ));
     }
     eprintln!("R3-19 holds_sealed_stub, n = 200 each: {}", said.join("; "));
+    // The baseline answers as the door does where there is no stub: nothing
+    // at the name, a directory there, and a file of another length.
+    let other = scratch.root().join("not-a-stub");
+    for (what, make) in [
+        ("nothing", None),
+        ("a directory", Some(true)),
+        ("another length", Some(false)),
+    ] {
+        match make {
+            Some(true) => std::fs::create_dir_all(&other).unwrap(),
+            Some(false) => {
+                std::fs::remove_dir_all(&other).unwrap();
+                std::fs::write(&other, b"BRUTEXMS").unwrap();
+            }
+            None => {}
+        }
+        assert!(!holds_sealed_stub_as_before(&other), "{what}");
+        assert!(!holds_sealed_stub(&other), "{what}");
+    }
 }
 
 // ═══ AG-05 follow-ups, part 3: a link at the single census is named ═════════

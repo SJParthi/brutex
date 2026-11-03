@@ -970,13 +970,10 @@ fn a_batch_is_three_flushes_and_one_slot_write_at_a_time() {
         }
     }
     let absent = scratch.root().join("never.man");
-    let mut flushed = 0;
     super::write_batch_with(&absent, &[], |_| {}, &mut |_, _| {
-        flushed += 1;
-        Ok(())
+        panic!("an empty batch flushes nothing")
     })
     .expect("nothing to write");
-    assert_eq!(flushed, 0);
     assert!(!absent.exists(), "an empty batch creates nothing");
 }
 
@@ -997,8 +994,6 @@ fn a_batch_is_three_flushes_and_one_slot_write_at_a_time() {
 #[test]
 fn a_torn_write_inside_a_batch_never_leaves_the_census_behind() {
     let scratch = Scratch::new("batch-torn");
-    let mut behind = Vec::new();
-    let mut together = Vec::new();
     let mut tears = 0_u32;
     for both in [true, false] {
         for new in [1_u32, 2, 3, 40, 41] {
@@ -1023,25 +1018,24 @@ fn a_torn_write_inside_a_batch_never_leaves_the_census_behind() {
                     .into_iter()
                     .filter(|slot| was[slot.clone()] != now[slot.clone()])
                     .collect();
-                if flying.len() > 1 {
-                    together.push((both, new, "two slot writes"));
-                }
+                assert!(
+                    flying.len() <= 1,
+                    "{both} {new}: two slot writes in flight together between two barriers"
+                );
                 let tail = entries.start..now.len();
                 if was.get(tail.clone()) != now.get(tail.clone()) {
-                    if !flying.is_empty() {
-                        together.push((both, new, "entries and a slot"));
-                    }
+                    assert!(
+                        flying.is_empty(),
+                        "{both} {new}: entries and a slot in flight together between two barriers"
+                    );
                     flying.push(tail);
                 }
                 assert!(!flying.is_empty(), "{both} {new}: a barrier over no write");
-                // Each write torn alone and, when more than one is in flight,
-                // all of them torn together; cut after its first byte, at its
-                // half and before its last byte.
-                let mut cases: Vec<Vec<std::ops::Range<usize>>> =
+                // ONE write in flight between two barriers (asserted above),
+                // torn alone: cut after its first byte, at its half and before
+                // its last byte.
+                let cases: Vec<Vec<std::ops::Range<usize>>> =
                     flying.iter().cloned().map(|one| vec![one]).collect();
-                if flying.len() > 1 {
-                    cases.push(flying.clone());
-                }
                 for case in &cases {
                     for cut in ["first byte", "half", "all but the last byte"] {
                         let mut torn = was.clone();
@@ -1055,14 +1049,23 @@ fn a_torn_write_inside_a_batch_never_leaves_the_census_behind() {
                             lay(&mut torn, at, &now[write.start..write.start + part]);
                         }
                         tears += 1;
-                        let ok = loads(&torn).is_ok_and(|header| {
-                            header.generation >= held.generation && committed.contains(&header)
-                        });
-                        if !ok {
-                            let loaded =
-                                loads(&torn).map(|header| (header.n_valid, header.generation));
-                            behind.push((both, new, case.clone(), cut, loaded, held.generation));
-                        }
+                        let loaded = loads(&torn);
+                        assert!(
+                            loaded
+                                .as_ref()
+                                .is_ok_and(|header| header.generation >= held.generation),
+                            "({both}, {new}) {case:?} cut at its {cut}: held generation {}, \
+                             loads as {loaded:?}: a torn write left the census behind where \
+                             the drive held it, or unreadable",
+                            held.generation
+                        );
+                        assert!(
+                            loaded
+                                .as_ref()
+                                .is_ok_and(|header| committed.contains(header)),
+                            "({both}, {new}) {case:?} cut at its {cut}: loads as {loaded:?}, \
+                             a header no barrier committed"
+                        );
                     }
                 }
             }
@@ -1073,21 +1076,6 @@ fn a_torn_write_inside_a_batch_never_leaves_the_census_behind() {
             );
         }
     }
-    let torn_behind: Vec<String> = behind
-        .iter()
-        .map(|(both, new, case, cut, loaded, held)| {
-            format!(
-                "({both}, {new}) {case:?} cut at its {cut}: held generation {held}, loads as \
-                 (entries, generation) {loaded:?}"
-            )
-        })
-        .collect();
-    assert!(
-        together.is_empty() && torn_behind.is_empty(),
-        "by (both slots populated, commits): writes in flight together between two barriers \
-         = {together:?}; and a torn write that left the census behind where the drive held \
-         it, or unreadable = {torn_behind:#?}"
-    );
     assert_eq!(tears, 84, "every tear was tried");
 }
 
@@ -1134,10 +1122,10 @@ fn a_refused_flush_inside_a_batch_stops_it_at_a_whole_generation() {
             assert_eq!(landed, 0, "{new} {at:?}: never reported as landed");
             let now = std::fs::read(&path).expect("census");
             assert_eq!(loads(&now), Ok(loaded), "{new} {at:?}");
+            // (older slot, newer slot): the newer is slot 0 after an even
+            // generation, so the pair turns by the generation's parity.
             let mut changed = slots_changed(&before, &now);
-            if was.generation.is_multiple_of(2) {
-                changed.reverse();
-            }
+            changed.rotate_left(usize::from(was.generation.is_multiple_of(2)));
             assert_eq!(
                 changed, slots,
                 "{new} {at:?}: (older slot, newer slot) written"
@@ -1158,9 +1146,11 @@ fn a_commit_past_the_batch_is_refused_before_a_byte() {
     let (before, mut appends, _) = a_day_of(3);
     let path = scratch.root().join("census.man");
     std::fs::write(&path, &before).expect("census");
-    if let Some(first) = appends.first_mut() {
-        first.commit.durable_through = u64::MAX;
-    }
+    appends
+        .first_mut()
+        .expect("a day of three appends")
+        .commit
+        .durable_through = u64::MAX;
     let why = super::write_batch(&path, &appends, |_| {}).expect_err("refused");
     assert!(why.to_string().contains("nothing was written"), "{why}");
     assert_eq!(std::fs::read(&path).expect("census"), before);

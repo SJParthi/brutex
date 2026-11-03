@@ -971,8 +971,8 @@ fn garbage_alert_parameters_are_refused_by_name() {
     assert_eq!(window(zero.root()).unwrap().older_unacknowledged, 0);
 
     // A `before` no page has: empty, not an error; a huge one is the newest.
-    assert!(page_is_empty(&page_of(&zero, Some(0))));
-    assert!(page_is_empty(&page_of(&zero, Some(1))));
+    assert_page_empty(&page_of(&zero, Some(0)));
+    assert_page_empty(&page_of(&zero, Some(1)));
     assert_eq!(page_of(&zero, Some(u32::MAX)).first, 1);
 }
 
@@ -980,8 +980,13 @@ fn page_of(scratch: &Scratch, before: Option<u32>) -> Page {
     page(scratch.root(), before).unwrap()
 }
 
-fn page_is_empty(page: &Page) -> bool {
-    page.exists && page.alerts.is_empty() && page.first == 0 && page.damaged.is_empty()
+/// The page of a queue that exists and holds nothing before the asked
+/// ordinal: each fact its own assertion.
+fn assert_page_empty(page: &Page) {
+    assert!(page.exists, "{page:?}");
+    assert!(page.alerts.is_empty(), "{page:?}");
+    assert_eq!(page.first, 0, "{page:?}");
+    assert!(page.damaged.is_empty(), "{page:?}");
 }
 
 // IA-AL-11.
@@ -1158,7 +1163,10 @@ fn mixed_queue(scratch: &Scratch) -> std::collections::BTreeSet<u32> {
     for i in 1..=2_500_u32 {
         let target = i.saturating_sub(1_300);
         let is_alert = |r: &Record| r.kind_of_record == TYPE_ALERT;
-        if target >= 1 && target % 7 == 0 && is_alert(&records[(target - 1) as usize]) {
+        if target >= 1 && target % 7 == 0 {
+            // Acknowledgements start at 1,301 and name an ordinal 1,300
+            // back, so every ordinal named is still an alert.
+            assert!(is_alert(&records[(target - 1) as usize]), "{target}");
             open -= 1;
             open_set.remove(&target);
             records.push(raw_ack(target, open));
@@ -1497,6 +1505,9 @@ fn a_replacement_holds_the_lock_through_its_first_alert() {
         // damaged, written once it is replaced.
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen_stop = std::sync::Arc::clone(&stop);
+        // The replacement starts only once the hammer has put and read once,
+        // so every round races at least one put against it.
+        let (ready, hammering) = mpsc::channel::<()>();
         let hammer = std::thread::spawn(move || {
             let mut n = 0_u32;
             while !seen_stop.load(Ordering::Relaxed) {
@@ -1509,17 +1520,17 @@ fn a_replacement_holds_the_lock_through_its_first_alert() {
                 );
                 // The damaged queue, or the new one WITH its first record:
                 // never a queue that does not yet say what it replaced.
-                let replaced = seen
-                    .alerts
-                    .last()
-                    .is_some_and(|a| a.ordinal == 1 && a.record.kind == KIND_QUEUE_REPLACED);
+                let replaced = seen.alerts.last().map(|a| (a.ordinal, a.record.kind))
+                    == Some((1, KIND_QUEUE_REPLACED));
                 assert!(
                     seen.damaged == [3, 2] || replaced,
                     "neither queue: {seen:?}"
                 );
                 n += 1;
+                let _told = ready.send(());
             }
         });
+        hammering.recv().expect("the hammer put and read once");
         let done = replace_damaged_at(scratch.root(), NOW).unwrap();
         stop.store(true, Ordering::Relaxed);
         hammer.join().unwrap();
@@ -1527,13 +1538,9 @@ fn a_replacement_holds_the_lock_through_its_first_alert() {
             done.ordinal, 1,
             "the replacement's alert is the new queue's first record"
         );
-        let mut first = None;
-        of_file(&scratch.names().queue, &mut |kept| {
-            if first.is_none() {
-                first = Some(kept);
-            }
-        })
-        .unwrap();
+        let mut kept_all = Vec::new();
+        of_file(&scratch.names().queue, &mut |kept| kept_all.push(kept)).unwrap();
+        let first = kept_all.into_iter().next();
         assert!(
             matches!(&first, Some(Kept::Good(1, r)) if r.kind == KIND_QUEUE_REPLACED),
             "{first:?}"
