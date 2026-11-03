@@ -1917,9 +1917,8 @@ fn rows_mode(
     let (bars, overlays, census) = keep_in_session(bars, overlays, &plan);
     done.census = census;
     let (bars, overlays) = (bars.as_slice(), overlays.as_slice());
-    if bars.is_empty() {
-        return (done, Filed::Appended);
-    }
+    // NOTHING KEPT IS NOTHING FILED: a batch the session filter emptied has no
+    // first and no last bar, and this is the one check that says so.
     let Some((first, last)) = bars.first().zip(bars.last()) else {
         return (done, Filed::Appended);
     };
@@ -3649,22 +3648,21 @@ fn months_in(
     bars: &[store::format::Bar],
 ) -> Result<Vec<(store::path::YearMonth, &[store::format::Bar])>, String> {
     let mut out: Vec<(store::path::YearMonth, &[store::format::Bar])> = Vec::new();
-    let mut start = 0usize;
-    while start < bars.len() {
-        let Some(first) = bars.get(start) else { break };
+    let mut rest = bars;
+    while let Some(first) = rest.first() {
         let ym = month_at(first)?;
-        let mut end = start;
-        while let Some(bar) = bars.get(end) {
+        let mut len = 0usize;
+        while let Some(bar) = rest.get(len) {
             if month_at(bar)? != ym {
                 break;
             }
-            end = end.saturating_add(1);
+            len = len.saturating_add(1);
         }
-        let Some(slice) = bars.get(start..end) else {
-            break;
-        };
+        // `len` counts bars of `rest` and is at least one, the first bar
+        // being in its own month: the split is in range and `rest` shrinks.
+        let (slice, tail) = rest.split_at(len);
         out.push((ym, slice));
-        start = end;
+        rest = tail;
     }
     Ok(out)
 }
@@ -5696,29 +5694,37 @@ impl CensusLock {
         // FIFO or a device that opens at this name is a misfiled path, the same
         // class as the directory refused above, and nothing downstream reports
         // it. A socket never opens, so it is refused in the arm above instead.
-        match lock.metadata() {
-            Ok(found) if found.is_file() => {}
-            Ok(found) => {
-                return Err(format!(
-                    "the census lock at {} is not a regular file ({}). \
-                     Refused rather than run without it: the census beside it \
-                     is still writable. Remove what occupies that name and try \
-                     again.",
-                    lock_path.display(),
-                    entry_kind(found.file_type())
-                ));
-            }
-            Err(why) => {
-                return Err(format!(
-                    "the census lock at {} opened but cannot be measured: {why}. \
-                     Refused rather than run without it.",
-                    lock_path.display()
-                ));
-            }
-        }
+        Self::opened(&lock_path, lock.metadata())?;
         Flock::try_lock(lock, lock_path.clone())
             .map(|held| Self { _held: Some(held) })
             .map_err(|refusal| lock_refusal(&lock_path, refusal))
+    }
+
+    /// Whether a lock file that opened may be locked: its handle's own `fstat`
+    /// says a regular file.
+    ///
+    /// Split out of [`CensusLock::take_at`] so the refusal of a handle that
+    /// opened and then could not be measured can be driven with a host error
+    /// no test can provoke on demand, as [`CensusLock::unopened`]'s arms are
+    /// (D-2765). The answer is the handle's, never the path's: the name may
+    /// have moved since the open.
+    fn opened(lock_path: &Path, found: std::io::Result<fs::Metadata>) -> Result<(), String> {
+        match found {
+            Ok(found) if found.is_file() => Ok(()),
+            Ok(found) => Err(format!(
+                "the census lock at {} is not a regular file ({}). \
+                 Refused rather than run without it: the census beside it \
+                 is still writable. Remove what occupies that name and try \
+                 again.",
+                lock_path.display(),
+                entry_kind(found.file_type())
+            )),
+            Err(why) => Err(format!(
+                "the census lock at {} opened but cannot be measured: {why}. \
+                 Refused rather than run without it.",
+                lock_path.display()
+            )),
+        }
     }
 
     /// Why the lock file would not open, and whether that may defer.
@@ -6330,9 +6336,7 @@ mod tests {
 
         // A MINUTE THAT MOVED THE HIGH is named with both values.
         let mut moved = minutes;
-        if let Some(second) = moved.get_mut(1) {
-            second.high = 125;
-        }
+        moved.get_mut(1).expect("the second minute").high = 125;
         let report = day_check_of(&moved, &root, symbol_id, &zerodha)
             .expect("zerodha is checked")
             .expect("the day file reads");
@@ -6696,10 +6700,13 @@ mod tests {
             let _gone = tell.send(answer);
         });
         let answer = heard.recv_timeout(std::time::Duration::from_secs(5));
-        if answer.is_err() {
-            // Release the writer blocked in open(2) before failing.
-            let _reader = std::fs::File::open(&lock_path);
-        }
+        // Release a writer a regression left blocked in open(2), before any
+        // assertion can fail: a read-write open of a FIFO never waits, so it
+        // is made whatever the answer was and costs a prompt refusal nothing.
+        let _release = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path);
         let Ok(Err(why)) = answer else {
             panic!("a FIFO at the lock path must refuse promptly, got {answer:?}")
         };
@@ -6728,10 +6735,25 @@ mod tests {
     /// hold the link is a panic naming each one tried and why, never a skip.
     /// `socket_at_binds_where_a_direct_bind_cannot` pins it.
     fn socket_at(path: &std::path::Path, tag: &str) -> std::os::unix::net::UnixListener {
+        socket_through(
+            path,
+            tag,
+            &[std::env::temp_dir(), std::path::PathBuf::from("/tmp")],
+        )
+    }
+
+    /// [`socket_at`] through the short directories `bases`, tried in order:
+    /// one that cannot hold the link, or whose link still spells an address
+    /// too long, is passed over and named, and the next one is tried.
+    fn socket_through(
+        path: &std::path::Path,
+        tag: &str,
+        bases: &[std::path::PathBuf],
+    ) -> std::os::unix::net::UnixListener {
         let dir = path.parent().expect("a socket path inside a directory");
         let file = path.file_name().expect("a socket path naming a file");
         let mut tried = Vec::new();
-        for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+        for base in bases {
             let link = base.join(format!("brutex-sock-{}-{tag}", std::process::id()));
             let _stale = std::fs::remove_file(&link);
             if let Err(why) = std::os::unix::fs::symlink(dir, &link) {
@@ -6784,6 +6806,25 @@ mod tests {
             );
         }
         drop(listener);
+
+        // EVERY SHORT DIRECTORY THAT CANNOT CARRY THE SOCKET IS PASSED OVER:
+        // one that cannot hold the link, then one whose link still spells an
+        // address too long, then one that can; no link is left in any.
+        let second = dir.join("dhan2.man.lock");
+        let bases = [
+            root.join("no-such-dir"),
+            dir.clone(),
+            std::env::temp_dir(),
+            std::path::PathBuf::from("/tmp"),
+        ];
+        let carried = socket_through(&second, "LONGER", &bases);
+        let found = std::fs::symlink_metadata(&second).expect("something at the second path");
+        assert!(found.file_type().is_socket(), "{:?}", found.file_type());
+        for base in &bases {
+            let link = base.join(format!("brutex-sock-{}-LONGER", std::process::id()));
+            assert!(std::fs::symlink_metadata(&link).is_err(), "{link:?}");
+        }
+        drop(carried);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -7063,10 +7104,12 @@ mod tests {
             })
         };
         let read = answer.recv_timeout(std::time::Duration::from_secs(2));
-        if read.is_err() {
-            // Release the stuck open so the suite does not hang, then fail.
-            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
-        }
+        // Release a stuck open so the suite does not hang, whatever the answer
+        // was: a read-write open of a FIFO never waits, so it is made always.
+        let _release = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo);
         let _ = reader.join();
         let why = read
             .expect("a FIFO at the census path must not hold the read")
@@ -7216,3 +7259,7 @@ mod tests {
 #[cfg(test)]
 #[path = "ingest_cov_tests.rs"]
 mod cov_tests;
+
+#[cfg(test)]
+#[path = "ingest_gap_tests.rs"]
+mod gap_tests;
