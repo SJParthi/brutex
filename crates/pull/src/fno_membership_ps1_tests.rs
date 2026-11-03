@@ -164,7 +164,7 @@ impl NfoSource for Fake {
     }
 
     fn fetch(&self, _file: &ListedFile<()>) -> Result<Vec<u8>, CmRefusal> {
-        Err(CmRefusal::FolderUnknown)
+        unreachable!("membership is read from listed names: no tick file is fetched")
     }
 }
 

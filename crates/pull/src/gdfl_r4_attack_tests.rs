@@ -81,10 +81,7 @@ fn bars_tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&at) else {
-            continue;
-        };
-        for entry in entries {
+        for entry in std::fs::read_dir(&at).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
@@ -798,10 +795,11 @@ fn r4_11_a_journal_this_branch_wrote_before_definition_existed_is_resumed_as_its
     assert!(after.starts_with(&written), "{after}");
     // ADAPTED (D-3317 item 4): the run's `run` line comes first, once.
     assert!(after[written.len()..].starts_with("run "), "{after}");
-    for (at, appended) in after[written.len()..].lines().enumerate() {
+    // Line 0 is the `run` line, held just above; every line after it is a
+    // day's `begin` or `done`.
+    for appended in after[written.len()..].lines().skip(1) {
         assert!(
-            (at == 0 && appended.starts_with("run "))
-                || appended.starts_with("begin stocks 2024-04-")
+            appended.starts_with("begin stocks 2024-04-")
                 || appended.starts_with("done stocks 2024-04-")
                     && appended.contains(&format!(" definition={BAR_DEFINITION} ")),
             "{appended}"

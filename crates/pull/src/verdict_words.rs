@@ -184,7 +184,7 @@ mod tests {
                     !word.is_empty()
                         && word
                             .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b == b'_' || b.is_ascii_digit())
+                            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'))
                 );
                 assert_eq!(
                     table.iter().filter(|(_, w)| w == word).count(),

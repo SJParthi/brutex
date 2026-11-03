@@ -763,11 +763,7 @@ fn line_of(store: &Path, kind: &str, on: &str) -> String {
     let text = std::fs::read_to_string(journal_path(store)).unwrap();
     text.lines()
         .rev()
-        .find(|l| {
-            !l.starts_with("begin ")
-                && l.split(' ').nth(1) == Some(kind)
-                && l.split(' ').nth(2) == Some(on)
-        })
+        .find(|l| !l.starts_with("begin ") && l.split(' ').skip(1).take(2).eq([kind, on]))
         .unwrap_or_else(|| panic!("no closing line for {kind} {on} in {text}"))
         .to_owned()
 }
@@ -2806,14 +2802,15 @@ fn reference(kind: ImportKind, day: Day, ticks: &[Tick]) -> Vec<Bar> {
     // traded or not.
     if kind == ImportKind::Options {
         for bar in &mut out {
-            if let Some(oi) = every
+            // Every option row carries its open interest and every placed row
+            // is in `every`, so each placed second has a last one.
+            let at = bar.ts_micros;
+            bar.open_interest = every
                 .iter()
-                .filter(|(s, _)| micros_at(day, *s) == bar.ts_micros)
+                .filter(|(s, _)| micros_at(day, *s) == at)
                 .filter_map(|(_, t)| t.oi)
                 .next_back()
-            {
-                bar.open_interest = oi;
-            }
+                .expect("an option second has a row with its open interest");
         }
     }
     out
@@ -4439,12 +4436,12 @@ fn bars_tree_has_no_day(store: &Path, on: Day) -> bool {
             let rel = path.to_string_lossy().into_owned();
             let parts: Vec<&str> = rel.split('/').collect();
             // bars/gdfl/NSE/FNO/<under>/<contract>/1s/<yyyy-mm>.bin
-            let (Some(under), Some(contract)) = (parts.get(4), parts.get(5)) else {
-                return true;
+            let [_, _, _, _, under, contract, ..] = parts.as_slice() else {
+                panic!("{rel}: not a bar month of the store");
             };
             bars_on(store, ("FNO", under, Contract::parse(contract)), on)
                 .iter()
-                .all(|bar| bar.ts_micros < start || bar.ts_micros > end)
+                .all(|bar| !(start..=end).contains(&bar.ts_micros))
         })
 }
 
@@ -4512,11 +4509,10 @@ fn store_bytes(store: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                 // seal over it (60..64) are the clock's too; every other byte
                 // of every record stands.
                 let mut out = bytes;
+                assert!(out.len().is_multiple_of(64), "{}", rel.display());
                 for record in out.chunks_mut(64) {
                     for at in (48..56).chain(60..64) {
-                        if let Some(byte) = record.get_mut(at) {
-                            *byte = 0;
-                        }
+                        record[at] = 0;
                     }
                 }
                 (rel, out)
@@ -4964,6 +4960,38 @@ fn every_month_reads_whole(store: &Path) -> (usize, usize) {
     (months, unborn)
 }
 
+/// A month cut off in its creation (its header region written as zeros and
+/// never stamped, `store::file`'s `is_interrupted_genesis`, D-1521) is told
+/// apart by `every_month_reads_whole`: the reader refuses it, and it is
+/// counted unborn, never read and never a half month. The kill test below
+/// meets one only when its SIGKILL lands inside a month's creation; this one
+/// is made on purpose.
+#[test]
+fn a_month_cut_off_in_its_creation_is_counted_unborn() {
+    let store = scratch("unborn-month");
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol: "ZQINVENTED",
+        contract: Some(nifty_ce()),
+        timeframe: Timeframe::SECOND_1,
+        month: d1().year_month().unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    let month_file = path.to_path_buf(&store);
+    std::fs::create_dir_all(month_file.parent().unwrap()).unwrap();
+    let region = usize::try_from(store::format::HEADER_LEN).unwrap();
+    std::fs::write(&month_file, vec![0_u8; region]).unwrap();
+    assert_eq!(
+        every_month_reads_whole(&store),
+        (0, 1),
+        "counted unborn, never read"
+    );
+    std::fs::remove_dir_all(store).unwrap();
+}
+
 /// WP-16 (DB-N25): A KILL -9 AT ANY POINT LEAVES EVERY MONTH AT ITS OLD STATE
 /// OR ITS NEW ONE, NEVER HALF, AND THE DAY IS DONE AGAIN ON RESUME. A child of
 /// this test binary imports three options days on four workers and is killed
@@ -5354,10 +5382,11 @@ fn a_day_that_cannot_be_made_durable_stops_the_run_and_stays_open() {
             &store.clone(),
             Box::new(move |_path| {
                 if journal_counts(&at).0 == 2 {
+                    // The census as the first refused flush finds it.
                     let mut census = census.lock().unwrap();
-                    if census.is_none() {
-                        *census = Some(std::fs::read(manifest_path(&at, Vendor::Gdfl)).unwrap());
-                    }
+                    let _first = census.get_or_insert_with(|| {
+                        std::fs::read(manifest_path(&at, Vendor::Gdfl)).unwrap()
+                    });
                     return Err(std::io::Error::other("injected day flush fault"));
                 }
                 Ok(())
@@ -5432,7 +5461,8 @@ fn a_day_that_cannot_be_made_durable_stops_the_run_and_stays_open() {
         again
             .failures
             .iter()
-            .any(|f| f.why.contains("durability barrier") && f.why.contains("already failed")),
+            .filter(|f| f.why.contains("durability barrier"))
+            .any(|f| f.why.contains("already failed")),
         "{:?}",
         again.failures
     );
@@ -5825,17 +5855,20 @@ fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store(
                 (2, 0),
                 "{word}"
             );
-            let flushed: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>> = std::sync::Arc::default();
-            let hook = {
-                let flushed = std::sync::Arc::clone(&flushed);
-                HookedFlushes::new(
-                    &store,
-                    Box::new(move |path| {
-                        flushed.lock().unwrap().push(path.to_path_buf());
-                        Ok(())
-                    }),
-                )
-            };
+            // NO REVISION IS LEFT TO THE DAY'S BATCH, and a back-fill day whose
+            // every file lands as a revision leaves the batch nothing at all to
+            // flush (measured: a hook recording the batch's flushes was never
+            // asked, in any of the three modes). Any flush the batch issues
+            // refuses the day, and the run below with it, naming the file.
+            let hook = HookedFlushes::new(
+                &store,
+                Box::new(move |path| {
+                    Err(std::io::Error::other(format!(
+                        "{word}: the back-fill day's batch flushed {}",
+                        path.display()
+                    )))
+                }),
+            );
             // THE BACK-FILL IS ASKED FOR (IA-16, D-4889): only a run with a
             // repair reason lands day 1 under the later days.
             let report = run_durable_with(
@@ -5848,17 +5881,6 @@ fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store(
             )
             .unwrap();
             drop(hook);
-            let held_back: Vec<PathBuf> = flushed
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|path| of_a_revision(path))
-                .cloned()
-                .collect();
-            assert!(
-                held_back.is_empty(),
-                "{word}: the day's batch was left a revision's flushes: {held_back:?}"
-            );
             (report, store_bytes(&store))
         })
         .collect();

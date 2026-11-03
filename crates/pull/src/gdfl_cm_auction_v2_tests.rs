@@ -402,43 +402,62 @@ fn a_garbage_file_at_the_auc_path_is_refused_by_name_and_kept() {
     assert_eq!(std::fs::read(&path).unwrap(), garbage);
 }
 
+/// What a reader beside an append may see: no file yet; whole days of
+/// `per_day` records, never fewer than the `seen` before; or THE ONE WINDOW
+/// (the first append has made the file and not yet taken its lock), named,
+/// and only before any record exists. Anything else fails.
+fn beside_an_append(got: Result<Option<Sidecar>, Refused>, per_day: usize, seen: &mut usize) {
+    match got {
+        Ok(None) => {}
+        Ok(Some(sidecar)) => {
+            let n = sidecar.records.len();
+            assert_eq!(n % per_day, 0, "a part of a day was seen: {n}");
+            assert!(n >= *seen, "a read went back: {n} after {seen}");
+            *seen = n;
+        }
+        Err(refusal) if *seen == 0 && refusal.why.contains("holds no header") => {}
+        Err(refusal) => panic!("a reader beside an append was refused: {refusal}"),
+    }
+}
+
 #[test]
 fn a_reader_beside_a_concurrent_append_sees_whole_days_only() {
     let root = scratch("ag04-concurrent");
     let first = day(2026, 9, 1);
+    // THE ONE WINDOW, made by hand in a store of its own, since no schedule
+    // promises a read inside it: the empty file a first append has made and
+    // not yet locked.
+    let window = path(&scratch("ag04-concurrent-window"), &key(), first).unwrap();
+    std::fs::create_dir_all(window.parent().unwrap()).unwrap();
+    std::fs::write(&window, b"").unwrap();
     let path = path(&root, &key(), first).unwrap();
     let prints = [
         print(at(15, 29, 1), 333_331, 3),
         print(at(15, 29, 2), 333_332, 5),
         print(at(15, 29, 3), 333_333, 7),
     ];
+    let mut seen = 0;
+    beside_an_append(read(&window), prints.len(), &mut seen);
+    // The writer starts on the reader's first read: that read finds no file,
+    // and the reader is reading before the writer can finish.
+    let (go, gate) = std::sync::mpsc::channel::<()>();
     let writer = {
         let root = root.clone();
         std::thread::spawn(move || {
+            gate.recv().unwrap();
             for d in 1..=28 {
                 append(&root, &key(), day(2026, 9, d), &prints).unwrap();
             }
         })
     };
-    let mut seen = 0;
-    let mut reads = 0_u32;
-    while !writer.is_finished() || reads == 0 {
-        match read(&path) {
-            Ok(None) => {}
-            Ok(Some(sidecar)) => {
-                let n = sidecar.records.len();
-                assert_eq!(n % prints.len(), 0, "a part of a day was seen: {n}");
-                assert!(n >= seen, "a read went back: {n} after {seen}");
-                seen = n;
-            }
-            // THE ONE WINDOW: the first append has made the file and not yet
-            // taken its lock. Named, and only before any record exists.
-            Err(refusal) if seen == 0 && refusal.why.contains("holds no header") => {}
-            Err(refusal) => panic!("a reader beside an append was refused: {refusal}"),
-        }
-        reads += 1;
+    while !writer.is_finished() {
+        beside_an_append(read(&path), prints.len(), &mut seen);
+        let _spare = go.send(());
     }
     writer.join().unwrap();
+    // One read after the writer: every day it filed, whole.
+    beside_an_append(read(&path), prints.len(), &mut seen);
+    assert_eq!(seen, 28 * 3, "the last read saw every day");
     assert_eq!(read(&path).unwrap().unwrap().records.len(), 28 * 3);
 }
 

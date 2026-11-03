@@ -167,11 +167,14 @@ fn outside_the_record_is_unmeasured_its_own_reason() {
 fn the_rule_is_the_specs_conditions_on_every_day_of_the_record() {
     let mut admitted_in_window = 0_u32;
     for day in SOURCED_FIRST_DAY - 3..=SOURCED_LAST_DAY + 3 {
-        let expected = sourced_kind_of(day) == DayKind::Open(Session::full())
-            && !weekday_of(day).is_weekend()
-            && special_session(day).is_none()
+        // Two halves, each varied by the record on its own: an open full
+        // weekday, and no special session, notice or halt.
+        let full = sourced_kind_of(day) == DayKind::Open(Session::full());
+        let open_weekday = full && !weekday_of(day).is_weekend();
+        let unmarked = special_session(day).is_none()
             && session_circular(day).is_none()
             && halt_on(day).is_none();
+        let expected = open_weekday && unmarked;
         assert_eq!(tradable_day(day).is_ok(), expected, "day {day}");
         if (FIRST_DAY..=LAST_DAY).contains(&day) {
             assert_eq!(sourced_kind_of(day), kind_of(day), "day {day}");
@@ -754,6 +757,16 @@ static EXTENDED_CIRCULARS: [HolidayCircular; 6] = circulars_with_2027();
 fn an_appended_row_is_a_new_version_and_re_keys_none_before_it() {
     let two = CalendarVersion::of(2).expect("version 2");
     let muhurat = at(2026, 11, 8);
+    // The extended tables are the tables of record with one row more at
+    // their end, the same at run time as the statics built at compile time.
+    let notices = notices_with_a_later_one();
+    let circulars = circulars_with_2027();
+    assert_eq!(notices, EXTENDED_NOTICES);
+    assert_eq!(circulars, EXTENDED_CIRCULARS);
+    assert_eq!(notices[..SESSION_CIRCULARS.len()], SESSION_CIRCULARS);
+    assert_eq!(notices[SESSION_CIRCULARS.len()], LATER_NOTICE);
+    assert_eq!(circulars[..HOLIDAY_CIRCULARS.len()], HOLIDAY_CIRCULARS);
+    assert_eq!(circulars[HOLIDAY_CIRCULARS.len()], whole(2027));
 
     // Version 2 over the tables with both rows appended is version 2.
     let two_later =

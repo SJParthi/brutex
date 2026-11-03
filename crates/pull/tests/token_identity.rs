@@ -235,9 +235,10 @@ fn check(module: &str, text: &str) -> Read {
     for name in TYPES {
         for keyword in ["struct", "enum"] {
             for at in word_positions(&code, &format!("{keyword} {name}")) {
-                if let Some(body) = delimited(&code, at, b'{', b'}') {
-                    judge(format!("type {name}"), body);
-                }
+                // Source that compiles closes what it opens: a body never
+                // closed is refused here, never passed over unread.
+                let body = delimited(&code, at, b'{', b'}').expect("a type body closes");
+                judge(format!("type {name}"), body);
             }
         }
     }
@@ -251,9 +252,8 @@ fn check(module: &str, text: &str) -> Read {
         };
         let Some(scope) = scope else { continue };
         for at in word_positions(scope, &format!("fn {name}")) {
-            if let Some(parameters) = delimited(scope, at, b'(', b')') {
-                judge(format!("fn {owner}::{name}"), parameters);
-            }
+            let parameters = delimited(scope, at, b'(', b')').expect("a parameter list closes");
+            judge(format!("fn {owner}::{name}"), parameters);
         }
     }
     for name in LITERALS {
@@ -267,9 +267,8 @@ fn check(module: &str, text: &str) -> Read {
             {
                 continue;
             }
-            if let Some(fields) = delimited(&code, at, b'{', b'}') {
-                judge(format!("literal {name}"), fields);
-            }
+            let fields = delimited(&code, at, b'{', b'}').expect("a literal's fields close");
+            judge(format!("literal {name}"), fields);
         }
     }
     read
@@ -346,6 +345,19 @@ fn the_module_list_is_closed_over_every_definition_of_a_key() {
         sources(&root.join("crates").join(krate).join("src"), &mut files);
     }
     assert!(files.len() > 100, "the walk found {} files", files.len());
+    // The walk descends into folders and keeps `.rs` files only: this crate's
+    // own folder holds `Cargo.toml` beside `src`, and `support/mod.rs` one
+    // folder below `tests`.
+    let mut own = Vec::new();
+    sources(&root.join("crates/pull"), &mut own);
+    assert!(
+        own.contains(&root.join("crates/pull/tests/support/mod.rs")),
+        "{own:?}"
+    );
+    assert!(
+        !own.contains(&root.join("crates/pull/Cargo.toml")),
+        "{own:?}"
+    );
     let mut strays = Vec::new();
     for path in files {
         let module = path
@@ -438,4 +450,12 @@ fn a_token_field_in_a_fixture_key_builder_is_refused() {
         code_only("a // token\nb /* token */ c \"x\\\"//y\""),
         "a \nb  c \"x\\\"//y\""
     );
+    // Text that ends inside a block comment is blanked to its end, and an
+    // escape the text ends on is kept as it is.
+    assert_eq!(code_only("a /* token"), "a ");
+    assert_eq!(code_only("\"\\"), "\"\\");
+    // A name inside a longer word is no position of it.
+    assert_eq!(word_positions("xfn new fn new", "fn new"), [8]);
+    // A delimiter that is never closed holds no body.
+    assert_eq!(delimited("a { b", 0, b'{', b'}'), None);
 }

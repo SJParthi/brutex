@@ -76,7 +76,7 @@ impl NfoSource for Fake {
     }
 
     fn fetch(&self, _file: &ListedFile<()>) -> Result<Vec<u8>, CmRefusal> {
-        Err(CmRefusal::FolderUnknown)
+        unreachable!("membership is read from listed names: no tick file is fetched")
     }
 }
 
@@ -1098,51 +1098,55 @@ fn a_kill_between_two_month_installs_leaves_a_servable_resumable_directory() {
 
 #[test]
 fn a_failed_write_between_two_month_installs_resumes_to_the_one_pass_bytes() {
+    // Mode bits do not bind root, which is how this suite runs in a
+    // container: re-run the body where they do (D-0995), so the refused
+    // install and the resume after it run on every host.
+    crate::support::where_permission_binds(
+        "fno_membership::tests::a_failed_write_between_two_month_installs_resumes_to_the_one_pass_bytes",
+        a_failed_write_between_two_month_installs_resumes_to_the_one_pass_bytes_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_failed_write_between_two_month_installs_resumes_to_the_one_pass_bytes_body() {
     // The same window, the second install refused by the file system (the
-    // directory made read-only once August is in). Under an account the
-    // mode does not stop (root), the build succeeds and the bytes are still
-    // compared.
+    // directory made read-only once August is in).
     use std::os::unix::fs::PermissionsExt as _;
     let source = aug_sep();
     let once = scratch("fail-once");
     build(&source, &once, aug_sep_window(), 2, &mut |_| {}).unwrap();
     let dir = scratch("fail-cut");
     let mode = |bits| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(bits));
+    // `finish` installs before it reports, and September's install is
+    // refused, so August is the one month ever reported.
     let built = build(&source, &dir, aug_sep_window(), 2, &mut |month| {
-        if month.table.month() == (2024, 8) {
-            mode(0o555).unwrap();
-        }
+        assert_eq!(month.table.month(), (2024, 8), "August alone is installed");
+        mode(0o555).unwrap();
     });
-    let stopped = std::fs::write(dir.join(".probe"), b"").is_err();
     mode(0o755).unwrap();
-    if stopped {
-        assert!(
-            matches!(&built, Err(MembershipError::Io { .. })),
-            "{built:?}"
-        );
-        let names: Vec<String> = files(&dir).into_iter().map(|(name, _)| name).collect();
-        assert_eq!(
-            names,
-            [file_name(2024, 8, 1)],
-            "August only, and no temporary"
-        );
-        let held = Membership::open(&dir).unwrap();
-        assert_eq!(held.known_span().map(|(_, to)| to), Some(d(2024, 8, 30)));
-        build(
-            &source,
-            &dir,
-            Window::Typed {
-                from: None,
-                to: d(2024, 9, 30),
-            },
-            2,
-            &mut |_| {},
-        )
-        .unwrap();
-    } else {
-        built.unwrap();
-        std::fs::remove_file(dir.join(".probe")).unwrap();
-    }
+    assert!(
+        matches!(&built, Err(MembershipError::Io { .. })),
+        "{built:?}"
+    );
+    let names: Vec<String> = files(&dir).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(
+        names,
+        [file_name(2024, 8, 1)],
+        "August only, and no temporary"
+    );
+    let held = Membership::open(&dir).unwrap();
+    assert_eq!(held.known_span().map(|(_, to)| to), Some(d(2024, 8, 30)));
+    build(
+        &source,
+        &dir,
+        Window::Typed {
+            from: None,
+            to: d(2024, 9, 30),
+        },
+        2,
+        &mut |_| {},
+    )
+    .unwrap();
     assert_eq!(newest(&dir), newest(&once));
 }
 
@@ -1187,24 +1191,25 @@ fn a_handover_needs_a_majority_of_both_sides_and_two_shared_keys() {
     // of the 5th is ZZILLIQ, ZZONE, ZZTWO's series, ZZNEWBIE, ZZNEWONE.
     assert_eq!(held.pool_size(d(2024, 3, 5)), Ok(5));
     assert_eq!(held.is_member("ZZILLIQ", d(2024, 3, 5)), Ok(true));
-    let reported: Vec<&str> = months[0]
+    let mut reported: Vec<&str> = months[0]
         .ambiguous
         .iter()
         .map(|(_, why)| why.as_str())
         .collect();
     assert_eq!(reported.len(), 2, "{reported:?}");
+    // In name order ("ZZILLIQ -> " sorts before "ZZONE -> "), each refused
+    // handover is checked at its own place.
+    reported.sort_unstable();
+    let [illiq, one] = reported.as_slice() else {
+        panic!("{reported:?}")
+    };
     assert!(
-        reported
-            .iter()
-            .any(|why| why.starts_with("ZZILLIQ -> ZZNEWBIE")
-                && why.ends_with("a minority of the new spelling's keys")),
+        illiq.starts_with("ZZILLIQ -> ZZNEWBIE")
+            && illiq.ends_with("a minority of the new spelling's keys"),
         "{reported:?}"
     );
     assert!(
-        reported
-            .iter()
-            .any(|why| why.starts_with("ZZONE -> ZZNEWONE")
-                && why.ends_with("fewer than 2 shared keys")),
+        one.starts_with("ZZONE -> ZZNEWONE") && one.ends_with("fewer than 2 shared keys"),
         "{reported:?}"
     );
 }
