@@ -96,13 +96,16 @@ fn write(root: &Root, commits: &[Vec<Bar>]) {
     }
 }
 
-/// A summary of `rows` as the kept file would hold it at `generation`.
+/// A summary of `rows` as the kept file would hold it at `generation`: the
+/// fold sets the stamps and the counts, and the commit counter it describes
+/// is the rows' own count (the writer stamps it from the header).
 fn summary_of(symbol: u32, rows: &[Bar], generation: u64) -> MonthSummary {
     let mut summary = MonthSummary::new(symbol, 1, YearMonth::new(2031, 5).unwrap());
     for row in rows {
         summary.fold(row);
     }
     summary.generation = generation;
+    summary.n_valid = u64::try_from(rows.len()).unwrap();
     summary
 }
 
