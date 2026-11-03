@@ -3728,3 +3728,50 @@ mod exact_stepdown_tests {
         assert!(rejected.iter().all(|row| row.strategy != 1));
     }
 }
+
+#[cfg(test)]
+mod degenerate_input_tests {
+    //! BASE-COV-LIBS-LS2: the degenerate inputs the private helpers and the
+    //! legacy stepdown door answer by contract.
+    use super::{DEFAULT_BLOCK, Performance, Rng, romano_wolf, summarise};
+
+    /// `below(0)` answers zero WITHOUT drawing: the stream after it is the
+    /// stream of a fresh generator of the same seed.
+    #[test]
+    fn a_draw_below_zero_answers_zero_without_advancing_the_stream() {
+        let mut drawn = Rng::new(7);
+        assert_eq!(drawn.below(0), 0);
+        assert_eq!(drawn.next_u64(), Rng::new(7).next_u64());
+        assert!(Rng::new(7).below(5) < 5);
+    }
+
+    /// An empty series summarises to the default rather than a NaN mean; a
+    /// single period has its value as the mean and no error.
+    #[test]
+    fn an_empty_series_summarises_to_nothing() {
+        assert_eq!(summarise(&[]), Performance::default());
+        assert_eq!(
+            summarise(&[5]),
+            Performance {
+                mean: 5.0,
+                standard_error: 0.0,
+                periods: 1
+            }
+        );
+    }
+
+    /// Zero draws is no resample, so the legacy stepdown door rejects nothing
+    /// even at an alpha of one, where a single draw rejects every varying
+    /// strategy.
+    #[test]
+    fn zero_draws_reject_nothing_at_the_legacy_door() {
+        let edged: Vec<i64> = (0..200).map(|i| 50 + (i % 7) - 3).collect();
+        let flat: Vec<i64> = (0..200).map(|i| (i % 5) - 2).collect();
+        let family = vec![edged, flat];
+        assert_eq!(
+            romano_wolf(&family, 1, 9, DEFAULT_BLOCK, 1_000_000).len(),
+            2
+        );
+        assert!(romano_wolf(&family, 0, 9, DEFAULT_BLOCK, 1_000_000).is_empty());
+    }
+}
