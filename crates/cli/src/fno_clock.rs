@@ -1719,3 +1719,1481 @@ fn xorshift(state: &mut u64) -> u64 {
     *state = x;
     x
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines,
+    reason = "the fixtures index invented feeds directly and narrow small invented counts, \
+              and an assertion that cannot panic cannot fail"
+)]
+mod tests {
+    use super::*;
+    use pull::gdfl_cm::{HEADER_OPEN_INTEREST, ListedFile, day_folder_name};
+    use pull::session::IST_OFFSET_SECS;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    // ── invented feeds ───────────────────────────────────────────────────────
+
+    fn day(year: u16, month: u8, date: u8) -> Day {
+        Day::new(year, month, date).unwrap()
+    }
+
+    /// The UTC second of `hh:mm:ss` IST on `at`.
+    fn utc(at: Day, hh: i64, mm: i64, ss: i64) -> i64 {
+        i64::from(at.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + hh * 3_600 + mm * 60 + ss
+    }
+
+    fn stock(name: &str) -> Symbol {
+        Symbol::new(name).unwrap()
+    }
+
+    fn key(name: &str, at: Day) -> Key {
+        Key {
+            stock: stock(name),
+            day: at,
+        }
+    }
+
+    fn bar(second: i64, prices: Prices, volume: i64) -> Bar {
+        Bar {
+            ts_micros: second * MICROS_PER_SECOND,
+            open: prices.open,
+            high: prices.high,
+            low: prices.low,
+            close: prices.close,
+            volume,
+            open_interest: store::format::OI_NULL,
+        }
+    }
+
+    const fn flat(price: i64) -> Prices {
+        Prices {
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+        }
+    }
+
+    /// Every real second in `from..to` that traded, with its prices: an
+    /// invented random walk of `tick` paisa a step, up, down or still; one
+    /// second in `quiet` trades nothing and one in nine has a one-tick range.
+    fn walk(from: i64, to: i64, seed: u64, tick: i64, quiet: u64) -> Vec<(i64, Prices)> {
+        let mut state = seed.max(1);
+        let mut price = 20_000 * tick;
+        let mut out = Vec::new();
+        for second in from..to {
+            let draw = xorshift(&mut state);
+            if draw.is_multiple_of(quiet) {
+                continue;
+            }
+            let step = match (draw >> 8) % 3 {
+                0 => -tick,
+                1 => 0,
+                _ => tick,
+            };
+            price = (price + step).max(tick * 1_000);
+            let wick = if (draw >> 16).is_multiple_of(9) {
+                tick
+            } else {
+                0
+            };
+            out.push((
+                second,
+                Prices {
+                    open: price,
+                    high: price + wick,
+                    low: price - wick,
+                    close: price,
+                },
+            ));
+        }
+        out
+    }
+
+    /// One price every second of `from..to`, rising one paisa a second.
+    fn rising(from: i64, to: i64) -> Vec<(i64, Prices)> {
+        (from..to)
+            .map(|second| (second, flat(100_000 + second - from)))
+            .collect()
+    }
+
+    /// Zerodha's minute bars of `trades` for `count` minutes from the minute
+    /// opening at UTC second `first`: each the fold of its traded seconds,
+    /// back-adjusted by `raw_over_adjusted`; a minute with no trade has no bar.
+    fn zerodha(
+        trades: &[(i64, Prices)],
+        first: i64,
+        count: i64,
+        raw_over_adjusted: (i64, i64),
+    ) -> Vec<Bar> {
+        let (num, den) = raw_over_adjusted;
+        let mut folds: BTreeMap<i64, (Prices, i64)> = BTreeMap::new();
+        for &(second, prices) in trades {
+            let start = first + (second - first).div_euclid(60) * 60;
+            if start < first || start >= first + count * 60 {
+                continue;
+            }
+            folds
+                .entry(start)
+                .and_modify(|(fold, volume)| {
+                    fold.high = fold.high.max(prices.high);
+                    fold.low = fold.low.min(prices.low);
+                    fold.close = prices.close;
+                    *volume += 1;
+                })
+                .or_insert((prices, 1));
+        }
+        folds
+            .into_iter()
+            .map(|(start, (prices, volume))| {
+                let adjust = |paisa: i64| {
+                    assert_eq!(paisa * den % num, 0, "an invented adjustment must be exact");
+                    paisa * den / num
+                };
+                let adjusted = Prices {
+                    open: adjust(prices.open),
+                    high: adjust(prices.high),
+                    low: adjust(prices.low),
+                    close: adjust(prices.close),
+                };
+                bar(start, adjusted, volume)
+            })
+            .collect()
+    }
+
+    /// GDFL's second bars of `trades`, each stamped `delta` seconds after its
+    /// real second, kept only when stamped inside `keep` (the store's session
+    /// gate).
+    fn gdfl(trades: &[(i64, Prices)], delta: i64, keep: (i64, i64)) -> Vec<Bar> {
+        trades
+            .iter()
+            .map(|&(second, prices)| (second + delta, prices))
+            .filter(|&(stamp, _)| stamp >= keep.0 && stamp < keep.1)
+            .map(|(stamp, prices)| bar(stamp, prices, 3))
+            .collect()
+    }
+
+    /// The continuous session of a regular day, in UTC seconds.
+    fn session(at: Day) -> (i64, i64) {
+        (utc(at, 9, 15, 0), utc(at, 15, 30, 0))
+    }
+
+    const MEASURED: Ticks = Ticks::Measured(BackStep { step_s: 0, rows: 0 });
+
+    /// A random walk over `minutes` minutes from 09:15 on `at`, two minutes of
+    /// trades either side, GDFL stamped `delta` late.
+    fn walked_day(at: Day, minutes: i64, seed: u64, delta: i64) -> DayBars {
+        let open = utc(at, 9, 15, 0);
+        let trades = walk(open - 120, open + minutes * 60 + 120, seed, 5, 4);
+        DayBars {
+            seconds: gdfl(&trades, delta, session(at)),
+            minutes: zerodha(&trades, open, minutes, (1, 1)),
+        }
+    }
+
+    // ── the offset ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn shifts_of_one_to_thirty_seconds_either_way_are_recovered_exactly() {
+        let at = day(2024, 4, 1);
+        for delta in -30_i64..=30 {
+            let bars = walked_day(at, 120, 0xC10C + delta.unsigned_abs(), delta);
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(
+                row.offset_ms,
+                Some(i32::try_from(delta * 1_000).unwrap()),
+                "{delta}"
+            );
+            assert_eq!(row.flags, Flags::default(), "{delta}");
+            assert!(row.margin > 0, "{delta}: the true shift beats every other");
+            assert_eq!(row.minutes, 120);
+            assert_eq!(row.window_s, FIRST_WINDOW_S);
+            assert!(row.score <= 4 * row.minutes);
+        }
+    }
+
+    #[test]
+    fn random_walks_recover_their_shift_under_many_seeds() {
+        let mut state = 0x5EED_u64;
+        for _ in 0..12 {
+            let at = day(2024, 4, 1);
+            let delta = i64::try_from(xorshift(&mut state) % 61).unwrap() - 30;
+            let tick = [1, 5, 10][usize::try_from(xorshift(&mut state) % 3).unwrap()];
+            let quiet = 2 + xorshift(&mut state) % 6;
+            let open = utc(at, 9, 15, 0);
+            let trades = walk(
+                open - 120,
+                open + 90 * 60 + 120,
+                xorshift(&mut state),
+                tick,
+                quiet,
+            );
+            let bars = DayBars {
+                seconds: gdfl(&trades, delta, session(at)),
+                minutes: zerodha(&trades, open, 90, (1, 1)),
+            };
+            let row = calibrate(key("TCS", at), &bars, MEASURED);
+            assert_eq!(row.offset_ms, Some(i32::try_from(delta * 1_000).unwrap()));
+            assert!(!row.flags.has(Flags::TIED));
+        }
+    }
+
+    #[test]
+    fn a_full_session_is_recovered_and_its_edges_are_unmatched_only_where_gdfl_is_cut() {
+        let at = day(2024, 4, 1);
+        let bars = walked_day(at, 375, 41, -17);
+        let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+        assert_eq!(row.offset_ms, Some(-17_000));
+        assert_eq!(row.minutes, 375);
+        // GDFL stamps 17 s early, and the gate cuts the first 17 s of the day:
+        // the 09:15 minute still holds the rest of its seconds.
+        assert_eq!(row.unmatched, 0);
+        assert!(row.seconds > 0);
+        assert_eq!(row.floor(), Floor::Calibrated(0));
+    }
+
+    #[test]
+    fn a_split_day_is_compared_under_its_session_ratio() {
+        let at = day(2024, 4, 2);
+        let open = utc(at, 9, 15, 0);
+        for (raw_over_adjusted, tick) in [((2, 1), 10), ((3, 2), 3), ((5, 1), 5)] {
+            let trades = walk(open - 120, open + 60 * 60 + 120, 77, tick, 3);
+            let bars = DayBars {
+                seconds: gdfl(&trades, 11, session(at)),
+                minutes: zerodha(&trades, open, 60, raw_over_adjusted),
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(row.offset_ms, Some(11_000), "{raw_over_adjusted:?}");
+        }
+    }
+
+    /// The primes from `from` up, by trial division: invented prices no two of
+    /// which share a ratio with one other price.
+    fn primes(from: i64, count: usize) -> Vec<i64> {
+        (from..)
+            .filter(|&n| (2..=n.isqrt()).all(|d| n % d != 0))
+            .take(count)
+            .collect()
+    }
+
+    #[test]
+    fn a_day_with_no_agreement_is_flagged_uncalibrated() {
+        let at = day(2024, 4, 1);
+        let open = utc(at, 9, 15, 0);
+        let constant = 100_003;
+        let seconds = (open..open + 20 * 60)
+            .map(|s| bar(s, flat(constant), 1))
+            .collect();
+        let distinct = primes(120_000, 80);
+        let minutes = (0..20)
+            .map(|m| {
+                let p = &distinct[m * 4..m * 4 + 4];
+                let prices = Prices {
+                    low: p[0],
+                    open: p[1],
+                    close: p[2],
+                    high: p[3],
+                };
+                bar(open + i64::try_from(m).unwrap() * 60, prices, 9)
+            })
+            .collect();
+        let row = calibrate(key("RELIANCE", at), &DayBars { seconds, minutes }, MEASURED);
+        assert_eq!(row.offset_ms, None);
+        assert!(row.flags.has(Flags::NO_AGREEMENT));
+        assert_eq!(row.score, 0);
+        assert_eq!(row.floor(), Floor::Uncalibrated);
+        assert!(row.window_s >= row.reach_s, "the whole reach was searched");
+    }
+
+    #[test]
+    fn ties_take_the_larger_shift_and_the_later_one_on_an_equal_shift() {
+        let at = day(2024, 4, 1);
+        let open = utc(at, 9, 15, 0);
+        let minutes: Vec<Bar> = (0..30)
+            .map(|m| bar(open + m * 60, flat(50_000), 4))
+            .collect();
+        // Every second of 09:15:00..09:45:00 trades at the one price, so every
+        // shift in -59..=59 matches every minute: the larger |delta| and then
+        // the later one is +59.
+        let seconds = (open..open + 30 * 60)
+            .map(|s| bar(s, flat(50_000), 1))
+            .collect();
+        let bars = DayBars {
+            seconds,
+            minutes: minutes.clone(),
+        };
+        let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+        assert_eq!(row.offset_ms, Some(59_000));
+        assert!(row.flags.has(Flags::TIED));
+        assert_eq!(row.margin, 0);
+        assert_eq!(row.floor(), Floor::Calibrated(59));
+        // Cut at 09:44:30: shifts past +29 leave the last minute unmatched, so
+        // the tie is -59..=29 and the larger |delta| is -59.
+        let seconds = (open..open + 30 * 60 - 30)
+            .map(|s| bar(s, flat(50_000), 1))
+            .collect();
+        let row = calibrate(key("RELIANCE", at), &DayBars { seconds, minutes }, MEASURED);
+        assert_eq!(row.offset_ms, Some(-59_000));
+        assert!(row.flags.has(Flags::TIED));
+        assert_eq!(row.floor(), Floor::Calibrated(0));
+    }
+
+    #[test]
+    fn the_window_doubles_until_the_best_shift_is_inside_it() {
+        let at = day(2024, 4, 3);
+        let open = utc(at, 9, 15, 0);
+        // A price that rises every second agrees with no other minute's ratio
+        // at any wrong shift, so a window that misses the truth scores nothing
+        // and its best shift is its edge.
+        let trades = rising(open - 600, open + 70 * 60);
+        for (delta, window) in [(59, 60), (60, 120), (90, 120), (-200, 240), (480, 960)] {
+            let bars = DayBars {
+                seconds: gdfl(&trades, delta, session(at)),
+                minutes: zerodha(&trades, open, 60, (1, 1)),
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(
+                row.offset_ms,
+                Some(i32::try_from(delta * 1_000).unwrap()),
+                "{delta}"
+            );
+            assert_eq!(row.window_s, window, "{delta}");
+            assert!(!row.flags.has(Flags::TIED), "{delta}");
+            assert_eq!(
+                row.margin, row.score,
+                "{delta}: no other shift agrees at all"
+            );
+        }
+    }
+
+    #[test]
+    fn a_best_shift_on_the_edge_of_the_whole_reach_stops_the_search() {
+        let at = day(2024, 4, 1);
+        let open = utc(at, 9, 15, 0);
+        // One minute and one traded second a minute later: the reach is 60,
+        // one minute makes no ratio two minutes give, every shift ties at 0
+        // and the tie's larger |delta| is the window's edge.
+        let bars = DayBars {
+            seconds: vec![bar(open + 60, flat(40_000), 2)],
+            minutes: vec![bar(open, flat(40_000), 2)],
+        };
+        let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+        assert_eq!((row.reach_s, row.window_s), (60, 60));
+        assert!(row.flags.has(Flags::NO_AGREEMENT));
+        // A reach under the first window's half-width ends the search at once.
+        let bars = DayBars {
+            seconds: vec![bar(open + 30, flat(40_000), 2)],
+            minutes: vec![bar(open, flat(40_000), 2)],
+        };
+        let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+        assert_eq!((row.reach_s, row.window_s), (30, 60));
+    }
+
+    #[test]
+    fn kite_hole_minutes_and_gdfl_gaps_leave_the_shift_exact() {
+        let at = day(2024, 4, 1);
+        let open = utc(at, 9, 15, 0);
+        let trades = walk(open - 120, open + 120 * 60 + 120, 9, 5, 4);
+        let delta = 7;
+        let mut minutes = zerodha(&trades, open, 120, (1, 1));
+        let held = minutes.len();
+        // Fifteen Kite-hole minutes: missing from Zerodha, not untraded.
+        minutes.retain(|m| (m.ts_micros / MICROS_PER_SECOND - open) / 60 % 8 != 5);
+        let holes = held - minutes.len();
+        assert_eq!(holes, 15);
+        // Ten minutes in which GDFL holds no traded second: as absent bars and
+        // as bars with no volume, which are the same thing.
+        let gap = (utc(at, 10, 0, 0), utc(at, 10, 10, 0));
+        for zero_volume in [false, true] {
+            let seconds: Vec<Bar> = gdfl(&trades, delta, session(at))
+                .into_iter()
+                .filter_map(|b| {
+                    let s = b.ts_micros / MICROS_PER_SECOND;
+                    if s < gap.0 || s >= gap.1 {
+                        Some(b)
+                    } else if zero_volume {
+                        Some(Bar { volume: 0, ..b })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let bars = DayBars {
+                seconds,
+                minutes: minutes.clone(),
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(row.offset_ms, Some(7_000));
+            assert_eq!(row.minutes, u32::try_from(minutes.len()).unwrap());
+            let empty = minutes
+                .iter()
+                .filter(|m| {
+                    let start = m.ts_micros / MICROS_PER_SECOND + delta;
+                    start >= gap.0 && start + 60 <= gap.1
+                })
+                .count();
+            // 10:00..10:08 are fully inside the gap at +7 s; two of them are
+            // also Kite holes, so seven are compared and unmatched.
+            assert_eq!(row.unmatched, u32::try_from(empty).unwrap());
+            assert_eq!(row.unmatched, 7);
+        }
+    }
+
+    #[test]
+    fn the_auction_era_compares_only_the_continuous_minutes() {
+        for (at, compared) in [(day(2026, 9, 15), 360), (day(2024, 4, 2), 375)] {
+            let open = utc(at, 9, 15, 0);
+            let mut trades = walk(open - 120, open + 375 * 60 + 120, 5, 5, 4);
+            // From 15:15 the band holds prints of another kind in both feeds:
+            // an invented auction price, far from the walk.
+            let band = utc(at, 15, 15, 0);
+            for (second, prices) in &mut trades {
+                if *second >= band {
+                    *prices = flat(prices.close * 3 + (*second % 7));
+                }
+            }
+            let bars = DayBars {
+                seconds: gdfl(&trades, -4, session(at)),
+                minutes: zerodha(&trades, open, 375, (1, 1)),
+            };
+            let row = calibrate(key("TCS", at), &bars, MEASURED);
+            assert_eq!(row.offset_ms, Some(-4_000), "{at}");
+            assert_eq!(row.minutes, compared, "{at}");
+        }
+    }
+
+    #[test]
+    fn the_partial_gdfl_day_of_2019_05_30_is_calibrated_from_its_afternoon() {
+        let at = day(2019, 5, 30);
+        let open = utc(at, 9, 15, 0);
+        let trades = walk(open - 120, open + 375 * 60 + 120, 3, 5, 3);
+        let gdfl_from = utc(at, 11, 57, 47);
+        let delta = 9;
+        let seconds = gdfl(&trades, delta, (gdfl_from, session(at).1));
+        let minutes = zerodha(&trades, open, 375, (1, 1));
+        let bars = DayBars {
+            seconds,
+            minutes: minutes.clone(),
+        };
+        let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+        assert_eq!(row.offset_ms, Some(9_000));
+        let before = minutes
+            .iter()
+            .filter(|m| m.ts_micros / MICROS_PER_SECOND + delta + 60 <= gdfl_from)
+            .count();
+        assert_eq!(row.unmatched, u32::try_from(before).unwrap());
+        assert!(row.unmatched > 150, "the morning is unmatched, never moved");
+    }
+
+    #[test]
+    fn a_recorded_halt_is_never_compared() {
+        let at = day(2020, 3, 13);
+        let open = utc(at, 9, 15, 0);
+        let trades = walk(open - 120, open + 375 * 60 + 120, 13, 5, 3);
+        let bars = DayBars {
+            seconds: gdfl(&trades, 2, session(at)),
+            minutes: zerodha(&trades, open, 375, (1, 1)),
+        };
+        let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+        assert_eq!(row.offset_ms, Some(2_000));
+        // 09:22 to 10:20, the halt and its reopening auction, are 59 minutes.
+        assert_eq!(row.minutes, 375 - 59);
+    }
+
+    // ── what a day lacked ────────────────────────────────────────────────────
+
+    #[test]
+    fn a_day_that_is_no_session_is_flagged_and_nothing_else_is_read() {
+        let sunday = day(2024, 4, 14);
+        let bars = walked_day(sunday, 10, 1, 0);
+        let row = calibrate(key("RELIANCE", sunday), &bars, Ticks::Absent);
+        assert_eq!(row.flags, Flags::NO_SESSION.with(Flags::TICKS_ABSENT));
+        assert_eq!(row.offset_ms, None);
+        assert_eq!(row.back_step_s, None);
+        assert_eq!(row.floor(), Floor::Uncalibrated);
+    }
+
+    #[test]
+    fn days_with_no_comparable_minute_or_no_traded_second_are_flagged() {
+        let at = day(2024, 4, 1);
+        let full = walked_day(at, 10, 2, 0);
+        let pre_open = vec![bar(utc(at, 9, 10, 0), flat(10_000), 5)];
+        let untraded: Vec<Bar> = full
+            .minutes
+            .iter()
+            .map(|b| Bar { volume: 0, ..*b })
+            .collect();
+        for minutes in [Vec::new(), pre_open, untraded] {
+            let bars = DayBars {
+                seconds: full.seconds.clone(),
+                minutes,
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(row.flags, Flags::NO_MINUTES);
+        }
+        let quiet: Vec<Bar> = full
+            .seconds
+            .iter()
+            .map(|b| Bar { volume: 0, ..*b })
+            .collect();
+        for seconds in [Vec::new(), quiet] {
+            let bars = DayBars {
+                seconds,
+                minutes: full.minutes.clone(),
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(row.flags, Flags::NO_SECONDS);
+            assert_eq!(row.minutes, 0, "nothing was searched");
+        }
+        let row = calibrate(key("RELIANCE", at), &DayBars::default(), Ticks::Refused);
+        assert_eq!(
+            row.flags,
+            Flags::NO_MINUTES
+                .with(Flags::NO_SECONDS)
+                .with(Flags::TICKS_REFUSED)
+        );
+        assert_eq!(row.floor(), Floor::Uncalibrated);
+    }
+
+    #[test]
+    fn every_broken_input_rule_flags_its_feed_malformed() {
+        let at = day(2024, 4, 1);
+        let open = utc(at, 9, 15, 0);
+        let good = walked_day(at, 10, 4, 0);
+        let fine = flat(10_000);
+        let broken = [
+            // Not on a whole unit.
+            Bar {
+                ts_micros: open * MICROS_PER_SECOND + 500_000,
+                ..bar(open, fine, 1)
+            },
+            // Another IST day.
+            bar(open + 86_400, fine, 1),
+            // An instant no calendar names.
+            Bar {
+                ts_micros: i64::MIN,
+                ..bar(open, fine, 1)
+            },
+            // Under one paisa.
+            bar(open, flat(0), 1),
+            // A low above the open.
+            bar(
+                open,
+                Prices {
+                    low: 10_001,
+                    ..fine
+                },
+                1,
+            ),
+            // A close above the high.
+            bar(
+                open,
+                Prices {
+                    close: 10_001,
+                    ..fine
+                },
+                1,
+            ),
+            // A negative volume.
+            bar(open, fine, -1),
+        ];
+        for wrong in broken {
+            let seconds = vec![bar(open - 1, fine, 1), wrong];
+            let bars = DayBars {
+                seconds,
+                minutes: good.minutes.clone(),
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(row.flags, Flags::SECONDS_MALFORMED, "{wrong:?}");
+            let minute_wrong = Bar {
+                ts_micros: if wrong.ts_micros == open * MICROS_PER_SECOND + 500_000 {
+                    (open + 30) * MICROS_PER_SECOND
+                } else {
+                    wrong.ts_micros
+                },
+                ..wrong
+            };
+            let bars = DayBars {
+                seconds: good.seconds.clone(),
+                minutes: vec![bar(open - 60, fine, 1), minute_wrong],
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(row.flags, Flags::MINUTES_MALFORMED, "{minute_wrong:?}");
+        }
+        // Out of order, and twice the same stamp.
+        for second in [open - 2, open - 1] {
+            let bars = DayBars {
+                seconds: vec![bar(open - 1, fine, 1), bar(second, fine, 1)],
+                minutes: vec![bar(open - 60, fine, 1), bar(open - 60, fine, 1)],
+            };
+            let row = calibrate(key("RELIANCE", at), &bars, MEASURED);
+            assert_eq!(
+                row.flags,
+                Flags::SECONDS_MALFORMED.with(Flags::MINUTES_MALFORMED)
+            );
+        }
+    }
+
+    // ── the back step ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_back_step_is_the_largest_fall_below_the_running_high() {
+        assert_eq!(back_step([]), BackStep::default());
+        assert_eq!(back_step([5, 5, 6, 9]), BackStep::default());
+        assert_eq!(
+            back_step([10, 12, 9, 13, 5, 13, 13, 11]),
+            BackStep { step_s: 8, rows: 3 }
+        );
+    }
+
+    /// One file an in-memory tick source holds.
+    #[derive(Clone)]
+    struct Held {
+        entry: String,
+        bytes: Vec<u8>,
+        crc32: u32,
+    }
+
+    /// An in-memory tick source: each day it holds, its files or its refusal.
+    struct MemTicks {
+        days: Vec<(Day, Result<Vec<Held>, CmRefusal>)>,
+    }
+
+    impl MemTicks {
+        fn files(&self, at: Day) -> Option<&Result<Vec<Held>, CmRefusal>> {
+            self.days
+                .iter()
+                .find(|(held, _)| *held == at)
+                .map(|(_, files)| files)
+        }
+    }
+
+    impl CmSource for MemTicks {
+        type Locator = usize;
+
+        fn day(&self, kind: CmKind, at: Day) -> Result<Option<DayListing<usize>>, CmRefusal> {
+            let Some(files) = self.files(at) else {
+                return Ok(None);
+            };
+            let files = files.as_ref().map_err(Clone::clone)?;
+            let mut listing = DayListing::new(kind, at);
+            for (index, file) in files.iter().enumerate() {
+                listing.push(&file.entry, file.bytes.len() as u64, file.crc32, index);
+            }
+            Ok(Some(listing))
+        }
+
+        fn fetch(
+            &self,
+            listing: &DayListing<usize>,
+            file: &ListedFile<usize>,
+        ) -> Result<Vec<u8>, CmRefusal> {
+            let files = self.files(listing.day()).unwrap().as_ref().unwrap();
+            Ok(files[file.locator].bytes.clone())
+        }
+    }
+
+    /// A share's vendor file on `at`, invented: one row per `(second of the
+    /// IST day, paisa)`, in the order given.
+    fn tick_file(name: &str, at: Day, rows: &[(u32, i64)]) -> Held {
+        let stem = format!("{name}.NSE");
+        let date = format!("{:02}/{:02}/{:04}", at.day(), at.month(), at.year());
+        let mut text = String::from(HEADER_OPEN_INTEREST);
+        for &(sod, paisa) in rows {
+            let time = format!("{:02}:{:02}:{:02}", sod / 3_600, sod / 60 % 60, sod % 60);
+            let price = format!("{}.{:02}", paisa / 100, paisa % 100);
+            let fields = [
+                stem.as_str(),
+                date.as_str(),
+                time.as_str(),
+                price.as_str(),
+                price.as_str(),
+                "10",
+                price.as_str(),
+                "10",
+                "5",
+                "0",
+            ];
+            text.push_str("\r\n");
+            text.push_str(&fields.join(","));
+        }
+        text.push_str("\r\n");
+        let bytes = text.into_bytes();
+        Held {
+            entry: format!("{}/{stem}.csv", day_folder_name(CmKind::Stocks, at)),
+            crc32: pull::gdfl_archive::crc32(&bytes),
+            bytes,
+        }
+    }
+
+    /// Seconds of the IST day of `hh:mm:ss`.
+    const fn sod(hh: u32, mm: u32, ss: u32) -> u32 {
+        hh * 3_600 + mm * 60 + ss
+    }
+
+    #[test]
+    fn the_raw_tick_order_gives_the_back_step_through_the_tick_reader() {
+        let at = day(2024, 4, 1);
+        let rows = [
+            (sod(9, 15, 0), 73_140),
+            (sod(9, 15, 4), 73_145),
+            (sod(9, 15, 1), 73_150),
+            (sod(9, 15, 6), 73_150),
+            (sod(9, 14, 59), 73_155),
+        ];
+        let mut refused = tick_file("TCS", at, &rows);
+        refused.crc32 ^= 1;
+        let source = MemTicks {
+            days: vec![(at, Ok(vec![tick_file("RELIANCE", at, &rows), refused]))],
+        };
+        let listing = source.day(CmKind::Stocks, at).unwrap().unwrap();
+        assert_eq!(
+            read_back_step(&source, &listing, stock("RELIANCE")),
+            Ok(Some(BackStep { step_s: 7, rows: 2 }))
+        );
+        assert!(matches!(
+            read_back_step(&source, &listing, stock("TCS")),
+            Err(CmRefusal::SourceCrcMismatch { .. })
+        ));
+        assert_eq!(read_back_step(&source, &listing, stock("INFY")), Ok(None));
+        assert_eq!(
+            read_back_step(&source, &listing, stock("ZZQAB")),
+            Err(CmRefusal::NotSwept),
+            "a stock off the listing's scope is refused, not absent"
+        );
+    }
+
+    // ── the floor and the row ───────────────────────────────────────────────
+
+    fn row_of(at: Day, offset_ms: Option<i32>, back: Option<u32>, flags: Flags) -> ClockRow {
+        ClockRow {
+            offset_ms,
+            back_step_s: back,
+            flags,
+            score: 400,
+            margin: 37,
+            back_rows: 3,
+            minutes: 120,
+            unmatched: 2,
+            seconds: 5_400,
+            window_s: 60,
+            reach_s: 7_259,
+            ..ClockRow::blank(key("RELIANCE", at))
+        }
+    }
+
+    #[test]
+    fn the_floor_is_the_positive_offset_plus_the_back_step() {
+        let at = day(2024, 4, 1);
+        let none = Flags::default();
+        assert_eq!(
+            row_of(at, Some(7_000), Some(3), none).floor(),
+            Floor::Calibrated(10)
+        );
+        assert_eq!(
+            row_of(at, Some(-5_000), Some(2), none).floor(),
+            Floor::Calibrated(2)
+        );
+        assert_eq!(
+            row_of(at, Some(4_000), None, Flags::TICKS_ABSENT).floor(),
+            Floor::OffsetOnly(4)
+        );
+        assert_eq!(
+            row_of(at, Some(-4_000), None, Flags::TICKS_REFUSED).floor(),
+            Floor::OffsetOnly(0)
+        );
+        assert_eq!(
+            row_of(at, None, Some(9), Flags::NO_AGREEMENT).floor(),
+            Floor::Uncalibrated
+        );
+    }
+
+    #[test]
+    fn a_row_agrees_with_its_flags_only_as_a_build_writes_it() {
+        let at = day(2024, 4, 1);
+        let none = Flags::default();
+        for (row, agrees) in [
+            (row_of(at, Some(5_000), Some(1), none), true),
+            (row_of(at, Some(5_000), Some(1), Flags::NO_AGREEMENT), false),
+            (row_of(at, Some(5_500), Some(1), none), false),
+            (row_of(at, None, Some(1), Flags::NO_SECONDS), true),
+            (row_of(at, None, Some(1), none), false),
+            (row_of(at, Some(5_000), Some(1), Flags::TICKS_ABSENT), false),
+            (row_of(at, Some(5_000), None, Flags::TICKS_REFUSED), true),
+            (row_of(at, Some(5_000), None, none), false),
+            (row_of(at, Some(5_000), None, Flags::UNMEASURED), false),
+        ] {
+            assert_eq!(row.agrees(), agrees, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn the_flags_name_nine_distinct_bits_and_refuse_any_other() {
+        let mut seen = 0_u16;
+        for (word, flag) in Flags::ALL {
+            assert_eq!(flag.bits().count_ones(), 1, "{word}");
+            assert_eq!(seen & flag.bits(), 0, "{word}");
+            seen |= flag.bits();
+        }
+        assert_eq!(Flags::from_bits(seen), Some(Flags(seen)));
+        assert_eq!(Flags::from_bits(1 << 9), None);
+        let both = Flags::TIED.with(Flags::TICKS_ABSENT);
+        assert!(both.has(Flags::TIED) && both.any(Flags::UNMEASURED));
+        assert!(!both.has(Flags::UNMEASURED) && !both.any(Flags::UNCALIBRATED));
+    }
+
+    #[test]
+    fn two_levels_of_the_sparse_table_cover_one_minute() {
+        let widest = 1_i64 << (LEVELS - 1);
+        assert!(widest <= SECS_PER_MINUTE && SECS_PER_MINUTE < 2 * widest);
+    }
+
+    // ── the grid and the search ─────────────────────────────────────────────
+
+    /// The window `[start, start + 60)` folded by walking every second.
+    fn scanned(cells: &[Option<Prices>], origin: i64, start: i64) -> Option<Prices> {
+        let traded: Vec<Prices> = cells
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| {
+                let second = origin + *at as i64;
+                second >= start && second < start + 60
+            })
+            .filter_map(|(_, cell)| *cell)
+            .collect();
+        Some(Prices {
+            open: traded.first()?.open,
+            high: traded.iter().map(|p| p.high).max()?,
+            low: traded.iter().map(|p| p.low).min()?,
+            close: traded.last()?.close,
+        })
+    }
+
+    #[test]
+    fn the_sparse_table_folds_every_window_as_a_scan_does() {
+        let mut state = 0xFEED_u64;
+        for _ in 0..40 {
+            let len = usize::try_from(xorshift(&mut state) % 300).unwrap();
+            let cells: Vec<Option<Prices>> = (0..len)
+                .map(|_| {
+                    let draw = xorshift(&mut state);
+                    (!draw.is_multiple_of(4)).then(|| {
+                        let price = 1_000 + (draw % 50) as i64;
+                        Prices {
+                            open: price,
+                            high: price + (draw % 3) as i64,
+                            low: price - (draw % 2) as i64,
+                            close: price + 1,
+                        }
+                    })
+                })
+                .collect();
+            let grid = Grid::build(10_000, &cells);
+            for start in 10_000 - 70..10_000 + len as i64 + 10 {
+                assert_eq!(
+                    grid.window(start),
+                    scanned(&cells, 10_000, start),
+                    "{len} {start}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_ratio_is_reduced_and_a_shift_is_taken_by_score_then_size_then_sign() {
+        assert_eq!(ratio(10, 5), (2, 1));
+        assert_eq!(ratio(6, 4), (3, 2));
+        assert_eq!(ratio(7, 7), (1, 1));
+        assert_eq!(ratio(4, 6), (2, 3));
+        let shift = |delta, score| Shift { delta, score };
+        assert!(shift(0, 9).beats(shift(40, 8)));
+        assert!(shift(-40, 8).beats(shift(39, 8)));
+        assert!(shift(40, 8).beats(shift(-40, 8)));
+        assert!(!shift(-40, 8).beats(shift(40, 8)));
+        let mut board = Board::new();
+        for (delta, score) in [(0, 3), (1, 5), (2, 5), (3, 4), (4, 1)] {
+            board.record(shift(delta, score));
+        }
+        assert_eq!((board.best, board.top, board.ties), (shift(2, 5), 5, 2));
+        assert_eq!(board.margin(), 0);
+        board.record(shift(5, 6));
+        assert_eq!((board.top, board.below, board.margin()), (6, 5, 1));
+    }
+
+    // ── the table ───────────────────────────────────────────────────────────
+
+    /// A private directory, named for its test and this process.
+    fn scratch(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("brutex-fno-clock-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn file_of(stock_name: &str, rows: &[ClockRow]) -> Vec<u8> {
+        encode(stock(stock_name), rows)
+    }
+
+    /// Sets bytes `at..` of `bytes` and seals the digest again, so only the
+    /// check under test can refuse.
+    fn reseal(mut bytes: Vec<u8>, at: usize, with: &[u8]) -> Vec<u8> {
+        bytes[at..at + with.len()].copy_from_slice(with);
+        let digest = file_digest(&bytes[..HEAD_LEN], &bytes[HEADER_LEN..]);
+        bytes[HEAD_LEN..HEADER_LEN].copy_from_slice(&digest);
+        bytes
+    }
+
+    #[test]
+    fn a_file_round_trips_and_every_broken_check_is_refused_by_name() {
+        let at = day(2024, 4, 1);
+        let rows = [
+            row_of(at, Some(3_000), Some(2), Flags::default()),
+            row_of(
+                day(2024, 4, 2),
+                None,
+                None,
+                Flags::NO_AGREEMENT.with(Flags::TICKS_ABSENT),
+            ),
+        ];
+        let good = file_of("RELIANCE", &rows);
+        assert_eq!(good.len(), HEADER_LEN + 2 * ROW_LEN);
+        let (read, digest) = decode(stock("RELIANCE"), &good).unwrap();
+        assert_eq!(read, rows);
+        assert_eq!(digest[..], good[HEAD_LEN..HEADER_LEN]);
+        let row = HEADER_LEN;
+        let cases: [(Vec<u8>, &str); 16] = [
+            (good[..50].to_vec(), SHORT),
+            (reseal(good.clone(), 0, b"BRTXFCL2"), NOT_MAGIC),
+            (reseal(good.clone(), 8, &2_u16.to_le_bytes()), NOT_VERSION),
+            (reseal(good.clone(), 10, &44_u16.to_le_bytes()), NOT_STRIDE),
+            (reseal(good.clone(), 12, &3_u32.to_le_bytes()), NOT_LENGTH),
+            (
+                reseal(good.clone(), 12, &u32::MAX.to_le_bytes()),
+                NOT_LENGTH,
+            ),
+            (good[..good.len() - 1].to_vec(), NOT_LENGTH),
+            (reseal(good.clone(), 16, b"TCS\0\0\0\0\0"), NOT_STOCK),
+            (
+                {
+                    let mut bent = good.clone();
+                    bent[row + 8] ^= 1;
+                    bent
+                },
+                NOT_DIGEST,
+            ),
+            (reseal(good.clone(), row, &u32::MAX.to_le_bytes()), NOT_ROW),
+            (
+                reseal(good.clone(), row + 44, &(1_u16 << 12).to_le_bytes()),
+                NOT_ROW,
+            ),
+            (
+                reseal(good.clone(), row + 46, &1_u16.to_le_bytes()),
+                NOT_ROW,
+            ),
+            (
+                reseal(
+                    good.clone(),
+                    row + 44,
+                    &Flags::NO_AGREEMENT.bits().to_le_bytes(),
+                ),
+                NOT_ROW,
+            ),
+            (
+                reseal(good.clone(), row + 4, &3_500_i32.to_le_bytes()),
+                NOT_ROW,
+            ),
+            (
+                reseal(
+                    good.clone(),
+                    row + ROW_LEN,
+                    &at.days_from_epoch().to_le_bytes(),
+                ),
+                NOT_ORDER,
+            ),
+            (
+                reseal(
+                    good.clone(),
+                    row + ROW_LEN,
+                    &day(2024, 3, 28).days_from_epoch().to_le_bytes(),
+                ),
+                NOT_ORDER,
+            ),
+        ];
+        for (bytes, why) in cases {
+            assert_eq!(decode(stock("RELIANCE"), &bytes), Err(why));
+        }
+    }
+
+    fn plant(dir: &Path, name: &str, bytes: &[u8]) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    #[test]
+    fn the_table_reads_every_stock_file_and_refuses_what_is_not_one() {
+        let out = scratch("table");
+        let dir = out.join(TABLE_DIR);
+        assert!(matches!(
+            Table::open(&out),
+            Err(TableRefusal::Unreadable { .. })
+        ));
+        let at = day(2024, 4, 1);
+        let reliance = [row_of(at, Some(1_000), Some(0), Flags::default())];
+        let tcs = [ClockRow {
+            key: key("TCS", at),
+            ..row_of(at, None, None, Flags::NO_SECONDS.with(Flags::TICKS_REFUSED))
+        }];
+        plant(&dir, "RELIANCE.fcl", &file_of("RELIANCE", &reliance));
+        plant(&dir, "TCS.fcl", &file_of("TCS", &tcs));
+        plant(&dir, ".TCS.fcl.tmp.1.1", b"a killed writer's leftover");
+        let table = Table::open(&out).unwrap();
+        assert_eq!(
+            (table.len(), table.is_empty(), table.leftovers()),
+            (2, false, 1)
+        );
+        assert_eq!(table.get(key("RELIANCE", at)), Some(&reliance[0]));
+        assert_eq!(table.get(key("TCS", at)), Some(&tcs[0]));
+        assert_eq!(table.get(key("INFY", at)), None);
+        let digest = table.digest();
+        // The digest moves with any stock's bytes, and not with a leftover.
+        plant(&dir, ".x", b"");
+        assert_eq!(Table::open(&out).unwrap().digest(), digest);
+        plant(&dir, "TCS.fcl", &file_of("TCS", &[]));
+        assert_ne!(Table::open(&out).unwrap().digest(), digest);
+        for stray in ["notes.txt", "RELIANCEfcl", "BAD NAME.fcl", "reliance.fcl"] {
+            plant(&dir, stray, b"");
+            assert_eq!(
+                Table::open(&out).unwrap_err(),
+                TableRefusal::Stray {
+                    path: dir.join(stray)
+                },
+                "{stray}"
+            );
+            fs::remove_file(dir.join(stray)).unwrap();
+        }
+        let odd = std::ffi::OsStr::from_bytes(b"\xff.fcl");
+        fs::write(dir.join(odd), b"").unwrap();
+        assert!(matches!(Table::open(&out), Err(TableRefusal::Stray { .. })));
+        fs::remove_file(dir.join(odd)).unwrap();
+        std::os::unix::fs::symlink(dir.join("TCS.fcl"), dir.join("INFY.fcl")).unwrap();
+        assert!(matches!(
+            Table::open(&out),
+            Err(TableRefusal::Unreadable { .. })
+        ));
+        fs::remove_file(dir.join("INFY.fcl")).unwrap();
+        plant(&dir, "INFY.fcl", b"short");
+        assert_eq!(
+            Table::open(&out).unwrap_err(),
+            TableRefusal::Corrupt {
+                path: dir.join("INFY.fcl"),
+                why: SHORT
+            }
+        );
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn an_empty_table_has_a_digest_of_its_own() {
+        let out = scratch("empty");
+        fs::create_dir_all(out.join(TABLE_DIR)).unwrap();
+        let table = Table::open(&out).unwrap();
+        assert!(table.is_empty());
+        let mut hasher = Hasher::new();
+        hasher.update(TABLE_DOMAIN);
+        assert_eq!(table.digest(), hasher.finalize());
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    // ── the build ───────────────────────────────────────────────────────────
+
+    /// An in-memory bar source: each key's bars, and one key it refuses.
+    struct Feeds {
+        days: HashMap<Key, DayBars>,
+        refuse: Option<Key>,
+    }
+
+    impl BarSource for Feeds {
+        fn bars(&self, key: Key) -> Result<DayBars, String> {
+            if self.refuse == Some(key) {
+                return Err("the month is locked".to_owned());
+            }
+            Ok(self.days.get(&key).cloned().unwrap_or_default())
+        }
+    }
+
+    const DAYS: [(u16, u8, u8); 3] = [(2024, 4, 1), (2024, 4, 2), (2024, 4, 3)];
+
+    /// Two stocks over three days, a short walk each, GDFL stamped `shift`
+    /// seconds late for each key's own seed.
+    fn feeds(shift: impl Fn(Key) -> i64) -> (Vec<Key>, Feeds) {
+        let mut keys = Vec::new();
+        let mut days = HashMap::new();
+        for (index, name) in ["RELIANCE", "TCS"].into_iter().enumerate() {
+            for (count, &(y, m, d)) in DAYS.iter().enumerate() {
+                let k = key(name, day(y, m, d));
+                let seed = 100 + (index * 10 + count) as u64;
+                days.insert(k, walked_day(k.day, 15, seed, shift(k)));
+                keys.push(k);
+            }
+        }
+        (keys, Feeds { days, refuse: None })
+    }
+
+    /// The tick source of the build tests: RELIANCE's file steps back on the
+    /// first day, TCS has none; on the second day RELIANCE's file is refused
+    /// and TCS's is in order; the third day's listing is refused.
+    fn ticks() -> MemTicks {
+        let one = day(2024, 4, 1);
+        let two = day(2024, 4, 2);
+        let stepped = [(sod(9, 15, 3), 73_100), (sod(9, 15, 0), 73_105)];
+        let ordered = [(sod(9, 15, 0), 73_100), (sod(9, 15, 3), 73_105)];
+        let mut bent = tick_file("RELIANCE", two, &ordered);
+        bent.crc32 ^= 1;
+        MemTicks {
+            days: vec![
+                (one, Ok(vec![tick_file("RELIANCE", one, &stepped)])),
+                (two, Ok(vec![bent, tick_file("TCS", two, &ordered)])),
+                (
+                    day(2024, 4, 3),
+                    Err(CmRefusal::TickStoreMalformed {
+                        what: "an invented refusal",
+                    }),
+                ),
+            ],
+        }
+    }
+
+    /// Every file of the table under `out`, by name.
+    fn files(out: &Path) -> BTreeMap<String, (Vec<u8>, u64)> {
+        fs::read_dir(out.join(TABLE_DIR))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let inode = entry.metadata().unwrap().ino();
+                (name, (fs::read(entry.path()).unwrap(), inode))
+            })
+            .collect()
+    }
+
+    fn bytes_of(files: &BTreeMap<String, (Vec<u8>, u64)>) -> BTreeMap<String, Vec<u8>> {
+        files
+            .iter()
+            .map(|(name, (bytes, _))| (name.clone(), bytes.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_build_calibrates_each_key_and_reports_what_it_met() {
+        let out = scratch("report");
+        let (keys, bars) = feeds(|k| i64::from(k.day.day()) * 3);
+        let built = build(&keys, &bars, &ticks(), &out).unwrap();
+        assert_eq!(
+            (built.keys, built.written, built.unchanged, built.rows),
+            (6, 2, 0, 6)
+        );
+        // RELIANCE day 1 measured; TCS day 2 measured; the rest unmeasured.
+        assert_eq!(
+            (built.calibrated, built.offset_only, built.uncalibrated),
+            (2, 4, 0)
+        );
+        let count =
+            |flag: Flags| built.flagged[Flags::ALL.iter().position(|&(_, f)| f == flag).unwrap()];
+        assert_eq!(count(Flags::TICKS_ABSENT), 1);
+        assert_eq!(count(Flags::TICKS_REFUSED), 3);
+        assert_eq!(count(Flags::NO_AGREEMENT), 0);
+        assert_eq!(built.tick_refusals, 3);
+        assert_eq!(built.named.len(), 3);
+        assert_eq!(built.named[0].0, key("RELIANCE", day(2024, 4, 2)));
+        assert!(built.named[0].1.contains("CRC"));
+        assert!(built.named[1].1.contains("an invented refusal"));
+        let table = Table::open(&out).unwrap();
+        assert_eq!(built.digest, table.digest());
+        for k in &keys {
+            let row = table.get(*k).unwrap();
+            assert_eq!(row.offset_ms, Some(i32::from(k.day.day()) * 3_000), "{k:?}");
+        }
+        let reliance = table.get(key("RELIANCE", day(2024, 4, 1))).unwrap();
+        assert_eq!((reliance.back_step_s, reliance.back_rows), (Some(3), 1));
+        assert_eq!(reliance.floor(), Floor::Calibrated(6));
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_build_names_only_the_first_refusals_and_counts_every_one() {
+        let out = scratch("named");
+        let at = day(2024, 4, 3);
+        let names: Vec<String> = (0..20)
+            .map(|i| format!("ZZ{}{}", char::from(b'A' + i / 5), char::from(b'A' + i % 5)))
+            .collect();
+        let keys: Vec<Key> = names.iter().map(|n| key(n, at)).collect();
+        let bars = Feeds {
+            days: HashMap::new(),
+            refuse: None,
+        };
+        let built = build(&keys, &bars, &ticks(), &out).unwrap();
+        assert_eq!(built.tick_refusals, 20);
+        assert_eq!(built.named.len(), NAMED_REFUSALS);
+        assert_eq!(built.uncalibrated, 20);
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_full_build_and_a_list_rebuild_over_the_same_keys_give_equal_bytes() {
+        let full = scratch("full");
+        let listed = scratch("listed");
+        let (keys, bars) = feeds(|k| i64::from(k.day.day()) - 2);
+        let whole = build(&keys, &bars, &ticks(), &full).unwrap();
+        // The same keys in three lists, out of order and with a repeat.
+        let (first, rest) = keys.split_at(2);
+        build(rest, &bars, &ticks(), &listed).unwrap();
+        build(&[first[1], first[0], first[1]], &bars, &ticks(), &listed).unwrap();
+        let again = build(&keys[2..4], &bars, &ticks(), &listed).unwrap();
+        assert_eq!(bytes_of(&files(&full)), bytes_of(&files(&listed)));
+        assert_eq!(again.digest, whole.digest);
+        assert_eq!((again.written, again.unchanged), (0, 2));
+        let _ = fs::remove_dir_all(&full);
+        let _ = fs::remove_dir_all(&listed);
+    }
+
+    #[test]
+    fn keys_outside_the_list_are_untouched() {
+        let out = scratch("untouched");
+        let fresh = scratch("fresh");
+        let (keys, bars) = feeds(|_| 4);
+        build(&keys, &bars, &ticks(), &out).unwrap();
+        let before = files(&out);
+        // The data of one stock-day changes (a repaired month), and only that
+        // key is rebuilt.
+        let changed = key("TCS", day(2024, 4, 2));
+        let (_, mut repaired) = feeds(|k| if k == changed { -6 } else { 4 });
+        repaired
+            .days
+            .insert(changed, walked_day(changed.day, 15, 999, -6));
+        let built = build(&[changed], &repaired, &ticks(), &out).unwrap();
+        assert_eq!((built.keys, built.written, built.unchanged), (1, 1, 0));
+        let after = files(&out);
+        assert_eq!(
+            after["RELIANCE.fcl"], before["RELIANCE.fcl"],
+            "bytes and inode"
+        );
+        assert_ne!(after["TCS.fcl"].0, before["TCS.fcl"].0);
+        let (old, _) = decode(stock("TCS"), &before["TCS.fcl"].0).unwrap();
+        let (new, _) = decode(stock("TCS"), &after["TCS.fcl"].0).unwrap();
+        for (was, is) in old.iter().zip(&new) {
+            if was.key == changed {
+                assert_eq!(is.offset_ms, Some(-6_000));
+            } else {
+                assert_eq!(was, is);
+            }
+        }
+        // And the table is the one a full build over the repaired data writes.
+        build(&keys, &repaired, &ticks(), &fresh).unwrap();
+        assert_eq!(bytes_of(&after), bytes_of(&files(&fresh)));
+        let _ = fs::remove_dir_all(&out);
+        let _ = fs::remove_dir_all(&fresh);
+    }
+
+    #[test]
+    fn a_bar_source_refusal_refuses_the_build_and_writes_nothing() {
+        let out = scratch("bars");
+        let (keys, mut bars) = feeds(|_| 0);
+        bars.refuse = Some(key("TCS", day(2024, 4, 1)));
+        let refused = build(&keys, &bars, &ticks(), &out).unwrap_err();
+        assert_eq!(
+            refused,
+            BuildRefusal::Bars {
+                key: key("TCS", day(2024, 4, 1)),
+                why: "the month is locked".to_owned()
+            }
+        );
+        assert!(!out.join(TABLE_DIR).exists(), "nothing was written");
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_corrupt_or_unreadable_file_already_there_refuses_before_any_write() {
+        let out = scratch("corrupt");
+        let dir = out.join(TABLE_DIR);
+        let (keys, bars) = feeds(|_| 0);
+        plant(&dir, "TCS.fcl", b"not a table file");
+        assert_eq!(
+            build(&keys, &bars, &ticks(), &out).unwrap_err(),
+            BuildRefusal::Corrupt {
+                path: dir.join("TCS.fcl"),
+                why: SHORT
+            }
+        );
+        assert!(!dir.join("RELIANCE.fcl").exists(), "nothing was written");
+        fs::remove_file(dir.join("TCS.fcl")).unwrap();
+        fs::create_dir_all(dir.join("TCS.fcl")).unwrap();
+        assert!(matches!(
+            build(&keys, &bars, &ticks(), &out),
+            Err(BuildRefusal::Io { .. })
+        ));
+        assert!(!dir.join("RELIANCE.fcl").exists(), "nothing was written");
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_made_refuses_the_build() {
+        let out = scratch("folder").join("a-file");
+        fs::write(&out, b"").unwrap();
+        let (keys, bars) = feeds(|_| 0);
+        assert!(matches!(
+            build(&keys, &bars, &ticks(), &out),
+            Err(BuildRefusal::Io { path, .. }) if path == out.join(TABLE_DIR)
+        ));
+    }
+
+    #[test]
+    fn a_temporary_the_staging_door_refuses_stops_the_write_and_is_left_alone() {
+        let out = scratch("staging");
+        let dir = out.join(TABLE_DIR);
+        let blocked = dir.join(".blocked");
+        fs::create_dir_all(blocked.join("inside")).unwrap();
+        let (keys, bars) = feeds(|_| 0);
+        let refused = build_with(&keys, &bars, &ticks(), &out, &|_, _| blocked.clone());
+        assert!(
+            matches!(refused, Err(BuildRefusal::Io { .. })),
+            "{refused:?}"
+        );
+        assert!(
+            blocked.join("inside").exists(),
+            "the door leaves what it found"
+        );
+        assert!(!dir.join("RELIANCE.fcl").exists());
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_failed_rename_removes_its_temporary_and_keeps_the_target() {
+        let dir = scratch("rename");
+        let target = dir.join("RELIANCE.fcl");
+        fs::create_dir_all(target.join("inside")).unwrap();
+        let temporary = dir.join(".RELIANCE.fcl.tmp.test");
+        assert!(publish(&dir, &target, &temporary, b"bytes").is_err());
+        assert!(!temporary.exists());
+        assert!(target.join("inside").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stray_entry_refuses_the_table_read_after_the_writes() {
+        let out = scratch("stray");
+        plant(&out.join(TABLE_DIR), "notes.txt", b"");
+        let (keys, bars) = feeds(|_| 0);
+        assert!(matches!(
+            build(&keys, &bars, &ticks(), &out),
+            Err(BuildRefusal::Table(TableRefusal::Stray { .. }))
+        ));
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn an_empty_key_list_writes_no_file_and_names_the_table() {
+        let out = scratch("none");
+        let bars = Feeds {
+            days: HashMap::new(),
+            refuse: None,
+        };
+        let built = build(&[], &bars, &ticks(), &out).unwrap();
+        assert_eq!((built.keys, built.written, built.rows), (0, 0, 0));
+        assert_eq!(built.digest, Table::open(&out).unwrap().digest());
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn every_refusal_says_what_it_refused() {
+        let path = PathBuf::from("/x/fno-clock-v1/TCS.fcl");
+        let k = key("TCS", day(2024, 4, 2));
+        let texts = [
+            TableRefusal::Unreadable {
+                path: path.clone(),
+                why: "denied".to_owned(),
+            }
+            .to_string(),
+            TableRefusal::Stray { path: path.clone() }.to_string(),
+            TableRefusal::Corrupt {
+                path: path.clone(),
+                why: NOT_DIGEST,
+            }
+            .to_string(),
+            BuildRefusal::Bars {
+                key: k,
+                why: "locked".to_owned(),
+            }
+            .to_string(),
+            BuildRefusal::Corrupt {
+                path: path.clone(),
+                why: SHORT,
+            }
+            .to_string(),
+            BuildRefusal::Io {
+                path: path.clone(),
+                why: "full".to_owned(),
+            }
+            .to_string(),
+            BuildRefusal::Table(TableRefusal::Stray { path }).to_string(),
+        ];
+        let words = [
+            "denied",
+            "neither a stock's file",
+            NOT_DIGEST,
+            "TCS on 2024-04-02",
+            SHORT,
+            "full",
+            "wrote its files, then",
+        ];
+        for (text, word) in texts.iter().zip(words) {
+            assert!(text.contains(word), "{text}");
+            assert!(text.contains("clock"), "{text}");
+        }
+    }
+
+    // ── the bench's measure ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_minute_boundary_measure_runs_at_tiny_sizes() {
+        for seconds in [0, 300] {
+            let samples = measure_minute_boundary(seconds, 3, 5);
+            assert_eq!(samples.len(), 3);
+        }
+        assert!(measure_minute_boundary(300, 0, 5).is_empty());
+    }
+
+    #[test]
+    fn a_spread_takes_the_nearest_rank() {
+        assert_eq!(Spread::of(&[]), Spread::default());
+        assert_eq!(
+            Spread::of(&[5]),
+            Spread {
+                p50: 5,
+                p99: 5,
+                max: 5,
+                n: 1
+            }
+        );
+        let hundred: Vec<u128> = (1..=100).rev().collect();
+        assert_eq!(
+            Spread::of(&hundred),
+            Spread {
+                p50: 50,
+                p99: 99,
+                max: 100,
+                n: 100
+            }
+        );
+        assert_eq!(Spread::of(&[7, 7, 7, 9]).p50, 7);
+    }
+}
