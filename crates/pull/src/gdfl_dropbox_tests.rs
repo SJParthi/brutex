@@ -312,8 +312,8 @@ impl Server {
         let log = Arc::new(Mutex::new(Vec::new()));
         let (f, l) = (Arc::clone(&fake), Arc::clone(&log));
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
+            // A failed accept is passed over as a closed connection is.
+            for mut stream in listener.incoming().flatten() {
                 let Some(request) = read_request(&mut stream) else {
                     continue;
                 };
@@ -1988,13 +1988,16 @@ fn s1_enospc_mid_body_leaves_a_named_part_and_resumes() {
         .iter()
         .filter_map(|r| r.headers.get("range").cloned())
         .collect();
-    if kept > 0 {
-        assert_eq!(
-            ranges,
-            [format!("bytes={kept}-")],
-            "resumed from the kept part"
-        );
-    }
+    // Resumed from the kept part; a part the disk filled before its first
+    // byte is fetched whole, with no Range.
+    assert_eq!(
+        ranges,
+        (kept > 0)
+            .then_some(format!("bytes={kept}-"))
+            .into_iter()
+            .collect::<Vec<_>>(),
+        "resumed from the kept part"
+    );
     // Any other write failure keeps its own name.
     let other = write_failed(
         Path::new("/x.part"),
@@ -2096,10 +2099,13 @@ fn s1_a_stop_mid_download_keeps_the_part_and_the_next_press_resumes_it() {
     assert!(stopped.verified.is_empty());
     let cut_at = a.len() * 40 / 100;
     let text = journal_text(&roots);
+    let bytes = format!("bytes={cut_at}");
     assert!(
-        text.lines().any(|l| l.starts_with("v=1 stopped ")
-            && l.contains("stage=download")
-            && l.contains(&format!("bytes={cut_at}"))),
+        text.lines()
+            .filter(|l| l.starts_with("v=1 stopped "))
+            .any(|l| ["stage=download", bytes.as_str()]
+                .iter()
+                .all(|word| l.contains(word))),
         "{text}"
     );
     let asked: Vec<String> = server
@@ -2293,10 +2299,11 @@ mod repair_r1 {
         rx.recv_timeout(Duration::from_secs(secs)).ok()
     }
 
+    /// The refusal's code; any other outcome fails the calling test here.
     fn refused_code(outcome: &Outcome) -> &'static str {
         match outcome {
             Outcome::Refused(refusal) => refusal.code,
-            _ => "not_refused",
+            other => panic!("not refused: {other:?}"),
         }
     }
 
@@ -2353,10 +2360,11 @@ mod repair_r1 {
         let text = journal_text(&roots);
         let refusals = text
             .lines()
+            .filter(|l| l.starts_with("v=1 refused "))
             .filter(|l| {
-                l.starts_with("v=1 refused ")
-                    && l.contains("GFDLNFO_TICK_04072019.zip")
-                    && l.contains("reason=content_duplicate")
+                ["GFDLNFO_TICK_04072019.zip", "reason=content_duplicate"]
+                    .iter()
+                    .all(|word| l.contains(word))
             })
             .count();
         assert_eq!(refusals, 1, "journalled once:\n{text}");
@@ -2438,9 +2446,11 @@ mod repair_r1 {
         );
         let text = journal_text(&roots);
         assert!(
-            text.lines().any(|l| l.starts_with("v=1 listing ")
-                && l.contains("complete=false")
-                && l.contains("reason=listing_incomplete")),
+            text.lines()
+                .filter(|l| l.starts_with("v=1 listing "))
+                .any(|l| ["complete=false", "reason=listing_incomplete"]
+                    .iter()
+                    .all(|word| l.contains(word))),
             "{text}"
         );
     }
@@ -3699,22 +3709,28 @@ fn a_line_torn_at_a_field_boundary_is_counted_torn_and_never_read() {
     // the cut one.
     server.fake.lock().unwrap().files.pop();
     let shrunk = run();
-    let (code, detail) = match &shrunk.outcome {
-        Outcome::Refused(refusal) => (refusal.code.to_owned(), refusal.detail.clone()),
-        other => (format!("{other:?}"), String::new()),
-    };
+    let token = shrunk.run.clone();
     // One assertion over all the cut line could change, so a failure shows
-    // every part of it: the torn count, the shrink baseline, the outcome.
+    // every part of it: the torn count, the shrink baseline, the outcome
+    // (refused against three, with this press's token).
     assert_eq!(
         (
             memory.torn,
             memory.complete.get(print.as_str()).copied(),
-            code.as_str()
+            &shrunk.outcome
         ),
-        (1, Some(3), "listing_shrank"),
-        "{detail}"
+        (
+            1,
+            Some(3),
+            &Outcome::Refused(RunRefusal::new(
+                "listing_shrank",
+                format!(
+                    "was=3 now=2 shrink={token}; to accept exactly this shrink once, set \
+                     accept_listing_shrink to {token} in the config"
+                )
+            ))
+        )
     );
-    assert!(detail.starts_with("was=3 now=2 "), "{detail}");
     assert_eq!(status(&roots.store).unwrap().unwrap().verb, "end");
     let closed = journal_text(&roots)
         .lines()
@@ -3734,4 +3750,1399 @@ fn a_line_torn_at_a_field_boundary_is_counted_torn_and_never_read() {
         Some("a\0b"),
         "{written:?}"
     );
+}
+
+// -- BASE-COV-PULL-PS3 (db): every press-level refusal a fixture reaches -------
+
+mod ps3_db {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// What the scripted server does with one request.
+    enum Act {
+        /// Answers with this reply.
+        Send(Reply),
+        /// Closes the connection without a byte.
+        Close,
+        /// Stops listening: this connection closes unanswered and every
+        /// later connect is refused.
+        Quit,
+    }
+
+    type Log = Arc<Mutex<Vec<Request>>>;
+
+    /// A loopback server answering its `n`-th request (0-based) with
+    /// `script(n, &request)`; its base URL and its request log.
+    fn serve(mut script: impl FnMut(usize, &Request) -> Act + Send + 'static) -> (String, Log) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let kept = Arc::clone(&log);
+        std::thread::spawn(move || {
+            for (n, stream) in listener.incoming().enumerate() {
+                let mut stream = stream.unwrap();
+                let request = read_request(&mut stream).expect("a whole request");
+                let act = script(n, &request);
+                kept.lock().unwrap().push(request);
+                match act {
+                    Act::Send(reply) => write_reply(&mut stream, reply),
+                    Act::Close => drop(stream),
+                    Act::Quit => break,
+                }
+            }
+        });
+        (base, log)
+    }
+
+    fn page(entries: &[serde_json::Value], cursor: &str, has_more: bool) -> Act {
+        Act::Send(json_reply(
+            200,
+            &serde_json::json!({"entries": entries, "cursor": cursor, "has_more": has_more}),
+        ))
+    }
+
+    fn file_entry(name: &str, size: u64, rev: &str) -> serde_json::Value {
+        serde_json::json!({".tag": "file", "name": name, "size": size, "rev": rev, "content_hash": ""})
+    }
+
+    fn folder_entry(name: &str) -> serde_json::Value {
+        serde_json::json!({".tag": "folder", "name": name})
+    }
+
+    fn status_only(status: u16) -> Act {
+        Act::Send(Reply::Full(status, Vec::new(), Vec::new()))
+    }
+
+    fn api_result(rev: &str) -> (String, String) {
+        (
+            "Dropbox-API-Result".to_owned(),
+            serde_json::json!({"rev": rev}).to_string(),
+        )
+    }
+
+    /// One file a scripted folder holds.
+    struct Shelf {
+        name: &'static str,
+        bytes: Vec<u8>,
+        rev: &'static str,
+    }
+
+    /// A whole `200` of `file` naming its revision.
+    fn whole(file: &Shelf) -> Act {
+        Act::Send(Reply::Full(
+            200,
+            vec![api_result(file.rev)],
+            file.bytes.clone(),
+        ))
+    }
+
+    /// A server listing `files` at the link's root in one page and answering
+    /// its `n`-th download (0-based, downloads only) with
+    /// `download(n, &request, file)`.
+    fn folder_of(
+        files: Vec<Shelf>,
+        mut download: impl FnMut(usize, &Request, &Shelf) -> Act + Send + 'static,
+    ) -> (String, Log) {
+        let entries: Vec<serde_json::Value> = files
+            .iter()
+            .map(|f| file_entry(f.name, f.bytes.len() as u64, f.rev))
+            .collect();
+        let mut downloads = 0;
+        serve(move |_, request| {
+            if request.path.starts_with("/2/files/list_folder") {
+                return page(&entries, "end", false);
+            }
+            let arg: serde_json::Value =
+                serde_json::from_str(&request.headers["dropbox-api-arg"]).unwrap();
+            let file = files
+                .iter()
+                .find(|f| arg["path"] == format!("/{}", f.name))
+                .unwrap();
+            downloads += 1;
+            download(downloads - 1, request, file)
+        })
+    }
+
+    /// One press against `base` with `meter`, `backoff` and `stop`.
+    fn press_on(
+        base: &str,
+        roots: &Roots,
+        meter: &dyn FreeSpace,
+        backoff: Backoff,
+        stop: Option<&AtomicBool>,
+        handoff: &mut dyn Handoff,
+    ) -> Report {
+        let endpoints = Endpoints::loopback(base);
+        let token = Tokens::new(&["tok-one"]);
+        let fetch = Fetch {
+            store_root: &roots.store,
+            tick_root: &roots.tick,
+            endpoints: &endpoints,
+            token: &token,
+            meter,
+            floor: Floor::Percent(15),
+            backoff,
+            stop,
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run(&fetch, Ok(config()), handoff))
+    }
+
+    /// [`press_on`] with a roomy meter, the fast back-off and no Stop.
+    fn go(base: &str, roots: &Roots) -> Report {
+        press_on(
+            base,
+            roots,
+            &Meter::roomy(),
+            fast(),
+            None,
+            &mut Recorder::default(),
+        )
+    }
+
+    fn refusal(report: &Report) -> (&'static str, String) {
+        match &report.outcome {
+            Outcome::Refused(refusal) => (refusal.code, refusal.detail.clone()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn downloads(log: &Log) -> Vec<Request> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.path == "/2/sharing/get_shared_link_file")
+            .cloned()
+            .collect()
+    }
+
+    /// A crashed earlier press's part of `name` holding `bytes`, in run
+    /// folder `1-1-1` and journalled as that run's part at `rev`.
+    fn crashed_part(roots: &Roots, name: &str, rev: &str, bytes: &[u8]) -> PathBuf {
+        let run = staging_root(&roots.store).join("1-1-1");
+        std::fs::create_dir_all(&run).unwrap();
+        let part = run.join(format!("{name}.part"));
+        std::fs::write(&part, bytes).unwrap();
+        append_line(
+            &journal_path(&roots.store),
+            &format!(
+                "v=1 part run=1-1-1 name=\"{name}\" rev=\"{rev}\" part={}",
+                quoted(&part.display().to_string())
+            ),
+        )
+        .unwrap();
+        part
+    }
+
+    const DAY: &str = "GFDLNFO_TICK_01082019.zip";
+
+    /// A meter that presses Stop on its `at`-th reading, roomy otherwise.
+    struct StopAt {
+        at: usize,
+        readings: Mutex<usize>,
+        flag: Arc<AtomicBool>,
+    }
+
+    impl FreeSpace for StopAt {
+        fn space(&self, _path: &Path) -> Result<Space, String> {
+            let mut readings = self.readings.lock().unwrap();
+            *readings += 1;
+            self.flag.store(*readings >= self.at, Ordering::Release);
+            Ok(Space {
+                total: 1 << 40,
+                free: 1 << 40,
+            })
+        }
+    }
+
+    // -- the wire ------------------------------------------------------------
+
+    /// A token Dropbox rejects again after one re-read gave a NEW value is
+    /// dead: one re-read a request, never a third try, never a refresh
+    /// (`send`'s second `401`).
+    #[test]
+    fn a_second_401_after_a_fresh_token_is_a_dead_token() {
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), day_zip(1, 1, 100))]));
+        let roots = roots("db-401-twice");
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-old", "tok-new"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(report.outcome, Outcome::Waiting(Wait::TokenDead));
+        let bearers: Vec<String> = server
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.headers["authorization"].clone())
+            .collect();
+        assert_eq!(bearers, ["Bearer tok-old", "Bearer tok-new"]);
+    }
+
+    /// A `5xx` storm under a small total wait is `server_error` by the total,
+    /// never `throttled` (the total's own refusal of a non-`429`).
+    #[test]
+    fn a_5xx_storm_past_the_total_wait_is_server_error_by_the_total() {
+        let mut fake = fake_with(&[(&format!("/{DAY}"), day_zip(1, 1, 100))]);
+        fake.fail5xx = usize::MAX;
+        let server = Server::start(fake);
+        let roots = roots("db-5xx-total");
+        let capped = Backoff {
+            max_attempts: 1_000,
+            max_total: Duration::from_millis(40),
+            base: Duration::from_millis(5),
+            cap: Duration::from_millis(10),
+            second: Duration::from_millis(1),
+        };
+        let report = press_on(
+            &server.base,
+            &roots,
+            &Meter::roomy(),
+            capped,
+            None,
+            &mut Recorder::default(),
+        );
+        assert_eq!(
+            refusal(&report),
+            (
+                "server_error",
+                "listing: answered 503; waiting 10 ms more would pass the press's total wait \
+                 of 40 ms (waited 40 ms)"
+                    .to_owned()
+            )
+        );
+        assert_eq!(report.waited, Duration::from_millis(40));
+    }
+
+    /// A redirect chain is followed at most twice: the third hop's `302` is
+    /// the answer, refused by its location, and its target is never asked
+    /// for (the redirect policy's hop bound).
+    #[test]
+    fn a_redirect_chain_past_two_hops_is_refused_by_its_last_location() {
+        let file = day_zip(2, 1, 300);
+        let size = file.len() as u64;
+        let (base, log) = serve(move |_, request| match request.path.as_str() {
+            "/2/files/list_folder" => page(&[file_entry(DAY, size, "r1")], "end", false),
+            "/2/sharing/get_shared_link_file" => Act::Send(Reply::Full(
+                302,
+                vec![("Location".into(), "/hop1".into())],
+                Vec::new(),
+            )),
+            hop => {
+                let next = hop.strip_prefix("/hop").unwrap().parse::<u32>().unwrap() + 1;
+                Act::Send(Reply::Full(
+                    302,
+                    vec![("Location".into(), format!("/hop{next}"))],
+                    Vec::new(),
+                ))
+            }
+        });
+        let roots = roots("db-hops");
+        let report = go(&base, &roots);
+        assert_eq!(report.outcome, Outcome::Incomplete, "{report:#?}");
+        assert_eq!(codes(&report), [(DAY.to_owned(), "redirect_refused")]);
+        assert_eq!(report.refused[0].detail, "location=none scheme=none");
+        let paths: Vec<String> = log.lock().unwrap().iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/2/files/list_folder",
+                "/2/sharing/get_shared_link_file",
+                "/hop1",
+                "/hop2"
+            ]
+        );
+    }
+
+    // -- the listing ---------------------------------------------------------
+
+    /// The link's first page names the link; every later page's failure names
+    /// the listing: a first page nobody answers is `link_unreachable`, and a
+    /// later page whose connection is dropped, a later page and a subfolder's
+    /// first page answering `404`, are `listing_incomplete`; a later page's
+    /// `5xx` storm keeps its own code (combination: a cut connection after a
+    /// whole first page, the server gone for good).
+    #[test]
+    fn a_first_page_names_the_link_and_every_later_failure_names_the_listing() {
+        let closed = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let roots_a = roots("db-list-first");
+        assert_eq!(
+            refusal(&go(&closed, &roots_a)),
+            (
+                "link_unreachable",
+                "listing: could not connect (host 127.0.0.1)".to_owned()
+            )
+        );
+        let first = || page(&[file_entry(DAY, 10, "r1")], "c1", true);
+        // A later page whose connection drops, then no server at all.
+        let (dropped, _) = serve(move |n, _| if n == 0 { first() } else { Act::Quit });
+        let (code, detail) = refusal(&go(&dropped, &roots("db-list-drop")));
+        assert_eq!(code, "listing_incomplete");
+        assert!(
+            detail.starts_with("pages=1 listing: ") && detail.ends_with("(host 127.0.0.1)"),
+            "{detail}"
+        );
+        // A later page answering 404.
+        let (later, _) = serve(move |n, _| if n == 0 { first() } else { status_only(404) });
+        assert_eq!(
+            refusal(&go(&later, &roots("db-list-404"))),
+            (
+                "listing_incomplete",
+                "pages=1 a later page answered 404".to_owned()
+            )
+        );
+        // A subfolder's first page answering 404.
+        let (sub, _) = serve(move |n, _| {
+            if n == 0 {
+                page(&[folder_entry("sub")], "c0", false)
+            } else {
+                status_only(404)
+            }
+        });
+        assert_eq!(
+            refusal(&go(&sub, &roots("db-list-sub-404"))),
+            (
+                "listing_incomplete",
+                "pages=1 a later page answered 404".to_owned()
+            )
+        );
+        // A later page's 5xx storm is the storm's own refusal.
+        let (storm, _) = serve(move |n, _| if n == 0 { first() } else { status_only(503) });
+        let (code, detail) = refusal(&go(&storm, &roots("db-list-storm")));
+        assert_eq!(code, "server_error");
+        assert_eq!(detail, "listing: answered 503 4 times (retry_after=none)");
+    }
+
+    /// A folder nine levels down is `listing_incomplete` before it is asked
+    /// for; eight levels down is listed (extremes: `MAX_DEPTH` and one past
+    /// it).
+    #[test]
+    fn a_folder_deeper_than_eight_is_refused_and_eight_deep_is_listed() {
+        // `/d1`, `/d1/d2`, ... nine levels down.
+        let mut chain = Vec::new();
+        let mut path = String::new();
+        for level in 1..=9 {
+            path = format!("{path}/d{level}");
+            chain.push(path.clone());
+        }
+        let mut fake = fake_with(&[(&format!("{}/{DAY}", chain[7]), day_zip(3, 1, 100))]);
+        fake.folders.clone_from(&chain);
+        let server = Server::start(fake);
+        let roots = roots("db-deep");
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(
+            refusal(&report),
+            (
+                "listing_incomplete",
+                format!("more than {MAX_FOLDERS} folders or deeper than {MAX_DEPTH}")
+            )
+        );
+        assert_eq!(
+            server.log.lock().unwrap().len(),
+            9,
+            "the ninth level is never asked for"
+        );
+        server.fake.lock().unwrap().folders.pop();
+        let eight = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(eight.outcome, Outcome::Complete, "{eight:#?}");
+        assert_eq!(eight.verified.len(), 1);
+    }
+
+    /// A root holding `MAX_FOLDERS` folders is listed folder by folder until
+    /// the walk would pass the cap: the last folder is refused before it is
+    /// asked for (extreme: 4,096 folders, one request each).
+    #[test]
+    fn a_root_of_4096_folders_is_refused_before_its_last_folder() {
+        let folders: Vec<serde_json::Value> = (0..MAX_FOLDERS)
+            .map(|n| folder_entry(&format!("f{n:04}")))
+            .collect();
+        let (base, log) = serve(move |n, _| {
+            if n == 0 {
+                page(&folders, "root", false)
+            } else {
+                page(&[], "leaf", false)
+            }
+        });
+        let report = go(&base, &roots("db-wide"));
+        assert_eq!(
+            refusal(&report),
+            (
+                "listing_incomplete",
+                format!("more than {MAX_FOLDERS} folders or deeper than {MAX_DEPTH}")
+            )
+        );
+        assert_eq!(log.lock().unwrap().len(), MAX_FOLDERS);
+    }
+
+    /// Pages that each add an entry but hand back the cursor they were asked
+    /// with are a stall: `MAX_STALLED_PAGES` of them in a row is
+    /// `listing_incomplete`, naming the folder that stalled.
+    #[test]
+    fn pages_that_add_entries_but_keep_their_cursor_stall_and_name_their_folder() {
+        let (base, log) = serve(move |n, request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if body["path"] == "" {
+                page(&[folder_entry("sub")], "root", false)
+            } else {
+                page(
+                    &[file_entry(&format!("INVENTED_{n:02}.txt"), 1, "r")],
+                    "same",
+                    true,
+                )
+            }
+        });
+        let report = go(&base, &roots("db-kept-cursor"));
+        assert_eq!(
+            refusal(&report),
+            (
+                "listing_incomplete",
+                format!(
+                    "pages=10 {MAX_STALLED_PAGES} pages in a row said has_more and listed \
+                     nothing new or kept the cursor (folder /sub)"
+                )
+            )
+        );
+        assert_eq!(log.lock().unwrap().len(), 10);
+    }
+
+    // -- the pick --------------------------------------------------------------
+
+    /// An MCX zip is out of scope, a listed size past 1 TiB is unlikely, and a
+    /// held stocks day is held (combination: three refusals or holds of three
+    /// kinds in one listing, nothing downloaded).
+    #[test]
+    fn an_mcx_zip_a_size_past_a_tebibyte_and_a_held_stocks_day_are_named() {
+        let mut fake = fake_with(&[]);
+        fake.list_override = Some(json_reply(
+            200,
+            &serde_json::json!({
+                "entries": [
+                    file_entry("MCX_TICK_01082019.zip", 10, "r1"),
+                    file_entry("GFDLNFO_TICK_02082019.zip", MAX_FILE_BYTES + 1, "r2"),
+                    file_entry("GFDLCM_STOCK_TICK_05082019.zip", 10, "r3"),
+                ],
+                "cursor": "end",
+                "has_more": false,
+            }),
+        ));
+        let server = Server::start(fake);
+        let roots = roots("db-names");
+        let held = DayIdentity::of_zip_name("GFDLCM_STOCK_TICK_05082019.zip")
+            .unwrap()
+            .path_under(&roots.tick);
+        std::fs::create_dir_all(held.parent().unwrap()).unwrap();
+        std::fs::write(&held, b"held, invented").unwrap();
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(report.outcome, Outcome::Incomplete, "{report:#?}");
+        assert_eq!((report.listed, report.held, report.wanted), (3, 1, 0));
+        assert_eq!(
+            codes(&report),
+            [
+                ("GFDLNFO_TICK_02082019.zip".to_owned(), "size_unlikely"),
+                ("MCX_TICK_01082019.zip".to_owned(), "out_of_scope_exchange"),
+            ]
+        );
+        assert_eq!(
+            report.refused[0].detail,
+            format!("listed size {}", MAX_FILE_BYTES + 1)
+        );
+        assert!(server.downloads().is_empty());
+        assert!(journal_text(&roots).contains("reason=held_tick_store"));
+    }
+
+    /// A held day listed again with no content hash is held, never a
+    /// re-delivery: only a listed hash that differs names one (FM-007).
+    #[test]
+    fn a_held_day_listed_without_a_hash_is_held_not_redelivered() {
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), day_zip(4, 1, 200))]));
+        let roots = roots("db-held-nohash");
+        let one = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(one.outcome, Outcome::Complete, "{one:#?}");
+        let held = DayIdentity::of_zip_name(DAY)
+            .unwrap()
+            .path_under(&roots.tick);
+        std::fs::create_dir_all(held.parent().unwrap()).unwrap();
+        std::fs::write(&held, b"held, invented").unwrap();
+        server.fake.lock().unwrap().files[0].hash = String::new();
+        let two = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(two.outcome, Outcome::Complete, "{two:#?}");
+        assert_eq!((two.held, two.wanted), (1, 0));
+        assert!(two.refused.is_empty(), "{:?}", two.refused);
+    }
+
+    /// A pending shrink journalled at counts the link's baseline no longer
+    /// has accepts nothing, even when the config names its token: the press
+    /// names a new token of its own (the pending shrink's `was`).
+    #[test]
+    fn a_pending_shrink_at_another_baseline_accepts_nothing() {
+        let server = Server::start(fake_with(&[
+            ("/GFDLNFO_TICK_01082019.zip", day_zip(5, 1, 100)),
+            ("/GFDLNFO_TICK_02082019.zip", day_zip(6, 1, 100)),
+        ]));
+        let roots = roots("db-shrink-other");
+        let print = config().print();
+        let path = journal_path(&roots.store);
+        for line in [
+            format!("v=1 begin run=1-1-1 at_ms=1 link={print} torn=0"),
+            format!("v=1 listing run=1-1-1 at_ms=2 link={print} complete=true count=3"),
+            format!(
+                "v=1 listing run=1-1-2 at_ms=3 link={print} complete=false \
+                 reason=listing_shrank was=5 count=2 shrink=1-1-2"
+            ),
+        ] {
+            append_line(&path, &line).unwrap();
+        }
+        let stale = Config::parse(&format!(
+            "link = \"{LINK}\"\naccept_listing_shrink = \"1-1-2\"\n"
+        ))
+        .unwrap();
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(stale),
+            &mut Recorder::default(),
+        );
+        let run = report.run.clone();
+        assert_eq!(
+            refusal(&report),
+            (
+                "listing_shrank",
+                format!(
+                    "was=3 now=2 shrink={run}; to accept exactly this shrink once, set \
+                     accept_listing_shrink to {run} in the config; accept_listing_shrink 1-1-2 \
+                     answers no pending shrink of this link (each token accepts one shrink, \
+                     once)"
+                )
+            )
+        );
+        assert!(server.downloads().is_empty());
+    }
+
+    // -- the store -------------------------------------------------------------
+
+    /// A store whose staging folder is a file is `store_lost`, never made
+    /// again somewhere else; nothing is asked of the server.
+    #[test]
+    fn a_staging_folder_that_is_a_file_is_store_lost() {
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), day_zip(7, 1, 100))]));
+        let roots = roots("db-staging-file");
+        let staging = roots.store.join("staging");
+        std::fs::write(&staging, b"a file where a folder belongs").unwrap();
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(
+            refusal(&report),
+            (
+                "store_lost",
+                format!(
+                    "{}: {}",
+                    staging.display(),
+                    std::io::Error::from_raw_os_error(17)
+                )
+            )
+        );
+        assert!(server.log.lock().unwrap().is_empty());
+    }
+
+    /// A journal folder that is a file: the press is `journal_unreadable`
+    /// before any request, its lines are refused and named, and `status`
+    /// names the path rather than answer "no journal" (combination: the
+    /// journal unreadable and unwritable at once).
+    #[test]
+    fn a_journal_under_a_file_is_unreadable_unwritable_and_named_by_status() {
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), day_zip(8, 1, 100))]));
+        let roots = roots("db-journal-file");
+        std::fs::write(
+            roots.store.join("journal"),
+            b"a file where a folder belongs",
+        )
+        .unwrap();
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        let path = journal_path(&roots.store);
+        let not_dir = format!(
+            "{}: {}",
+            path.display(),
+            std::io::Error::from_raw_os_error(20)
+        );
+        assert_eq!(refusal(&report), ("journal_unreadable", not_dir.clone()));
+        assert_eq!(
+            report.journal_error,
+            Some(format!(
+                "{}: {}",
+                path.display(),
+                std::io::Error::from_raw_os_error(17)
+            ))
+        );
+        assert!(server.log.lock().unwrap().is_empty());
+        assert_eq!(status(&roots.store), Err(not_dir));
+    }
+
+    /// An import journal holding a line it never writes is
+    /// `journal_unreadable` by name, before any download.
+    #[test]
+    fn an_import_journal_holding_a_foreign_line_is_journal_unreadable() {
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), day_zip(9, 1, 100))]));
+        let roots = roots("db-import-foreign");
+        let imports = crate::gdfl_import::journal_path(&roots.store);
+        std::fs::create_dir_all(imports.parent().unwrap()).unwrap();
+        std::fs::write(&imports, b"hello, not an import journal\n").unwrap();
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        let (code, detail) = refusal(&report);
+        assert_eq!(code, "journal_unreadable");
+        assert!(detail.starts_with("the import journal: "), "{detail}");
+        assert!(server.downloads().is_empty());
+    }
+
+    /// A tick store inside the staging root overlaps it: refused before any
+    /// request, as the staging root inside the tick store is.
+    #[test]
+    fn a_tick_store_inside_the_staging_root_is_refused() {
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), day_zip(10, 1, 100))]));
+        let base = roots("db-tick-in-staging");
+        let roots = Roots {
+            store: base.store.clone(),
+            tick: staging_root(&base.store).join("ticks"),
+        };
+        let (code, _) = refusal(&press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        ));
+        assert_eq!(code, "staging_overlaps_published");
+        assert!(server.log.lock().unwrap().is_empty());
+    }
+
+    /// The drive unplugged by the LAST hand-off: the press did all its work,
+    /// but its `handed` line was lost, so it is never complete (R407-02): it
+    /// is `store_lost`, and both files were handed (the unplug after the
+    /// second, not the first).
+    #[test]
+    fn the_drive_unplugged_by_the_last_hand_off_is_store_lost() {
+        let server = Server::start(fake_with(&[
+            ("/GFDLNFO_TICK_01082019.zip", day_zip(11, 1, 200)),
+            ("/GFDLNFO_TICK_02082019.zip", day_zip(12, 1, 200)),
+        ]));
+        let roots = roots("db-unplug-last");
+        let mut handoff = Recorder {
+            unplug_after: Some((2, roots.store.clone())),
+            ..Recorder::default()
+        };
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut handoff,
+        );
+        assert_eq!(handoff.got.len(), 2, "{report:#?}");
+        assert_eq!(report.verified.len(), 2);
+        let (code, detail) = refusal(&report);
+        assert_eq!(code, "store_lost");
+        assert!(
+            detail.starts_with(&format!(
+                "{} is gone; the journal could not be written: ",
+                roots.store.display()
+            )),
+            "{detail}"
+        );
+    }
+
+    // -- the download --------------------------------------------------------
+
+    /// Stop read after the listing, before the first file: nothing is asked
+    /// for, the run folder stays empty, and the stop is journalled before
+    /// that file (`fetch_all`'s Stop).
+    #[test]
+    fn a_stop_read_before_the_first_file_asks_for_nothing() {
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), day_zip(13, 1, 200))]));
+        let roots = roots("db-stop-before");
+        let flag = Arc::new(AtomicBool::new(false));
+        let meter = StopAt {
+            at: 1,
+            readings: Mutex::new(0),
+            flag: Arc::clone(&flag),
+        };
+        let report = press_on(
+            &server.base,
+            &roots,
+            &meter,
+            fast(),
+            Some(&flag),
+            &mut Recorder::default(),
+        );
+        assert_eq!(
+            refusal(&report),
+            ("stopped", format!("the operator pressed Stop before {DAY}"))
+        );
+        assert!(server.downloads().is_empty());
+        let run_dir = report.staging.clone().unwrap();
+        assert_eq!(std::fs::read_dir(&run_dir).unwrap().count(), 0);
+        assert!(
+            journal_text(&roots)
+                .lines()
+                .any(|l| l.starts_with("v=1 stopped ")
+                    && l.ends_with(&format!(" stage=download before=\"{DAY}\""))),
+            "{}",
+            journal_text(&roots)
+        );
+    }
+
+    /// Stop read as a download is about to be sent: the request is never
+    /// sent, the new part is kept empty and named, and the next press fills
+    /// that same part (`send`'s Stop before a request, `download`'s
+    /// `Got::Stopped`).
+    #[test]
+    fn a_stop_read_as_a_download_is_sent_keeps_the_empty_part_for_the_next_press() {
+        let bytes = day_zip(14, 1, 200);
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), bytes.clone())]));
+        let roots = roots("db-stop-send");
+        let flag = Arc::new(AtomicBool::new(false));
+        let meter = StopAt {
+            at: 2,
+            readings: Mutex::new(0),
+            flag: Arc::clone(&flag),
+        };
+        let stopped = press_on(
+            &server.base,
+            &roots,
+            &meter,
+            fast(),
+            Some(&flag),
+            &mut Recorder::default(),
+        );
+        assert_eq!(
+            refusal(&stopped),
+            (
+                "stopped",
+                format!(
+                    "the operator pressed Stop during {DAY}; its part is kept and resumed by \
+                     the next press"
+                )
+            )
+        );
+        assert!(server.downloads().is_empty(), "the request was never sent");
+        let part = stopped.staging.clone().unwrap().join(format!("{DAY}.part"));
+        assert_eq!(std::fs::metadata(&part).unwrap().len(), 0);
+        assert!(
+            journal_text(&roots)
+                .lines()
+                .any(|l| l.starts_with("v=1 stopped ") && l.ends_with(" bytes=0")),
+            "{}",
+            journal_text(&roots)
+        );
+        let next = go(&server.base, &roots);
+        assert_eq!(next.outcome, Outcome::Complete, "{next:#?}");
+        assert_eq!(next.verified[0].path, part.with_file_name(DAY));
+        assert_eq!(std::fs::read(&next.verified[0].path).unwrap(), bytes);
+    }
+
+    /// A download whose connection is dropped every time is cut, resumed
+    /// `MAX_RESUMES` times, and then refused `download_cut` with its part
+    /// kept: never a run refusal, never a sixth request.
+    #[test]
+    fn a_download_dropped_every_time_is_refused_after_its_resumes() {
+        let (base, log) = folder_of(
+            vec![Shelf {
+                name: DAY,
+                bytes: day_zip(15, 1, 200),
+                rev: "r1",
+            }],
+            |_, _, _| Act::Close,
+        );
+        let roots = roots("db-cut-always");
+        let report = go(&base, &roots);
+        assert_eq!(report.outcome, Outcome::Incomplete, "{report:#?}");
+        assert_eq!(codes(&report), [(DAY.to_owned(), "download_cut")]);
+        assert_eq!(
+            report.refused[0].detail,
+            "cut 5 times; the part is kept for the next press"
+        );
+        assert_eq!(downloads(&log).len(), 5);
+        let cuts = journal_text(&roots)
+            .lines()
+            .filter(|l| l.starts_with("v=1 cut "))
+            .count();
+        assert_eq!(cuts, 5);
+        assert!(
+            report
+                .staging
+                .unwrap()
+                .join(format!("{DAY}.part"))
+                .is_file()
+        );
+    }
+
+    /// A download throttled past its attempts refuses the run `throttled`:
+    /// a refusal of the wire other than a cut or a Stop stops the run.
+    #[test]
+    fn a_throttled_download_refuses_the_run_by_its_own_code() {
+        let (base, log) = folder_of(
+            vec![Shelf {
+                name: DAY,
+                bytes: day_zip(16, 1, 200),
+                rev: "r1",
+            }],
+            |_, _, _| status_only(429),
+        );
+        let report = go(&base, &roots("db-throttled-download"));
+        assert_eq!(
+            refusal(&report),
+            (
+                "throttled",
+                "download: answered 429 4 times (retry_after=none)".to_owned()
+            )
+        );
+        assert_eq!(downloads(&log).len(), 4);
+    }
+
+    /// The drive unplugged while a download waits, its connection then
+    /// dropped: the cut is resumed only after the store is checked, and the
+    /// gone store is `store_lost` by name (`store_there` between two tries).
+    #[test]
+    fn a_store_lost_between_two_tries_of_one_file_is_store_lost() {
+        let roots = roots("db-lost-between");
+        let store = roots.store.clone();
+        let (base, log) = folder_of(
+            vec![Shelf {
+                name: DAY,
+                bytes: day_zip(17, 1, 200),
+                rev: "r1",
+            }],
+            move |_, _, _| {
+                std::fs::rename(&store, store.with_extension("unplugged")).unwrap();
+                Act::Close
+            },
+        );
+        let report = go(&base, &roots);
+        assert_eq!(
+            refusal(&report),
+            ("store_lost", format!("{} is gone", roots.store.display()))
+        );
+        assert_eq!(downloads(&log).len(), 1);
+        assert!(report.journal_error.is_some());
+    }
+
+    /// The drive unplugged while a whole answer comes: the part cannot be
+    /// opened for the body, `staging_write_failed` naming the part.
+    #[test]
+    fn a_part_gone_before_its_body_is_written_is_staging_write_failed() {
+        let roots = roots("db-part-gone");
+        let store = roots.store.clone();
+        let (base, _) = folder_of(
+            vec![Shelf {
+                name: DAY,
+                bytes: day_zip(18, 1, 200),
+                rev: "r1",
+            }],
+            move |_, _, file| {
+                std::fs::rename(&store, store.with_extension("unplugged")).unwrap();
+                whole(file)
+            },
+        );
+        let report = go(&base, &roots);
+        let part = report.staging.clone().unwrap().join(format!("{DAY}.part"));
+        assert_eq!(
+            refusal(&report),
+            (
+                "staging_write_failed",
+                format!(
+                    "{}: {}",
+                    part.display(),
+                    std::io::Error::from_raw_os_error(2)
+                )
+            )
+        );
+    }
+
+    /// The part's status read and its last sync failing (a device error,
+    /// through the test's fault seam) are `staging_write_failed` naming the
+    /// part; after the sync fault the part holds every byte (extremes: each
+    /// of the two steps no sound drive fails).
+    #[test]
+    fn a_part_whose_status_or_sync_fails_is_staging_write_failed() {
+        let bytes = day_zip(19, 1, 200);
+        for step in ["metadata", "sync"] {
+            let server = Server::start(fake_with(&[(&format!("/{DAY}"), bytes.clone())]));
+            let roots = roots(&format!("db-fault-{step}"));
+            PART_FAULT.with(|cell| cell.set(Some(step)));
+            let report = press(
+                &server,
+                &roots,
+                &Tokens::new(&["tok-one"]),
+                &Meter::roomy(),
+                Ok(config()),
+                &mut Recorder::default(),
+            );
+            PART_FAULT.with(|cell| cell.set(None));
+            let part = report.staging.clone().unwrap().join(format!("{DAY}.part"));
+            assert_eq!(
+                refusal(&report),
+                (
+                    "staging_write_failed",
+                    format!("{}: {step} failed (a test's fault)", part.display())
+                )
+            );
+            let kept = std::fs::read(&part).unwrap();
+            assert_eq!(kept.len(), if step == "sync" { bytes.len() } else { 0 });
+        }
+    }
+
+    /// A resumed part already longer than the listed size is never appended
+    /// to: a new part in this run's folder takes the file, and the long part
+    /// is kept as it was.
+    #[test]
+    fn a_resumed_part_longer_than_the_listing_starts_a_new_part() {
+        let bytes = day_zip(20, 1, 300);
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), bytes.clone())]));
+        let roots = roots("db-long-part");
+        let mut long = bytes.clone();
+        long.extend_from_slice(b"ten extra!");
+        let old = crashed_part(&roots, DAY, "rev0000", &long);
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(report.outcome, Outcome::Complete, "{report:#?}");
+        assert_eq!(
+            report.verified[0].path,
+            report.staging.clone().unwrap().join(DAY)
+        );
+        assert_eq!(std::fs::read(&report.verified[0].path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&old).unwrap(), long, "the long part is kept");
+        assert!(
+            server
+                .downloads()
+                .iter()
+                .all(|r| !r.headers.contains_key("range"))
+        );
+    }
+
+    /// A resumed part that verifies, whose final name its folder already
+    /// holds, is `name_taken`: the file there is never overwritten and the
+    /// whole part is kept.
+    #[test]
+    fn a_verified_part_whose_name_is_taken_is_never_renamed_over_it() {
+        let bytes = day_zip(21, 1, 300);
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), bytes.clone())]));
+        let roots = roots("db-name-taken");
+        let part = crashed_part(&roots, DAY, "rev0000", &bytes[..bytes.len() * 6 / 10]);
+        let taken = part.with_file_name(DAY);
+        std::fs::write(&taken, b"an earlier copy, invented").unwrap();
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(report.outcome, Outcome::Incomplete, "{report:#?}");
+        assert_eq!(codes(&report), [(DAY.to_owned(), "name_taken")]);
+        assert_eq!(
+            report.refused[0].detail,
+            format!("{} exists and is never overwritten", taken.display())
+        );
+        assert_eq!(std::fs::read(&taken).unwrap(), b"an earlier copy, invented");
+        assert_eq!(
+            std::fs::read(&part).unwrap(),
+            bytes,
+            "the whole part is kept"
+        );
+    }
+
+    /// A resume answered `416`, or a `206` stating another total, cannot be
+    /// trusted: the file restarts into a new part (`remote_changed`) and is
+    /// fetched whole; the old part is never appended to.
+    #[test]
+    fn a_resume_answered_416_or_with_another_total_restarts_into_a_new_part() {
+        for (tag, total_off) in [("416", None), ("total", Some(1_u64))] {
+            let bytes = day_zip(22, 1, 400);
+            let size = bytes.len() as u64;
+            let roots = roots(&format!("db-restart-{tag}"));
+            let kept = &bytes[..bytes.len() / 2];
+            let old = crashed_part(&roots, DAY, "r1", kept);
+            let (base, log) = folder_of(
+                vec![Shelf {
+                    name: DAY,
+                    bytes: bytes.clone(),
+                    rev: "r1",
+                }],
+                move |_, request, file| {
+                    let Some(range) = request.headers.get("range") else {
+                        return whole(file);
+                    };
+                    let from: u64 = range
+                        .trim_start_matches("bytes=")
+                        .trim_end_matches('-')
+                        .parse()
+                        .unwrap();
+                    total_off.map_or_else(
+                        || status_only(416),
+                        |off| {
+                            Act::Send(Reply::Full(
+                                206,
+                                vec![
+                                    api_result("r1"),
+                                    (
+                                        "Content-Range".into(),
+                                        format!("bytes {from}-{}/{}", size - 1, size + off),
+                                    ),
+                                ],
+                                file.bytes[usize::try_from(from).unwrap()..].to_vec(),
+                            ))
+                        },
+                    )
+                },
+            );
+            let report = go(&base, &roots);
+            assert_eq!(report.outcome, Outcome::Complete, "{tag}: {report:#?}");
+            assert_eq!(std::fs::read(&report.verified[0].path).unwrap(), bytes);
+            assert_eq!(std::fs::read(&old).unwrap(), kept, "{tag}: never stitched");
+            assert_eq!(downloads(&log).len(), 2);
+            assert!(
+                journal_text(&roots)
+                    .lines()
+                    .any(|l| l.starts_with("v=1 restarted ")
+                        && l.ends_with(" reason=remote_changed")),
+                "{tag}"
+            );
+        }
+    }
+
+    /// A download answered `403` is `http_status` by its status; the file is
+    /// refused and the press goes on.
+    #[test]
+    fn a_download_answered_403_is_refused_by_its_status() {
+        let (base, _) = folder_of(
+            vec![Shelf {
+                name: DAY,
+                bytes: day_zip(23, 1, 200),
+                rev: "r1",
+            }],
+            |_, _, _| status_only(403),
+        );
+        let report = go(&base, &roots("db-403"));
+        assert_eq!(report.outcome, Outcome::Incomplete, "{report:#?}");
+        assert_eq!(codes(&report), [(DAY.to_owned(), "http_status")]);
+        assert_eq!(report.refused[0].detail, "status=403");
+    }
+
+    /// The served revision decides only when both sides name one: an answer
+    /// without `Dropbox-API-Result` and a listing without a revision are
+    /// taken, and a served revision other than the listed one is
+    /// `remote_changed` (combination: the three in one press).
+    #[test]
+    fn a_served_revision_is_checked_only_when_both_sides_name_one() {
+        let (base, _) = folder_of(
+            vec![
+                Shelf {
+                    name: "GFDLNFO_TICK_01082019.zip",
+                    bytes: day_zip(24, 1, 200),
+                    rev: "r1",
+                },
+                Shelf {
+                    name: "GFDLNFO_TICK_02082019.zip",
+                    bytes: day_zip(25, 1, 200),
+                    rev: "",
+                },
+                Shelf {
+                    name: "GFDLNFO_TICK_05082019.zip",
+                    bytes: day_zip(26, 1, 200),
+                    rev: "r3",
+                },
+            ],
+            |_, _, file| {
+                let headers = match file.rev {
+                    "r1" => Vec::new(),
+                    "" => vec![api_result("zz")],
+                    _ => vec![api_result("r9")],
+                };
+                Act::Send(Reply::Full(200, headers, file.bytes.clone()))
+            },
+        );
+        let report = go(&base, &roots("db-revs"));
+        let verified: Vec<&str> = report.verified.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            verified,
+            ["GFDLNFO_TICK_01082019.zip", "GFDLNFO_TICK_02082019.zip"]
+        );
+        assert_eq!(
+            codes(&report),
+            [("GFDLNFO_TICK_05082019.zip".to_owned(), "remote_changed")]
+        );
+        assert_eq!(report.refused[0].detail, "listed rev r3 served rev r9");
+    }
+
+    /// A body longer than the listed size is refused `size_mismatch` as it
+    /// comes, the part never holding more than the listing states.
+    #[test]
+    fn a_body_past_the_listed_size_is_refused_as_it_comes() {
+        let bytes = day_zip(27, 1, 200);
+        let size = bytes.len();
+        let (base, _) = folder_of(
+            vec![Shelf {
+                name: DAY,
+                bytes,
+                rev: "r1",
+            }],
+            |_, _, file| {
+                let mut longer = file.bytes.clone();
+                longer.extend_from_slice(b"seven!!");
+                Act::Send(Reply::Full(200, vec![api_result("r1")], longer))
+            },
+        );
+        let report = go(&base, &roots("db-long-body"));
+        assert_eq!(codes(&report), [(DAY.to_owned(), "size_mismatch")]);
+        assert_eq!(
+            report.refused[0].detail,
+            format!("the body runs past the listed {size} bytes")
+        );
+        let part = report.staging.unwrap().join(format!("{DAY}.part"));
+        assert!(std::fs::metadata(part).unwrap().len() <= size as u64);
+    }
+
+    /// A body that ends cleanly before the listed size is a cut, resumed by
+    /// `Range` from what the part holds, and the file completes whole.
+    #[test]
+    fn a_body_that_ends_early_and_cleanly_is_resumed_by_range() {
+        let bytes = day_zip(28, 1, 400);
+        let half = bytes.len() / 2;
+        let (base, log) = folder_of(
+            vec![Shelf {
+                name: DAY,
+                bytes: bytes.clone(),
+                rev: "r1",
+            }],
+            move |n, _, file| {
+                if n == 0 {
+                    return Act::Send(Reply::Full(
+                        200,
+                        vec![api_result("r1")],
+                        file.bytes[..half].to_vec(),
+                    ));
+                }
+                let size = file.bytes.len();
+                Act::Send(Reply::Full(
+                    206,
+                    vec![
+                        api_result("r1"),
+                        (
+                            "Content-Range".into(),
+                            format!("bytes {half}-{}/{size}", size - 1),
+                        ),
+                    ],
+                    file.bytes[half..].to_vec(),
+                ))
+            },
+        );
+        let roots = roots("db-short-body");
+        let report = go(&base, &roots);
+        assert_eq!(report.outcome, Outcome::Complete, "{report:#?}");
+        assert_eq!(report.resumed, 1);
+        assert_eq!(std::fs::read(&report.verified[0].path).unwrap(), bytes);
+        let ranges: Vec<Option<String>> = downloads(&log)
+            .iter()
+            .map(|r| r.headers.get("range").cloned())
+            .collect();
+        assert_eq!(ranges, [None, Some(format!("bytes={half}-"))]);
+        assert!(
+            journal_text(&roots)
+                .lines()
+                .any(|l| l.starts_with("v=1 cut ") && l.ends_with(&format!(" bytes={half}")))
+        );
+    }
+
+    /// A disk that fills exactly at the file's last byte still takes the file:
+    /// only a chunk that would pass the limit fails (extreme: the boundary of
+    /// the test's own full disk).
+    #[test]
+    fn a_disk_full_exactly_at_the_last_byte_still_takes_the_file() {
+        let bytes = day_zip(29, 2, 2_000);
+        let server = Server::start(fake_with(&[(&format!("/{DAY}"), bytes.clone())]));
+        let roots = roots("db-full-exact");
+        FULL_AT.with(|cell| cell.set(Some(bytes.len() as u64)));
+        let report = press(
+            &server,
+            &roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        FULL_AT.with(|cell| cell.set(None));
+        assert_eq!(report.outcome, Outcome::Complete, "{report:#?}");
+        assert_eq!(std::fs::read(&report.verified[0].path).unwrap(), bytes);
+    }
+
+    /// A download the server answers `404` (here at the end of an allowed
+    /// redirect to a path it does not know) is `remote_gone`, and stops the
+    /// download stage `link_revoked`. A connection that closes before its
+    /// request is whole is passed over by the fixture, which serves on.
+    #[test]
+    fn a_download_answered_404_is_remote_gone_and_revokes_the_link() {
+        let mut fake = fake_with(&[(&format!("/{DAY}"), day_zip(30, 1, 200))]);
+        fake.redirect_to = Some(String::new());
+        let server = Server::start(fake);
+        server.fake.lock().unwrap().redirect_to = Some(format!("{}/nowhere", server.base));
+        drop(std::net::TcpStream::connect(server.base.trim_start_matches("http://")).unwrap());
+        let report = press(
+            &server,
+            &roots("db-404"),
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut Recorder::default(),
+        );
+        assert_eq!(
+            refusal(&report),
+            (
+                "link_revoked",
+                format!("{DAY} answered status=404 after the listing; what was verified is kept")
+            )
+        );
+        assert_eq!(codes(&report), [(DAY.to_owned(), "remote_gone")]);
+        let paths: Vec<String> = server
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/2/files/list_folder",
+                "/2/sharing/get_shared_link_file",
+                "/nowhere"
+            ]
+        );
+    }
+
+    /// A hand-off that deletes the next file upstream (the folder changed
+    /// mid-press).
+    struct Vanish {
+        fake: Arc<Mutex<Fake>>,
+        gone: &'static str,
+        got: Vec<String>,
+    }
+
+    impl Handoff for Vanish {
+        fn hand(&mut self, file: &Verified) -> Handed {
+            self.got.push(file.name.clone());
+            self.fake
+                .lock()
+                .unwrap()
+                .files
+                .retain(|f| !f.path.ends_with(self.gone));
+            Handed {
+                ok: true,
+                verdict: "written".into(),
+            }
+        }
+    }
+
+    /// A file deleted upstream after its listing answers `409 path/not_found`
+    /// on its download: `remote_gone`, and the stage stops `link_revoked`
+    /// keeping the file verified before it.
+    #[test]
+    fn a_file_deleted_upstream_after_its_listing_is_remote_gone() {
+        let server = Server::start(fake_with(&[
+            ("/GFDLNFO_TICK_01082019.zip", day_zip(31, 1, 200)),
+            ("/GFDLNFO_TICK_02082019.zip", day_zip(32, 1, 200)),
+        ]));
+        let mut handoff = Vanish {
+            fake: Arc::clone(&server.fake),
+            gone: "GFDLNFO_TICK_02082019.zip",
+            got: Vec::new(),
+        };
+        let report = press(
+            &server,
+            &roots("db-vanish"),
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            &mut handoff,
+        );
+        let (code, detail) = refusal(&report);
+        assert_eq!(code, "link_revoked");
+        assert!(detail.contains("status=409"), "{detail}");
+        assert_eq!(handoff.got, ["GFDLNFO_TICK_01082019.zip"]);
+        assert_eq!(report.verified.len(), 1);
+        assert!(report.verified[0].path.is_file());
+    }
 }
