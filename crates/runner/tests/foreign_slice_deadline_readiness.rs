@@ -1,4 +1,8 @@
 //! Generated fixtures only: public cached facts cannot authorize a later exit.
+#![allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a call that fails must fail the test loudly"
+)]
 use costs::fill::Direction;
 use indicators::column::Column;
 use indicators::evaluator::{Calendar, Evaluator, Widths};
@@ -101,14 +105,9 @@ fn every_public_cached_walk_refuses_foreign_facts_that_move_1509_to_1520() -> Re
                 direction,
                 &stale,
             );
-            let boolean = trade::walk_expression_over(
-                &bars,
-                column,
-                &expression,
-                horizon,
-                direction,
-                &stale,
-            )?;
+            let boolean =
+                trade::walk_expression_over(&bars, column, &expression, horizon, direction, &stale)
+                    .expect("the call over foreign facts answers");
             assert_eq!(mask, boolean);
             assert!(mask.signals > 0 && mask.reconciles());
             assert!(
@@ -133,7 +132,8 @@ fn every_public_cached_walk_refuses_foreign_facts_that_move_1509_to_1520() -> Re
                 side,
                 levels(),
                 &stale,
-            )?;
+            )
+            .expect("the call over foreign facts answers");
             assert_eq!(mask_grid, boolean_grid);
             assert!(
                 mask_grid.cells.is_empty(),
@@ -173,7 +173,8 @@ fn actual_clock_guard_preserves_earlier_horizons_on_both_public_predicate_paths(
                     horizon,
                     direction,
                     &facts,
-                )?;
+                )
+                .expect("the call over its own facts answers");
                 assert_eq!(mask, boolean);
                 assert!(mask.count() > 0 && mask.reconciles());
                 let ordinary: Vec<_> = mask.trades.iter().filter(|item| !item.forced).collect();
@@ -198,7 +199,8 @@ fn actual_clock_guard_preserves_earlier_horizons_on_both_public_predicate_paths(
                     side,
                     levels(),
                     &facts,
-                )?;
+                )
+                .expect("the call over its own facts answers");
                 assert_eq!(mask_grid, boolean_grid);
                 assert!(
                     !mask_grid.cells.is_empty(),
@@ -241,14 +243,9 @@ fn matching_forced_boundary_cannot_hide_a_foreign_earlier_horizon_lookup() -> Re
                 direction,
                 &stale,
             );
-            let boolean = trade::walk_expression_over(
-                &bars,
-                column,
-                &expression,
-                horizon,
-                direction,
-                &stale,
-            )?;
+            let boolean =
+                trade::walk_expression_over(&bars, column, &expression, horizon, direction, &stale)
+                    .expect("the call over foreign facts answers");
             assert_eq!(mask, boolean);
             assert!(mask.signals > 0 && mask.reconciles());
             assert!(
@@ -333,7 +330,8 @@ fn checked_grids_refuse_an_actual_late_or_foreign_day_inside_cached_endpoints() 
                     side,
                     levels(),
                     &facts,
-                )?;
+                )
+                .expect("the call over its own facts answers");
                 assert_eq!(mask, boolean);
                 assert!(
                     mask.refused_paths > control.refused_paths,
