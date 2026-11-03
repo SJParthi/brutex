@@ -746,19 +746,9 @@ fn every_event_of_a_hook_call_reaches_a_sink_with_its_fields_body() {
 #[test]
 fn a_record_of_wide_letters_past_the_record_length_is_refused() {
     let wide = |letters: usize| "\u{1D538}".repeat(letters);
-    let (a, b, c, d, e, f) = (wide(3), wide(2), wide(5), wide(12), wide(10), wide(10));
+    let fields = [wide(3), wide(2), wide(5), wide(12), wide(10), wide(10)];
     let refused = Err("a record is wider than the record length".to_owned());
-    assert_eq!(
-        fixed([
-            a.as_str(),
-            b.as_str(),
-            c.as_str(),
-            d.as_str(),
-            e.as_str(),
-            f.as_str()
-        ]),
-        refused
-    );
+    assert_eq!(fixed(fields.each_ref().map(String::as_str)), refused);
     let one = wide(1);
     assert_eq!(fixed([one.as_str(); 6]), refused);
     let line = fixed(["a"; 6]).unwrap();
@@ -798,7 +788,7 @@ fn a_dangling_link_at_the_diff_name_is_never_written_over() {
         "{why}"
     );
     assert_eq!(
-        std::fs::read_link(&link).unwrap(),
+        std::fs::read_link(link).unwrap(),
         root.join("nowhere"),
         "left as it was"
     );

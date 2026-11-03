@@ -577,7 +577,7 @@ fn a_torn_progress_record_is_read_again_then_refused() {
     let path = progress.path().to_path_buf();
     let mut bytes = std::fs::read(&path).unwrap();
     bytes[40] ^= 0xFF;
-    std::fs::write(&path, &bytes).unwrap();
+    std::fs::write(&path, bytes).unwrap();
     assert_eq!(
         Progress::read(&path).unwrap_err(),
         "progress: CRC mismatch (torn or damaged)"

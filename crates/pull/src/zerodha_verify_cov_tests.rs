@@ -41,20 +41,21 @@ fn a_vendor_stamp_is_utc_milliseconds_in_each_encoding() {
 /// on each segment.
 #[test]
 fn a_day_not_traded_or_not_attested_permits_no_minute() {
-    let n = |y: u16, m: u8, d: u8| Day::new(y, m, d).unwrap().days_from_epoch();
+    let number =
+        |year: u16, month: u8, day: u8| Day::new(year, month, day).unwrap().days_from_epoch();
     for segment in [Segment::Index, Segment::Cash, Segment::Fno] {
         assert_eq!(
-            permit(segment, n(2024, 3, 3)),
+            permit(segment, number(2024, 3, 3)),
             Permit::Closed,
             "{segment:?}"
         );
         assert_eq!(
-            permit(segment, n(2010, 1, 4)),
+            permit(segment, number(2010, 1, 4)),
             Permit::Unattested,
             "{segment:?}"
         );
         assert_eq!(
-            permit(segment, n(2027, 6, 1)),
+            permit(segment, number(2027, 6, 1)),
             Permit::Unattested,
             "{segment:?}"
         );

@@ -349,7 +349,7 @@ fn a_take_clears_a_dead_stop_and_a_release_names_what_it_could_not_remove() {
         stop.join("in-the-way").is_dir(),
         "a directory is never removed"
     );
-    std::fs::remove_dir_all(&stop).unwrap();
+    std::fs::remove_dir_all(stop).unwrap();
     third.release().unwrap();
 }
 
