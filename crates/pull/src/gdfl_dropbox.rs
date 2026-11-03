@@ -3376,3 +3376,9 @@ fn sha256_of(file: &std::fs::File) -> Result<String, String> {
 #[cfg(test)]
 #[path = "gdfl_dropbox_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL repair 2 (D-7334): the token from Parameter Store, over an
+// in-memory secret source (CLAUDE.md §8: nothing here reaches AWS).
+#[cfg(test)]
+#[path = "gdfl_dropbox_cov_tests.rs"]
+mod cov_tests;
