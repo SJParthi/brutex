@@ -2352,3 +2352,304 @@ fn nifty_first_a_spot_day_an_options_day_and_a_special_session() {
         [(Code::Match, 1)]
     );
 }
+
+// ---------------------------------------------------------------------------
+// BASE-COV-PULL-PS2 (3 Nov 2026): the arms Route B found unreached on START
+// (2e7a0b6d3b56), each driven by input or a direct construction and
+// asserted. Every bar and price is the fixture's invented one.
+// ---------------------------------------------------------------------------
+
+/// A claim of a fresh lock file under `root`, its descriptor opened
+/// READ-ONLY: every note written through it is refused by the host (`EBADF`),
+/// while the hold itself stands. `file` is the claim's remembered identity
+/// (`None`: the file was not measured).
+fn read_only_claim(root: &Path, measured: bool, seq: u64) -> (VendorClaim, PathBuf, (u64, u64)) {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = root.join("imports").join("ps2.landing.lock");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"before").unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let meta = file.metadata().unwrap();
+    let identity = (meta.dev(), meta.ino());
+    let claim = VendorClaim {
+        lock: Flock::lock(file, path.clone()).unwrap(),
+        name: "imports/ps2.landing.lock".to_owned(),
+        file: measured.then_some(identity),
+        seq,
+    };
+    (claim, path, identity)
+}
+
+/// The live notes this process remembers for one lock file, by claim.
+fn live_notes(identity: (u64, u64)) -> Option<BTreeMap<u64, Vec<u8>>> {
+    NOTING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .live
+        .get(&identity)
+        .cloned()
+}
+
+/// PS2-LR-01: a Zerodha window whose body the pack could not take (the disk
+/// refused the `.rsb` write) is kept by name, `kept=0 storage_full`, and its
+/// days are not spooled: `body_not_in_pack`, no spool written.
+#[test]
+fn a_body_the_pack_could_not_take_is_named_and_not_spooled() {
+    let on = day(2024, 4, 23);
+    let window = Window::new(on, on).unwrap();
+    let root = scratch("ps2-unkept-body");
+    let hook = RunHook::new(&root, 11, Vendor::Zerodha, 1);
+    crate::response_keep::FAULT.with(|fault| fault.set(Some(1)));
+    let (_, hooked) = land_and_hook(
+        &root,
+        &hook,
+        &kite_body(&[on], &[]),
+        window,
+        Door::FromWindow,
+    );
+    crate::response_keep::FAULT.with(|fault| fault.set(None));
+    let outcome = hooked.kept.as_ref().unwrap();
+    assert_eq!(
+        (outcome.first.receipt.kept, outcome.first.receipt.reason),
+        (Kept::NotKept, response_keep::Reason::StorageFull)
+    );
+    assert!(!body_in_pack(outcome));
+    assert!(hooked.spooled.is_none());
+    assert_eq!(hooked.not_spooled, Some("body_not_in_pack"));
+    assert!(!root.join("verify/spool").exists(), "nothing spooled");
+}
+
+/// PS2-LR-02: a gap ledger that is no regular file (a directory at its name)
+/// stops the window's spool by name, the ledger's path in the words; the
+/// answer is still kept.
+#[test]
+fn a_gap_ledger_that_is_no_file_stops_the_spool_by_name() {
+    let on = day(2024, 4, 23);
+    let window = Window::new(on, on).unwrap();
+    let root = scratch("ps2-ledger-dir");
+    let ledger_at = crate::ingest::gap_backfill::ledger_path(&root, Vendor::Zerodha);
+    std::fs::create_dir_all(&ledger_at).unwrap();
+    let hook = RunHook::new(&root, 12, Vendor::Zerodha, 1);
+    let (_, hooked) = land_and_hook(
+        &root,
+        &hook,
+        &kite_body(&[on], &[]),
+        window,
+        Door::FromWindow,
+    );
+    assert!(hooked.kept.is_ok(), "{hooked:?}");
+    let Some(Err(why)) = &hooked.spooled else {
+        panic!("{hooked:?}");
+    };
+    assert!(why.starts_with(&ledger_at.display().to_string()), "{why}");
+    assert_eq!(hooked.not_spooled, None);
+}
+
+/// PS2-LR-03: a series whose daily folder is a regular file cannot name its
+/// first served day: the window is verified with none (the read is said by
+/// name), its verdicts are spooled, and the series is remembered as having
+/// none, read once.
+#[test]
+fn a_series_whose_daily_folder_is_no_folder_is_verified_with_no_first_day() {
+    let on = day(2024, 4, 23);
+    let window = Window::new(on, on).unwrap();
+    let root = scratch("ps2-first-day");
+    let hook = RunHook::new(&root, 13, Vendor::Zerodha, 1);
+    let (rows, answered) = answered(&kite_body(&[on], &[]));
+    let landing = land(&root, &rows, window, Door::FromWindow, hook.run());
+    let daily = root
+        .join("bars")
+        .join("zerodha")
+        .join("NSE")
+        .join("INDEX")
+        .join("ZZIDX")
+        .join(Timeframe::DAY_1.as_str());
+    if daily.exists() {
+        std::fs::rename(&daily, daily.with_extension("moved")).unwrap();
+    }
+    std::fs::write(&daily, b"invented").unwrap();
+    let key = key();
+    let hooked = hook.after_landing(&Landed {
+        key: &key,
+        granularity: crate::vendor::Granularity::Minute1,
+        asked: window,
+        answered: &answered,
+        rows: &rows.rows,
+        landing: &landing,
+        door: Door::FromWindow,
+        encoding: spec().timestamps,
+    });
+    assert!(matches!(&hooked.spooled, Some(Ok(_))), "{hooked:?}");
+    let series = Series {
+        exchange: Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Index,
+        symbol: "ZZIDX".to_owned(),
+        contract: None,
+    };
+    let known = hook.first_days.lock().unwrap().get(&series).copied();
+    assert_eq!(known, Some(None), "remembered as none");
+}
+
+/// PS2-LR-04: a claim whose note the host refuses (its descriptor is
+/// read-only) still holds, and still remembers the note as its latest: the
+/// file keeps what it held. When it lets go while another holder of the file
+/// is live, the write-back of that holder's note is refused the same and only
+/// this claim leaves the live notes.
+#[test]
+fn a_claim_whose_note_the_host_refuses_still_holds_and_remembers_it() {
+    let root = scratch("ps2-claim-ro");
+    let (claim, path, identity) = read_only_claim(&root, true, u64::MAX - 1);
+    claim.note("ps2 invented holder");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"before",
+        "the note was refused"
+    );
+    let remembered = live_notes(identity).unwrap();
+    assert_eq!(
+        remembered.get(&(u64::MAX - 1)),
+        Some(&note_record("ps2 invented holder"))
+    );
+    NOTING
+        .lock()
+        .unwrap()
+        .live
+        .entry(identity)
+        .or_default()
+        .insert(u64::MAX, note_record("another holder"));
+    drop(claim);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"before",
+        "the write-back too"
+    );
+    let left = live_notes(identity).unwrap();
+    assert_eq!(left.keys().copied().collect::<Vec<_>>(), [u64::MAX]);
+    NOTING.lock().unwrap().live.remove(&identity);
+}
+
+/// PS2-LR-05: a claim whose lock file was not measured writes its note and
+/// remembers none; letting go writes nothing back, so the file keeps that
+/// note and no live note is left behind.
+#[test]
+fn a_claim_of_an_unmeasured_lock_file_notes_and_remembers_nothing() {
+    use std::os::unix::fs::MetadataExt as _;
+    let root = scratch("ps2-claim-unmeasured");
+    let path = root.join("imports").join("ps2.landing.lock");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    let meta = file.metadata().unwrap();
+    let identity = (meta.dev(), meta.ino());
+    let claim = VendorClaim {
+        lock: Flock::lock(file, path.clone()).unwrap(),
+        name: "imports/ps2.landing.lock".to_owned(),
+        file: None,
+        seq: u64::MAX,
+    };
+    claim.note("ps2 unmeasured holder");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        note_record("ps2 unmeasured holder")
+    );
+    assert_eq!(live_notes(identity), None, "nothing remembered");
+    drop(claim);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        note_record("ps2 unmeasured holder"),
+        "nothing written back"
+    );
+    assert_eq!(live_notes(identity), None);
+}
+
+/// PS2-LR-06: every word the hook and the claim say on these paths reaches a
+/// file, by its message and field: `response not kept` for a window with no
+/// landing run (`note_unhooked`), `landing claim not noted` and `landing
+/// claim note not restored` for a refused note, `verdicts not spooled` for a
+/// refused spool and `first day bar unread` for a refused first-day read.
+/// Run in a child of its own, the one install of its process (D-0995).
+#[test]
+fn every_word_the_hook_and_the_claim_say_reaches_a_file() {
+    crate::support::where_permission_binds(
+        "ingest::landing_run::tests::every_word_the_hook_and_the_claim_say_reaches_a_file",
+        every_word_body,
+    );
+}
+
+fn every_word_body() {
+    use telemetry::{Config, Level, MAX_LIMIT, OwnedValue, Query};
+    let home = scratch("ps2-landing-words");
+    let sink = telemetry::install(&Config::new(&home).with_min_level(Level::Trace))
+        .expect("the one install of this child");
+    let words = |message: &str, key: &str| -> Vec<OwnedValue> {
+        telemetry::tail(
+            &home,
+            sink.keep_files(),
+            &Query::last(MAX_LIMIT).from_target(TARGET),
+        )
+        .records
+        .into_iter()
+        .filter(|record| record.message == message)
+        .filter_map(|record| record.field(key).cloned())
+        .collect()
+    };
+    let on = day(2024, 4, 23);
+    let window = Window::new(on, on).unwrap();
+    note_unhooked(window);
+    assert_eq!(
+        words("response not kept", "from"),
+        [OwnedValue::Str(on.to_string())]
+    );
+    let root = scratch("ps2-words-claim");
+    let (claim, _, identity) = read_only_claim(&root, true, u64::MAX - 1);
+    claim.note("ps2 invented holder");
+    NOTING
+        .lock()
+        .unwrap()
+        .live
+        .entry(identity)
+        .or_default()
+        .insert(u64::MAX, note_record("another holder"));
+    drop(claim);
+    NOTING.lock().unwrap().live.remove(&identity);
+    let lock = OwnedValue::Str("imports/ps2.landing.lock".to_owned());
+    assert_eq!(
+        words("landing claim not noted", "lock"),
+        std::slice::from_ref(&lock)
+    );
+    assert_eq!(words("landing claim note not restored", "lock"), [lock]);
+    let root = scratch("ps2-words-ledger");
+    std::fs::create_dir_all(crate::ingest::gap_backfill::ledger_path(
+        &root,
+        Vendor::Zerodha,
+    ))
+    .unwrap();
+    let hook = RunHook::new(&root, 14, Vendor::Zerodha, 1);
+    let daily = root.join("bars/zerodha/NSE/INDEX/ZZIDX");
+    std::fs::create_dir_all(&daily).unwrap();
+    std::fs::write(daily.join(Timeframe::DAY_1.as_str()), b"invented").unwrap();
+    let (rows, answered) = answered(&kite_body(&[on], &[]));
+    let landing = land(&root, &rows, window, Door::FromWindow, hook.run());
+    let key = key();
+    let hooked = hook.after_landing(&Landed {
+        key: &key,
+        granularity: crate::vendor::Granularity::Minute1,
+        asked: window,
+        answered: &answered,
+        rows: &rows.rows,
+        landing: &landing,
+        door: Door::FromWindow,
+        encoding: spec().timestamps,
+    });
+    assert!(matches!(&hooked.spooled, Some(Err(_))), "{hooked:?}");
+    assert_eq!(words("verdicts not spooled", "run"), [OwnedValue::Int(14)]);
+    assert_eq!(
+        words("first day bar unread", "series").len(),
+        1,
+        "the first-day read was said once"
+    );
+}
