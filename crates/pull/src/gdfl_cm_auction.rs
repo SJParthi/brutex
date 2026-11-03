@@ -597,6 +597,35 @@ pub fn append(
     day: Day,
     prints: &[Print],
 ) -> Result<Appended, CmRefusal> {
+    append_with(
+        store_root,
+        key,
+        day,
+        prints,
+        &Host {
+            release: &|lock| lock.release(),
+            cut: &|file, len| file.set_len(len).and_then(|()| file.sync_data()),
+        },
+    )
+}
+
+/// The two calls an append makes of the host under its lock, as arguments
+/// (BASE-COV-PULL-PS1, D-7335): production releases the lock and cuts a torn
+/// tail back with `set_len` and `sync_data`; a test hands a release or a cut
+/// the host refuses, which no input makes happen on demand.
+struct Host<'h> {
+    release: &'h dyn Fn(Flock<&File>) -> Result<(), store::flock::Unreleased>,
+    cut: &'h dyn Fn(&File, u64) -> io::Result<()>,
+}
+
+/// [`append`] with its host calls as arguments.
+fn append_with(
+    store_root: &Path,
+    key: &InstrumentKey,
+    day: Day,
+    prints: &[Print],
+    host: &Host<'_>,
+) -> Result<Appended, CmRefusal> {
     let refuse = |why: String| CmRefusal::AuctionSidecar { why };
     let offered: Vec<Record> = prints.iter().map(|p| Record::of(day, p)).collect();
     let appended = Appended {
@@ -631,8 +660,8 @@ pub fn append(
             path.display()
         ))
     })?;
-    let written = write_day(&lock, &path, day, &offered, &made).map_err(refuse);
-    lock.release().map_err(|why| {
+    let written = write_day(&lock, &path, (day, &offered, &made), host.cut).map_err(refuse);
+    (host.release)(lock).map_err(|why| {
         refuse(format!(
             "{}: the lock was not released: {why}",
             path.display()
@@ -651,9 +680,8 @@ pub fn append(
 fn write_day(
     file: &File,
     path: &Path,
-    day: Day,
-    offered: &[Record],
-    made: &[PathBuf],
+    (day, offered, made): (Day, &[Record], &[PathBuf]),
+    cut: &dyn Fn(&File, u64) -> io::Result<()>,
 ) -> Result<(usize, u16), String> {
     let mut bytes = Vec::new();
     let mut reader = file;
@@ -666,15 +694,13 @@ fn write_day(
     // the exclusive lock, and never a record the file held whole.
     if let Some(keep) = torn_tail(&bytes) {
         let had = bytes.len();
-        file.set_len(u64::try_from(keep).unwrap_or(u64::MAX))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| {
-                format!(
-                    "{}: its torn tail ({} of {had} bytes) could not be cut back: {why}",
-                    path.display(),
-                    had - keep
-                )
-            })?;
+        cut(file, u64::try_from(keep).unwrap_or(u64::MAX)).map_err(|why| {
+            format!(
+                "{}: its torn tail ({} of {had} bytes) could not be cut back: {why}",
+                path.display(),
+                had - keep
+            )
+        })?;
         bytes.truncate(keep);
         note_torn_cut(path, had, keep);
     }

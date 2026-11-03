@@ -1,8 +1,8 @@
 //! BASE-COV-PULL-PS1 (D-7335): the diff's matching arms and its delisting
-//! pass on inputs that fail one condition at a time, and a diff whose rename
-//! is refused. Every row is invented: `ZQ` names, tokens in the nine
-//! millions, and ISINs that end in a letter where every issued ISIN carries
-//! its check digit.
+//! pass on inputs that fail one condition at a time, and a diff and a receipt
+//! whose rename is refused. Every row is invented: `ZQ` names, tokens in the
+//! nine millions, and ISINs that end in a letter where every issued ISIN
+//! carries its check digit.
 
 #![allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
 
@@ -209,4 +209,30 @@ fn a_diff_whose_rename_is_refused_stays_partial_whole_and_named() {
         b"ZQ INVENTED DIFF"
     );
     assert!(fs::symlink_metadata(root.join(diff_name(at))).is_err());
+}
+
+/// A receipt whose rename the host refuses stays partial, whole and named:
+/// nothing is at the receipt's own name, so the body it would receipt stays
+/// incomplete and is never read, and the refusal names the receipt in the
+/// host's words. The rename `commit_receipt` hands `commit_receipt_renaming`,
+/// refused by a test (a folder made at the name after the check is a race).
+#[test]
+fn a_receipt_whose_rename_is_refused_stays_partial_whole_and_named() {
+    let root = scratch("PS1-RECEIPT-RENAME");
+    let at = stamp(day(2026, 3, 3), 1);
+    let refused =
+        commit_receipt_renaming(&root, (Kind::Kite, at), b"ZQ INVENTED RECEIPT", &|_, _| {
+            Err(std::io::Error::other("ZQ invented: not renamed"))
+        });
+    assert_eq!(
+        refused,
+        Err(format!(
+            "{} could not be committed: ZQ invented: not renamed; the body stays incomplete \
+             and is never read",
+            root.join(receipt_name(Kind::Kite, at)).display()
+        ))
+    );
+    let partial = root.join(format!("{}{PARTIAL}", receipt_name(Kind::Kite, at)));
+    assert_eq!(fs::read(partial).unwrap(), b"ZQ INVENTED RECEIPT");
+    assert!(fs::symlink_metadata(root.join(receipt_name(Kind::Kite, at))).is_err());
 }

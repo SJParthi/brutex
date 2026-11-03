@@ -1116,7 +1116,14 @@ async fn answer_within(answer: &mut reqwest::Response) -> Result<String, SsmErro
 /// [`SsmError`] before 1970, which a system clock can report and which cannot
 /// produce a valid scope.
 pub fn now_stamp() -> Result<String, SsmError> {
-    let secs = std::time::SystemTime::now()
+    stamp_at(std::time::SystemTime::now())
+}
+
+/// [`now_stamp`] at the instant `now` (BASE-COV-PULL-PS1, D-7335): production
+/// hands it the system clock, and a test hands an instant before 1970, which
+/// no clock of a test host reads on demand.
+fn stamp_at(now: std::time::SystemTime) -> Result<String, SsmError> {
+    let secs = now
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| {
             SsmError::unreachable(

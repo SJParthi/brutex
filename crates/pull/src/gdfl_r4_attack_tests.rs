@@ -634,7 +634,6 @@ fn r4_10_a_journal_line_torn_inside_a_run_is_closed_before_the_next_one() {
         std::fs::remove_dir_all(root).unwrap();
         text.lines().last().unwrap().len() + 1
     };
-    let mut refused = 0_usize;
     for keep in 0..line_len {
         let root = scratch("r4-torn-append");
         let path = journal_path(&root);
@@ -667,10 +666,11 @@ fn r4_10_a_journal_line_torn_inside_a_run_is_closed_before_the_next_one() {
                 ..DayRead::default()
             }
         });
-        let Ok(second) = second else {
-            refused += 1;
-            continue;
-        };
+        assert!(
+            second.is_ok(),
+            "keep {keep} of {line_len}: a torn write stopped the later run: {second:?}"
+        );
+        let second = second.unwrap();
         assert_eq!(
             (second.days_skipped, second.days_imported, &second.resumed),
             (1, 1, &vec![d1()]),
@@ -680,10 +680,6 @@ fn r4_10_a_journal_line_torn_inside_a_run_is_closed_before_the_next_one() {
         assert_eq!(second.seconds_committed, 0, "keep {keep}");
         std::fs::remove_dir_all(root).unwrap();
     }
-    assert_eq!(
-        refused, 0,
-        "{refused} of {line_len} torn writes stopped every later run"
-    );
 }
 
 // ── 7. LOCAL: a journal this branch wrote before `definition=` existed ─────
@@ -808,12 +804,7 @@ fn r4_11_a_journal_this_branch_wrote_before_definition_existed_is_resumed_as_its
     // A rerun skips every stocks day of the range and writes nothing.
     let journal = journal_text(&root);
     let bars = bars_tree(&root);
-    let mut reread = Vec::new();
-    let again = drive(&run, |on, _| {
-        reread.push(on);
-        DayRead::default()
-    });
-    assert!(reread.is_empty(), "{reread:?} read again");
+    let again = drive(&run, |on, _| unreachable!("{on:?} read again"));
     assert_eq!(again.unwrap().days_skipped, 8);
     assert_eq!(journal_text(&root), journal);
     assert_eq!(bars_tree(&root), bars);

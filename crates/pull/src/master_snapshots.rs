@@ -784,6 +784,19 @@ const PARTIAL: &str = ".partial";
 /// [`Catalog`] names, never a torn receipt listed as receipted. A receipt
 /// already at the name is refused and left as it is.
 fn commit_receipt(root: &Path, kind: Kind, stamp: Stamp, bytes: &[u8]) -> Result<(), String> {
+    commit_receipt_renaming(root, (kind, stamp), bytes, &|from, to| fs::rename(from, to))
+}
+
+/// [`commit_receipt`] with its rename as an argument (BASE-COV-PULL-PS1,
+/// D-7335): production renames, and a test hands a rename the host refuses,
+/// which no input makes happen on demand (a folder made at the name after
+/// the check is a race).
+fn commit_receipt_renaming(
+    root: &Path,
+    (kind, stamp): (Kind, Stamp),
+    bytes: &[u8],
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     let path = root.join(receipt_name(kind, stamp));
     let partial = root.join(format!("{}{PARTIAL}", receipt_name(kind, stamp)));
     write_new(&partial, bytes)?;
@@ -793,7 +806,7 @@ fn commit_receipt(root: &Path, kind: Kind, stamp: Stamp, bytes: &[u8]) -> Result
             path.display()
         ));
     }
-    fs::rename(&partial, &path).map_err(|why| {
+    rename(&partial, &path).map_err(|why| {
         format!(
             "{} could not be committed: {why}; the body stays incomplete and is never read",
             path.display()

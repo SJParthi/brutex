@@ -686,6 +686,19 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_new_with(path, bytes, &|file, bytes| {
+        file.write_all(bytes).and_then(|()| file.sync_all())
+    })
+}
+
+/// [`write_new`] with its write and sync as an argument (BASE-COV-PULL-PS1,
+/// D-7335): production writes and syncs, and a test hands a write the host
+/// refuses, a full disk or a failing device that no input makes on demand.
+fn write_new_with(
+    path: &Path,
+    bytes: &[u8],
+    persist: &dyn Fn(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -696,14 +709,12 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
                 path.display()
             )
         })?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|why| {
-            format!(
-                "incomplete publication at {} retained: {why}",
-                path.display()
-            )
-        })
+    persist(&mut file, bytes).map_err(|why| {
+        format!(
+            "incomplete publication at {} retained: {why}",
+            path.display()
+        )
+    })
 }
 
 async fn download(url: String) -> Result<Vec<u8>, String> {

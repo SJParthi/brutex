@@ -81,22 +81,18 @@ fn keyed_index_row(stem: &str, key: &str, status: &str, source: &str) -> Vec<Str
 
 // ── the grammar ─────────────────────────────────────────────────────────────
 
-/// A sink that refuses its first write and keeps every later one, so what a
-/// formatter writes after a refusal shows whether it stopped there.
+/// A sink that refuses its first write and fails the test at any later one,
+/// so a formatter that writes after a refusal is caught at that write.
 #[derive(Default)]
 struct RefusesFirst {
     writes: usize,
-    kept: String,
 }
 
 impl std::fmt::Write for RefusesFirst {
     fn write_str(&mut self, text: &str) -> std::fmt::Result {
         self.writes += 1;
-        if self.writes == 1 {
-            return Err(std::fmt::Error);
-        }
-        self.kept.push_str(text);
-        Ok(())
+        assert_eq!(self.writes, 1, "a write after the refusal: {text:?}");
+        Err(std::fmt::Error)
     }
 }
 
@@ -117,7 +113,7 @@ fn a_refusal_told_to_a_sink_that_refuses_stops_at_the_refusal() {
         std::fmt::write(&mut sink, format_args!("{refused}")),
         Err(std::fmt::Error)
     );
-    assert_eq!((sink.writes, sink.kept.as_str()), (1, ""));
+    assert_eq!(sink.writes, 1);
     assert_eq!(
         refused.to_string(),
         "reference table fno_list refused row (generation 3) at /zq/invented: an invented detail"

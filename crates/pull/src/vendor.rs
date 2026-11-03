@@ -7969,6 +7969,10 @@ mod tests {
             "descending later rows"
         );
         assert!(
+            !table(anchor, [Some(anchor), Some(later(day(2021, 1, 1)))]).rows_ascend(),
+            "equal starts before a second row"
+        );
+        assert!(
             !table(anchor, [None, Some(later(day(2020, 1, 1)))]).rows_ascend(),
             "a hole before a populated slot — `rows()` would silently close it"
         );
@@ -8020,6 +8024,14 @@ mod tests {
         assert!(
             !table(anchor, [None, Some(inverted)]).rows_are_well_shaped(),
             "and so is a second slot with a hole before it"
+        );
+        assert!(
+            !table(uncited, [Some(anchor), None]).rows_are_well_shaped(),
+            "an ill-shaped anchor beside one later row"
+        );
+        assert!(
+            !table(uncited, [None, Some(anchor)]).rows_are_well_shaped(),
+            "and beside a second slot with a hole before it"
         );
         assert!(table(anchor, [Some(anchor), Some(anchor)]).rows_are_well_shaped());
 
