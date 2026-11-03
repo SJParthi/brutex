@@ -3936,6 +3936,139 @@ test('a sheet or a harness sent a signal the moment its command or browser has s
   }
 });
 
+test('a process that joins a command\'s group after its SIGTERM went out, as a fork the signal missed does, is asked too, and no process is asked twice: the stop lists the group and asks each process itself (BASE-REDS-1023 repair 9)', { timeout: 60_000 }, async () => {
+  // Before (the D1 landing gate, 3 Nov 2026, load 36/58/54): the stop sent
+  // SIGTERM to the group once, and on this Mac that misses a process whose
+  // parent is forking it at that instant. The --writer `echo
+  // the-writer-printed; sleep 30` left its `sleep 30` running, it was killed
+  // 5 s later, and a sheet that should have passed failed ("the sheet is
+  // still on stdout"). Probed 4 Nov: 3 of 300 such stops left one.
+  //
+  // THE ASKER ON A TABLE OF ITS OWN, the fork modelled exactly: 101 is
+  // forking 102 as it is signalled, so 102 is in the group only after the
+  // signal went out.
+  let members = [100, 101];
+  /** @type {[number, string][]} */
+  const sent = [];
+  /** @type {number[]} */
+  const lists = [];
+  const ask = sheet.asker(100, {
+    list: async (pgid) => {
+      lists.push(pgid);
+      return { pids: [...members] };
+    },
+    kill: (target, signal) => {
+      sent.push([target, signal]);
+      if (target === 101) members = [...members, 102];
+      return true;
+    }
+  });
+  assert.deepEqual(await ask.pass('SIGTERM'), [100, 101], 'each process in the group is sent the signal itself');
+  assert.deepEqual(await ask.pass('SIGTERM'), [102], 'the process forked as its parent was signalled is asked at the next list');
+  assert.deepEqual(await ask.pass('SIGTERM'), [], 'and none is asked twice');
+  assert.deepEqual(sent, [[100, 'SIGTERM'], [101, 'SIGTERM'], [102, 'SIGTERM']]);
+  assert.deepEqual(lists, [100, 100, 100], 'its own group, listed each pass');
+  assert.equal(ask.unlisted(), '');
+  assert.deepEqual([...ask.asked], [100, 101, 102]);
+  // A FIRST LIST THAT FAILS IS SAID, and the group is signalled as one, once.
+  /** @type {[number, string][]} */
+  const once = [];
+  const unlistable = sheet.asker(200, { list: async () => ({ why: 'no table here' }), kill: (t, s) => (once.push([t, s]), true) });
+  assert.deepEqual(await unlistable.pass('SIGTERM'), []);
+  assert.deepEqual(once, [[-200, 'SIGTERM']]);
+  assert.equal(unlistable.unlisted(), 'its processes could not be listed (no table here), so the group was sent SIGTERM as one, which misses a process forked at that instant');
+  assert.deepEqual(await unlistable.pass('SIGTERM'), [], 'no list is tried after one failed');
+  assert.deepEqual(once, [[-200, 'SIGTERM']], 'nor the group signalled again');
+  // A LATER LIST THAT FAILS leaves the processes already asked as they are: never the group as one again.
+  let calls = 0;
+  /** @type {[number, string][]} */
+  const later = [];
+  const flaky = sheet.asker(300, { list: async () => (++calls === 1 ? { pids: [300] } : { why: 'ps timed out' }), kill: (t, s) => (later.push([t, s]), true) });
+  assert.deepEqual(await flaky.pass('SIGTERM'), [300]);
+  assert.deepEqual(await flaky.pass('SIGTERM'), []);
+  assert.deepEqual(later, [[300, 'SIGTERM']]);
+  assert.equal(flaky.unlisted(), 'its processes could not be listed again (ps timed out), so a process that joined it after the last list was not sent SIGTERM');
+  assert.deepEqual(await flaky.pass('SIGTERM'), []);
+  assert.equal(calls, 2, 'no list after one failed');
+  // THE TABLE `ps -A -o pid= -o pgid=` PRINTS, read for one group: a line of any other shape is no process.
+  assert.deepEqual(sheet.membersIn('  100   100\n  101   100\n  102     7\n 103 1000\nx 100\n 0 100\n 104 100 extra\n\n105 100', 100), [100, 101, 105]);
+  assert.deepEqual(sheet.membersIn('', 100), []);
+  assert.equal(sheet.LIST_POLL_MS, 100);
+  assert.equal(sheet.LIST_WAIT_MS, 2_000);
+  const { spawn } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'r9-asked-'));
+  const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
+  // THE REAL TABLE: a group started here is listed by this system's `ps`, its leader in it.
+  const listed = spawn('sleep 30 & exec sleep 30', { shell: true, detached: true, stdio: 'ignore' });
+  try {
+    const pgid = /** @type {number} */ (listed.pid);
+    /** @type {{pids: number[]} | {why: string}} */
+    let got = { pids: [] };
+    for (let i = 0; i < 100 && !('pids' in got && got.pids.length === 2); i += 1) {
+      got = await sheet.groupMembers(pgid);
+      if (!('pids' in got)) break;
+      await nap(50);
+    }
+    assert.ok('pids' in got && got.pids.length === 2 && got.pids.includes(pgid), `the leader and its one child: ${JSON.stringify(got)}`);
+  } finally {
+    process.kill(-(/** @type {number} */ (listed.pid)), 'SIGKILL');
+  }
+  // REAL PROCESSES, NO RACE NEEDED: on SIGTERM the command starts a process
+  // and leaves, so that process joins the group after the signal went out,
+  // as a fork the signal missed does. The old stop never asked it: the group
+  // was still there COMMAND_STOP_MS later, and was killed.
+  const script = join(dir, 'leaves-one.sh');
+  writeFileSync(script, ['trap \'( sleep 0.3; exec sh -c "echo \\$\\$ > \\"$2\\"; exec sleep 1000" ) & exit 0\' TERM', 'sleep 1000 &', 'echo $$ > "$1"', 'wait', ''].join('\n'));
+  const ready = join(dir, 'ready.pid');
+  const lateFile = join(dir, 'late.pid');
+  const leaves = sheet.run(`sh '${script}' '${ready}' '${lateFile}'`, logFd);
+  try {
+    await pidIn(ready);
+    const t0 = Date.now();
+    assert.equal(await leaves.stop(), 'was sent SIGTERM and left', 'the process that joined after the signal was asked, and left');
+    assert.ok(Date.now() - t0 < sheet.COMMAND_STOP_MS, `well inside the wait (took ${Date.now() - t0} ms)`);
+    assert.equal(sheet.groupRunning(leaves.child.pid), false, 'no process of its group is left');
+  } finally {
+    try {
+      process.kill(-(/** @type {number} */ (leaves.child.pid)), 'SIGKILL');
+    } catch {
+      // already gone: the case the assertions above ask for
+    }
+  }
+  // EACH PROCESS ONCE, NEVER TWICE: a command whose TERM trap writes a line
+  // and takes half a second to leave, listed five times meanwhile, wrote one
+  // line: it was sent SIGTERM once (a second would have run its trap again).
+  const counted = join(dir, 'counted.sh');
+  writeFileSync(counted, ['trap \'echo got >> "$1"; sleep 0.5; exit 0\' TERM', 'echo $$ > "$2"', 'while :; do sleep 0.05; done', ''].join('\n'));
+  const got = join(dir, 'got.txt');
+  const up = join(dir, 'up.pid');
+  const graceful = sheet.run(`sh '${counted}' '${got}' '${up}'`, logFd);
+  try {
+    await pidIn(up);
+    assert.equal(await graceful.stop(), 'was sent SIGTERM and left');
+    assert.equal(readFileSync(got, 'utf8'), 'got\n', 'its trap ran once');
+  } finally {
+    try {
+      process.kill(-(/** @type {number} */ (graceful.child.pid)), 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+  // A TABLE THAT CANNOT BE READ IS SAID in the stop's words, and the group is still ended.
+  const unread = sheet.run('exec sleep 1000', logFd, { list: async () => ({ why: 'this test reads no table' }) });
+  try {
+    await nap(100);
+    assert.equal(await unread.stop(), 'was sent SIGTERM and left (its processes could not be listed (this test reads no table), so the group was sent SIGTERM as one, which misses a process forked at that instant)');
+    assert.equal(sheet.groupRunning(unread.child.pid), false);
+  } finally {
+    try {
+      process.kill(-(/** @type {number} */ (unread.child.pid)), 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+});
+
 test('the up wait after a restart is --up-wait-ms in all: each check within it waits at most the time left, and a server not up ends the restart pass by name; a first ask that runs out after a restart is asked no more', { timeout: 60_000 }, async () => {
   // Before: each up check was bounded by --timeout-ms (60 s by default), so
   // an up check that was never answered held the wait 60 s past its 400 ms,
