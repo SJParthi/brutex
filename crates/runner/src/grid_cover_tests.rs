@@ -2,7 +2,10 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    reason = "tests state their expectations"
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    reason = "tests state their expectations: a fixture bar is read by its fixed \
+              position, and one refusal table reads as one list"
 )]
 //! BASE-COV-LIBS: the grid's small answers no sweep in the other tests asks
 //! for: a cell with no trades or no losers, the trade count a rate needs, the
