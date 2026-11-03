@@ -496,3 +496,86 @@ fn every_replay_reconciliation_a_candidate_can_break_is_refused() {
         Err(refused("block-only occupancy ends before its entry"))
     );
 }
+
+/// BASE-COV-LIBS-LS2: A CELL THAT NAMES NO TRADES NEVER CLEARS, whatever its
+/// other counters say: a torn cell claiming a win over zero trades fails even
+/// the lowest thresholds, and the same win over one trade clears zero ones.
+#[test]
+fn a_cell_naming_no_trades_never_clears_even_the_lowest_thresholds() {
+    let torn = cell(0, 1);
+    assert!(!torn.clears(0, 0));
+    assert!(!torn.clears(i64::MIN, i64::MIN));
+    assert!(cell(1, 1).clears(0, 0));
+}
+
+/// BASE-COV-LIBS-LS2: AN EMPTY GRID HAS NO BEST CELL TO MATERIALIZE, and
+/// answers no rows rather than a refusal or a fabricated cell, on either side.
+#[test]
+fn an_empty_grid_materializes_no_rows() {
+    let (bars, column) = swept(2);
+    let horizon = Horizon::bars(15).expect("a nonzero horizon");
+    for side in [Side::Long, Side::Short] {
+        assert_eq!(
+            materialize_best(
+                &bars,
+                &column,
+                &ConditionMask::default(),
+                horizon,
+                side,
+                &Grid::default()
+            ),
+            Ok(Vec::new()),
+            "{side:?}"
+        );
+    }
+}
+
+/// BASE-COV-LIBS-LS2: A STEPPED GRID WITH NO CALLER STOP LADDER STEPS ITS
+/// STOPS AND ITS TRAILS, with the operator's forced level merged into the
+/// stepped stops (the target stays the one far target); a step that can build
+/// no rung (zero rungs) falls back to the quantile derivation, which at zero
+/// rungs places none.
+#[test]
+fn a_stepped_grid_steps_its_own_stops_and_merges_the_forced_level() {
+    let (bars, column) = swept(8);
+    let horizon = Horizon::bars(15).expect("a nonzero horizon");
+    let mask = ConditionMask::default();
+    for side in [Side::Long, Side::Short] {
+        let stepped = evaluate(
+            &bars,
+            &column,
+            &mask,
+            horizon,
+            side,
+            Levels {
+                rungs: 3,
+                step_ppm: Some(25),
+                stops_ppm: &[],
+                forced: Some(30),
+                ratios: false,
+            },
+        );
+        assert_eq!(stepped.stops.rungs(), &[25, 30, 50, 75], "{side:?}");
+        assert_eq!(stepped.trails.rungs(), &[25, 50, 75], "{side:?}");
+        assert!(!stepped.cells.is_empty(), "{side:?}");
+
+        let unbuildable = evaluate(
+            &bars,
+            &column,
+            &mask,
+            horizon,
+            side,
+            Levels {
+                rungs: 0,
+                step_ppm: Some(25),
+                stops_ppm: &[],
+                forced: None,
+                ratios: false,
+            },
+        );
+        let derived = evaluate(&bars, &column, &mask, horizon, side, Levels::derived(0));
+        assert_eq!(unbuildable.targets, derived.targets, "{side:?}");
+        assert_eq!(unbuildable.trails, derived.trails, "{side:?}");
+        assert!(unbuildable.trails.rungs().is_empty(), "{side:?}");
+    }
+}
