@@ -2634,3 +2634,57 @@ mod ladder_selection_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod refusal_cover_tests {
+    //! BASE-COV-LIBS-LS2: the ladder constructors' refusals and a torn pair of
+    //! running extremes, which answers zero rather than reading one series
+    //! without the other.
+    use super::{Ladder, Ladders, Side, crossings};
+    use indicators::{Candle, OI_NULL};
+
+    /// A stepped ladder needs a positive step and at least one rung.
+    #[test]
+    fn a_stepped_ladder_refuses_a_step_or_count_it_cannot_use() {
+        assert_eq!(Ladder::stepped(0, 3), None);
+        assert_eq!(Ladder::stepped(-100, 3), None);
+        assert_eq!(Ladder::stepped(100, 0), None);
+        let stepped = Ladder::stepped(100, 3).expect("three rungs");
+        assert_eq!(stepped.rungs(), [100, 200, 300]);
+    }
+
+    /// A ladder of zero rungs is refused even from a non-empty sample.
+    #[test]
+    fn a_ladder_of_zero_rungs_is_refused_from_any_sample() {
+        assert_eq!(Ladder::from_excursions(&mut [5, 10, 15], 0), None);
+        assert!(Ladder::from_excursions(&mut [5, 10, 15], 1).is_some());
+    }
+
+    /// The low and high runs are pushed together; a pair torn apart (one
+    /// series longer than the other) reads as nothing walked, never as one
+    /// extreme beside a missing one.
+    #[test]
+    fn a_torn_pair_of_running_extremes_reads_as_nothing_walked() {
+        let bar = Candle::new(0, 990, 1_010, 990, 1_010, 100, OI_NULL);
+        let rungs = Ladder::new(vec![10_000]).expect("one rung");
+        let ladders = Ladders {
+            stops: &rungs,
+            targets: &rungs,
+            trails: &rungs,
+        };
+        let walked = crossings(&[bar], 0, 0, 1_000, Side::Long, ladders);
+        assert_eq!(walked.adverse_ppm_at(0, 1_000, Side::Long), 10_000);
+        assert_eq!(walked.adverse_ppm_ceil_at(0, 1_000, Side::Long), 10_000);
+        let mut torn = walked;
+        torn.high_run.clear();
+        for side in [Side::Long, Side::Short] {
+            assert_eq!(torn.adverse_ppm_at(0, 1_000, side), 0, "{side:?}");
+            assert_eq!(torn.adverse_ppm_ceil_at(0, 1_000, side), 0, "{side:?}");
+            assert_eq!(torn.favourable_ppm_at(0, 1_000, side), 0, "{side:?}");
+        }
+    }
+}
