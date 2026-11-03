@@ -22,6 +22,7 @@
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::too_many_lines,
+    clippy::panic,
     reason = "a test that cannot panic cannot fail"
 )]
 
@@ -904,15 +905,18 @@ fn blob(id: &str) -> Option<String> {
 #[test]
 fn the_split_moves_lines_and_changes_none() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    prove_split(&|name| std::fs::read(src.join(name)).unwrap(), &blob);
+}
+
+/// [`the_split_moves_lines_and_changes_none`] over the readers it is given:
+/// `read`, the tree's bytes of a file of [`AFTER`] by name; `blob`, a
+/// history blob by id. Its own function (BASE-COV-PULL PS3) so the paths a
+/// given history does not take (a file still holding the split's bytes, a
+/// history without a blob, lines lost or added) run in tests of their own.
+fn prove_split(read: &dyn Fn(&str) -> Vec<u8>, blob: &dyn Fn(&str) -> Option<String>) {
     let mut after = Counted::default();
     for (i, (name, blob_id, sha)) in AFTER.iter().enumerate() {
-        let here = std::fs::read(src.join(name)).unwrap();
-        let text = if sha256_hex(&here) == *sha {
-            String::from_utf8(here).unwrap()
-        } else if let Some(text) = blob(blob_id) {
-            assert_eq!(sha256_hex(text.as_bytes()), *sha, "{name}: blob {blob_id}");
-            text
-        } else {
+        let Some(text) = split_text(read(name), sha, || blob(blob_id)) else {
             println!(
                 "SKIPPING: {name} is no longer the split's own bytes and its blob {blob_id} \
                  is not in this history, so the split cannot be counted here. The commit \
@@ -924,19 +928,7 @@ fn the_split_moves_lines_and_changes_none() {
     }
     if let Some(before_text) = blob(BEFORE_BLOB) {
         let before = counted(&before_text, false);
-        let mut gone: Vec<&str> = Vec::new();
-        for (line, n) in &before.kept {
-            let have = after.kept.get(line).copied().unwrap_or(0);
-            if have < *n {
-                gone.push(line);
-            }
-        }
-        let mut new: Vec<&str> = Vec::new();
-        for (line, n) in &after.kept {
-            if before.kept.get(line).copied().unwrap_or(0) < *n {
-                new.push(line);
-            }
-        }
+        let (gone, new) = lost_and_added(&before, &after);
         assert!(
             gone.is_empty() && new.is_empty(),
             "lines the split lost: {gone:#?}\nlines the split added: {new:#?}"
@@ -963,6 +955,70 @@ fn the_split_moves_lines_and_changes_none() {
         "the six files' lines, less module, use and visibility lines, against the \
          unsplit file's"
     );
+}
+
+/// The split's own text of one file: the tree's bytes while they hash to
+/// `sha`, else the history's blob (which must hash to it), else `None`.
+fn split_text(here: Vec<u8>, sha: &str, blob: impl FnOnce() -> Option<String>) -> Option<String> {
+    if sha256_hex(&here) == sha {
+        return Some(String::from_utf8(here).unwrap());
+    }
+    let text = blob()?;
+    assert_eq!(
+        sha256_hex(text.as_bytes()),
+        sha,
+        "the history's blob is the split's"
+    );
+    Some(text)
+}
+
+/// The kept lines `before` holds more of than `after` (lost by the split),
+/// and those `after` holds more of than `before` (added by it).
+fn lost_and_added<'a>(before: &'a Counted, after: &'a Counted) -> (Vec<&'a str>, Vec<&'a str>) {
+    let more = |of: &'a Counted, than: &'a Counted| -> Vec<&'a str> {
+        of.kept
+            .iter()
+            .filter(|(line, n)| than.kept.get(*line).copied().unwrap_or(0) < **n)
+            .map(|(line, _)| line.as_str())
+            .collect()
+    };
+    (more(before, after), more(after, before))
+}
+
+/// The proof's paths a full history does not take, with invented readers
+/// (BASE-COV-PULL PS3): a file still holding the split's bytes is read from
+/// the tree and the history is not asked; a changed one is read from its blob;
+/// with neither, nothing, and the proof says so and stops; without the unsplit
+/// file's blob, the six files are still counted and their set-aside pinned.
+#[test]
+fn the_split_proof_reads_the_tree_the_history_or_nothing() {
+    let text = "fn a() {}\n";
+    let sha = sha256_hex(text.as_bytes());
+    let held = split_text(text.as_bytes().to_vec(), &sha, || {
+        panic!("the history is asked")
+    });
+    assert_eq!(held.as_deref(), Some(text));
+    let from_history = split_text(b"changed".to_vec(), &sha, || Some(text.to_owned()));
+    assert_eq!(from_history.as_deref(), Some(text));
+    assert_eq!(split_text(b"changed".to_vec(), &sha, || None), None);
+    prove_split(&|_| b"changed".to_vec(), &|_| None);
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    prove_split(&|name| std::fs::read(src.join(name)).unwrap(), &|id| {
+        (id != BEFORE_BLOB).then(|| blob(id)).flatten()
+    });
+}
+
+/// A line the split lost and a line it added are each named, and a count
+/// against itself names none.
+#[test]
+fn lines_lost_and_added_are_each_named() {
+    let before = counted("fn a() {}\nfn b() {}\nfn b() {}\n", false);
+    let after = counted("fn a() {}\nfn b() {}\nfn c() {}\n", false);
+    assert_eq!(
+        lost_and_added(&before, &after),
+        (vec!["fn b() {}"], vec!["fn c() {}"])
+    );
+    assert_eq!(lost_and_added(&before, &before), (Vec::new(), Vec::new()));
 }
 
 /// The counter itself: a module line, a use line over three lines with its
