@@ -1852,7 +1852,9 @@ fn a_zero_rung_environment_refuses_the_legacy_walk_by_name() {
         );
         return;
     }
-    let status = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+    // Captured, not inherited: the child prints its own `test result` line,
+    // which would otherwise be read as one more test of this run.
+    let child = std::process::Command::new(std::env::current_exe().expect("this test binary"))
         .args([
             "--exact",
             "validate::cover_tests::a_zero_rung_environment_refuses_the_legacy_walk_by_name",
@@ -1860,7 +1862,12 @@ fn a_zero_rung_environment_refuses_the_legacy_walk_by_name() {
         ])
         .env(CHILD, "1")
         .env("BRUTEX_GRID_RUNGS", "0")
-        .status()
+        .output()
         .expect("the test binary re-runs");
-    assert!(status.success(), "the child run refused as named: {status}");
+    assert!(
+        child.status.success(),
+        "the child run refused as named: {}\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stdout)
+    );
 }
