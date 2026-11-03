@@ -3723,10 +3723,22 @@ pub fn merge_lock(root: &Path) -> Result<store::flock::Flock<std::fs::File>, Mer
     let file = crate::gdfl_run::locks::open_lock_file(root, spool::MERGE_LOCK)
         .map_err(|why| MergeError::Lock(why.to_string()))?;
     let path = root.join(spool::MERGE_LOCK);
-    match store::flock::Flock::try_lock(file, path.clone()) {
+    lock_answer(&path, store::flock::Flock::try_lock(file, path.clone()))
+}
+
+/// What one try of `verify/merge.lock` at `path` answered, as [`merge_lock`]
+/// returns it: the lock, `run_busy` with the holder's note, or the host's
+/// refusal by its words. Its own function so the host's refusal, which a
+/// file system that takes `flock` never gives for a regular file, is proved
+/// by a direct call (BASE-COV-PULL-PS3).
+fn lock_answer(
+    path: &Path,
+    tried: Result<store::flock::Flock<std::fs::File>, std::fs::TryLockError>,
+) -> Result<store::flock::Flock<std::fs::File>, MergeError> {
+    match tried {
         Ok(lock) => Ok(lock),
         Err(std::fs::TryLockError::WouldBlock) => Err(MergeError::RunBusy {
-            holder: store::flock::holder_note(&path),
+            holder: store::flock::holder_note(path),
         }),
         Err(std::fs::TryLockError::Error(why)) => Err(MergeError::Lock(why.to_string())),
     }
@@ -3819,16 +3831,7 @@ pub fn merge_under(
             break;
         }
     }
-    match spool::waiting(root) {
-        Ok(left) => {
-            outcome.waiting = left.spools.len() as u64;
-            outcome.live = live_runs(root, &left.spools, &mut outcome.faults);
-        }
-        // NOT KNOWN IS NOT ZERO: the count stays 0 only beside its fault.
-        Err(why) => outcome.faults.push(format!(
-            "the spool tree could not be listed after the merge, so the spools still waiting are not known: {why}"
-        )),
-    }
+    note_left(root, spool::waiting(root), &mut outcome);
     if let Some(progress) = progress {
         progress.update(false, |record| merge_counts(record, &outcome));
         progress_end(progress, outcome.stopped, None);
@@ -3863,6 +3866,24 @@ pub fn merge_under(
         );
     }
     Ok(outcome)
+}
+
+/// What the merge's last listing of the spool tree, `left`, says, into
+/// `outcome`: the spools still waiting and the runs still spooling among
+/// them. Its own function so a listing that failed, which needs the tree to
+/// change between this merge's second listing and its last, is proved by a
+/// direct call (BASE-COV-PULL-PS3).
+fn note_left(root: &Path, left: Result<spool::Waiting, SpoolError>, outcome: &mut MergeOutcome) {
+    match left {
+        Ok(left) => {
+            outcome.waiting = left.spools.len() as u64;
+            outcome.live = live_runs(root, &left.spools, &mut outcome.faults);
+        }
+        // NOT KNOWN IS NOT ZERO: the count stays 0 only beside its fault.
+        Err(why) => outcome.faults.push(format!(
+            "the spool tree could not be listed after the merge, so the spools still waiting are not known: {why}"
+        )),
+    }
 }
 
 /// The most runs whose live locks one merge holds open at once (IA-9 repair
@@ -4577,3 +4598,9 @@ mod tests;
 #[cfg(test)]
 #[path = "zerodha_verify_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL-PS3: the verifier's edges on disk (the walk, the cold run,
+// the window path and the merge), each named and asserted.
+#[cfg(test)]
+#[path = "zerodha_verify_cov_store_tests.rs"]
+mod cov_store_tests;
