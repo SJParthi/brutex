@@ -1907,11 +1907,13 @@ mod cloud_mutant_tests {
                 crate::session::with_recorded_window(at, Runtime::default().kind_of(at))
                     == DayKind::OpenLengthUnmeasured
             });
+        // A calendar that sizes every traded day leaves this arm no subject; the
+        // test then says so and fails rather than passing having asserted
+        // nothing (CLAUDE.md §4). Today 2026-11-08 is that day (DB-B41).
         let Some(number) = found else {
-            // The calendar sizes every traded day: the arm has no subject,
-            // which is what the walk above just proved for every day.
-            assert!(found.is_none());
-            return;
+            panic!(
+                "no traded day of the sourced span is of unrecorded length: name another subject"
+            );
         };
         let day = Day::from_days(u32::try_from(number).unwrap()).unwrap();
         let request = request_on(day, day);
