@@ -87617,6 +87617,155 @@ unused.
 <!-- slot FNO-PAUSE -->
 
 <!-- slot FNO-PORTFOLIO -->
+### D-8180 — FNO-PORTFOLIO: one account holds the F&O path's money rules, and a released position stays in force through its last fill second — 2026-11-03
+
+**Context** (PARTS FNO-PORTFOLIO, wave 2 of F1; SPEC 9.6, 11.1, 11.3 to 11.6,
+OP-18, OP-19, OP-21; PARTS READINESS ADDENDUM item 5). Built in the cloud
+build session of 3 Nov 2026 on `cloud/fib-fno-portfolio-20261103`, cut from
+FNO-SEAM's passed tip `1ad6e24ef8e0`; the Mac's independent check decides
+whether it counts.
+
+**Decision.** `runner::fno_portfolio::Account` is one walk's account: twenty
+slots in a fixed array; the stock-lock table `[Option<u8>; 256]` naming the
+slot that holds each stock (a stock is its position in the universe file,
+`fno218.txt`, which lists the 218 in byte order, so position order is symbol
+order); the session's entry count; exposure and margin in use as running
+sums; capital at Rs 20 lakh plus the net carried since the window began
+(`Capital::Carried`, the headline, OP-21), with `Capital::ResetDaily` (Rs 20
+lakh again every session, the reading shown beside it) and
+`Capital::Unchecked` (no margin check, the single walk item 5 bounds after
+it). It decides and counts; it fills, sizes, prices and charges nothing
+(FNO-SEC-EXEC and FNO-NET do), every figure reaches it as a plain integer, and
+it emits no telemetry (gate 17).
+
+* **The checks, in order:** the stock's lock (`while_open`), a free slot
+  (`position_cap`), the session's 100 entries (`trade_cap`), the exposure with
+  this order's `q·P_s` against Rs 1 crore (`exposure_cap`), the margin in use
+  with this order's against the capital (`margin_cap`), and only then the
+  order-rate rings (D-8181). A refusal is counted under one name, the first
+  that binds, and is final; SPEC 11.3 checks "at an entry order's start
+  second, before it is sent".
+* **The margin check reads 11.3's two sentences as one:** margin in use plus
+  this order's margin at most Rs 20 lakh plus the carried net, which is the
+  order's margin at most 11.3's "available capital ... less the margin in
+  use".
+* **A released position stays in force through its last fill second**, or the
+  second a zero-fill entry was cancelled: its slot, its stock's lock, its
+  exposure, its margin, and its net not yet carried. SPEC 9.6 lets a new entry
+  on the stock start only strictly after that second; this applies the same
+  reading, the one that admits less, to everything the position held, so no
+  admission in the second a fill completes sees a slot, a lock or a net that
+  completes only by that second's end. The first timed call at a later second
+  settles it, whatever order the caller made its calls in.
+* **Each window starts at Rs 20 lakh** (`Account::new`, `begin_window`), as
+  item 5 says; the ticket count carries on across windows so an id from the
+  window before stays stale.
+* **C-FNO-PORT-01** times admit and release with the other nineteen slots held
+  at 10, 100 and 1,000 sessions of history, and judges the ratio on one cycle
+  (a release and the admission into its slot), every p99 against the 300 ns
+  budget. A release alone is a few tens of nanoseconds, near the timer's own
+  cost, so its p99 alone is mostly the machine's noise.
+
+**Rejected.** Settling a release at once: an admission later in the same
+second would then see the freed slot, lock or net only if the caller happened
+to call release first. Checking the rings before the caps: an order a cap
+refuses would queue instead of being counted at its start second.
+
+**Cost.** Fixed work per call over twenty slots and three rings; the one
+second's batch is sorted (`docs/06-limits.md` L-FNO-PORT-01). D-8184 to
+D-8189 are unused.
+
+### D-8181 — The order-rate rings slide, the 7,000 is a session's count, and only a replacement is an order — 2026-11-03
+
+**Context** (SPEC 9.7, OP-43). Dhan's order API: 10 orders a second, 250 a
+minute, 1,000 an hour, 7,000 a day, 25 modifications per order, as SPEC 9.7
+records them from `sources-leverage-execution.md` line 234 (T09-07). That
+source is on the Mac; `docs/00-charter.md` does not hold it on this base, and
+FNO-LAW is the part that records it (PARTS FNO-LAW, "the order-rate ceilings
+(T09-07)"). Until it lands the figures are UNVERIFIED in this repository and
+say so where they are declared.
+
+**Decision.**
+
+* **Second, minute and hour are sliding windows**: rings of the last 10, 250
+  and 1,000 send seconds, an order allowed when the ring is not full or its
+  oldest send is a whole window old. A sliding window never allows more than a
+  calendar one, so it is the stricter reading; a night is longer than an hour,
+  so the three are empty at every session's open either way.
+* **The 7,000 is counted per session**, reset by `begin_day`. A sliding day
+  would carry yesterday's afternoon into this morning, and a window started at
+  a session would then hold a different state from a walk carried into it,
+  which breaks the equal rows of item 5 (D-8183). With 100 entries a session
+  the count binds only through replacements.
+* **Over a ceiling an order queues** to the second its blocking ring's oldest
+  send expires (the latest such second over the rings), or to `i64::MAX` once
+  the session's 7,000 are spent: no second of it allows another order. A queued
+  order changes nothing and is checked whole again, caps included, when it is
+  offered at that second.
+* **A modification in place takes no ring**: each resting order (stop-entry,
+  stop, target, trailing stop, trailing take-profit) takes 25 in place; the
+  next change cancels and replaces it by a new order, which is one order in
+  every ring and starts its own 25. That is SPEC 9.7's text. Whether Dhan also
+  counts a modification in its per-second budget, SPEC 9.7 does not say and its
+  source is not here: open, recorded in `docs/06-limits.md` L-FNO-PORT-03
+  with the figures themselves.
+* Exits and replacements are not cap-checked. The account counts the orders
+  the client sends; the broker's own square-off orders (SPEC 9.8) are not sent
+  through it.
+
+### D-8182 — One second's orders are acted on in one total order: exits first, then start second, then the S81 tie-break, then symbol, recipe and the request — 2026-11-03
+
+**Context** (SPEC 9.7, 11.5, 14 S81, OP-20, OP-43).
+
+**Decision.** `Account::schedule_second` sorts the second's batch and acts on
+it in that order: exits before entries (risk first); each group by start
+second (11.5 rule 1, so an order queued from an earlier second goes first);
+then by the account's `TieBreak`: (a) the larger move `m` in absolute value,
+(b) the smaller stop distance in R (the ladder's range), (c) the earlier first
+entry into top N today, (d) symbol order, (e) a seeded order; every order
+falls through to (d), then to the recipe's place, then to the rest of the
+request, so two batches holding the same orders in any arrangement are acted
+on alike.
+
+* (a) and (b) are exact fractions compared by cross-multiplying in `u128`
+  (FIB-I10).
+* An exit is ordered by its position's keys as they were at its entry, with
+  the exit's own start second.
+* (e) is `SplitMix64`, the generator `runner::bootstrap` draws with, over the
+  seed, the order's start second, its stock and its recipe: one order for one
+  seed whatever the arrangement, drawn afresh each second. The k seeds are the
+  run's to generate (FNO-WFT, FNO-RUN).
+* A procedure's shared account (SPEC 11.6) runs under one order, the
+  procedure's own S81 value, because orders of two recipes in one second must
+  be compared under one rule.
+
+### D-8183 — Margin is exact and floored at 20%, and the window-start bound is read off the account — 2026-11-03
+
+**Context** (SPEC 11.3, 9.8, OP-33; PARTS READINESS ADDENDUM item 5).
+
+**Decision.**
+
+* A position blocks its value times `max(20%, M/100)`, the rate taken in parts
+  per million from the caller's largest reading of `M` (the one the quantity
+  was sized under), and kept exact as millionths of a paisa in `i128`; the
+  margin check compares exact sums and rounds nothing. A value past `i64::MAX`
+  paisa is refused by name.
+* The MTM rule's base (SPEC 9.8, OP-33) is `Account::margin(slot)`, exact, at
+  the position's last mark; `Margin::floor_paisa` is the stricter reading for
+  its 80% trigger, since a smaller base fires no later.
+* A mark or a cut moves the sums; a mark never reduces a position, it only
+  changes what the next entry is checked against.
+* `CapitalBound` carries the largest margin in use right after an admission,
+  the largest fall of the carried net from a running peak (the walk's start a
+  peak of zero), and the margin refusals. `holds()` is true only with no
+  margin refusal and the two figures summing to Rs 20 lakh or less. Then the
+  walk trades the same under every window start: quantity never reads capital
+  and no other check reads it, margin in use at any admission is at most the
+  peak, and the net since any window start has fallen by at most the largest
+  fall, so no window start refuses either. A walk with a margin refusal never
+  qualifies: margin in use never saw the refused entry, so its figures can
+  pass while a window that starts after the fall takes that entry. Which rows
+  FNO-RUN then shares, and the per-window walks, are FNO-RUN's (item 5).
 
 <!-- slot FNO-WFT -->
 

@@ -1141,6 +1141,11 @@ the first was closed in code afterwards.
 <!-- slot FNO-PAUSE -->
 
 <!-- slot FNO-PORTFOLIO -->
+| FNO-PORTFOLIO (wave 2, F1) | State |
+|---|---|
+| `runner::fno_portfolio`: one account's money rules and order-rate rules, with exact tie-breaks (SPEC 9.6, 9.7, 11.1, 11.3 to 11.6; PARTS READINESS ADDENDUM item 5); C-FNO-PORT-01 in `crates/runner/benches/ratio.rs` | **Built** in the cloud build session of 3 Nov 2026 on `cloud/fib-fno-portfolio-20261103`, from FNO-SEAM's `1ad6e24ef8e0`; D-8180 to D-8183, FNO-PORT-I01 to FNO-PORT-I11, L-FNO-PORT-01 to L-FNO-PORT-04. Next: the Mac's independent check (Route B), then F1's family assembly |
+| The row-level halves of READINESS item 5 (P6's rows per candidate, scheme and window; the per-window walk of a candidate over the capital bound) | FNO-RUN's, after F2; the account gives it `CapitalBound` |
+| Dhan's order-rate figures (T09-07) in `docs/00-charter.md` | FNO-LAW's; until then UNVERIFIED (L-FNO-PORT-03) |
 
 <!-- slot FNO-WFT -->
 
