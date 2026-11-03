@@ -111,9 +111,10 @@ fn broker(body: &str) -> (String, std::sync::mpsc::Receiver<String>) {
     );
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let Ok((mut stream, _)) = socket.accept() else {
-            return;
-        };
+        // One connection is the test's premise: a refused accept fails it (BASE-COV-PULL-PS2).
+        let (mut stream, _) = socket
+            .accept()
+            .expect("the loopback listener accepts its one connection");
         let mut buf = [0u8; 8192];
         let n = stream.read(&mut buf).unwrap_or(0);
         let _ = tx.send(String::from_utf8_lossy(buf.get(..n).unwrap_or(&[])).into_owned());
@@ -917,7 +918,11 @@ fn groww_declares_the_expired_fno_lookup_and_the_others_declare_none() {
         segs.iter()
             .map(|s| match *s {
                 PathSegment::Literal(w) => w,
-                PathSegment::Value { placeholder, .. } => placeholder,
+                // A discovery path is all literals at every feed: a value
+                // segment is the test's own failure (BASE-COV-PULL-PS2).
+                PathSegment::Value { placeholder, .. } => {
+                    panic!("a discovery path names a value: {placeholder}")
+                }
             })
             .collect::<Vec<_>>()
             .join("/")
@@ -1389,4 +1394,18 @@ fn walk_bin_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+/// PS2-BR-01: the three walks over a store read a folder that is not there as
+/// holding nothing, never as a refusal: what a store with no bars yet answers.
+#[test]
+fn the_store_walks_read_a_missing_folder_as_empty() {
+    let gone = std::env::temp_dir().join(format!("brutex-ps2-broker-gone-{}", std::process::id()));
+    assert!(!gone.exists());
+    let mut bins = Vec::new();
+    walk_bins(&gone, &mut bins);
+    let mut ovls = Vec::new();
+    walk_ext(&gone, "ovl", &mut ovls);
+    assert!(bins.is_empty() && ovls.is_empty());
+    assert!(walk_bin_files(&gone).is_empty());
 }

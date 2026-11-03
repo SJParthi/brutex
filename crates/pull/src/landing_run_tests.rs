@@ -587,8 +587,14 @@ fn behind_alerts(root: &Path, claimed: u64) -> (usize, Option<String>) {
     let hits: Vec<&crate::alerts::Alert> = page
         .alerts
         .iter()
-        .filter(|alert| alert.record.kind == 8 && alert.record.key == key)
+        .filter(|alert| alert.record.key == key)
         .collect();
+    // The key is the behind-claims alert's own: a hit of another kind is the
+    // test's failure, not a row to skip (BASE-COV-PULL-PS2).
+    assert!(
+        hits.iter().all(|alert| alert.record.kind == 8),
+        "only a behind-claims alert carries this key: {hits:?}"
+    );
     assert!(
         hits.iter().all(|alert| alert.record.run == claimed),
         "the alert names the claimed run: {hits:?}"
@@ -1400,8 +1406,18 @@ fn a_window_over_differing_held_minutes_is_refused_by_name_and_its_answer_is_kep
             .ingested
             .failures
             .iter()
-            .filter(|f| f.instrument == "ZZIDX" && f.month == Some(month))
+            .filter(|f| f.month == Some(month))
             .collect();
+        // Only ZZIDX is landed here: a failure naming another instrument is the
+        // test's own (BASE-COV-PULL-PS2).
+        assert!(
+            landing
+                .ingested
+                .failures
+                .iter()
+                .all(|f| f.instrument == "ZZIDX"),
+            "{door:?}: {landing:?}"
+        );
         assert_eq!(named.len(), 1, "{door:?}: {landing:?}");
         assert!(
             named[0].why.contains("1min/2024-04.bin") && named[0].why.contains("restates"),
@@ -2464,9 +2480,7 @@ fn a_series_whose_daily_folder_is_no_folder_is_verified_with_no_first_day() {
         .join("INDEX")
         .join("ZZIDX")
         .join(Timeframe::DAY_1.as_str());
-    if daily.exists() {
-        std::fs::rename(&daily, daily.with_extension("moved")).unwrap();
-    }
+    assert!(!daily.exists(), "a minute landing writes no daily rung");
     std::fs::write(&daily, b"invented").unwrap();
     let key = key();
     let hooked = hook.after_landing(&Landed {
@@ -2652,4 +2666,14 @@ fn every_word_body() {
         1,
         "the first-day read was said once"
     );
+}
+
+/// PS2-LR-07: the fixture's regular days are the sessions of record of the
+/// regular 375 minutes: a recorded short session (the 2021-02-24 outage, in
+/// the measured window) is left out, its neighbours kept.
+#[test]
+fn the_regular_days_leave_out_a_recorded_short_session() {
+    let february = regular_days(YearMonth::new(2021, 2).unwrap());
+    assert!(!february.contains(&day(2021, 2, 24)), "{february:?}");
+    assert!(february.contains(&day(2021, 2, 23)) && february.contains(&day(2021, 2, 25)));
 }
