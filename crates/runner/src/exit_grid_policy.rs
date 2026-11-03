@@ -8390,3 +8390,46 @@ mod tests {
 #[cfg(test)]
 #[path = "exit_grid_policy_cover_tests.rs"]
 mod policy_cover_tests;
+
+#[cfg(test)]
+pub(crate) mod resolution_tamper {
+    //! BASE-COV-LIBS-LS2: test-only edits of a resolved grid, for the tests of
+    //! the modules that authenticate one (`crate::validate`). Each returns a
+    //! copy with one fact changed; the resealed copies recompute the digest so
+    //! that the check under test, and not the seal, is what refuses them.
+    use super::{ResolvedExitGridV1, digest_resolved};
+
+    /// A copy whose digest no longer reproduces.
+    pub(crate) fn torn(value: &ResolvedExitGridV1) -> ResolvedExitGridV1 {
+        let mut copy = value.clone();
+        copy.digest = [0; 32];
+        copy
+    }
+
+    /// A resealed copy whose training span is `(bars, first, last)` while its
+    /// training digest still names the bars it was resolved from.
+    pub(crate) fn with_training_span(
+        value: &ResolvedExitGridV1,
+        span: (u64, i64, i64),
+    ) -> ResolvedExitGridV1 {
+        let mut copy = value.clone();
+        (
+            copy.training_bars,
+            copy.training_first_ts_micros,
+            copy.training_last_ts_micros,
+        ) = span;
+        copy.digest = digest_resolved(&copy);
+        copy
+    }
+
+    /// A resealed copy whose stop levels are each one ppm wider than the ones
+    /// its policy resolves from its own training series.
+    pub(crate) fn with_wider_stops(value: &ResolvedExitGridV1) -> ResolvedExitGridV1 {
+        let mut copy = value.clone();
+        for level in &mut copy.stop_levels_ppm {
+            *level += 1;
+        }
+        copy.digest = digest_resolved(&copy);
+        copy
+    }
+}
