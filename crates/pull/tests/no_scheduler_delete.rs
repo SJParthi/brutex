@@ -524,3 +524,36 @@ fn every_declared_module_that_exists_is_listed() {
         );
     }
 }
+
+/// The scanner's own pieces at their edges (BASE-COV-PULL PS3), so a
+/// stripped comment or literal and a found site never depend on what the
+/// scheduler's modules happen to contain today: a line comment and a block
+/// comment, a string, a raw string and a char escape each cut off by the end
+/// of the text; comments nested with lone `/` and `*` inside them; newlines
+/// kept inside a block comment and a raw string; a raw byte string with a
+/// hash; a `rename` imported inside braces and one that is only a variable;
+/// `libc::truncate`; a stray `}` after `#[cfg(test)]` before a `mod x;` item;
+/// and an identifier that ends its line.
+#[test]
+fn the_scanner_blanks_and_finds_at_the_edges_of_its_input() {
+    assert_eq!(code_only("x // tail"), "x ");
+    assert_eq!(code_only("a /* b\nc */ d"), "a \n d");
+    assert_eq!(code_only("/* a/b a*b /* c */ d */e"), "e");
+    assert_eq!(code_only("/* open"), "");
+    assert_eq!(code_only("r\"a\nb\" x"), "\"\"\n x");
+    assert_eq!(code_only("br#\"q\"#"), "\"\"");
+    assert_eq!(code_only("r\"open"), "\"\"");
+    assert_eq!(code_only("\"open"), "\"\"");
+    assert_eq!(code_only("'\\n"), "' '");
+
+    let import = "use std::fs::{rename};";
+    assert!(is_site(import, import.find("rename").unwrap(), "rename"));
+    assert!(!is_site("let rename = 1;", 4, "rename"));
+    assert!(is_site("libc::truncate(p, 0)", 6, "truncate"));
+
+    assert_eq!(
+        without_tests("#[cfg(test)]\n}\nmod tests;\nfn kept() {}"),
+        "\n\n\nfn kept() {}"
+    );
+    assert_eq!(identifiers("let x"), [(0, "let"), (4, "x")]);
+}
