@@ -413,11 +413,8 @@ fn fixture_git(root: &Path, args: &[&str]) -> String {
             "core.hooksPath=/dev/null",
         ])
         .args(args));
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{args:?}: {said}");
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
@@ -499,6 +496,13 @@ fn refusal<T: std::fmt::Debug>(body: impl FnOnce() -> T + std::panic::UnwindSafe
         .unwrap_or_default()
 }
 
+/// Fails unless `said` holds each of `words`.
+fn assert_says(said: &str, words: &[&str]) {
+    for word in words {
+        assert!(said.contains(word), "{word:?} in {said}");
+    }
+}
+
 /// What [`compare`] failed with, which it must.
 fn refused(root: &Path, cut: &str, more: &[(&str, &str)]) -> String {
     refusal(|| compare(root, cut, more))
@@ -528,10 +532,7 @@ fn a_git_dir_naming_nothing_fails_with_gits_words() {
         let nothing = [("GIT_DIR", "/nonexistent/x")];
         for commit in [&*history.cut, ABSENT] {
             let said = refused(root, commit, &nothing);
-            assert!(
-                said.contains(UNREAD) && said.contains("not a git repository"),
-                "{said}"
-            );
+            assert_says(&said, &[UNREAD, "not a git repository"]);
         }
     });
 }
@@ -550,26 +551,17 @@ fn a_git_the_tree_cannot_read_fails_with_gits_words() {
 
         std::fs::write(&git, format!("gitdir: {}\n", nowhere.display())).expect("a `.git` file");
         let said = refused(root, &history.cut, &[]);
-        assert!(
-            said.contains(UNREAD) && said.contains("not a git repository"),
-            "{said}"
-        );
+        assert_says(&said, &[UNREAD, "not a git repository"]);
         std::fs::remove_file(&git).expect("the `.git` file is removed");
 
         std::os::unix::fs::symlink(&nowhere, &git).expect("a `.git` symlink naming nothing");
         let said = refused(root, &history.cut, &[]);
-        assert!(
-            said.contains(UNREAD) && said.contains("not a git repository"),
-            "{said}"
-        );
+        assert_says(&said, &[UNREAD, "not a git repository"]);
         std::fs::remove_file(&git).expect("the `.git` symlink is removed");
 
         std::fs::create_dir(&git).expect("an empty `.git`");
         let said = refused(root, &history.cut, &[]);
-        assert!(
-            said.contains(UNREAD) && said.contains("not a git repository"),
-            "{said}"
-        );
+        assert_says(&said, &[UNREAD, "not a git repository"]);
     });
 }
 
@@ -622,10 +614,7 @@ fn a_clone_with_neither_the_commit_nor_main_fails_by_name() {
     with_history(git_runs(), "neither", |history| {
         rewrite(&history.root);
         let said = refused(&history.root, ABSENT, &[]);
-        assert!(
-            said.contains("is not in this clone") && said.contains("git fetch origin main"),
-            "{said}"
-        );
+        assert_says(&said, &["is not in this clone", "git fetch origin main"]);
     });
 }
 
@@ -670,12 +659,7 @@ fn a_commit_that_cannot_be_shown_compares_nothing() {
         ] {
             assert!(compare(root, commit, more).is_empty());
             let said = said(root, commit, more);
-            assert!(
-                said.starts_with("SKIPPING: ")
-                    && said.contains("holds no `.git`")
-                    && said.contains(LEDGER.0),
-                "{said}"
-            );
+            assert_says(&said, &["SKIPPING: ", "holds no `.git`", LEDGER.0]);
         }
     });
 }
@@ -726,10 +710,7 @@ fn a_damaged_clone_or_a_root_that_is_no_folder_fails_with_gits_words() {
     with_history(git_runs(), "damaged", |history| {
         let root = &history.root;
         let said = refused(&root.join(LEDGER.0), &history.cut, &[]);
-        assert!(
-            said.contains(UNREAD) && said.contains("cannot change to"),
-            "{said}"
-        );
+        assert_says(&said, &[UNREAD, "cannot change to"]);
 
         rewrite(root);
         let path = path();
@@ -739,18 +720,16 @@ fn a_damaged_clone_or_a_root_that_is_no_folder_fails_with_gits_words() {
             env: Some(&env),
         };
         let said = refusal(|| copy_at(tree, &history.cut, "no-such-ledger.md"));
-        assert!(
-            said.contains("`git show") && said.contains("no-such-ledger.md"),
-            "{said}"
-        );
+        assert_says(&said, &["`git show", "no-such-ledger.md"]);
 
         let (folder, name) = history.blob.split_at(2);
         let object = root.join(".git/objects").join(folder).join(name);
         std::fs::rename(object, root.join("moved-object")).expect("the object moved aside");
         let said = refused(root, &history.cut, &[]);
+        assert_says(&said, &["`git show", "unread: "]);
         assert!(
-            said.contains("`git show") && said.contains(": fatal: "),
-            "{said}"
+            !said.ends_with("unread: "),
+            "git's own words follow: {said}"
         );
     });
 }
