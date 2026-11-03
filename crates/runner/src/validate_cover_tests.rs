@@ -1936,3 +1936,77 @@ fn a_fold_whose_test_window_starts_past_the_series_is_skipped() {
     assert_eq!(walked.folds[0].index, 0);
     assert_eq!(walked.folds[0].test_bars, 200);
 }
+
+/// BASE-COV-LIBS-LS2: A CALLER'S BUILDER THAT ANSWERS A COLUMN OF OTHER BARS
+/// IS REFUSED AT THE FOLD'S PROJECTION, by name and before any fold is
+/// reported: a column folded from the whole series names rows the training
+/// slice does not hold, so they cannot be aligned to its one-minute closes.
+#[test]
+fn a_builder_column_of_other_bars_is_refused_at_the_fold_projection() {
+    let bars = crate::synthetic::sessions(6);
+    let whole = built(&bars);
+    let mut answers_the_whole_series = |_: &[indicators::Candle]| Ok(whole.clone());
+    let refused = super::walk_forward_projected_prepared_with_rungs(
+        &bars,
+        super::ExecutionSeries {
+            bars: &bars,
+            signal_length_micros: 60_000_000,
+        },
+        super::tests::h(15),
+        3,
+        Direction::Long,
+        &super::tests::sweeper(),
+        &mut answers_the_whole_series,
+        super::Shape::Anchored,
+        super::FoldRungs::Fixed(0),
+        &|_| {},
+    );
+    assert!(refused.folds.is_empty());
+    assert_eq!(
+        refused.refused.as_deref(),
+        Some("a walk-forward fold could not align its signal rows to exact one-minute closes")
+    );
+}
+
+/// BASE-COV-LIBS-LS2: A BUILDER THAT REFUSES THE OUT-OF-SAMPLE PREFIX ENDS
+/// THE WALK WITH ITS REASON at the first fold that chose a candidate: every
+/// training slice is built, the prefix through a test window is not, and the
+/// folds before that one are the ones reported.
+#[test]
+fn a_builder_refusing_the_out_of_sample_prefix_ends_the_walk_with_its_reason() {
+    let bars = crate::synthetic::sessions(12);
+    let horizon = super::tests::h(15);
+    let windows = super::Shape::Anchored.folds(bars.len(), horizon, 3);
+    let test_ends: Vec<usize> = windows.iter().map(|fold| fold.test.end).collect();
+    let trains: Vec<usize> = windows.iter().map(|fold| fold.train.0.end).collect();
+    assert!(test_ends.iter().all(|end| !trains.contains(end)));
+    let mut refuses_test_prefixes = |slice: &[indicators::Candle]| {
+        if test_ends.contains(&slice.len()) {
+            Err(format!("no column through bar {}", slice.len()))
+        } else {
+            Ok(built(slice))
+        }
+    };
+    let walked = super::walk_forward_projected_prepared_with_rungs(
+        &bars,
+        super::ExecutionSeries {
+            bars: &bars,
+            signal_length_micros: 60_000_000,
+        },
+        horizon,
+        3,
+        Direction::Long,
+        &crate::Sweeper::new(engine::Ladder::with_min_hits(1_200).with_ceiling(20_000)),
+        &mut refuses_test_prefixes,
+        super::Shape::Anchored,
+        super::FoldRungs::Fixed(0),
+        &|_| {},
+    );
+    let at = walked.folds.len();
+    assert!(at < windows.len(), "a fold chose a candidate");
+    assert_eq!(
+        walked.refused,
+        Some(format!("no column through bar {}", windows[at].test.end))
+    );
+    assert!(walked.folds.iter().all(|fold| fold.chosen.is_none()));
+}
