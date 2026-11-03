@@ -6032,10 +6032,7 @@ mod tests {
             for targets in 0..=3 {
                 for trails in 0..=3 {
                     let slots = stops * targets;
-                    let subsets = 1_usize.checked_shl(u32::try_from(slots).unwrap_or(0));
-                    let Some(subsets) = subsets else {
-                        continue;
-                    };
+                    let subsets = 1_usize << slots;
                     for bits in 0..subsets {
                         let mut pairs = Vec::new();
                         for stop_index in 0..stops {
@@ -6078,11 +6075,9 @@ mod tests {
         let resolved = policy()
             .resolve(&nifty(), &input)
             .unwrap_or_else(|_| unreachable_resolved());
-        let ladders = resolved.ladders().unwrap_or_else(|_| ResolvedLaddersV1 {
-            stops: Ladder::new(vec![1]).unwrap_or_default(),
-            targets: Ladder::new(vec![1]).unwrap_or_default(),
-            trails: Ladder::new(vec![1]).unwrap_or_default(),
-        });
+        let ladders = resolved
+            .ladders()
+            .expect("the freshly resolved ladders are valid");
         let mut cells = Vec::new();
         assert!(resolved.visit_coordinates(|chosen| {
             cells.push(Cell {
@@ -7223,11 +7218,8 @@ mod tests {
         let resolved = policy()
             .resolve(&instrument, &training)
             .unwrap_or_else(|_| unreachable_resolved());
-        let selected = selected_for(&resolved, &training);
-        assert!(selected.is_some());
-        let Some(selected) = selected else {
-            return;
-        };
+        let selected = selected_for(&resolved, &training)
+            .expect("the fixture seals one policy-admitted training coordinate");
         let replay = |candidate: &[Candle]| -> Result<ReplayedExitV1, ExitGridErrorV1> {
             let series = ExecutionSeriesV1::new(
                 &instrument,
@@ -7334,11 +7326,9 @@ mod tests {
         let mut thresholds = Thresholds::CLASSICAL;
         thresholds.long_body = thresholds.long_body.saturating_add(1);
         let changed_column = test_column_with_thresholds(&clean, thresholds);
-        let changed_spec = changed_column.evaluation_spec_token();
-        assert!(changed_spec.is_some());
-        let Some(changed_spec) = changed_spec else {
-            return;
-        };
+        let changed_spec = changed_column
+            .evaluation_spec_token()
+            .expect("a built column carries its evaluation spec");
         let mut wrong_spec = selected;
         wrong_spec.evaluation_spec = changed_spec;
         assert_eq!(
@@ -7416,15 +7406,10 @@ mod tests {
             );
         }
 
-        if universe.pricing_refused_paths() > 0 {
-            assert_eq!(
-                resolved.replay_selected(oos, &execution_column, &selected, run),
-                Err(ExitGridErrorV1::RefusedExecutionPaths {
-                    paths: universe.pricing_refused_paths(),
-                }),
-                "the compatibility replay delegates to the universe and retains its fail-closed refusal"
-            );
-        }
+        // The flat fixture prices every path, so the compatibility replay's
+        // fail-closed refusal is driven by a holed series in
+        // `a_missing_minute_inside_an_oos_hold_refuses_the_one_cell_replay`.
+        assert_eq!(universe.pricing_refused_paths(), 0);
 
         let mut torn = universe;
         let first = torn
@@ -7581,11 +7566,9 @@ mod tests {
         let resolved = cfg
             .resolve(&nifty(), &input)
             .unwrap_or_else(|_| unreachable_resolved());
-        let ladders = resolved.ladders().unwrap_or_else(|_| ResolvedLaddersV1 {
-            stops: Ladder::new(vec![1]).unwrap_or_default(),
-            targets: Ladder::new(vec![1]).unwrap_or_default(),
-            trails: Ladder::new(vec![1]).unwrap_or_default(),
-        });
+        let ladders = resolved
+            .ladders()
+            .expect("the freshly resolved ladders are valid");
         assert_eq!(ladders.stops.rungs(), resolved.stop_levels_ppm());
         assert_eq!(ladders.targets.rungs(), resolved.target_levels_ppm());
         assert_eq!(ladders.trails.rungs(), resolved.trail_levels_ppm());
@@ -8461,6 +8444,339 @@ mod tests {
                 .view()
                 .execution_refusal_bits(&on)
                 .contains(ExecutionRefusalBitsV1::FORCED_STOP_MISMATCH)
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2: A PERCENTILE OVER A ZERO DENOMINATOR OR ABOVE ONE IS
+    /// REFUSED BY NAME, beside the zero numerator; the largest legal one is
+    /// the whole sample and reduces to one over one.
+    #[test]
+    fn a_percentile_over_zero_or_above_one_is_refused_by_name() {
+        for (numerator, denominator) in [(1, 0), (u32::MAX, 0), (3, 2), (u32::MAX, u32::MAX - 1)] {
+            assert_eq!(
+                RationalPercentileV1::new(numerator, denominator),
+                Err(ExitGridErrorV1::InvalidPercentile {
+                    numerator,
+                    denominator
+                }),
+                "{numerator}/{denominator}"
+            );
+        }
+        assert_eq!(
+            RationalPercentileV1::new(u32::MAX, u32::MAX)
+                .map(|value| (value.numerator(), value.denominator())),
+            Ok((1, 1))
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2: AN NSE INDEX-SEGMENT KEY OF ANOTHER KIND IS NOT A
+    /// SPOT INDEX. The exchange and the segment do not admit it on their own:
+    /// an equity kind under either legal underlying is refused like a share.
+    #[test]
+    fn an_index_segment_key_of_a_non_index_kind_is_refused() {
+        let input = bars(100);
+        for underlying in ["NIFTY", "BANKNIFTY"] {
+            let equity = InstrumentKey {
+                exchange: Exchange::Nse,
+                segment: Segment::Index,
+                underlying: symbol(underlying),
+                kind: Kind::Equity,
+            };
+            assert_eq!(
+                policy().resolve(&equity, &input),
+                Err(ExitGridErrorV1::UnsupportedInstrument),
+                "{underlying}"
+            );
+        }
+    }
+
+    /// BASE-COV-LIBS-LS2: A RESOLUTION RESEALED OVER A POLICY DIGEST THAT NO
+    /// LONGER NAMES ITS POLICY IS TORN, though its own digest reproduces; the
+    /// runtime door refuses it before reading the evaluation.
+    #[test]
+    fn a_resolution_resealed_over_a_foreign_policy_digest_is_torn() {
+        let input = bars(100);
+        let resolved = policy()
+            .resolve(&nifty(), &input)
+            .expect("the fixture resolves");
+        assert!(resolved.digest_is_valid());
+        let evaluated = canonical_evaluation(&resolved, &input);
+        let mut torn = resolved;
+        torn.policy_digest[0] ^= 1;
+        torn.digest = digest_resolved(&torn);
+        assert!(!torn.digest_is_valid());
+        assert_eq!(
+            torn.select(&evaluated).err(),
+            Some(ExitGridErrorV1::ResolutionDigestMismatch)
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2: AN EVALUATION CARRYING THE OTHER SIDE IS NOT THIS
+    /// RESOLUTION'S, though it names this resolution's digest: selection and
+    /// validation both refuse it.
+    #[test]
+    fn an_evaluation_of_the_other_side_is_refused_by_selection_and_validation() {
+        let input = bars(100);
+        let resolved = policy()
+            .resolve(&nifty(), &input)
+            .expect("the fixture resolves");
+        let mut evaluated = canonical_evaluation(&resolved, &input);
+        assert!(resolved.validate_evaluation(&evaluated).is_ok());
+        evaluated.side = crate::excursion::Side::Short;
+        assert_eq!(
+            resolved.select(&evaluated).err(),
+            Some(ExitGridErrorV1::EvaluationResolutionMismatch)
+        );
+        assert_eq!(
+            resolved.validate_evaluation(&evaluated).err(),
+            Some(ExitGridErrorV1::EvaluationResolutionMismatch)
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2: FLOOR AND CEILING RANGE RESOLUTION PART ON A
+    /// FRACTIONAL PPM. Every range here is a third of a ppm above a whole
+    /// ppm: the floor policy resolves the whole ppm and the ceiling policy the
+    /// next one, and the two policies are different identities.
+    #[test]
+    fn floor_and_ceiling_resolution_round_a_fractional_ppm_apart() {
+        let mut input = bars(100);
+        for (index, bar) in input.iter_mut().enumerate() {
+            let rung = i64::try_from(index).expect("a small fixture") + 1;
+            let span = 3 * rung + 1;
+            bar.open = 3_000_000;
+            bar.close = 3_000_000;
+            bar.high = 3_000_000 + span;
+            bar.low = 3_000_000 - span;
+        }
+        let floor = ExitGridPolicyV1 {
+            range_resolution: RangeResolutionV1::PpmFloor,
+            ..policy()
+        };
+        let floored = floor.resolve(&nifty(), &input).expect("floor resolves");
+        let ceiled = policy()
+            .resolve(&nifty(), &input)
+            .expect("ceiling resolves");
+        assert_eq!(floored.stop_levels_ppm(), &[25, 50]);
+        assert_eq!(floored.target_levels_ppm(), &[75, 100]);
+        assert_eq!(ceiled.stop_levels_ppm(), &[26, 51]);
+        assert_eq!(ceiled.target_levels_ppm(), &[76, 101]);
+        assert_ne!(floor.digest(), policy().digest());
+        assert_ne!(floored.digest(), ceiled.digest());
+    }
+
+    /// BASE-COV-LIBS-LS2: THE EXECUTION-COLUMN CODEC TAGS AN ABSENT SPEC AND
+    /// AN ABSENT ACCEPTANCE WITH ONE ZERO BYTE EACH. The digest is a durable
+    /// identity, so the empty default column's bytes are pinned field by
+    /// field; a built column carries both and digests apart from it.
+    #[test]
+    fn the_column_codec_tags_an_absent_spec_and_acceptance_with_zero() {
+        let empty = Column::default();
+        assert!(empty.evaluation_spec_token().is_none());
+        assert!(empty.acceptance().is_none());
+        let mut h = Hasher::new();
+        h.update(b"brutex.indicators.execution-column.v1");
+        put_usize(&mut h, 0);
+        put_usize(&mut h, 0);
+        h.update(&[1]);
+        put_census(&mut h, indicators::column::Census::default());
+        put_option_usize(&mut h, None);
+        put_u64(&mut h, 0);
+        h.update(&[0]);
+        h.update(&[0]);
+        put_census(&mut h, indicators::column::Census::default());
+        assert_eq!(column_digest_v1(&empty), h.finalize());
+        let built = test_column(&bars(100));
+        assert!(built.evaluation_spec_token().is_some());
+        assert!(built.acceptance().is_some());
+        assert_ne!(column_digest_v1(&built), column_digest_v1(&empty));
+    }
+
+    /// BASE-COV-LIBS-LS2: A SHORT RESOLUTION MINTS A SHORT GLOBAL WITNESS, and
+    /// its direction is sealed: the same witness relabelled Long fails its
+    /// integrity gate.
+    #[test]
+    fn a_short_resolution_mints_a_short_witness_whose_direction_is_sealed() {
+        let training = crate::synthetic::sessions(6);
+        let instrument = nifty();
+        let short = ExitGridPolicyV1 {
+            side: crate::excursion::Side::Short,
+            ..policy()
+        };
+        let training_series = ExecutionSeriesV1::new(
+            &instrument,
+            Vendor::Zerodha.as_str(),
+            "test-commit",
+            [0xA5; 32],
+            &training,
+        )
+        .expect("canonical stored training source");
+        let resolved = short
+            .resolve_attested(training_series)
+            .expect("canonical stored training resolution");
+        let selected = selected_for_feed(&resolved, &training, Vendor::Zerodha.as_str())
+            .expect("the fixture seals one policy-admitted training coordinate");
+        let mut execution = crate::synthetic::sessions(6);
+        for bar in &mut execution {
+            bar.ts_micros = bar
+                .ts_micros
+                .saturating_add(8_i64.saturating_mul(crate::synthetic::DAY_MICROS));
+            bar.high = bar.open;
+            bar.low = bar.open;
+            bar.close = bar.open;
+        }
+        let column = test_column(&execution);
+        let stored = ExecutionSeriesV1::new(
+            &instrument,
+            Vendor::Zerodha.as_str(),
+            "test-commit",
+            [0xA5; 32],
+            &execution,
+        )
+        .expect("canonical stored OOS source");
+        let oos = OosExecutionSeriesV1::new(stored, 0).expect("OOS boundary");
+        let run = test_execution_run_for_feed(
+            &instrument,
+            &ConditionMask::ZERO,
+            resolved.side(),
+            &execution,
+            Vendor::Zerodha.as_str(),
+        )
+        .expect("canonical stored OOS run");
+        let witness = resolved
+            .replay_global_witness(oos, &column, &selected, run)
+            .expect("authenticated global replay witness");
+        assert_eq!(witness.direction(), CostDirection::Short);
+        assert_eq!(witness.require_integrity(), Ok(()));
+        let mut relabelled = witness;
+        relabelled.direction = CostDirection::Long;
+        assert_eq!(
+            relabelled.require_integrity(),
+            Err(ExitGridErrorV1::ReplayEvidenceDigestMismatch)
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2: A MISSING MINUTE INSIDE AN OOS HOLD REFUSES THE
+    /// ONE-CELL REPLAY. The candidate universe keeps the holed candidate as
+    /// occupancy evidence and counts it; the compatibility replay refuses the
+    /// stream with that count rather than price around the hole.
+    #[test]
+    fn a_missing_minute_inside_an_oos_hold_refuses_the_one_cell_replay() {
+        let (resolved, selected, execution) = replay_fixture();
+        let instrument = nifty();
+        let column = test_column(&execution);
+        let (oos, run) = oos_and_run(&instrument, &execution, resolved.side());
+        let clean = resolved
+            .replay_selected_universe(oos, &column, &selected, run)
+            .expect("the fixture replays");
+        assert_eq!(clean.pricing_refused_paths(), 0);
+        assert!(
+            resolved
+                .replay_selected(oos, &column, &selected, run)
+                .is_ok()
+        );
+        let hole = clean
+            .candidates()
+            .iter()
+            .find(|candidate| candidate.occupied_through_bar() >= candidate.entry_bar() + 2)
+            .map(|candidate| candidate.entry_bar() + 1)
+            .expect("a hold of three bars or more");
+        let mut holed = execution;
+        holed.remove(hole);
+        let holed_column = test_column(&holed);
+        let (oos, run) = oos_and_run(&instrument, &holed, resolved.side());
+        let universe = resolved
+            .replay_selected_universe(oos, &holed_column, &selected, run)
+            .expect("a refused path is kept as occupancy evidence");
+        let paths = universe.pricing_refused_paths();
+        assert!(paths > 0, "the hole refuses the hold it falls in");
+        assert_eq!(
+            resolved.replay_selected(oos, &holed_column, &selected, run),
+            Err(ExitGridErrorV1::RefusedExecutionPaths { paths })
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2: THE ONE-CELL REPLAY REFUSES A STREAM PAST EITHER
+    /// FROZEN QUALITY CEILING (3 ambiguous bars, 2 gap fills in this policy),
+    /// naming both counts. Bars a fiftieth of their price wide each side touch
+    /// the stop and the target inside one minute (ambiguous, no gap); flat
+    /// bars whose price alternates by a hundredth fill every level exit at a
+    /// gapped open (gaps, no ambiguity).
+    #[test]
+    fn the_one_cell_replay_refuses_a_stream_past_either_quality_ceiling() {
+        let (resolved, selected, execution) = replay_fixture();
+        let instrument = nifty();
+        let cell_and_replay = |bars: &[Candle]| {
+            let column = test_column(bars);
+            let (oos, run) = oos_and_run(&instrument, bars, resolved.side());
+            let cell = resolved
+                .replay_selected_universe(oos, &column, &selected, run)
+                .expect("the stream replays")
+                .local_cell()
+                .copied()
+                .expect("the selected coordinate trades");
+            (cell, resolved.replay_selected(oos, &column, &selected, run))
+        };
+        let refusal = |cell: Cell| ExitGridErrorV1::ReplayQualityLimitExceeded {
+            ambiguous_bars: cell.ambiguous_bars,
+            max_ambiguous_bars: 3,
+            gap_fills: cell.gapped,
+            max_gap_fills: 2,
+        };
+
+        let mut wide = execution.clone();
+        for bar in &mut wide {
+            bar.high = bar.open + bar.open / 50;
+            bar.low = bar.open - bar.open / 50;
+        }
+        let (cell, replay) = cell_and_replay(&wide);
+        assert!(cell.ambiguous_bars > 3 && cell.gapped <= 2, "{cell:?}");
+        assert_eq!(replay, Err(refusal(cell)));
+
+        let mut sawtooth = execution;
+        for bar in sawtooth.iter_mut().skip(1).step_by(2) {
+            let moved = bar.open - bar.open / 100;
+            (bar.open, bar.high, bar.low, bar.close) = (moved, moved, moved, moved);
+        }
+        let (cell, replay) = cell_and_replay(&sawtooth);
+        assert!(cell.ambiguous_bars <= 3 && cell.gapped > 2, "{cell:?}");
+        assert_eq!(replay, Err(refusal(cell)));
+    }
+
+    /// BASE-COV-LIBS-LS2: UNDER A REQUIRED FORCED STOP THE REPLAY DOOR ADMITS
+    /// ONLY THE FORCED STOP. A selection on the forced stop replays; the same
+    /// selection resealed onto the other observed stop, a coordinate inside
+    /// the grid and its ratio limits, is refused as an invalid coordinate.
+    #[test]
+    fn under_a_required_forced_stop_the_replay_door_admits_only_that_stop() {
+        let training = bars(100);
+        let instrument = nifty();
+        let mut forced = policy();
+        forced.forced_stop = ForcedStopV1::RequireExactObserved(25);
+        let resolved = forced
+            .resolve(&instrument, &training)
+            .expect("25 ppm is an observed training stop");
+        assert_eq!(resolved.stop_levels_ppm(), &[25, 50]);
+        assert_eq!(resolved.forced_stop_index(), Some(0));
+        let selected = selected_for(&resolved, &training)
+            .expect("the fixture seals one policy-admitted training coordinate");
+        assert_eq!(selected.coordinate.stop, Some(0));
+        let execution = shifted_bars(100, 1);
+        let column = test_column(&execution);
+        let (oos, run) = oos_and_run(&instrument, &execution, resolved.side());
+        assert!(
+            resolved
+                .replay_selected_universe(oos, &column, &selected, run)
+                .is_ok()
+        );
+        let mut wider = selected;
+        wider.coordinate.stop = Some(1);
+        reseal_selected(&mut wider);
+        assert!(resolved.chosen_is_in_bounds(wider.coordinate));
+        assert_eq!(
+            resolved
+                .replay_selected_universe(oos, &column, &wider, run)
+                .map(|_| ()),
+            Err(ExitGridErrorV1::InvalidChosenCoordinate)
         );
     }
 }
