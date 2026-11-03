@@ -8086,14 +8086,19 @@ mod tests {
     /// behind the gate.
     fn reaped(sink: &Sink) -> super::AuditHealth {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
+        loop {
             let health = sink.audit_health().expect("a stream");
             if health.gone_waiting <= health.reap_failures {
                 return health;
             }
+            // The bound is the loop's assertion: running out of time is this
+            // helper failing, never a loop that ends some other way.
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reaper did not finish: {health:?}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        panic!("the reaper did not finish: {:?}", sink.audit_health());
     }
 
     /// A stream in `dir` fifteen rolls old with nothing written since, so the
