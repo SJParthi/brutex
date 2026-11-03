@@ -1709,3 +1709,9 @@ mod tests {
         }
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): the refusals a fetch names, and every array
+// length of a window.
+#[cfg(test)]
+#[path = "fetch_ps1_tests.rs"]
+mod ps1_tests;

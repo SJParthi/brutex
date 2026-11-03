@@ -1931,3 +1931,9 @@ mod tests {
         }
     }
 }
+
+// BASE-COV-PULL-PS1 (D-7335): a contract the dated strike ladder cannot place,
+// by day and by spot, and the bound on the reasons a batch keeps.
+#[cfg(test)]
+#[path = "pricing_ps1_tests.rs"]
+mod ps1_tests;
