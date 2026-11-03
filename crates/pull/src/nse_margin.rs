@@ -77,9 +77,12 @@
 //! Every file is sealed by its own BLAKE3 trailer, and every month header
 //! carries the BLAKE3 of the dictionary file it was built against, so a
 //! month built against another dictionary, whose cells would name other
-//! symbols, is refused by name ([`OpenError::Corrupt`]). Each
-//! file is written whole to a hidden `.part` file and renamed into place; the
-//! dictionary is written last. A build is a pure function of the batch-1
+//! symbols, is refused by name ([`OpenError::Corrupt`]). Each file is
+//! written whole to a hidden staging file of this process's own name, made by
+//! `store::staging::create` (gate 28's one door, which opens nothing already
+//! there), synced, and renamed into place; the dictionary is written last. One
+//! build writes one `out` at a time: the build takes no lock (D-8151). A
+//! build is a pure function of the batch-1
 //! files: rebuilding over the same files writes the same bytes
 //! (`CLAUDE.md` section 3 rule 5).
 //!
@@ -552,6 +555,9 @@ pub struct Report {
     pub other_batches: Vec<String>,
     /// Entries that are not margin files at all, not read, by name.
     pub not_source: Vec<String>,
+    /// Files whose staging name held a dead writer's leftover, which the
+    /// staging door cleared first: the file's name and the leftover's bytes.
+    pub cleared: Vec<(String, u64)>,
     /// [`MarginTable::file_digest_hex`] of what was written.
     pub digest_hex: String,
 }
@@ -783,13 +789,36 @@ fn list_sources(src: &Path) -> Result<Listing, BuildError> {
     Ok(listing)
 }
 
-/// Writes `bytes` to `<dir>/<name>` through a hidden `.part` file and a
-/// rename, so a reader never meets half a file.
-fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), BuildError> {
+/// The staging name of `<dir>/<name>`: hidden, and this process's own, so
+/// two builds never share one (`store::staging`'s rule for its callers).
+fn staging_name(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!(".{name}.{}.tmp", std::process::id()))
+}
+
+/// Writes `bytes` to `<dir>/<name>` through a staging file made by
+/// `store::staging::create` (gate 28's one door: it opens nothing already
+/// there), synced, then renamed into place, so a reader never meets half a
+/// file. A dead writer's leftover the door cleared is pushed to `cleared`.
+fn write_file(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    cleared: &mut Vec<(String, u64)>,
+) -> Result<(), BuildError> {
+    use std::io::Write as _;
     let path = dir.join(name);
-    let part = dir.join(format!(".{name}.part"));
-    fs::write(&part, bytes).map_err(|e| write_error(&part, &e))?;
-    fs::rename(&part, &path).map_err(|e| write_error(&path, &e))
+    let staging = staging_name(dir, name);
+    let mut staged = store::staging::create(&staging).map_err(|e| BuildError::Write {
+        path: staging.clone(),
+        why: e.to_string(),
+    })?;
+    cleared.extend(staged.cleared.map(|len| (name.to_owned(), len)));
+    staged
+        .file
+        .write_all(bytes)
+        .and_then(|()| staged.file.sync_all())
+        .and_then(|()| fs::rename(&staging, &path))
+        .map_err(|e| write_error(&path, &e))
 }
 
 /// Reads every batch-1 margin file in `src` and writes the dated table to
@@ -818,10 +847,11 @@ pub fn build_from_dir(src: &Path, out: &Path) -> Result<Report, BuildError> {
     let encoded = encode(&days)?;
     let dir = out.join(DIR_NAME);
     fs::create_dir_all(&dir).map_err(|e| write_error(&dir, &e))?;
+    let mut cleared = Vec::new();
     for (name, bytes) in &encoded.months {
-        write_file(&dir, name, bytes)?;
+        write_file(&dir, name, bytes, &mut cleared)?;
     }
-    write_file(&dir, DICTIONARY, &encoded.dictionary)?;
+    write_file(&dir, DICTIONARY, &encoded.dictionary, &mut cleared)?;
     let digest = set_digest(&encoded.dictionary, &encoded.month_bytes());
     Ok(Report {
         dir,
@@ -834,6 +864,7 @@ pub fn build_from_dir(src: &Path, out: &Path) -> Result<Report, BuildError> {
         months: encoded.months.len(),
         other_batches: listing.other_batches,
         not_source: listing.not_source,
+        cleared,
         digest_hex: hex(&digest),
     })
 }
@@ -2228,6 +2259,7 @@ mod tests {
             vec![file_name(day(2020, 6, 1), 2), file_name(day(2020, 6, 1), 6)]
         );
         assert_eq!(report.not_source, vec!["README.md".to_owned()]);
+        assert_eq!(report.cleared, Vec::<(String, u64)>::new());
         let table = MarginTable::open(&report.dir).unwrap();
         assert_eq!(table.file_digest_hex(), report.digest_hex);
         assert_eq!(report.digest_hex.len(), 2 * DIGEST_LEN);
@@ -2329,11 +2361,14 @@ mod tests {
         let blocked = file_out.join(DIR_NAME);
         let refused = build_from_dir(&src, &file_out).unwrap_err();
         assert!(begins(&refused, "cannot write", &blocked), "{refused}");
+        // A directory at the staging name: the door refuses it, by its name,
+        // and leaves it as it is.
         let part_out = scratch("REFUSE-PART");
-        let part = part_out.join(DIR_NAME).join(".2020-06.nsm.part");
+        let part = staging_name(&part_out.join(DIR_NAME), "2020-06.nsm");
         fs::create_dir_all(&part).unwrap();
         let refused = build_from_dir(&src, &part_out).unwrap_err();
         assert!(begins(&refused, "cannot write", &part), "{refused}");
+        assert!(part.is_dir());
         let rename_out = scratch("REFUSE-RENAME");
         let target = rename_out.join(DIR_NAME).join("2020-06.nsm");
         fs::create_dir_all(target.join("CHILD")).unwrap();
@@ -2342,7 +2377,7 @@ mod tests {
         // The dictionary is written last: the months are in place and the
         // dictionary's own write is refused by its path.
         let last_out = scratch("REFUSE-LAST");
-        let dictionary_part = last_out.join(DIR_NAME).join(".symbols.nsd.part");
+        let dictionary_part = staging_name(&last_out.join(DIR_NAME), DICTIONARY);
         fs::create_dir_all(&dictionary_part).unwrap();
         let refused = build_from_dir(&src, &last_out).unwrap_err();
         assert!(
@@ -2354,6 +2389,28 @@ mod tests {
             out, only_other, bad_name, empty_file, unreadable, src, part_out, rename_out, last_out,
         ] {
             let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_dead_writers_leftover_is_cleared_and_named_never_published() {
+        let src = source_dir("LEFTOVER-SRC", &[(file_name(day(2020, 6, 1), 1), DAY_ONE)]);
+        let clean = scratch("LEFTOVER-CLEAN");
+        let expected = build_from_dir(&src, &clean).unwrap();
+        let out = scratch("LEFTOVER-OUT");
+        let dir = out.join(DIR_NAME);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(staging_name(&dir, "2020-06.nsm"), "HALF").unwrap();
+        let report = build_from_dir(&src, &out).unwrap();
+        assert_eq!(report.cleared, vec![("2020-06.nsm".to_owned(), 4)]);
+        assert_eq!(report.digest_hex, expected.digest_hex);
+        assert_eq!(
+            fs::read(dir.join("2020-06.nsm")).unwrap(),
+            fs::read(expected.dir.join("2020-06.nsm")).unwrap()
+        );
+        assert!(!staging_name(&dir, "2020-06.nsm").exists());
+        for scratch_dir in [src, clean, out] {
+            let _ = fs::remove_dir_all(scratch_dir);
         }
     }
 
