@@ -1059,57 +1059,160 @@ mod tests {
 
     /// Names the refresh child's scratch folder.
     const REFRESH_CHILD: &str = "BRUTEX_TEST_MASTERS_REFRESH_CHILD";
+    /// Names the refresh child's public transport: `answers`, `down` or `short`.
+    const REFRESH_MODE: &str = "BRUTEX_TEST_MASTERS_REFRESH_MODE";
+    /// Names the words the refresh child's credential refusal must say.
+    const REFRESH_SAYS: &str = "BRUTEX_TEST_MASTERS_REFRESH_SAYS";
+
+    /// A public transport no host answers through.
+    struct Down;
+
+    impl Discovery for Down {
+        async fn get(&self, url: &str) -> Result<String, Refusal> {
+            Err(Refusal::transport(format!("{url} unreachable")))
+        }
+    }
+
+    /// A public transport every host answers with two bytes, which no master
+    /// is.
+    struct Short;
+
+    impl Discovery for Short {
+        async fn get(&self, _url: &str) -> Result<String, Refusal> {
+            Ok("a\n".to_owned())
+        }
+    }
+
+    /// The refresh child: one refresh over the transport `mode` names, in this
+    /// child's own `HOME`, and what its answer must say.
+    fn refresh_child(root: &std::path::Path) {
+        let dir = root.join("masters");
+        std::fs::create_dir_all(&dir).expect("the masters");
+        let site: crate::server::Loaded =
+            std::sync::Arc::new(crate::server::Site::load(&dir, root));
+        let mode = std::env::var(REFRESH_MODE).expect("the child's transport");
+        let said = std::env::var(REFRESH_SAYS).expect("the child's credential words");
+        let (status, _, body) = match mode.as_str() {
+            "down" => block_on(super::refresh_over(&site, &dir, &Down, &NoWait)),
+            "short" => block_on(super::refresh_over(&site, &dir, &Short, &NoWait)),
+            _ => {
+                let from = Recording {
+                    body: a_master(),
+                    seen: std::sync::Mutex::new(Vec::new()),
+                };
+                block_on(super::refresh_over(&site, &dir, &from, &NoWait))
+            }
+        };
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_GATEWAY,
+            "{mode}: {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
+        assert_eq!(
+            parsed.get("complete"),
+            Some(&serde_json::json!(false)),
+            "{mode}: {body}"
+        );
+        // WHAT IS MISSING IS WHAT IS NOT ON THE DISK: the credentialed master
+        // when the public ones landed, and every master when none did.
+        let missing = masters::SOURCES
+            .iter()
+            .filter(|source| mode == "down" || mode == "short" || source.needs_token)
+            .map(|source| serde_json::json!(source.file))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parsed.get("missing"),
+            Some(&serde_json::json!(missing)),
+            "{mode}: {body}"
+        );
+        // THE CREDENTIAL REFUSAL IS AN ATTEMPT THAT DID NOT LAND, in every
+        // mode: it is never a skip that would let the rest read as whole.
+        assert_eq!(
+            parsed.get("attempted_landed"),
+            Some(&serde_json::json!(false)),
+            "{mode}: {body}"
+        );
+        // THE CREDENTIAL READ'S OWN WORDS, and no ledger: no host was asked.
+        let credentialed = parsed["landed"]
+            .as_array()
+            .expect("the rows")
+            .iter()
+            .find(|row| row["needs_token"] == true)
+            .expect("the credentialed source's row")
+            .clone();
+        assert_eq!(
+            credentialed["attempts"],
+            serde_json::json!([]),
+            "{mode}: {credentialed}"
+        );
+        let refusal = credentialed["refusal"]
+            .as_str()
+            .expect("the refusal's words");
+        assert!(refusal.contains(&said), "{mode}: no {said:?} in {refusal}");
+        std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
+    }
 
     /// **A REFRESH THAT COULD NOT READ THE CREDENTIAL LANDS THE PUBLIC MASTERS
-    /// AND IS NOT A SUCCESS** (BASE-COV-API, D-7344). In a child whose `HOME`
-    /// holds no credential file, so no host is asked for anything: the public
-    /// sources land from an invented transport, the credentialed one is
-    /// refused in the credential read's own words, its ledger empty, and the
-    /// whole answer is a `502` that names the master missing from the disk.
-    /// The universe is re-parsed over what landed either way. Extremes: an
-    /// empty `HOME`, refused rather than read as the working directory, and a
-    /// `HOME` with no credential file at all.
+    /// AND IS NOT A SUCCESS** (BASE-COV-API, D-7344, D-7346). In a child whose
+    /// `HOME` holds no usable credential file, so no host is asked for
+    /// anything: the public sources land from an invented transport, the
+    /// credentialed one is refused in the credential read's own words, its
+    /// ledger empty, and the whole answer is a `502` that names the master
+    /// missing from the disk. The universe is re-parsed over what landed
+    /// either way. Extremes: a `HOME` with no credential file; an empty
+    /// `HOME`, refused rather than read as the working directory; no `HOME`
+    /// at all; a credential file that is empty; every public host down; every
+    /// public host answering two bytes; and, at once, every host down with no
+    /// `HOME`, and two-byte answers with an empty credential file; out of the
+    /// box, a credential "file" that is a folder.
     #[test]
     fn a_refresh_with_no_credential_lands_the_public_masters_and_says_it_is_not_whole() {
         const NAME: &str = "mastersrun::tests::a_refresh_with_no_credential_lands_the_public_masters_and_says_it_is_not_whole";
         if let Some(root) = std::env::var_os(REFRESH_CHILD) {
-            let root = std::path::Path::new(&root);
-            let dir = root.join("masters");
-            std::fs::create_dir_all(&dir).expect("the masters");
-            let site: crate::server::Loaded =
-                std::sync::Arc::new(crate::server::Site::load(&dir, root));
-            let from = Recording {
-                body: a_master(),
-                seen: std::sync::Mutex::new(Vec::new()),
-            };
-            let (status, _, body) = block_on(super::refresh_over(&site, &dir, &from, &NoWait));
-            assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY, "{body}");
-            let parsed: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
-            assert_eq!(
-                parsed.get("complete"),
-                Some(&serde_json::json!(false)),
-                "{body}"
-            );
-            let missing = masters::SOURCES
-                .iter()
-                .filter(|source| source.needs_token)
-                .map(|source| serde_json::json!(source.file))
-                .collect::<Vec<_>>();
-            assert_eq!(
-                parsed.get("missing"),
-                Some(&serde_json::json!(missing)),
-                "{body}"
-            );
-            assert!(body.contains("credential"), "{body}");
-            std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
+            refresh_child(std::path::Path::new(&root));
             return;
         }
-        for (tag, home) in [("no-file", None), ("empty", Some(""))] {
+        // (tag, transport, HOME: the root / empty / unset, what is under
+        // `.brutex/credentials.toml`, what the refusal says)
+        for (tag, mode, home, credential, said) in [
+            ("no-file", "answers", "root", "", "is not usable"),
+            ("empty", "answers", "empty", "", "cannot be located"),
+            ("unset", "answers", "unset", "", "HOME is unset"),
+            ("empty-file", "answers", "root", "file", "is not usable"),
+            ("folder", "answers", "root", "folder", "is not usable"),
+            ("down", "down", "root", "", "is not usable"),
+            ("short", "short", "root", "", "is not usable"),
+            ("down-unset", "down", "unset", "", "HOME is unset"),
+            ("short-empty-file", "short", "root", "file", "is not usable"),
+        ] {
             let root = scratch(&format!("refresh-child-{tag}"));
-            let named = root.clone();
-            let home = home.map_or(named.as_os_str(), std::ffi::OsStr::new);
-            let _ =
-                crate::isolated::rerun(NAME, &[(REFRESH_CHILD, root.as_os_str()), ("HOME", home)]);
+            let held = root.join(".brutex");
+            match credential {
+                "file" => {
+                    std::fs::create_dir_all(&held).expect("the credential folder");
+                    std::fs::write(held.join("credentials.toml"), b"").expect("an empty file");
+                }
+                "folder" => std::fs::create_dir_all(held.join("credentials.toml"))
+                    .expect("a folder where the file goes"),
+                _ => {}
+            }
+            let env = [
+                (REFRESH_CHILD, root.as_os_str()),
+                (REFRESH_MODE, std::ffi::OsStr::new(mode)),
+                (REFRESH_SAYS, std::ffi::OsStr::new(said)),
+            ];
+            let _ = match home {
+                "unset" => crate::isolated::rerun_unsetting(NAME, &env, &["HOME"]),
+                "empty" => crate::isolated::rerun(
+                    NAME,
+                    &[env[0], env[1], env[2], ("HOME", std::ffi::OsStr::new(""))],
+                ),
+                _ => crate::isolated::rerun(
+                    NAME,
+                    &[env[0], env[1], env[2], ("HOME", root.as_os_str())],
+                ),
+            };
             assert_eq!(
                 std::fs::read(root.join("child-ran")).ok().as_deref(),
                 Some(&b"refreshed"[..]),

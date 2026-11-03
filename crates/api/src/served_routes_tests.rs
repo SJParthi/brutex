@@ -189,35 +189,43 @@ fn pooled_doors() -> Vec<(Named, String)> {
 /// Asks every pooled door twice, its pool crowded and then its work lost.
 async fn full_pools_and_lost_tasks(root: &Path) {
     served(root, |addr| async move {
-        let mut wrong = Vec::new();
         for (pool, target) in pooled_doors() {
             let crowd = crate::detail::crowd(pool);
             let full = get(addr, &target).await;
             drop(crowd);
-            if full.status != 429 || full.body.is_empty() {
-                wrong.push(format!(
-                    "{target} full: {} {}",
-                    full.status,
-                    full.body.chars().take(200).collect::<String>()
-                ));
-            }
+            assert_eq!(full.status, 429, "{target} full: {}", full.body);
+            assert!(!full.body.is_empty(), "{target} full: no body");
         }
         crate::detail::lost_work::lose_admitted_work(true);
         for (_, target) in pooled_doors() {
             let lost = get(addr, &target).await;
-            if lost.status < 500 || lost.body.is_empty() {
-                wrong.push(format!(
-                    "{target} lost: {} {}",
-                    lost.status,
-                    lost.body.chars().take(200).collect::<String>()
-                ));
-            }
+            assert!(
+                lost.status >= 500,
+                "{target} lost: {} {}",
+                lost.status,
+                lost.body
+            );
+            assert!(!lost.body.is_empty(), "{target} lost: no body");
         }
         crate::detail::lost_work::lose_admitted_work(false);
         // THE SERVER LIVES: a door that lost its task leaves its slot free.
         let after = get(addr, "/feeds.json").await;
         assert_eq!(after.status, 200, "{}{}", after.head, after.body);
-        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        // EVERY POOL HAS ITS SLOTS BACK, not only the list's: this child is
+        // alone, so nothing runs or waits in any of the nine once the doors
+        // above have answered.
+        let pools = get(addr, "/pools.json").await;
+        assert_eq!(pools.status, 200, "{}", pools.body);
+        let table: serde_json::Value = serde_json::from_str(&pools.body).expect("the pool table");
+        let rows = table["pools"].as_array().expect("the pools");
+        assert_eq!(rows.len(), crate::detail::Named::ALL.len(), "{table:#}");
+        for row in rows {
+            assert_eq!(
+                row["running"], 0,
+                "a slot kept after its door answered: {row:#}"
+            );
+            assert_eq!(row["waiting"], 0, "a reader still waiting: {row:#}");
+        }
     })
     .await;
 }
@@ -315,6 +323,12 @@ async fn a_door_refuses_what_it_cannot_read_through_the_router() {
     let root = crate::scratch::path("served-routes-refusals");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch root");
+    // One symbol past the door's bound, each a store symbol on its own.
+    let past = (0..=crate::server::ingest_refusals::MAX_SYMBOLS)
+        .map(|n| format!("S{n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let past_the_bound = format!("/ingest/refusals.json?feed=zerodha&symbols={past}");
     served(&root, |addr| async move {
         for (target, status, said) in [
             ("/folder.json", 400, "has no folder"),
@@ -336,6 +350,7 @@ async fn a_door_refuses_what_it_cannot_read_through_the_router() {
                 400,
                 "error",
             ),
+            (past_the_bound.as_str(), 400, "at most"),
         ] {
             let answer = get(addr, target).await;
             assert_eq!(answer.status, status, "{target}: {}", answer.body);

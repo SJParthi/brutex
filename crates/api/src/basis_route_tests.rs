@@ -112,6 +112,41 @@ fn notes_of(record: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Every corporate-action note on `days`, beside the day it sits on, in page
+/// order; a note of any other kind is not one.
+fn corporate_notes(days: &[Value]) -> Vec<(String, Value)> {
+    days.iter()
+        .flat_map(|record| {
+            let on = record["day"].as_str().unwrap().to_owned();
+            notes_of(record)
+                .into_iter()
+                .filter(|note| note["note"] == "corporate_action")
+                .map(move |note| (on.clone(), note))
+        })
+        .collect()
+}
+
+/// **A NOTE OF ANOTHER KIND IS NEVER COUNTED AS A CORPORATE ACTION.** The
+/// helper the page tests count with, on a page it was not written against: a
+/// day with two other notes and one action, a day with no notes key, a day
+/// whose notes are empty, and the action on the last day.
+#[test]
+fn the_note_counter_counts_only_corporate_actions() {
+    let days = vec![
+        serde_json::json!({"day": "2025-03-03", "notes": [{"note": "holiday"}, {"note": "corporate_action", "ratio": "2/1"}, {"note": "other"}]}),
+        serde_json::json!({"day": "2025-03-04"}),
+        serde_json::json!({"day": "2025-03-05", "notes": []}),
+        serde_json::json!({"day": "2025-03-06", "notes": [{"note": "corporate_action", "ratio": "1/5"}]}),
+    ];
+    let noted = corporate_notes(&days);
+    assert_eq!(noted.len(), 2, "{noted:#?}");
+    assert_eq!(noted[0].0, "2025-03-03");
+    assert_eq!(noted[0].1["ratio"], "2/1");
+    assert_eq!(noted[1].0, "2025-03-06");
+    assert_eq!(noted[1].1["ratio"], "1/5");
+    assert!(corporate_notes(&[]).is_empty());
+}
+
 // ─────────────────────────────── /dayflags.json, as /db reads it ───────────────────────────────
 
 #[test]
@@ -124,15 +159,7 @@ fn db_shows_the_action_on_its_day() {
         ))
         .unwrap();
         let body = super::super::dayflags::answer(&store, &ask);
-        let days = body["days"].as_array().unwrap();
-        let mut noted = Vec::new();
-        for record in days {
-            for note in notes_of(record) {
-                if note["note"] == "corporate_action" {
-                    noted.push((record["day"].as_str().unwrap().to_owned(), note));
-                }
-            }
-        }
+        let noted = corporate_notes(body["days"].as_array().unwrap());
         assert_eq!(
             noted.len(),
             1,
@@ -241,14 +268,7 @@ fn a_two_for_one_step_across_a_missing_month_is_never_at_this_session() {
     )
     .unwrap();
     let body = super::super::dayflags::answer(&store, &ask);
-    let mut noted = Vec::new();
-    for record in body["days"].as_array().unwrap() {
-        for note in notes_of(record) {
-            if note["note"] == "corporate_action" {
-                noted.push((record["day"].as_str().unwrap().to_owned(), note));
-            }
-        }
-    }
+    let noted = corporate_notes(body["days"].as_array().unwrap());
     assert_eq!(noted.len(), 1, "{noted:#?}");
     let (on, note) = &noted[0];
     assert_eq!(on, "2025-03-06");
@@ -650,6 +670,9 @@ async fn through(store: &Path, query: &str) -> (axum::http::StatusCode, String) 
 /// the tables do not hold.
 #[tokio::test]
 async fn the_handler_serves_the_answer_and_refuses_a_bad_query_by_name() {
+    // APART FROM THE TESTS THAT CROWD A POOL: a crowd of the operations pool
+    // would turn the served 200 below into a 429.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let store = root("handler");
     install(&store, &[measured_split()]);
     let (status, body) = through(&store, "symbol=SPLITCO&day=2025-03-04").await;
@@ -855,6 +878,9 @@ async fn over_the_router(store: &Path, query: &str) -> (String, String, String) 
 /// and a served answer down the same socket path.
 #[tokio::test]
 async fn the_real_router_answers_what_the_row_says_for_a_repeat_and_for_the_handler() {
+    // APART FROM THE TESTS THAT CROWD A POOL: the served answers below go
+    // through the operations pool, which a crowd would turn into 429s.
+    let _apart = crate::detail::apart_from_slot_owners().await;
     let store = root("router");
     install(&store, &[measured_split()]);
     for (query, field) in [

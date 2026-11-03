@@ -1566,6 +1566,31 @@ fn every_reachable_emit_site_puts_a_record_in_the_file() {
                 case.site, record.level,
             );
             assert_eq!(record.target, case.target, "{}", case.site);
+            // THE ROW'S MATCHER IS SPECIFIC (BASE-COV-API, D-7346): a matcher
+            // that still accepts the record with its fields gone, or with any
+            // one of them gone, reads no field, and would accept another
+            // test's record on the same target as this drive's. Every
+            // single-field removal is asked, none skipped, so each clause of
+            // the matcher meets a record that fails it.
+            let mut bare = record.clone();
+            bare.fields.clear();
+            assert!(
+                !(case.mine)(&bare),
+                "{}: the matcher accepts a record with no fields",
+                case.site
+            );
+            let refused = (0..record.fields.len())
+                .filter(|&at| {
+                    let mut less = record.clone();
+                    less.fields.remove(at);
+                    !(case.mine)(&less)
+                })
+                .count();
+            assert!(
+                refused > 0,
+                "{}: no field of the record decides the matcher",
+                case.site
+            );
         }
     }
 

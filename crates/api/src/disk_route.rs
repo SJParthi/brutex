@@ -2083,6 +2083,9 @@ mod tests {
     /// roots, then `n` route answers missed and hit; `margin` times the
     /// child's p50 bounds the call's p99.
     fn timed_against_the_child(tag: &str, n: usize, margin: u128) {
+        // APART FROM THE TESTS THAT CROWD A POOL: the route answers through
+        // the operations pool, and a crowd there would make its 200 a 429.
+        let _apart = crate::detail::apart_from_slot_owners_blocking();
         let tmp = crate::scratch::path(tag);
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("masters")).unwrap();

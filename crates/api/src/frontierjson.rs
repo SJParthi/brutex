@@ -1245,6 +1245,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
     }
 
+    /// **EVERY EDGE OF A PAGE ANSWERS OR REFUSES BY NAME** (BASE-COV-API,
+    /// D-7346), over one saved frontier of two ranked rows. Extremes: the last
+    /// row alone, one page in; a limit equal to the total; the hard maximum
+    /// limit; one past it; a limit of zero; a page one past its hard maximum;
+    /// and, at once, the top page with the largest limit, and the first page
+    /// past the end with the largest limit; out of the box, a page written
+    /// with a leading zero and a page field given twice.
+    #[test]
+    fn every_edge_of_a_page_answers_or_refuses_by_name() {
+        use axum::http::StatusCode;
+        let dir = crate::scratch::path("frontier-page-edges");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch root");
+        let identity = [0x97; 32];
+        let hex = "97".repeat(32);
+        cli::frontier::Frontier::open(&dir)
+            .expect("frontier")
+            .append_all(&[verdict_row(identity, 1), verdict_row(identity, 2)])
+            .expect("two ranked rows of one run");
+        commit_frontier_fixture(&dir, identity, 2);
+        let ask = |rest: &str| respond(Ok(dir.clone()), &format!("identity={hex}&{rest}"));
+
+        // THE LAST ROW ALONE: a page that holds the end but not the start is
+        // partial, and names no next page.
+        let (status, _, body) = ask("page=1&limit=1");
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT, "{body}");
+        assert!(
+            body.contains(r#""rank":2"#) && !body.contains(r#""rank":1"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""next_page":null"#), "{body}");
+        // A LIMIT EQUAL TO THE TOTAL, AND THE HARD MAXIMUM: the whole frontier.
+        for limit in ["2", "256"] {
+            let (status, _, body) = ask(&format!("page=0&limit={limit}"));
+            assert_eq!(status, StatusCode::OK, "limit {limit}: {body}");
+            assert!(
+                body.contains(r#""rank":1"#) && body.contains(r#""rank":2"#),
+                "{body}"
+            );
+            assert!(body.contains(r#""complete":true"#), "limit {limit}: {body}");
+        }
+        // REFUSED BEFORE ANY READ, each in its own words.
+        for (rest, said) in [
+            ("limit=257", "from 1 through 256"),
+            ("limit=0", "from 1 through 256"),
+            ("page=4096", "hard maximum is 4095"),
+            ("page=01&limit=1", "canonical unsigned decimal"),
+            ("page=0&page=0", "repeated"),
+        ] {
+            let (status, _, body) = ask(rest);
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{rest}: {body}");
+            assert!(body.contains(said), "{rest}: {body}");
+            assert!(body.contains(r#""rows":null"#), "{rest}: {body}");
+        }
+        // TWO EXTREMES AT ONCE: past the end with the largest limit, at the
+        // first page past it and at the top of the range.
+        for page in ["1", "4095"] {
+            let (status, _, body) = ask(&format!("page={page}&limit=256"));
+            assert_eq!(
+                status,
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "page {page}: {body}"
+            );
+            assert!(body.contains(r#""total_count":2"#), "page {page}: {body}");
+            assert!(
+                body.contains("past this run's 2 rows"),
+                "page {page}: {body}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The sentinel for "not measured" is `null`, never a figure.
     #[test]
     fn an_unmeasured_figure_is_null_and_a_measured_one_is_itself() {

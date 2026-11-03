@@ -39,24 +39,33 @@ fn attempt_of(route: &str, status: StatusCode, body: &str) -> u64 {
     assert_eq!(status, StatusCode::ACCEPTED, "{route}: {body}");
     let parsed: Value = serde_json::from_str(body).expect("an acceptance is JSON");
     assert_eq!(parsed["accepted"], true, "{route}: {body}");
-    parsed["attempt"]
+    // THE ATTEMPT IS WRITTEN AS A STRING, always (`sweeprun::accepted`): a
+    // number in its place is a change of the answer, and fails here.
+    let text = parsed["attempt"]
         .as_str()
-        .map_or_else(
-            || parsed["attempt"].as_u64(),
-            |text| text.parse::<u64>().ok(),
-        )
-        .unwrap_or_else(|| panic!("{route}: no attempt in {body}"))
+        .expect("an acceptance writes its attempt as a string");
+    text.parse::<u64>()
+        .expect("the attempt string is a whole number")
 }
 
 /// Waits for the slot to finish `attempt`; the text it finished with.
+///
+/// From the press's acceptance on, the slot holds that attempt and no other:
+/// these presses run one at a time, each waited for here before the next.
 async fn settled(site: &Loaded, route: &str, attempt: u64) -> String {
     let deadline = Instant::now() + Duration::from_mins(2);
     loop {
-        let held = site.sweep.lock().expect("the slot").clone();
-        if let Some(progress) = held
-            && progress.attempt == attempt
-            && !progress.in_flight()
-        {
+        let progress = site
+            .sweep
+            .lock()
+            .expect("the slot")
+            .clone()
+            .expect("an accepted press holds the slot");
+        assert_eq!(
+            progress.attempt, attempt,
+            "{route}: the slot holds this press"
+        );
+        if !progress.in_flight() {
             return progress
                 .refusal
                 .as_deref()
@@ -158,6 +167,88 @@ async fn every_press_accepted(root: &Path) {
             assert!(said.contains("walks ONE month"), "{word}: {said}");
         }
     }
+
+    // AN ATTEMPT AT EACH EDGE OF ITS RANGE: the largest u64 and the smallest
+    // positive one, neither ever started, are each an unknown attempt said in
+    // words, never another attempt's status and never a completion.
+    for asked in [u64::MAX, 1] {
+        let (code, answer) = status_of(&site, &format!("/backtest/run.json?attempt={asked}")).await;
+        assert_eq!(code, StatusCode::OK, "{asked}: {answer}");
+        assert_eq!(answer["running"]["status"], "unknown", "{asked}: {answer}");
+        assert_eq!(
+            answer["running"]["requested_attempt"],
+            asked.to_string(),
+            "{asked}: {answer}"
+        );
+        assert_eq!(answer["running"]["in_flight"], false, "{asked}: {answer}");
+    }
+    // AN ATTEMPT THAT IS NO CANONICAL POSITIVE u64 IS A 400 BEFORE ANY READ:
+    // zero, a leading zero, one past the largest, empty, another field, and
+    // (out of the box) the field given twice.
+    for query in [
+        "attempt=0",
+        "attempt=01",
+        "attempt=18446744073709551616",
+        "attempt=",
+        "when=1",
+        "attempt=1&attempt=1",
+    ] {
+        let (code, answer) = status_of(&site, &format!("/backtest/run.json?{query}")).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{query}: {answer}");
+        assert_eq!(answer["running"]["status"], "unknown", "{query}: {answer}");
+    }
+
+    // A PRESS WHILE AN ATTEMPT IS IN FLIGHT IS REFUSED, on each of the three
+    // doors at once, and leaves the slot as it was; the status with no
+    // attempt then answers the one in flight. The slot is set by hand: over a
+    // store with no bar no press stays in flight long enough to press again.
+    let finished = site
+        .sweep
+        .lock()
+        .expect("the slot")
+        .clone()
+        .expect("the last press");
+    let mut flying = finished.clone();
+    flying.finished_micros = None;
+    *site.sweep.lock().expect("the slot") = Some(flying.clone());
+    for (word, (status, _, answer)) in [
+        ("run", run_with(&site, &run, Some(STAMP))),
+        ("descend", descend_with(&site, &descent, Some(STAMP))),
+        (
+            "audit-range",
+            super::command_with(
+                &site,
+                &command(r#""command":"audit-range","rung":"15min","min_hits":500"#),
+                Some(STAMP),
+            ),
+        ),
+    ] {
+        assert_eq!(status, StatusCode::CONFLICT, "{word}: {answer}");
+        assert!(answer.contains(r#""accepted":false"#), "{word}: {answer}");
+        assert!(answer.contains("already running"), "{word}: {answer}");
+    }
+    let held = site
+        .sweep
+        .lock()
+        .expect("the slot")
+        .clone()
+        .expect("still held");
+    assert_eq!(
+        held.attempt, flying.attempt,
+        "a refused press takes no attempt"
+    );
+    assert!(
+        held.in_flight(),
+        "a refused press does not finish the one in flight"
+    );
+    let (code, answer) = status_of(&site, "/backtest/run.json").await;
+    assert_eq!(code, StatusCode::OK, "{answer}");
+    assert_eq!(answer["running"]["in_flight"], true, "{answer}");
+    assert_eq!(
+        answer["running"]["attempt"], flying.attempt,
+        "the one in flight, from memory: {answer}"
+    );
+    *site.sweep.lock().expect("the slot") = Some(finished);
 }
 
 /// **EVERY PRESS THE ROUTES ACCEPT RUNS TO ITS END AND READS BACK.** Over a
@@ -165,6 +256,11 @@ async fn every_press_accepted(root: &Path) {
 /// one-month command asked for two months among them. Each answers `202`,
 /// holds the slot, and settles with words of its own; the status route finds
 /// it in the slot and, once the slot has moved on, in the durable record.
+/// Extremes (D-7346): the largest and the smallest attempt, neither started;
+/// zero, a leading zero, one past the largest, an empty attempt and another
+/// field, each a `400`; and, at once, all three doors pressed while an attempt
+/// is in flight, each a `409` that leaves the slot as it was; out of the box,
+/// the attempt field given twice.
 #[test]
 fn every_press_the_routes_accept_runs_to_its_end_and_reads_back() {
     if let Some(root) = std::env::var_os(CHILD) {

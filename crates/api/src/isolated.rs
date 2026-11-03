@@ -34,11 +34,33 @@
     reason = "a fixture that cannot start its child must fail the test loudly"
 )]
 pub(crate) fn rerun(test: &str, env: &[(&str, &std::ffi::OsStr)]) -> String {
-    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+    rerun_unsetting(test, env, &[])
+}
+
+/// [`rerun`], with each variable `unset` names removed from the inherited
+/// environment too: a child that must see a variable ABSENT, which no value
+/// in `env` can say (an empty `HOME` is a different input from no `HOME`).
+///
+/// # Panics
+///
+/// As [`rerun`].
+#[allow(
+    clippy::expect_used,
+    reason = "a fixture that cannot start its child must fail the test loudly"
+)]
+pub(crate) fn rerun_unsetting(
+    test: &str,
+    env: &[(&str, &std::ffi::OsStr)],
+    unset: &[&str],
+) -> String {
+    let mut child = std::process::Command::new(std::env::current_exe().expect("this test binary"));
+    child
         .args(["--exact", test, "--nocapture", "--test-threads=1"])
-        .envs(env.iter().copied())
-        .output()
-        .expect("the child test process starts");
+        .envs(env.iter().copied());
+    for name in unset {
+        child.env_remove(name);
+    }
+    let output = child.output().expect("the child test process starts");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
