@@ -319,6 +319,11 @@ fn adding_a_required_bit_can_only_remove_hits_at_every_position() {
             if after {
                 assert!(before);
             }
+            // And exactly: the wider candidate hits where the base hits AND
+            // the bar holds the added bit, nowhere else. Only a bar that holds
+            // its base can show a hit kept for free, which is why half of them
+            // do. BASE-COV-LIBS-LS3.
+            assert_eq!(after, before && bar.get(b), "bit {b} of trial {trial}");
         }
     }
 }
