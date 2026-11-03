@@ -1653,12 +1653,22 @@ pub fn replace_damaged(root: &Path) -> Result<Replaced, AlertError> {
     replace_damaged_at(root, unix_now())
 }
 
+/// What the rename seam runs: one step, given the queue's names.
+#[cfg(test)]
+pub(crate) type BeforeRename = Box<dyn FnOnce(&Names)>;
+
 #[cfg(test)]
 thread_local! {
     /// Test seam: the step of a replacement after which this thread's next
     /// one stops, as a kill there would (0: never). The steps are those
     /// [`replace_damaged_at`] numbers.
     pub(crate) static REPLACEMENT_STOPS_AFTER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+
+    /// Test seam (D-7336): run once, with the queue's names, between a
+    /// replacement's new queue written under its temporary name and its
+    /// rename, as another process landing there would.
+    pub(crate) static BEFORE_RENAME: std::cell::RefCell<Option<BeforeRename>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Whether the test seam stops the replacement after `step`.
@@ -1818,6 +1828,10 @@ pub fn replace_damaged_at(root: &Path, now: u64) -> Result<Replaced, AlertError>
 
     // Step 3: one atomic rename. Before it the name is the damaged queue,
     // after it the new one with its first record; never anything else.
+    #[cfg(test)]
+    if let Some(step) = BEFORE_RENAME.with_borrow_mut(Option::take) {
+        step(&names);
+    }
     if let Err(why) = fs::rename(&tmp, &names.queue) {
         let why = AlertError::io("put the new queue in place", &why);
         note_not_saved(&alert, &why);
