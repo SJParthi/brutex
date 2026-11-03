@@ -713,11 +713,7 @@ fn descend(
     })?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| ArchiveError::Unreadable {
-            path: dir.to_path_buf(),
-            detail: e.to_string(),
-        })?;
-        let path = entry.path();
+        let path = entry_path(dir, entry)?;
 
         // THE GHOST FILTER, before anything is opened. Counted in a plain
         // integer rather than logged: `GDFL.zip` holds 12,145 of these, and one
@@ -828,6 +824,24 @@ fn descend(
     // so ordering here ordered the whole walk's accumulator once per directory.
     // It happens exactly once now, in `walk`, after this recursion unwinds.
     Ok(())
+}
+
+/// The path of one entry [`fs::read_dir`] handed back, or the walk's refusal
+/// naming `dir` when its listing failed part-way.
+///
+/// A function of its own so that refusal can be asked for at all. A listing
+/// that starts and then fails needs a filesystem that goes away under an open
+/// handle, and glibc reads even a directory removed while it is open as
+/// ended rather than failed (ENOENT from a dead directory is its end of
+/// directory), so no folder a test can make reaches it. The refusal is the
+/// one the walk always gave: the folder, in the host's own words.
+fn entry_path(dir: &Path, entry: std::io::Result<fs::DirEntry>) -> Result<PathBuf, ArchiveError> {
+    entry
+        .map(|entry| entry.path())
+        .map_err(|e| ArchiveError::Unreadable {
+            path: dir.to_path_buf(),
+            detail: e.to_string(),
+        })
 }
 
 /// One member's bytes, refused past [`MAX_MEMBER_BYTES`] before they are read.
@@ -1456,3 +1470,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "archive_cov_tests.rs"]
+mod cov_tests;

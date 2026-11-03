@@ -339,13 +339,15 @@ fn month_lines(
             continue;
         };
         let windows = windows.get(..count).unwrap_or(&[]);
-        if file.is_none() {
+        // OPENED ONCE, by the first session that needs its stamps, and held
+        // for the rest: one arm reads the one held, the other opens it.
+        let open = if let Some(open) = &file {
+            open
+        } else {
             let path = StorePath::new(parts).map_err(|why| why.to_string())?;
-            file =
-                Some(BarFile::open_existing(root, path, symbol_id).map_err(|why| why.to_string())?);
-        }
-        let Some(open) = file.as_ref() else {
-            continue;
+            &*file.insert(
+                BarFile::open_existing(root, path, symbol_id).map_err(|why| why.to_string())?,
+            )
         };
         let stamps = held_stamps(open, day, windows)?;
         if let Some((mut line, missing)) =
@@ -462,3 +464,7 @@ pub fn write(
     }
     Ok(lines)
 }
+
+#[cfg(test)]
+#[path = "gap_backfill_cov_tests.rs"]
+mod cov_tests;

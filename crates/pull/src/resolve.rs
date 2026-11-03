@@ -1116,9 +1116,9 @@ mod tests {
         let addr = socket.local_addr().expect("an address");
         let answer = answer.to_owned();
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = socket.accept() else {
-                return;
-            };
+            // A CLIENT THAT NEVER CONNECTS fails the test that made this
+            // server, by its own request; there is no quiet way out.
+            let (mut stream, _) = socket.accept().expect("the client connects");
             let mut buf = [0u8; 4096];
             let _read = stream.read(&mut buf).unwrap_or(0);
             let _wrote = stream.write_all(answer.as_bytes());
@@ -1208,9 +1208,7 @@ mod tests {
         let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let addr = socket.local_addr().expect("an address");
         let handle = std::thread::spawn(move || {
-            let Ok((mut stream, _)) = socket.accept() else {
-                return 0;
-            };
+            let (mut stream, _) = socket.accept().expect("the client connects");
             let mut buf = [0u8; 4096];
             let _read = stream.read(&mut buf).unwrap_or(0);
             let head = if chunked {
@@ -1218,14 +1216,21 @@ mod tests {
             } else {
                 "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
             };
-            if stream.write_all(head.as_bytes()).is_err() {
-                return 0;
-            }
+            // The client has asked and waits for its answer, so the head is
+            // always taken; a head refused fails the test, never passes it.
+            stream
+                .write_all(head.as_bytes())
+                .expect("the client takes the head");
             let frame = vec![b'x'; 1 << 20];
             let mut written = 0usize;
-            for _ in 0..frames {
-                // THE CLIENT HANGING UP IS THE EXPECTED END. Rust ignores
-                // SIGPIPE at startup, so this is an `Err`, not a dead process.
+            // THE CLIENT HANGING UP IS THE EXPECTED END. Rust ignores SIGPIPE
+            // at startup, so this is an `Err`, not a dead process, and the
+            // walk stops at it. The frames run out only when the client read
+            // every one of them, which is the defect the caller refuses
+            // (`written < offered`) before it reads anything else: no chunked
+            // terminator follows them, so even then the client sees an answer
+            // cut short and fails rather than hangs.
+            let _hung_up = (0..frames).try_for_each(|_| {
                 let sent = if chunked {
                     stream
                         .write_all(format!("{:x}\r\n", frame.len()).as_bytes())
@@ -1234,15 +1239,8 @@ mod tests {
                 } else {
                     stream.write_all(&frame)
                 };
-                if sent.is_err() {
-                    return written;
-                }
-                written += frame.len();
-            }
-            if chunked {
-                let _end = stream.write_all(b"0\r\n\r\n");
-            }
-            let _flushed = stream.flush();
+                sent.map(|()| written += frame.len())
+            });
             written
         });
         (format!("http://{addr}"), handle)
@@ -1314,6 +1312,80 @@ mod tests {
             .await
             .expect_err("nothing is listening");
         assert!(why.contains("was not reached"), "{why}");
+    }
+
+    /// **A LISTING PAST THE LINK BOUND FAILS ITS CATEGORY BY NAME**, with the
+    /// bound's own refusal, and the other three categories still resolve.
+    /// One link past [`crate::nse::MAX_INDEX_LINKS`], every one invented; the
+    /// same listing at exactly the bound is read whole, so the refusal is the
+    /// one link alone.
+    #[tokio::test]
+    async fn a_listing_past_the_link_bound_fails_its_category_by_name() {
+        use std::fmt::Write as _;
+        let category = Category::Sectoral;
+        let listing = format!("{HOST}{}", category.path());
+        let mut flood = String::new();
+        for n in 0..crate::nse::MAX_INDEX_LINKS {
+            let _ = write!(
+                flood,
+                r#"<a href="{}/zz{n}">an invented index</a>"#,
+                category.path()
+            );
+        }
+        let at_bound = complete().with(&listing, &flood);
+        let read = crawl(&at_bound, HOST, day(), "groww", JoinKey::Isin, &master()).await;
+        assert_eq!(
+            read.failures.len(),
+            crate::nse::MAX_INDEX_LINKS,
+            "at the bound every link is crawled, and none of the invented pages exists"
+        );
+        let _ = write!(
+            flood,
+            r#"<a href="{}/zz-one-more">one past the bound</a>"#,
+            category.path()
+        );
+        let past = complete().with(&listing, &flood);
+        let snap = crawl(&past, HOST, day(), "groww", JoinKey::Isin, &master()).await;
+        assert_eq!(snap.resolutions.len(), 3, "the other three still resolve");
+        assert_eq!(
+            snap.failures,
+            [IndexFailure {
+                at: listing,
+                why: nse::NseError::TooManyIndexLinks {
+                    links: crate::nse::MAX_INDEX_LINKS + 1,
+                }
+                .to_string(),
+            }],
+            "the category is named, with the bound's own words, and no page of it is fetched"
+        );
+        assert!(snap.admits_publication(None).is_err());
+    }
+
+    /// **A CONSTITUENT FILE THAT IS NOT REACHED FAILS EVERY INDEX THAT LINKS
+    /// IT, BY THE FILE'S NAME AND IN THE TRANSPORT'S OWN WORDS**, rather than
+    /// reading as an index with no members.
+    #[tokio::test]
+    async fn an_unreached_constituent_file_fails_each_index_by_its_name() {
+        let file = format!("{HOST}/IndexConstituent/ind_one.csv");
+        let refused = complete().refusing(&file, "an invented 503 from the exchange");
+        let snap = crawl(&refused, HOST, day(), "groww", JoinKey::Isin, &master()).await;
+        assert!(snap.resolutions.is_empty(), "every index linked that file");
+        assert_eq!(
+            snap.failures,
+            vec![
+                IndexFailure {
+                    at: file,
+                    why: "an invented 503 from the exchange".to_owned(),
+                };
+                4
+            ]
+        );
+        assert!(snap.unlinked.is_empty());
+        let why = snap.admits_publication(None).expect_err("nothing resolved");
+        assert!(
+            why.starts_with("4 of 4 index file(s) did not resolve"),
+            "{why}"
+        );
     }
 
     #[tokio::test]

@@ -1559,17 +1559,22 @@ fn whole_months(month_end: u32, capped: u32, last: u32) -> Result<u32, SessionEr
         // THE MONTH IS WIDER THAN THE CAP: cut inside it, at the cap.
         return Ok(capped);
     }
+    // ONLY THE CAP ENDS THIS WALK. `end` starts at `month_end <= capped` (the
+    // arm above) and only ever takes a `next` that is `<= capped`, while
+    // `capped < last` (the first arm): so `end < last` holds at every step
+    // and asking it decided nothing. `next` grows by a whole month a step,
+    // so the walk passes `capped` within `cap / 28` steps; a day the
+    // calendar cannot name ends it as a refusal.
     let mut end = month_end;
-    while end < last {
+    loop {
         let next = Day::from_days(end.saturating_add(1))?
             .end_of_month()
             .days_from_epoch();
         if next > capped {
-            break;
+            return Ok(end);
         }
         end = next;
     }
-    Ok(end)
 }
 
 #[cfg(test)]
@@ -1878,6 +1883,37 @@ mod tests {
         let text = SessionError::SessionLengthUnmeasured { days: 18_935 }.to_string();
         assert!(text.contains("18935") && text.contains("length"), "{text}");
     }
+
+    /// **A VENUE WITH NO VERIFIED HOURS FOR A DAY IS REFUSED IN WORDS THAT NAME
+    /// THE VENUE AND THE DAY**, and say the hours were not assumed. Every row
+    /// of the three NSE tables is verified today, so the refusal is held by
+    /// its sentence; the venue and day here are invented.
+    #[test]
+    fn a_venue_with_no_verified_hours_is_named_with_its_day() {
+        let said = SessionError::VenueHoursUnknown {
+            venue: "ZZ venue",
+            days: 20_000,
+        }
+        .to_string();
+        assert!(
+            said.starts_with("ZZ venue states no verified trading hours for day 20000, "),
+            "{said}"
+        );
+        assert!(said.contains("Refused rather than assumed"), "{said}");
+        let widest = SessionError::VenueHoursUnknown {
+            venue: "",
+            days: u32::MAX,
+        }
+        .to_string();
+        assert!(
+            widest.starts_with(" states no verified trading hours for day 4294967295, "),
+            "an empty venue and the widest day are still printed whole: {widest}"
+        );
+        assert_ne!(
+            said,
+            SessionError::SessionLengthUnmeasured { days: 20_000 }.to_string()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1889,7 +1925,7 @@ mod tests {
               test that cannot panic cannot fail."
 )]
 mod month_boundary {
-    use super::{Day, Window, split_window};
+    use super::{Day, SessionError, Window, split_window, whole_months};
 
     fn day(y: u16, m: u8, d: u8) -> Day {
         Day::new(y, m, d).expect("a real calendar date")
@@ -2041,7 +2077,7 @@ mod month_boundary {
         ] {
             let holding = chunks
                 .iter()
-                .find(|c| c.from() <= muhurat && muhurat <= c.to())
+                .find(|c| c.contains(muhurat))
                 .expect("a chunk holds the Muhurat");
             assert_eq!((holding.from(), holding.to()), (from, to), "{muhurat}");
         }
@@ -2050,6 +2086,57 @@ mod month_boundary {
             split_window(window, Some(2000)).expect("splittable").len(),
             2
         );
+    }
+
+    /// **THE WALK OF WHOLE MONTHS STOPS AT THE CAP AND NOWHERE ELSE**, asked of
+    /// `whole_months` directly: the rest of the window when it fits, the cap
+    /// itself inside a month wider than it, and otherwise the last month end
+    /// at or before the cap — across a leap February and a year end. A month
+    /// end past the last day a `Day` can name ends the walk as a refusal.
+    #[test]
+    fn the_walk_of_whole_months_stops_at_the_cap_and_nowhere_else() {
+        let at = |y, m, d| day(y, m, d).days_from_epoch();
+        // THE REST FITS: one request to the window's last day, at and below.
+        assert_eq!(
+            whole_months(at(2024, 1, 31), at(2024, 3, 10), at(2024, 3, 10)),
+            Ok(at(2024, 3, 10))
+        );
+        assert_eq!(
+            whole_months(at(2024, 1, 31), at(2024, 3, 10), at(2024, 2, 5)),
+            Ok(at(2024, 2, 5))
+        );
+        // THE MONTH IS WIDER THAN THE CAP: the cap, one day short of it.
+        assert_eq!(
+            whole_months(at(2024, 1, 31), at(2024, 1, 30), at(2024, 6, 1)),
+            Ok(at(2024, 1, 30))
+        );
+        // THE CAP ON THE MONTH END ITSELF: that month, and no other.
+        assert_eq!(
+            whole_months(at(2024, 1, 31), at(2024, 1, 31), at(2024, 6, 1)),
+            Ok(at(2024, 1, 31))
+        );
+        // A LEAP FEBRUARY IS A WHOLE MONTH; one day short of it is not.
+        assert_eq!(
+            whole_months(at(2024, 1, 31), at(2024, 2, 29), at(2024, 6, 1)),
+            Ok(at(2024, 2, 29))
+        );
+        assert_eq!(
+            whole_months(at(2024, 1, 31), at(2024, 2, 28), at(2024, 6, 1)),
+            Ok(at(2024, 1, 31))
+        );
+        // ACROSS A YEAR END, to the last month end the cap reaches.
+        assert_eq!(
+            whole_months(at(2024, 11, 30), at(2025, 2, 27), at(2026, 1, 1)),
+            Ok(at(2025, 1, 31))
+        );
+        // OUT OF THE BOX, AND BOTH EXTREMES AT ONCE: a cap and a window past
+        // the last day a Day names. The walk asks for the day after
+        // 9999-12-31, and that refusal ends it rather than a wrapped day.
+        let last = at(9999, 12, 31);
+        assert!(matches!(
+            whole_months(last, last + 40, last + 80),
+            Err(SessionError::YearOutOfRange { year: 10_000 })
+        ));
     }
 
     /// A month wider than the cap is the one month a chunk may end inside,
