@@ -85021,8 +85021,11 @@ nothing above is edited.
     until a run happens to reach it.
 24. **D-7152: the seven runs of L-BRED23-14 fell inside seconds (check r8,
     follow-up 1).** Addendum 21 ended a held census read at zero, so a run of
-    `a_census_change_never_blocks_a_request` lasts @@NBRUN@@ where it lasted
-    the read's five seconds, and its seven runs fit in a few seconds: one
+    `a_census_change_never_blocks_a_request` lasts under a second where it
+    lasted the read's five seconds (a whole test process of one run, on the
+    repair-7 tip's binary: 0.69 to 1.00 s, p50 0.78 s, n = 20 at load 47 to
+    50; check r8 read 0.36 to 0.8 s), and its seven runs fit in a few seconds:
+    one
     burst of load failed all seven inside check r8's connection storm ('a
     request waited in every run', max 63 to 97 ms), against 0 of about 400
     runs outside it, and the doc of `NEVER_BLOCKS_RUNS` and L-BRED23-14's
@@ -85032,7 +85035,8 @@ nothing above is edited.
     The never-blocks test passes the read's five seconds
     (`NEVER_BLOCKS_APART`), so its seven sample the machine across more than
     half a minute again, and the cut test passes the same, since a run of it
-    lasts @@CUTRUN@@; the /db view asks pass zero, because a read held for a
+    lasts under half a second (0.39 to 0.52 s a whole process, p50 0.42 s, n =
+    20, the same binary); the /db view asks pass zero, because a read held for a
     minute bounds them and waiting would let it run out. Every bound, every
     count of runs and every other assertion is unchanged, and a run that holds
     costs nothing more. Refused: more runs, which buy the spread with more
