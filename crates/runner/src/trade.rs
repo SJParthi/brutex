@@ -3511,6 +3511,61 @@ mod tests {
     /// NOT HOLD WITH "NO", never a panic or a guess: a reversed range, a range
     /// starting or ending past the slice, and an entry past it or on a slice
     /// with no verdict at all.
+    /// AN ACCEPTED EXIT THAT CANNOT BE FILLED HOLDS THE WINDOW UNPRICED: a
+    /// one-paisa bar passes the bar check and the evaluator, and its fill is
+    /// refused below one tick. The first signal to exit on one holds its
+    /// window without a trade; the next signal, blocked inside that window and
+    /// exiting on a second such bar, is held too and does not move the window.
+    #[test]
+    fn an_accepted_exit_below_one_tick_holds_the_window_unpriced() {
+        let mut bars = crate::synthetic::sessions(6);
+        let first = *Column::build(&bars, &mut evaluator())
+            .sources()
+            .first()
+            .expect("six sessions warm the evaluator");
+        let (entry, exit) = (first + 1, first + 6);
+        for at in [exit, exit + 1] {
+            let bar = bars.get_mut(at).expect("inside the session");
+            *bar = indicators::Candle::new(bar.ts_micros, 1, 1, 1, 1, 1_000, indicators::OI_NULL);
+        }
+        let column = Column::build(&bars, &mut evaluator());
+        assert!(column.accepts(exit) && column.accepts(exit + 1));
+        assert_eq!(column.sources().first(), Some(&first));
+        let walked = walk(&bars, &column, &ConditionMask::ZERO, h(5), Direction::Long);
+        assert!(walked.reconciles());
+        for (signal, held_entry, held_exit) in
+            [(first, entry, exit), (first + 1, entry + 1, exit + 1)]
+        {
+            assert!(
+                walked.occupancy.iter().any(|held| {
+                    (
+                        held.signal_bar,
+                        held.entry_bar,
+                        held.exit_bar,
+                        held.priceable,
+                    ) == (signal, held_entry, held_exit, false)
+                }),
+                "signal {signal} holds {held_entry}..={held_exit} unpriced"
+            );
+            assert!(
+                walked
+                    .trades
+                    .iter()
+                    .all(|trade| trade.entry_bar != held_entry)
+            );
+        }
+        assert!(
+            walked.trades.iter().all(|trade| trade.entry_bar > exit),
+            "the first held window, not the second, decides the next entry"
+        );
+        assert!(
+            walked
+                .trades
+                .iter()
+                .any(|trade| trade.entry_bar == exit + 2)
+        );
+    }
+
     #[test]
     fn a_range_or_entry_outside_the_slice_facts_is_answered_no() {
         let (bars, column) = swept();
