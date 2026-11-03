@@ -2101,11 +2101,18 @@ fn a_signed_month_file_name_is_not_listed_as_a_held_month() {
 /// names, a cursor that is no whole number of seconds and one that overflows
 /// microseconds; and, at once, every slot of the store-read pool taken while
 /// the rung table, the timeline and the day table are each asked a good
-/// question, the timeline's a month with no end day.
+/// question, the timeline's a month with no end day. The crowd runs in a child
+/// process ([`crate::isolated`]): a full pool in this one would refuse every
+/// other sources test of the binary while it stood.
 #[tokio::test]
 async fn a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name() {
-    let _apart = crate::detail::apart_from_slot_owners().await;
+    const CROWD_CHILD: &str = "BRUTEX_TEST_SOURCES_CROWD_CHILD";
     let fx = Fixture::empty("unreadable-questions");
+    if std::env::var_os(CROWD_CHILD).is_some() {
+        crowded_sources_answer_429(&fx).await;
+        println!("SOURCES-CROWD 429 on three doors");
+        return;
+    }
     let long = "S".repeat(25);
     for (route, query, said) in [
         (
@@ -2149,6 +2156,16 @@ async fn a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name() {
             "{route}?{query}: {body}"
         );
     }
+    let out = crate::isolated::rerun(
+        "server::sources::tests::a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name",
+        &[(CROWD_CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(out.contains("SOURCES-CROWD 429 on three doors"), "{out}");
+}
+
+/// The child half of the test above: every slot of the store-read pool taken,
+/// and each sources door asked a question it can read.
+async fn crowded_sources_answer_429(fx: &Fixture) {
     let crowd = crate::detail::crowd(crate::detail::Named::StoreRead);
     for (route, query, named) in [
         (

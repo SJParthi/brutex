@@ -294,15 +294,55 @@ fn every_press_the_routes_accept_runs_to_its_end_and_reads_back() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Names the crowding children's proof folder.
+const CROWD_CHILD: &str = "BRUTEX_TEST_SWEEP_CROWD_CHILD";
+
+/// Runs `body` alone in a child of this test binary (`crate::isolated`): a
+/// crowd of the detail pool in this process would refuse every other test
+/// that reads through it while it stood. The child proves it ran.
+fn in_a_child<F, Fut>(name: &str, body: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if let Some(proof) = std::env::var_os(CROWD_CHILD) {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(body());
+        std::fs::write(proof, b"crowded").expect("the child's proof");
+        return;
+    }
+    let proof = crate::scratch::path(&format!("sweep-crowd-{}", name.len()));
+    let _ = std::fs::remove_file(&proof);
+    let _ = crate::isolated::rerun(name, &[(CROWD_CHILD, proof.as_os_str())]);
+    assert_eq!(
+        std::fs::read(&proof).ok().as_deref(),
+        Some(&b"crowded"[..]),
+        "the child ran {name}"
+    );
+    let _ = std::fs::remove_file(&proof);
+}
+
 /// **EACH PRESS DOOR ANSWERS THROUGH THE DETAIL POOL, AND A FULL POOL IS
 /// SAID** (BASE-COV-API, D-7346). The three handlers the router mounts, not
 /// the `_with` halves every other test calls: in a test build, which carries
 /// no commit stamp, each refuses in the stamp's own words before the slot;
 /// with every slot of the detail pool taken, each says the admission is
 /// unavailable and dispatches nothing. Neither leaves a press in the slot.
-#[tokio::test]
-async fn each_press_door_answers_through_its_pool_and_says_when_it_is_full() {
-    let _apart = crate::detail::apart_from_slot_owners().await;
+#[test]
+fn each_press_door_answers_through_its_pool_and_says_when_it_is_full() {
+    in_a_child(
+        "sweeprun::accepted_tests::each_press_door_answers_through_its_pool_and_says_when_it_is_full",
+        press_doors,
+    );
+}
+
+/// The child half of the test above: alone in its process, so its crowd of
+/// the detail pool refuses no other test.
+async fn press_doors() {
     assert!(
         cli::commit_stamp().is_none(),
         "the premise: a test build carries no commit stamp"
@@ -371,9 +411,16 @@ async fn each_press_door_answers_through_its_pool_and_says_when_it_is_full() {
 /// is gone, the journal's own refusal is said with a `503`; with every slot
 /// of the detail pool taken, the read is not queued and says so. Extremes: the
 /// first durable attempt, and the largest.
-#[tokio::test]
-async fn an_attempt_the_record_cannot_be_asked_for_is_unavailable() {
-    let _apart = crate::detail::apart_from_slot_owners().await;
+#[test]
+fn an_attempt_the_record_cannot_be_asked_for_is_unavailable() {
+    in_a_child(
+        "sweeprun::accepted_tests::an_attempt_the_record_cannot_be_asked_for_is_unavailable",
+        attempt_reads,
+    );
+}
+
+/// The child half of the test above, alone in its process for its crowd.
+async fn attempt_reads() {
     let root = crate::scratch::path("sweep-status-gone");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch root");
