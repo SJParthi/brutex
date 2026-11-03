@@ -51,6 +51,12 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+/// C-FNO-LEV-01: one margin lookup, flat at 1x, 10x and 100x the months held,
+/// its p99 within the design's budget (FNO-LEVERAGE, D-8154). Proof: this
+/// bench, `crates/pull/benches/ratio.rs`, which fails on a ratio or the budget.
+#[path = "ratio/nse_margin.rs"]
+mod nse_margin;
+
 /// C-TSW-01 and C-TSW-02: the tick-store writer per member and a written
 /// day's lookup, flat at 1x, 10x and 100x (R4-08, E2E-02). Proof: this
 /// bench, `crates/pull/benches/ratio.rs`, which runs both and fails on a ratio.
@@ -1855,6 +1861,10 @@ fn main() {
     ok &= gdfl_option_lookup_is_flat();
     ok &= gdfl_stock_lookup_is_flat();
     ok &= day_table::day_lookup_is_flat();
+    println!(
+        "C-FNO-LEV-01 one margin lookup at 1x, 10x, 100x the months held (FNO-LEVERAGE, D-8154)"
+    );
+    ok &= nse_margin::margin_lookup_is_flat();
     ok &= gdfl_second_by_index_is_flat();
     ok &= census_beats_the_scan_it_replaces();
     ok &= entry_lookup_is_flat();

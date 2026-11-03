@@ -772,7 +772,7 @@ fn list_sources(src: &Path) -> Result<Listing, BuildError> {
         match source_file(&name)? {
             None => listing.not_source.push(name),
             Some(file) if file.batch == BATCH => {
-                listing.sources.push((file.day, entry.path(), name))
+                listing.sources.push((file.day, entry.path(), name));
             }
             Some(_) => listing.other_batches.push(name),
         }
@@ -2456,126 +2456,61 @@ mod tests {
         MarginTable::from_bytes(dictionary, &[month]).unwrap_err()
     }
 
+    /// `bytes` with byte `at` set to `value` and the trailer sealed again.
+    fn edited(bytes: &[u8], at: usize, value: u8) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        out[at] = value;
+        reseal(&mut out);
+        out
+    }
+
+    /// `bytes` with one bit of byte `at` flipped and the trailer left alone.
+    fn flipped(bytes: &[u8], at: usize) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        out[at] ^= 1;
+        out
+    }
+
     #[test]
     fn every_corrupt_dictionary_is_refused_by_name() {
         let good = sample();
         let month = good.months[0].1.as_slice();
-        let refused = |edit: &dyn Fn(&mut Vec<u8>), what: &'static str| {
-            let mut bytes = good.dictionary.clone();
-            edit(&mut bytes);
-            assert_eq!(refusal(&bytes, month), corrupt(DICTIONARY, what), "{what}");
-        };
-        refused(
-            &|b| b.truncate(DICTIONARY_HEADER_LEN + DIGEST_LEN - 1),
-            "shorter than its header and digest",
-        );
-        refused(
-            &|b| b[DICTIONARY_HEADER_LEN] ^= 1,
-            "its digest does not match its bytes",
-        );
-        refused(
-            &|b| {
-                b[0] ^= 1;
-                reseal(b)
-            },
-            "wrong magic",
-        );
-        refused(
-            &|b| {
-                b[8] = 2;
-                reseal(b)
-            },
-            "unknown format version",
-        );
-        refused(
-            &|b| {
-                b[20] = 3;
-                reseal(b)
-            },
-            "its length is not its symbol count's",
-        );
-        refused(
-            &|b| {
-                b[12] = 0;
-                reseal(b)
-            },
-            "a span month outside 1 to 12",
-        );
-        refused(
-            &|b| {
-                b[12] = 13;
-                reseal(b)
-            },
-            "a span month outside 1 to 12",
-        );
-        refused(
-            &|b| {
-                b[16] = 13;
-                reseal(b)
-            },
-            "a span month outside 1 to 12",
-        );
-        refused(
-            &|b| {
-                b[16] = 5;
-                reseal(b)
-            },
-            "its span ends before it starts",
-        );
+        let d = good.dictionary.as_slice();
         let name = DICTIONARY_HEADER_LEN;
         let not_a_name = "a name that is not a symbol as written";
-        refused(
-            &|b| {
-                b[name] = b'z';
-                reseal(b)
-            },
-            not_a_name,
-        );
-        refused(
-            &|b| {
-                b[name + 5] = b'Z';
-                reseal(b)
-            },
-            not_a_name,
-        );
-        refused(
-            &|b| {
-                b[name + 1] = b'.';
-                reseal(b)
-            },
-            not_a_name,
-        );
-        refused(
-            &|b| {
-                b[name] = 0;
-                reseal(b)
-            },
-            not_a_name,
-        );
-        refused(
-            &|b| {
-                b[name] = 0xFF;
-                reseal(b)
-            },
-            not_a_name,
-        );
-        refused(
-            &|b| {
-                b[name + SYMBOL_CAPACITY + 2] = b'A';
-                reseal(b)
-            },
-            "names not strictly sorted",
-        );
-        refused(
-            &|b| {
-                b[name + 2] = b'C';
-                reseal(b)
-            },
-            "names not strictly sorted",
-        );
+        let cases: [(Vec<u8>, &'static str); 16] = [
+            (
+                d[..DICTIONARY_HEADER_LEN + DIGEST_LEN - 1].to_vec(),
+                "shorter than its header and digest",
+            ),
+            (
+                flipped(d, DICTIONARY_HEADER_LEN),
+                "its digest does not match its bytes",
+            ),
+            (edited(d, 0, d[0] ^ 1), "wrong magic"),
+            (edited(d, 8, 2), "unknown format version"),
+            (edited(d, 20, 3), "its length is not its symbol count's"),
+            (edited(d, 12, 0), "a span month outside 1 to 12"),
+            (edited(d, 12, 13), "a span month outside 1 to 12"),
+            (edited(d, 16, 13), "a span month outside 1 to 12"),
+            (edited(d, 16, 5), "its span ends before it starts"),
+            (edited(d, name, b'z'), not_a_name),
+            (edited(d, name + 5, b'Z'), not_a_name),
+            (edited(d, name + 1, b'.'), not_a_name),
+            (edited(d, name, 0), not_a_name),
+            (edited(d, name, 0xFF), not_a_name),
+            (
+                edited(d, name + SYMBOL_CAPACITY + 2, b'A'),
+                "names not strictly sorted",
+            ),
+            (edited(d, name + 2, b'C'), "names not strictly sorted"),
+        ];
+        for (bytes, what) in cases {
+            assert_eq!(refusal(&bytes, month), corrupt(DICTIONARY, what), "{what}");
+        }
         let none: [&[u8]; 0] = [];
         assert_eq!(
-            MarginTable::from_bytes(&good.dictionary, &none).unwrap_err(),
+            MarginTable::from_bytes(d, &none).unwrap_err(),
             corrupt(DICTIONARY, "its span is not the months given")
         );
     }
@@ -2583,73 +2518,36 @@ mod tests {
     #[test]
     fn every_corrupt_month_is_refused_by_name() {
         let good = sample();
-        let refused = |edit: &dyn Fn(&mut Vec<u8>), what: &'static str| {
-            let mut bytes = good.months[0].1.clone();
-            edit(&mut bytes);
+        let m = good.months[0].1.as_slice();
+        let another = "its header names another month";
+        let cases: [(Vec<u8>, &'static str); 9] = [
+            (
+                m[..m.len() - 1].to_vec(),
+                "its length is not the dictionary's stride",
+            ),
+            (
+                flipped(m, MONTH_HEADER_LEN),
+                "its digest does not match its bytes",
+            ),
+            (edited(m, 0, m[0] ^ 1), "wrong magic"),
+            (edited(m, 8, 2), "unknown format version"),
+            (edited(m, 10, m[10] ^ 1), another),
+            (edited(m, 12, 7), another),
+            (edited(m, 16, 3), "its symbol count is not the dictionary's"),
+            (
+                edited(m, 24, m[24] ^ 1),
+                "it was built against another dictionary",
+            ),
+            (edited(m, 23, 0x40), "a held day past the month's end"),
+        ];
+        for (bytes, what) in cases {
             assert_eq!(
                 refusal(&good.dictionary, &bytes),
                 corrupt("2020-06.nsm", what),
                 "{what}"
             );
-        };
-        refused(
-            &|b| b.truncate(b.len() - 1),
-            "its length is not the dictionary's stride",
-        );
-        refused(
-            &|b| b[MONTH_HEADER_LEN] ^= 1,
-            "its digest does not match its bytes",
-        );
-        refused(
-            &|b| {
-                b[0] ^= 1;
-                reseal(b)
-            },
-            "wrong magic",
-        );
-        refused(
-            &|b| {
-                b[8] = 2;
-                reseal(b)
-            },
-            "unknown format version",
-        );
-        refused(
-            &|b| {
-                b[10] ^= 1;
-                reseal(b)
-            },
-            "its header names another month",
-        );
-        refused(
-            &|b| {
-                b[12] = 7;
-                reseal(b)
-            },
-            "its header names another month",
-        );
-        refused(
-            &|b| {
-                b[16] = 3;
-                reseal(b)
-            },
-            "its symbol count is not the dictionary's",
-        );
-        refused(
-            &|b| {
-                b[24] ^= 1;
-                reseal(b)
-            },
-            "it was built against another dictionary",
-        );
-        refused(
-            &|b| {
-                b[23] = 0x40;
-                reseal(b)
-            },
-            "a held day past the month's end",
-        );
-        assert!(MarginTable::from_bytes(&good.dictionary, &[good.months[0].1.as_slice()]).is_ok());
+        }
+        assert!(MarginTable::from_bytes(&good.dictionary, &[m]).is_ok());
     }
 
     #[test]
