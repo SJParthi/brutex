@@ -1898,3 +1898,7 @@ mod tests {
         assert!(worst(&large.by_old, &all_olds) <= 4);
     }
 }
+
+#[cfg(test)]
+#[path = "alias_cover_tests.rs"]
+mod cover_tests;
