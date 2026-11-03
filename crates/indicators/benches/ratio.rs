@@ -62,6 +62,15 @@ use indicators::pattern::Thresholds;
 use indicators::vwap::{Availability, ITERATION_CEILING, isqrt_i128, isqrt_i128_counted};
 use indicators::{Candle, OI_NULL};
 
+// ---- PSRB indicator parts (state/strategy-psrb-20261103/PARTS.md 2.3). One slot per
+// ---- part; each part inserts its bench module (the path attribute naming
+// ---- benches/ratio/psrb_<x>.rs and its mod line) directly under its slot.
+// slot bench-mod PSRB-RSI
+
+// slot bench-mod PSRB-BOLL
+
+// slot bench-mod PSRB-STV
+
 // ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
 // ---- part; each part inserts its bench module (the path attribute naming
 // ---- benches/ratio/fno_<x>.rs and its mod line) directly under its slot.
@@ -765,6 +774,16 @@ fn main() {
         the_column_costs_the_same_per_bar_however_long_it_is(),
         a_known_step_stays_within_its_budget(),
     ];
+    // PSRB rows (state/strategy-psrb-20261103/PARTS.md 2.3): each part puts one statement
+    // directly under its own slot, in the form the F&O rows below take, naming its own
+    // module and ids: `.chain([psrb_<x>::row(floor, &["C-PSRB-<CODE>-01", ...])])`.
+    // They run before the F&O rows, fold into the same check, and are not counted in ROWS.
+    // slot bench-row PSRB-RSI
+
+    // slot bench-row PSRB-BOLL
+
+    // slot bench-row PSRB-STV
+
     // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). `verdicts` is typed
     // `[bool; ROWS]`, so a row inside the array would make every part edit the one
     // `ROWS` line. Each part instead puts one statement directly under its slot and
