@@ -305,8 +305,17 @@ fn an_index_or_ledger_that_is_no_regular_file_is_refused_by_name() {
     ));
 }
 
+/// Root opens a mode-000 file, so the host's refusal runs only where the mode
+/// bits bind: re-run as `nobody` when this process is root (D-0995).
 #[test]
 fn an_index_the_host_will_not_open_is_refused_with_the_hosts_kind() {
+    crate::support::where_permission_binds(
+        "quarantine::cover_tests::an_index_the_host_will_not_open_is_refused_with_the_hosts_kind",
+        an_index_the_host_will_not_open_is_refused_with_the_hosts_kind_body,
+    );
+}
+
+fn an_index_the_host_will_not_open_is_refused_with_the_hosts_kind_body() {
     let store = Scratch::new("denied");
     store.audit();
     let index = index_path(&store.0, FEED);

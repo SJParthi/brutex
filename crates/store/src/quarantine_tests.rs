@@ -1221,8 +1221,18 @@ fn a_torn_append_ended_by_the_next_writer_is_not_damage() {
 /// synced, then the index publish was refused. Before, the readers read the
 /// month as clear and the rerun answered `already_dropped` without indexing
 /// it, so the stored sweep never refused what `/store.json` called dropped.
+///
+/// Root renames into a mode-0555 directory, so the body runs where the mode
+/// bits bind: re-run as `nobody` when this process is root (D-0995).
 #[test]
 fn an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply() {
+    crate::support::where_permission_binds(
+        "quarantine::tests::an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply",
+        an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply_body,
+    );
+}
+
+fn an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply_body() {
     let store = Store::new("publish-refused-drop");
     let rows: Vec<Bar> = (0..6).map(|i| bar(i, 4_211)).collect();
     // An earlier act: the lock, the ledger and the index all exist.
@@ -1269,8 +1279,18 @@ fn an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply()
 /// BLOCKING 2, a month recorded whole: before, the readers served every bar
 /// of a month the ledger (and so `/store.json`) recorded whole, until a rerun
 /// wrote a second whole line.
+///
+/// Re-run as `nobody` when this process is root, for the same reason as the
+/// dropped-month case above (D-0995).
 #[test]
 fn an_index_publish_refused_after_a_whole_line_is_finished_by_the_next_apply() {
+    crate::support::where_permission_binds(
+        "quarantine::tests::an_index_publish_refused_after_a_whole_line_is_finished_by_the_next_apply",
+        an_index_publish_refused_after_a_whole_line_is_finished_by_the_next_apply_body,
+    );
+}
+
+fn an_index_publish_refused_after_a_whole_line_is_finished_by_the_next_apply_body() {
     let store = Store::new("publish-refused-whole");
     let rows: Vec<Bar> = (0..3).map(|i| bar(i, 4_407)).collect();
     let first = minute("QFIXZ", march());
