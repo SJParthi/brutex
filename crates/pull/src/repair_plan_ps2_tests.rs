@@ -344,3 +344,32 @@ fn a_day_whose_windows_fail_to_read_after_it_was_counted_is_refused_by_its_judge
     assert!(month.short.is_empty());
     let _cleanup = std::fs::remove_dir_all(&root);
 }
+
+/// PS2 (D-7336): A SESSION NOT OWED WHOSE BARS FAIL TO READ is refused by that
+/// day, never excused: an excused session names the bars held on it, and a
+/// count that could not be made is no count. FORCEMOT's NSE interruption
+/// (2023-10-26..=2024-02-13, `docs/00-charter.md`) excuses 2024-02-01; every
+/// bar here is invented.
+#[test]
+fn a_session_not_owed_whose_bars_fail_to_read_is_refused_not_excused() {
+    let root = scratch("cut-not-owed");
+    let february = PathParts {
+        segment: "CASH",
+        symbol: "FORCEMOT",
+        ..parts(YearMonth::new(2024, 2).unwrap())
+    };
+    drop(month_file(&root, february, &session_of(day(2024, 2, 14))));
+    let window = Window::new(day(2024, 2, 1), day(2024, 2, 29)).unwrap();
+    // WHOLE, THE MONTH EXCUSES ITS NINE SESSIONS BEFORE THE 14TH.
+    let [whole] = plan(&root, february, window).try_into().unwrap();
+    assert_eq!(whole.refused, None);
+    assert_eq!(whole.not_owed.len(), 9, "{:?}", whole.not_owed);
+    // CUT AFTER IT OPENS, IT IS REFUSED BY THE FIRST OF THEM.
+    seam::plant("repair.opened", cut_to_header);
+    let [month] = plan(&root, february, window).try_into().unwrap();
+    let why = month.refused.as_deref().unwrap();
+    assert!(why.starts_with("2024-02-01: "), "{why}");
+    assert_eq!((month.sessions, month.held), (0, 0), "no owed session yet");
+    assert!(month.not_owed.is_empty(), "{:?}", month.not_owed);
+    let _cleanup = std::fs::remove_dir_all(&root);
+}
