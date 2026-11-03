@@ -4582,3 +4582,10 @@ fn text_at(image: &[u8; IMAGE_LEN], start: usize, len: usize) -> Option<&str> {
 #[cfg(test)]
 #[path = "manifest_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL-PS1 (D-7335): the census format's refusals no test reached:
+// capacities past the field, epoch names, magics, reserved bytes, a foreign
+// row on load, the last generation, an epoch below zero.
+#[cfg(test)]
+#[path = "manifest_ps1_tests.rs"]
+mod ps1_tests;
