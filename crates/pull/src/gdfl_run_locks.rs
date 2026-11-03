@@ -1433,3 +1433,10 @@ pub fn stop_names_run(path: &Path, run: u64) -> bool {
 #[cfg(test)]
 #[path = "gdfl_run_locks_cov_tests.rs"]
 mod cov_tests;
+
+// BASE-COV-PULL-PS1 (D-7335): the run locks' refusals no test reached: a lock
+// replaced or left holding bytes, another layout, a full descriptor table, an
+// executable whose name is gone, a sidecar cut short.
+#[cfg(test)]
+#[path = "gdfl_run_locks_ps1_tests.rs"]
+mod ps1_tests;
