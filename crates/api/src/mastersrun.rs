@@ -1152,6 +1152,12 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("the refusal's words");
         assert!(refusal.contains(&said), "{mode}: no {said:?} in {refusal}");
+        the_doors_that_find_the_masters(&site, &mode, &said);
+        std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
+    }
+
+    /// The refresh child's two doors that find the masters directory themselves.
+    fn the_doors_that_find_the_masters(site: &crate::server::Loaded, mode: &str, said: &str) {
         // WITH NO USABLE HOME AND NO BRUTEX_MASTERS THE DOORS THAT FIND THE
         // MASTERS THEMSELVES SAY SO, before any fetch (D-7346): the status
         // answer and the refresh's own work, both 503 in the same words. Only
@@ -1198,7 +1204,6 @@ mod tests {
                 "{mode}: one row a source: {body}"
             );
         }
-        std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
     }
 
     /// **A REFRESH THAT COULD NOT READ THE CREDENTIAL LANDS THE PUBLIC MASTERS
