@@ -4256,10 +4256,11 @@ fn the_needles_readers_answer_at_their_edges() {
 /// no `#[path]` keeps the first one's file; an inner attribute's naming is
 /// shipped code, and an inner `cfg_attr` path is refused by name, as an outer
 /// one on an inline module is; a bare `#[test]` on a parameter exempts
-/// nothing; a naming inside an attribute beside `#[cfg(test)]` is test code;
-/// `#[macro_use]` on an `extern` block loads no crate, and on an `extern
-/// crate` inside a test module it is test code; and a point inside a
-/// function's signature is not directly in a module's body.
+/// nothing; a naming inside an attribute beside `#[cfg(test)]` is test code,
+/// and so is one inside an attribute within a test module; `#[macro_use]` on
+/// an `extern` block loads no crate, and on an `extern crate` inside a test
+/// module it is test code; and a point inside a function's signature is not
+/// directly in a module's body.
 #[test]
 fn a_pass_records_what_the_rarer_placements_hold() {
     let named = "names the process-spawning type";
@@ -4304,6 +4305,11 @@ fn a_pass_records_what_the_rarer_placements_hold() {
         scanned("#[cfg(test)]\nmod tests {\n    #[macro_use]\n    extern crate x;\n}\n");
     assert!(crate_in_tests.found.is_empty());
     assert_eq!(crate_in_tests.in_tests, 1);
+    let within = scanned(&format!(
+        "#[cfg(test)]\nmod t {{\n    #[m({MODULE}::{TYPE})]\n    fn f() {{}}\n}}\n"
+    ));
+    assert!(within.found.is_empty());
+    assert_eq!(within.in_tests, 1);
 
     let inline: [String; 0] = [];
     let mut at = Nesting::new(&inline);
