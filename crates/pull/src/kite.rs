@@ -248,3 +248,8 @@ impl fmt::Display for KiteException {
 fn read(name: &str) -> Option<Disposition> {
     KiteException::from_wire(name).map(KiteException::disposition)
 }
+
+// BASE-COV-PULL repair 2 (D-7334): every exception said by its wire name.
+#[cfg(test)]
+#[path = "kite_cov_tests.rs"]
+mod cov_tests;
