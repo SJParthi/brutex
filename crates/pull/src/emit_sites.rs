@@ -2173,7 +2173,9 @@ fn every_emit_site_in_this_crate_reaches_a_file_body() {
     assert!(
         said.is_empty(),
         "three ids from a healthy ledger and claims must say neither warning: {:?}",
-        said.iter().map(|record| &record.message).collect::<Vec<_>>()
+        said.iter()
+            .map(|record| &record.message)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -2310,10 +2312,7 @@ fn drive_census_degraded(scratch: &Scratch) {
     // AND A SECOND RUN, which opens the damaged census.
     let after = ingest_complete_session(scratch);
     assert!(
-        after
-            .failures
-            .iter()
-            .any(|f| f.why.contains("DEGRADED")),
+        after.failures.iter().any(|f| f.why.contains("DEGRADED")),
         "a census that stepped over a generation is a named failure, not a \
          silent one: {:?}",
         after.failures
