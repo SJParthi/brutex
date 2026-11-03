@@ -1365,3 +1365,8 @@ mod tests;
 #[cfg(test)]
 #[path = "month_summary_cover_tests.rs"]
 mod cover_tests;
+
+/// The decoder's refusals no other test reached (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "month_summary_decode_cover_tests.rs"]
+mod decode_cover_tests;
