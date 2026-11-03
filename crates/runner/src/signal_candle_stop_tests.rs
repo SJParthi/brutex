@@ -938,3 +938,559 @@ fn a_canonical_word_outside_its_values_is_refused() {
     bytes.get_mut(..8).unwrap().copy_from_slice(b"BRSCXX01");
     assert_eq!(Trade::decode(&bytes), Err(Error::Encoding));
 }
+
+// BASE-COV-LIBS-LS2: every refusal arm of the four record codecs and of the
+// source check, each reached by a record or source that breaks exactly that
+// one rule and keeps every rule checked before it.
+
+/// A long trade stopped at minute 40 (09:55 IST): the stop is the signal
+/// candle's low, BASE - 1000, and minute 40 prints a low of BASE - 1100.
+fn stopped_long() -> Trade {
+    let mut fixture = Fixture::new(1, 30);
+    fixture.set(40, BASE, BASE + 10, BASE - 1100, BASE);
+    let trade = exact_trade(&fixture.evaluate(Direction::Long));
+    assert_eq!(trade.exit_reason, ExitReason::Stop);
+    assert_eq!(
+        (trade.optimistic_paisa, trade.pessimistic_paisa),
+        (-1000, -1100)
+    );
+    assert_eq!(trade.holding_minutes, 10);
+    trade
+}
+
+/// A long trade closed at the exact 15:10 print.
+fn forced_long() -> Trade {
+    let trade = exact_trade(&Fixture::new(1, 30).evaluate(Direction::Long));
+    assert_eq!(trade.exit_reason, ExitReason::Forced1510);
+    trade
+}
+
+/// A canonical record with one eight-byte word, counted after the
+/// eight-byte magic, replaced.
+fn with_word<const B: usize>(mut bytes: [u8; B], word: usize, value: u64) -> [u8; B] {
+    bytes
+        .get_mut(8 + word * 8..16 + word * 8)
+        .unwrap()
+        .copy_from_slice(&value.to_le_bytes());
+    bytes
+}
+
+/// Every case is refused as an encoding fault, never read back as a trade.
+fn assert_each_trade_refused(cases: &[(&str, Trade)]) {
+    for (what, row) in cases {
+        assert_eq!(
+            Trade::decode(&row.canonical_bytes()),
+            Err(Error::Encoding),
+            "{what}"
+        );
+    }
+}
+
+/// EACH RULE OF A STOP-EXIT RECORD REFUSES: a record that keeps every other
+/// rule the decoder checks and breaks one is never read back as a trade. The
+/// one exception is a later-day exit, which is also past its entry day's 15:09
+/// close and so breaks two rules at once: a later IST day starts after it.
+#[test]
+fn a_stop_exit_record_that_breaks_one_rule_is_refused() {
+    let stop = stopped_long();
+    assert_eq!(Trade::decode(&stop.canonical_bytes()), Ok(stop));
+    let late = stamp(355);
+    let late_hold = u64::try_from((late + MINUTE - stop.entry_micros) / MINUTE).unwrap();
+    assert_each_trade_refused(&[
+        (
+            "an exit on a later day than its entry",
+            Trade {
+                exit_bar_micros: stop.exit_bar_micros + DAY,
+                ..stop
+            },
+        ),
+        (
+            "a stop exit observed after its bar opened",
+            Trade {
+                exit_from_micros: stop.exit_from_micros + 1,
+                ..stop
+            },
+        ),
+        (
+            "a stop exit that does not end with its minute",
+            Trade {
+                exit_until_micros: stop.exit_until_micros + 1,
+                ..stop
+            },
+        ),
+        (
+            "a stop exit that did not lose",
+            Trade {
+                optimistic_exit_paisa: stop.entry_paisa,
+                optimistic_paisa: 0,
+                ..stop
+            },
+        ),
+        (
+            "an entry off the minute grid",
+            Trade {
+                entry_bar: stop.entry_bar + 1,
+                entry_micros: stop.entry_micros + 1,
+                signal_close_micros: stop.signal_close_micros + 1,
+                holding_minutes: stop.holding_minutes - 1,
+                ..stop
+            },
+        ),
+        (
+            "an exit off the minute grid",
+            Trade {
+                exit_bar_micros: stop.exit_bar_micros + 1,
+                exit_from_micros: stop.exit_from_micros + 1,
+                exit_until_micros: stop.exit_until_micros + 1,
+                ..stop
+            },
+        ),
+        (
+            "a stop exit after the 15:09 closing minute",
+            Trade {
+                exit_bar: stop.entry_bar + late_hold - 1,
+                exit_bar_micros: late,
+                exit_from_micros: late,
+                exit_until_micros: late + MINUTE,
+                holding_minutes: late_hold,
+                ..stop
+            },
+        ),
+    ]);
+}
+
+/// EACH RULE OF A FORCED-CLOSE RECORD REFUSES, and an entry exactly at its
+/// stop has no side to price whichever exit it took.
+#[test]
+fn a_forced_close_record_that_breaks_one_rule_is_refused() {
+    let forced = forced_long();
+    assert_eq!(Trade::decode(&forced.canonical_bytes()), Ok(forced));
+    assert_each_trade_refused(&[
+        (
+            "a forced close one minute before 15:10",
+            Trade {
+                exit_bar: forced.exit_bar - 1,
+                exit_bar_micros: forced.exit_bar_micros - MINUTE,
+                exit_from_micros: forced.exit_from_micros - MINUTE,
+                exit_until_micros: forced.exit_until_micros - MINUTE,
+                holding_minutes: forced.holding_minutes - 1,
+                ..forced
+            },
+        ),
+        (
+            "a forced close read at two prices",
+            Trade {
+                pessimistic_exit_paisa: forced.optimistic_exit_paisa - 1,
+                pessimistic_paisa: forced.pessimistic_paisa - 1,
+                ..forced
+            },
+        ),
+        (
+            "a forced close marked as a gap",
+            Trade {
+                gapped: true,
+                ..forced
+            },
+        ),
+        (
+            "an entry exactly at its stop, which has no side",
+            Trade {
+                stop_paisa: forced.entry_paisa,
+                ..forced
+            },
+        ),
+    ]);
+}
+
+/// EACH DISPOSITION RULE OF AN EVENT RECORD REFUSES ON ITS OWN, including a
+/// version word no writer emits and a priced event with a missing coordinate.
+#[test]
+fn an_event_record_that_breaks_one_disposition_rule_is_refused() {
+    let result = Fixture::new(1, 30).evaluate(Direction::Long);
+    let event = *result.events().first().unwrap();
+    assert_eq!(event.reason, Reason::None);
+    assert!(event.entry_bar.is_some() && event.occupied_through_micros.is_some());
+    assert_eq!(Event::decode(&event.canonical_bytes()), Ok(event));
+    // Word 5 is the version; only 1 exists.
+    for version in [0, 2, u64::MAX] {
+        let bytes = with_word(event.canonical_bytes(), 5, version);
+        assert_eq!(Event::decode(&bytes), Err(Error::Encoding), "{version}");
+    }
+    let close = event.signal_close_micros;
+    let cases = [
+        (
+            "a signal that opens at its own close",
+            Event {
+                signal_micros: close,
+                ..event
+            },
+        ),
+        (
+            "a stop of zero",
+            Event {
+                stop_paisa: 0,
+                ..event
+            },
+        ),
+        (
+            "an entry at another instant than the signal's close",
+            Event {
+                entry_micros: Some(close + MINUTE),
+                ..event
+            },
+        ),
+        (
+            "an occupation that ends before the entry",
+            Event {
+                occupied_through_micros: Some(close - 1),
+                ..event
+            },
+        ),
+        (
+            "a priced event with no trade",
+            Event {
+                trade_index: None,
+                ..event
+            },
+        ),
+        (
+            "a trade with no entry coordinate",
+            Event {
+                entry_bar: None,
+                entry_micros: None,
+                ..event
+            },
+        ),
+        (
+            "a trade with no occupied minute",
+            Event {
+                occupied_through_micros: None,
+                ..event
+            },
+        ),
+    ];
+    for (what, row) in cases {
+        assert_eq!(
+            Event::decode(&row.canonical_bytes()),
+            Err(Error::Encoding),
+            "{what}"
+        );
+    }
+}
+
+/// EACH COUNT RULE OF A PERIOD RECORD REFUSES ON ITS OWN, including counts
+/// that would overflow and money on a day that traded nothing.
+#[test]
+fn a_period_record_that_breaks_one_count_rule_is_refused() {
+    let day = Period {
+        day: LAST_DAY,
+        offered_bars: 375,
+        accepted_bars: 375,
+        unavailable_minutes: 0,
+        close_verified: true,
+        trades: 1,
+        wins: 0,
+        optimistic_paisa: -1000,
+        pessimistic_paisa: -1100,
+        refused: 0,
+        signals: 1,
+    };
+    assert_eq!(Period::decode(&day.canonical_bytes()), Ok(day));
+    let quiet = Period {
+        trades: 0,
+        optimistic_paisa: 0,
+        pessimistic_paisa: 0,
+        ..day
+    };
+    assert_eq!(Period::decode(&quiet.canonical_bytes()), Ok(quiet));
+    // Word 4 is the close flag; only 0 and 1 exist.
+    let bytes = with_word(day.canonical_bytes(), 4, 2);
+    assert_eq!(Period::decode(&bytes), Err(Error::Encoding));
+    let cases = [
+        (
+            "a day that offered no bar",
+            Period {
+                offered_bars: 0,
+                accepted_bars: 0,
+                ..day
+            },
+        ),
+        (
+            "more bars accepted than offered",
+            Period {
+                accepted_bars: 376,
+                ..day
+            },
+        ),
+        ("more wins than trades", Period { wins: 2, ..day }),
+        (
+            "more trades and refusals than signals",
+            Period { refused: 1, ..day },
+        ),
+        (
+            "a trade count that overflows with its refusals",
+            Period {
+                trades: u64::MAX,
+                refused: 1,
+                ..day
+            },
+        ),
+        (
+            "a pessimistic total above the optimistic one",
+            Period {
+                pessimistic_paisa: -900,
+                ..day
+            },
+        ),
+        (
+            "an optimistic total on a day with no trade",
+            Period {
+                optimistic_paisa: 5,
+                ..quiet
+            },
+        ),
+        (
+            "a pessimistic total on a day with no trade",
+            Period {
+                pessimistic_paisa: -5,
+                ..quiet
+            },
+        ),
+    ];
+    for (what, row) in cases {
+        assert_eq!(
+            Period::decode(&row.canonical_bytes()),
+            Err(Error::Encoding),
+            "{what}"
+        );
+    }
+}
+
+/// EACH ACCOUNTING RULE OF A METRICS RECORD REFUSES ON ITS OWN, including
+/// money with no trade behind it. A sign rule is broken on a one-trade record,
+/// so the no-trade money rule cannot be what refuses it.
+#[test]
+fn a_metrics_record_that_breaks_one_accounting_rule_is_refused() {
+    let none = Metrics::default();
+    assert_eq!(Metrics::decode(&none.canonical_bytes()), Ok(none));
+    let one = Metrics {
+        trades: 1,
+        stopped: 1,
+        holding_minutes: 1,
+        ..none
+    };
+    assert_eq!(Metrics::decode(&one.canonical_bytes()), Ok(one));
+    let cases = [
+        ("a win with no trade", Metrics { wins: 1, ..none }),
+        ("a stop with no trade", Metrics { stopped: 1, ..none }),
+        (
+            "a stop gap with no stop",
+            Metrics {
+                stop_gaps: 1,
+                ..none
+            },
+        ),
+        (
+            "an optimistic total below the pessimistic one",
+            Metrics {
+                optimistic_paisa: -1,
+                ..one
+            },
+        ),
+        (
+            "a negative drawdown",
+            Metrics {
+                drawdown_paisa: -1,
+                ..one
+            },
+        ),
+        (
+            "a negative adverse excursion",
+            Metrics {
+                adverse_paisa: -1,
+                ..one
+            },
+        ),
+        (
+            "a negative favourable excursion",
+            Metrics {
+                favourable_paisa: -1,
+                ..one
+            },
+        ),
+        (
+            "a trade that held no minute",
+            Metrics {
+                holding_minutes: 0,
+                ..one
+            },
+        ),
+        (
+            "a drawdown with no trade",
+            Metrics {
+                drawdown_paisa: 5,
+                ..none
+            },
+        ),
+    ];
+    for (what, row) in cases {
+        assert_eq!(
+            Metrics::decode(&row.canonical_bytes()),
+            Err(Error::Encoding),
+            "{what}"
+        );
+    }
+}
+
+/// A FREQUENCY RUN HAS NO TRADING IDENTITY, and only the eight intraday
+/// labels have a canonical name.
+#[test]
+fn an_undirected_run_id_and_an_unknown_timeframe_are_refused_by_scope() {
+    let fixture = Fixture::new(1, 30);
+    let prepared = fixture.prepared();
+    assert_eq!(
+        prepared.run_id(&always(), Direction::Undirected),
+        Err(Error::Scope)
+    );
+    assert!(prepared.run_id(&always(), Direction::Long).is_ok());
+    for label in [
+        "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min",
+    ] {
+        assert_eq!(canonical_timeframe(label), Ok(label));
+        assert!(timeframe_micros(label).is_ok());
+    }
+    for label in ["", "4min", "1day", "60MIN", "1min "] {
+        assert_eq!(canonical_timeframe(label), Err(Error::Scope), "{label}");
+        assert_eq!(timeframe_micros(label), Err(Error::Scope), "{label}");
+    }
+}
+
+/// One edit of a signal bar the column's last row reads, with what it breaks.
+type SignalEdit = (&'static str, fn(&mut Candle));
+
+/// The source error `Prepared::new` answers, if any.
+fn refused_source(source: Source<'_>) -> Option<Error> {
+    Prepared::new(Policy::V1, source).err()
+}
+
+/// THE SIGNAL SIDE IS CHECKED BEFORE ANY ALIGNMENT: nothing to read, a
+/// column that is not a signal column, bars out of order, and a row whose
+/// signal bar is unlike the bar it was folded from (the caller hands both, so
+/// the evaluator's own refusals do not cover them).
+#[test]
+fn a_signal_side_that_is_empty_unsorted_or_unlike_its_rows_is_refused() {
+    let fixture = Fixture::new(1, 30);
+    assert!(Prepared::new(Policy::V1, fixture.source()).is_ok());
+    // The empty signal side carries a column folded from no bar, so its
+    // acceptance covers it exactly and only the emptiness can refuse it.
+    let nothing = column(&[]);
+    assert!(nothing.acceptance_covers(0));
+    assert_eq!(
+        refused_source(Source {
+            signal_bars: &[],
+            signal_column: &nothing,
+            ..fixture.source()
+        }),
+        Some(Error::Source)
+    );
+    // A column already projected onto fill bars is not a signal column.
+    let width = fixture.column.len();
+    let (fill, _) = fixture.column.reproject(&vec![None; width], width).unwrap();
+    assert_eq!(fill.sourced(), Sourced::Fill);
+    assert_eq!(
+        refused_source(Source {
+            signal_column: &fill,
+            ..fixture.source()
+        }),
+        Some(Error::Source)
+    );
+    // Signal bars whose last row repeats the stamp before it.
+    let mut repeated = fixture.signals.clone();
+    let before = repeated.get(repeated.len() - 2).unwrap().ts_micros;
+    repeated.last_mut().unwrap().ts_micros = before;
+    assert_eq!(
+        refused_source(Source {
+            signal_bars: &repeated,
+            ..fixture.source()
+        }),
+        Some(Error::Source)
+    );
+    let row = *fixture.column.sources().last().unwrap();
+    let edits: [SignalEdit; 4] = [
+        ("off the minute grid", |bar| bar.ts_micros += 1),
+        ("no close instant", |bar| {
+            bar.ts_micros = i64::MAX / MINUTE * MINUTE;
+        }),
+        ("a low of zero", |bar| bar.low = 0),
+        ("a high below its low", |bar| bar.high = bar.low - 1),
+    ];
+    for (what, edit) in edits {
+        let mut signals = fixture.signals.clone();
+        edit(signals.get_mut(row).unwrap());
+        assert_eq!(
+            refused_source(Source {
+                signal_bars: &signals,
+                ..fixture.source()
+            }),
+            Some(Error::Source),
+            "{what}"
+        );
+    }
+}
+
+/// THE EXECUTION SIDE IS CHECKED BEFORE ANY ALIGNMENT: no bar, bars or
+/// context out of order, a context bar past the last placeable instant, and
+/// a context that does not hold the execution bars it claims to.
+#[test]
+fn an_execution_side_that_is_empty_unsorted_or_not_its_context_is_refused() {
+    let fixture = Fixture::new(1, 30);
+    let series = |bars| {
+        ExecutionSeriesV1::new(
+            &fixture.key,
+            "generated-test-feed",
+            "generated-test-commit",
+            [7; 32],
+            bars,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        refused_source(Source {
+            series: series(&[]),
+            ..fixture.source()
+        }),
+        Some(Error::Source)
+    );
+    let mut swapped = fixture.bars.clone();
+    swapped.swap(10, 11);
+    let mut beyond = fixture.bars.clone();
+    let mut last = *beyond.last().unwrap();
+    last.ts_micros = i64::MAX;
+    beyond.push(last);
+    let mut edited = fixture.bars.clone();
+    edited.get_mut(100).unwrap().close += 1;
+    for (what, context) in [
+        ("out of order", &swapped),
+        ("past the last placeable instant", &beyond),
+        ("not the execution bars", &edited),
+    ] {
+        assert_eq!(
+            refused_source(Source {
+                minute_context: context,
+                ..fixture.source()
+            }),
+            Some(Error::Source),
+            "{what}"
+        );
+    }
+    // COMBINED: the execution bars and their context agree with each other,
+    // and both are out of order.
+    assert_eq!(
+        refused_source(Source {
+            series: series(&swapped),
+            minute_context: &swapped,
+            ..fixture.source()
+        }),
+        Some(Error::Source)
+    );
+}
