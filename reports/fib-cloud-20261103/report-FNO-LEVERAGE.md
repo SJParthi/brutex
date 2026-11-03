@@ -157,8 +157,16 @@ The two line figures differ because the report also counts, as separate function
 Every missed line and branch is the self-checking bench's own failing-check arm, which R2 excuses, named for this file:
 - line 118, `refuse("the invented table does not answer as built")`;
 - branches 114:12, 115:16 and 116:16, the three `||` checks that guard it, never true;
-- branch 100:12's false outcome, the `OVER BUDGET` arm. The opt-level 0 run did take this arm (its held-day p99 was 1,582 ns, as printed), but that profile was not merged;
+- branch 100:12's false outcome, the `OVER BUDGET` arm, in the opt-level 3 run alone;
 - the seven `unwrap_or_else(|…| refuse(…))` closures (functions, not lines).
+
+**Update, with the opt-level 0 run finished.** That run took 18 min 29 s. Its profile was merged with the opt-level 3 run's:
+- **Command:** `llvm-profdata merge` of both raw profiles, then `llvm-cov report <opt-3 binary> -object <opt-0 binary>`.
+- **Branches:** 5 of 8 (62.50%). Branch 100:12's `OVER BUDGET` outcome is now covered (`[True: 2, False: 1]` in the opt-level 0 binary).
+- **Lines:** unchanged (98 of 106 in the report; 93 of 94 per source line, line 118 the one miss).
+- **Still missed:** only the three `||` guards of `refuse` at 114-116, true outcomes, and that line.
+
+**For the Mac's check:** under Route B's opt-level 0 the whole harness exits 1 ("A RATIO BREACHED ITS CEILING"), and only because of C-FNO-LEV-01's absolute p99 budget. The held-day p99 was 1,582 ns against 1,000 ns, its line marked `OVER BUDGET`. No bench in the harness printed a BREACH: every ratio held at opt-level 0, this part's six included (0.945x to 1.022x). The budget is set for the optimised bench, and both the dev-profile timing run and the opt-level 3 instrumented run met it. So in a coverage run, the profile is the evidence and that exit status is not a timing verdict.
 
 Harness lines in `crates/pull/benches/ratio.rs`:
 - the `println!` at 1864 and the `ok &=` at 1867 each have count 1;

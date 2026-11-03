@@ -47,12 +47,10 @@ The other touched lines:
 - The `lib.rs` line has no instrumented region.
 - The bench wrapper `crates/pull/benches/ratio/nse_margin.rs` was measured by running the bench target once under the same instrumentation, at the dev profile's opt-level 3 (CC-20's precedent; the run exited 0 with all ratios within the ceiling):
   - lines: 93 of 94 per source line (98 of 106 in `llvm-cov report`, which counts the unexecuted `refuse` closures apart);
-  - branches: 4 of 8.
-- Everything missed is the self-checking failing-check arm, which R2 excuses, named for this file:
-  - line 118 `refuse(…)`;
-  - its three `||` guards at 114-116;
-  - the `OVER BUDGET` outcome at 100.
+  - branches: 4 of 8, and **5 of 8** once the opt-level 0 run's profile is merged (it took the `OVER BUDGET` arm).
+- Everything still missed is the self-checking failing-check arm, which R2 excuses, named for this file: line 118 `refuse(…)` and its three `||` guards at 114-116.
 - The harness's `println!` (1864) and `ok &=` (1867) lines each have count 1.
+- **Under Route B's opt-level 0 the whole harness exits 1**, and only on C-FNO-LEV-01's absolute p99 budget: held-day p99 1,582 ns against 1,000 ns, its line marked `OVER BUDGET`. Every ratio held at opt-level 0, this part's included, and no line is marked BREACH. In a coverage run that exit is not a timing verdict; the optimised runs met the budget.
 
 ## Gates (commands run here, with output)
 
