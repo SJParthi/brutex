@@ -2025,14 +2025,19 @@ mod tests {
                 // file is damaged", naming the file and the disagreement.
                 let sentence = "n_valid claims more records than the file holds";
                 for got in [started, answer(&site, from, None)] {
+                    let Ok((status, body)) = got.as_ref() else {
+                        panic!("{what}: refused by name at the open: {got:?}");
+                    };
+                    assert_eq!(
+                        *status,
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "{what}: {body}"
+                    );
+                    assert!(body.contains(sentence), "{what}: {body}");
+                    assert!(body.contains(MONTH_DAMAGED), "{what}: {body}");
                     assert!(
-                        got.as_ref().is_ok_and(|(status, body)| {
-                            *status == axum::http::StatusCode::INTERNAL_SERVER_ERROR
-                                && body.contains(sentence)
-                                && body.contains(MONTH_DAMAGED)
-                                && body.contains("this month's file is damaged")
-                        }),
-                        "{what}: refused by name at the open: {got:?}"
+                        body.contains("this month's file is damaged"),
+                        "{what}: {body}"
                     );
                 }
                 let uri: axum::http::Uri = "/bars.json?feed=dhan&exchange=NSE&segment=INDEX\
@@ -2309,11 +2314,18 @@ mod tests {
             !refused.contains("a bar window scan"),
             "a five-row sort never waits on the scan pool: {refused}"
         );
-        if scan == axum::http::StatusCode::OK {
-            assert!(refused.contains(r#""admitted":"store_read""#), "{refused}");
-        } else {
-            assert_eq!(scan, axum::http::StatusCode::TOO_MANY_REQUESTS, "{refused}");
-        }
+        // ANSWERED FROM THE SEEKS' POOL, OR REFUSED THERE WHEN ANOTHER TEST
+        // FILLS IT: never anything else, and only an answer says `store_read`.
+        let ok_or_full = [
+            axum::http::StatusCode::OK,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+        ];
+        assert!(ok_or_full.contains(&scan), "{refused}");
+        assert_eq!(
+            refused.contains(r#""admitted":"store_read""#),
+            scan == axum::http::StatusCode::OK,
+            "{refused}"
+        );
         for (_, body) in [(timed, &timed_body), (covered, &covered_body)] {
             assert!(
                 body.contains(&format!("at most {MAX_SCAN_CONCURRENT} run at once")),
@@ -2326,21 +2338,106 @@ mod tests {
             !served.contains("a bar window scan"),
             "a seek never waits on the scan pool: {served}"
         );
-        if seek == axum::http::StatusCode::OK {
-            assert_eq!(served.matches("\"t\":").count(), 5, "{served}");
-        } else {
-            assert_eq!(seek, axum::http::StatusCode::TOO_MANY_REQUESTS, "{served}");
-        }
+        assert!(ok_or_full.contains(&seek), "{served}");
+        assert_eq!(
+            served.matches("\"t\":").count() == 5,
+            seek == axum::http::StatusCode::OK,
+            "{served}"
+        );
         // AND WITH THE SLOTS FREE AGAIN THE SAME SCAN IS ANSWERED.
+        let (status, body) = past_full_pools(|| ask("c"), &mut || ()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body.matches("\"t\":").count(), 5, "{body}");
+    }
+
+    /// Asks `ask` again while it answers 429 (a pool full, by another test
+    /// or by this one), calling `free` after each refusal; at most 400 times.
+    async fn past_full_pools<F, Fut>(
+        ask: F,
+        free: &mut dyn FnMut(),
+    ) -> (axum::http::StatusCode, String)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<
+                Output = (
+                    axum::http::StatusCode,
+                    [(axum::http::HeaderName, &'static str); 1],
+                    String,
+                ),
+            >,
+    {
         for _ in 0..400 {
-            let (status, _, body) = ask("c").await;
-            if status == axum::http::StatusCode::OK {
-                assert_eq!(body.matches("\"t\":").count(), 5, "{body}");
-                return;
+            let (status, _, body) = ask().await;
+            if status != axum::http::StatusCode::TOO_MANY_REQUESTS {
+                return (status, body);
+            }
+            free();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the pool stayed full for two seconds");
+    }
+
+    /// `cancellable(heavy, ..)` started as a task whose work says it began,
+    /// waits for its flag (ten seconds at most) and says whether it saw it;
+    /// asked again, after `free`, while its pool is full and the work never
+    /// began. The task and the channel the work answers on.
+    async fn begun(
+        heavy: bool,
+        free: &mut dyn FnMut(),
+    ) -> (
+        tokio::task::JoinHandle<Result<(), crate::detail::RunError>>,
+        std::sync::mpsc::Receiver<bool>,
+    ) {
+        for _ in 0..400 {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let task = tokio::spawn(cancellable(heavy, move |cancel: &bars::Cancel| {
+                let _ = started_tx.send(());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !cancel.is_cancelled() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the flag was never set"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let _ = done_tx.send(cancel.is_cancelled());
+            }));
+            if started_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
+            {
+                // THE POOL WAS FULL: the work never started and the future
+                // answered 429. Asked again.
+                let _ = task.await;
+                free();
+                continue;
+            }
+            return (task, done_rx);
+        }
+        panic!("the pool stayed full");
+    }
+
+    /// `cancellable(heavy, make())`, asked again (after `free`) while its pool
+    /// is full; at most 400 times.
+    async fn past_saturation<T, W>(
+        heavy: bool,
+        mut make: impl FnMut() -> W,
+        free: &mut dyn FnMut(),
+    ) -> T
+    where
+        T: Send + 'static,
+        W: FnOnce(&bars::Cancel) -> T + Send + 'static,
+    {
+        for _ in 0..400 {
+            match cancellable(heavy, make()).await {
+                Ok(done) => return done,
+                Err(crate::detail::RunError::Saturated) => free(),
+                Err(why) => panic!("the work did not join: {why:?}"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        panic!("the scan pool stayed full for two seconds after the slots were returned");
+        panic!("the pool stayed full");
     }
 
     /// **AN ABANDONED REQUEST STOPS ITS BLOCKING WORK** (DB-N15). The future
@@ -2351,35 +2448,14 @@ mod tests {
     /// for: a 97-month scan kept reading for 6.5 s after the client left.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_abandoned_request_stops_its_blocking_work() {
-        for _ in 0..400 {
-            let (started_tx, started_rx) = std::sync::mpsc::channel();
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let task = tokio::spawn(cancellable(false, move |cancel: &bars::Cancel| {
-                let _ = started_tx.send(());
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                while !cancel.is_cancelled() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                let _ = done_tx.send(cancel.is_cancelled());
-            }));
-            if started_rx
-                .recv_timeout(std::time::Duration::from_millis(200))
-                .is_err()
-            {
-                // THE POOL WAS FULL (another test's reads): the work never
-                // started and the future answered 429. Asked again.
-                let _ = task.await;
-                continue;
-            }
-            task.abort();
-            assert_eq!(
-                done_rx.recv_timeout(std::time::Duration::from_secs(10)),
-                Ok(true),
-                "the blocking work saw the client go"
-            );
-            return;
-        }
-        panic!("the store-read pool stayed full");
+        // A FULL POOL (another test's reads) is asked again by `begun`.
+        let (task, done_rx) = begun(false, &mut || ()).await;
+        task.abort();
+        assert_eq!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "the blocking work saw the client go"
+        );
     }
 
     /// An abandoned request writes ONE `api.bars` line naming its route; an
@@ -2408,27 +2484,23 @@ mod tests {
     #[tokio::test]
     async fn an_answered_request_cancels_nothing() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let held = std::sync::Arc::clone(&seen);
-        for _ in 0..400 {
-            let held = std::sync::Arc::clone(&held);
-            let answered = cancellable(true, move |cancel: &bars::Cancel| {
-                if let Ok(mut slot) = held.lock() {
-                    *slot = Some(cancel.clone());
+        past_saturation(
+            true,
+            || {
+                let held = std::sync::Arc::clone(&seen);
+                move |cancel: &bars::Cancel| {
+                    *held.lock().expect("the slot") = Some(cancel.clone());
                 }
-            })
-            .await;
-            if answered.is_ok() {
-                let kept = seen
-                    .lock()
-                    .expect("the slot")
-                    .clone()
-                    .expect("the work ran");
-                assert!(!kept.is_cancelled());
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        panic!("the scan pool stayed full");
+            },
+            &mut || (),
+        )
+        .await;
+        let kept = seen
+            .lock()
+            .expect("the slot")
+            .clone()
+            .expect("the work ran");
+        assert!(!kept.is_cancelled());
     }
 
     /// One invented bar a second from 2024-01-02 09:15:00 IST, `n` of them,
@@ -2496,52 +2568,57 @@ mod tests {
             .expect("a uri");
             bars_window_json(axum::extract::State(std::sync::Arc::clone(&loaded)), uri)
         };
-        let crowd = crate::detail::crowd(crate::detail::Named::Scan);
+        let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
         let (indexed, _, indexed_body) = ask("c").await;
         let (scan, _, scan_body) = ask("tod").await;
-        drop(crowd);
         assert!(
             !indexed_body.contains("a bar window scan"),
             "an indexed sort never waits on the scan pool: {indexed_body}"
         );
-        if indexed == axum::http::StatusCode::OK {
-            let got: serde_json::Value = serde_json::from_str(&indexed_body).expect("JSON");
-            assert_eq!(got["admitted"], "store_read", "{indexed_body}");
-            assert_eq!(
-                got["scan_rows"], 0,
-                "the page alone is read: {indexed_body}"
-            );
-            assert_eq!(got["bars"].as_array().map(Vec::len), Some(5));
-        } else {
-            // The SEEK pool is shared with other tests; a refusal there names
-            // that pool, never the scan's.
-            assert_eq!(
-                indexed,
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                "{indexed_body}"
-            );
-        }
+        // ANSWERED WITH THE SEEKS, or refused by the SEEK pool another test
+        // fills: never the scan's, and only an answer carries the page.
+        let ok_or_full = [
+            axum::http::StatusCode::OK,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+        ];
+        assert!(ok_or_full.contains(&indexed), "{indexed_body}");
+        let answered = indexed == axum::http::StatusCode::OK;
+        let got: serde_json::Value = serde_json::from_str(&indexed_body).expect("JSON");
+        assert_eq!(got["admitted"] == "store_read", answered, "{indexed_body}");
+        assert_eq!(
+            got["scan_rows"] == 0,
+            answered,
+            "the page alone is read: {indexed_body}"
+        );
+        assert_eq!(
+            got["bars"].as_array().map(Vec::len) == Some(5),
+            answered,
+            "{indexed_body}"
+        );
         assert_eq!(
             scan,
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             "{scan_body}"
         );
         assert!(
-            scan_body.contains("a bar window scan not admitted")
-                && scan_body.contains(&format!("at most {MAX_SCAN_CONCURRENT} run at once")),
+            scan_body.contains("a bar window scan not admitted"),
             "a real scan waits where the scans wait, named: {scan_body}"
         );
-        for _ in 0..400 {
-            let (status, _, body) = ask("tod").await;
-            if status == axum::http::StatusCode::OK {
-                let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-                assert_eq!(got["admitted"], "scan", "{body}");
-                assert_eq!(got["scan_rows"], rows, "{body}");
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        panic!("the scan pool stayed full for two seconds after the slots were returned");
+        assert!(
+            scan_body.contains(&format!("at most {MAX_SCAN_CONCURRENT} run at once")),
+            "a real scan waits where the scans wait, named: {scan_body}"
+        );
+        // ASKED AGAIN WHILE THE SLOTS ARE STILL TAKEN: refused once more, which
+        // gives them back, and then answered in the scan pool.
+        let (status, body) = past_full_pools(|| ask("tod"), &mut || drop(crowd.take())).await;
+        assert!(
+            crowd.is_none(),
+            "refused once before the slots were given back"
+        );
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(got["admitted"], "scan", "{body}");
+        assert_eq!(got["scan_rows"], rows, "{body}");
     }
 
     /// `/bars.json` for NIFTY 1s January 2024 under `loaded`, any query tail.
@@ -2646,5 +2723,398 @@ mod tests {
         );
         let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
         assert_eq!(got["code"], MONTH_DAMAGED, "{body}");
+    }
+
+    // -----------------------------------------------------------------------
+    // BASE-COV-API-AS3: values past a browser's number, a month quarantined in
+    // part, a time of day of the wrong shape, damaged records, a writer's
+    // month beside an inexact bar, coverage, and the pools met full.
+    // -----------------------------------------------------------------------
+
+    /// 2^53 + 1: the first count a browser's JSON number cannot hold exactly.
+    const PAST_EXACT: i64 = (1 << 53) + 1;
+
+    /// Midday IST on day `d` of February 2024 (day 0 is the 1st), in micros.
+    /// `19_754` days after 1970-01-01 is 2024-02-01.
+    const fn february_noon(d: i64) -> i64 {
+        ((19_754 + d) * 86_400 - 19_800 + 6 * 3_600) * 1_000_000
+    }
+
+    /// One invented bar at `at` holding `volume` (100-ish paisa).
+    const fn noon_bar(at: i64, volume: i64) -> store::format::Bar {
+        store::format::Bar {
+            ts_micros: at,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// Where an invented Dhan NIFTY 1min month of 2024 lives.
+    fn dhan_month(month: u8) -> store::path::StorePath<'static> {
+        store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month: store::path::YearMonth::new(2024, month).expect("a legal month"),
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path")
+    }
+
+    /// The low 32 bits of NIFTY's hash, the id `open` folds.
+    fn nifty_id() -> u32 {
+        u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits")
+    }
+
+    /// Writes `rows` as the Dhan NIFTY 1min `month` of 2024 under `root`.
+    fn plant(root: &std::path::Path, month: u8, rows: &[store::format::Bar]) {
+        let mut file = store::file::BarFile::open_or_create(root, dhan_month(month), nifty_id())
+            .expect("a bar file");
+        file.append(rows).expect("legal bars");
+    }
+
+    /// The Dhan NIFTY 1min `/bars.json` or `/bars/window.json` answer under
+    /// `loaded`, asked again past a full pool.
+    async fn dhan_get(
+        loaded: &Loaded,
+        route: &str,
+        tail: &str,
+    ) -> (axum::http::StatusCode, String) {
+        let base = "feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min";
+        past_full_pools(
+            || {
+                let uri: axum::http::Uri = format!("{route}?{base}&{tail}").parse().expect("a uri");
+                let site = std::sync::Arc::clone(loaded);
+                async move {
+                    if route == "/bars.json" {
+                        bars_json(axum::extract::State(site), uri).await
+                    } else {
+                        bars_window_json(axum::extract::State(site), uri).await
+                    }
+                }
+            },
+            &mut || (),
+        )
+        .await
+    }
+
+    /// **A VALUE PAST A BROWSER'S NUMBER IS WITHHELD BY NAME, AND A MONTH
+    /// QUARANTINED IN PART IS SERVED.** `/bars.json` of a month holding a
+    /// volume of 2^53 + 1 serves the bars around it, `206` with the bar named
+    /// in `faults`, and serves 2^53 − 1 as it is. The same month quarantined
+    /// in part (some bars dropped, the month still served) is answered as the
+    /// store holds it; quarantined whole it is `409`, never served.
+    ///
+    /// Extremes: singles — a volume of 2^53 + 1 (withheld), one of 2^53 − 1
+    /// (the largest served), a quarantine of one bar (served), a quarantine of
+    /// the whole month (409); combinations — the inexact bar and the partial
+    /// quarantine in the same month at once (still 206, the bar still named),
+    /// the partial act then the whole one (the whole decides); out of the box
+    /// — a count no browser can hold, stored as the store admits it.
+    #[tokio::test]
+    async fn a_value_past_a_browsers_number_is_withheld_by_name_and_a_month_dropped_in_part_is_served()
+     {
+        let root = store_root("cover-inexact-month");
+        plant(
+            &root,
+            1,
+            &[
+                noon_bar(january_noon(1), 1),
+                noon_bar(january_noon(2), PAST_EXACT),
+                noon_bar(january_noon(3), PAST_EXACT - 2),
+            ],
+        );
+        let loaded = std::sync::Arc::new(Site::serving(
+            &masters("cover-inexact-month", None, None),
+            &root,
+        ));
+        let (status, body) = dhan_get(&loaded, "/bars.json", "month=2024-01").await;
+        assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+        assert_eq!(body.matches("\"t\":").count(), 2, "{body}");
+        assert!(body.contains("`v` = 9007199254740993"), "{body}");
+        assert!(body.contains("\"v\":9007199254740991"), "{body}");
+        let one = [january_noon(1)];
+        let act =
+            |scope: store::quarantine::Scope, stamps: &'static [i64]| store::quarantine::Record {
+                path: january_path(),
+                scope,
+                cause: store::quarantine::Cause::ZeroPrice,
+                stamps,
+                bars: 1,
+                revision: 0,
+                source_digest: [9; 32],
+                who: "test",
+                reason: "invented: a quarantine of a generated month",
+            };
+        let dropped = store::quarantine::Record {
+            stamps: &one,
+            ..act(store::quarantine::Scope::Dropped, &[])
+        };
+        store::quarantine::record(&root, &dropped).expect("recorded");
+        let (status, body) = dhan_get(&loaded, "/bars.json", "month=2024-01").await;
+        assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+        assert_eq!(body.matches("\"t\":").count(), 2, "{body}");
+        store::quarantine::record(&root, &act(store::quarantine::Scope::WholeMonth, &[]))
+            .expect("recorded");
+        let (status, body) = dhan_get(&loaded, "/bars.json", "month=2024-01").await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+        assert!(body.contains(MONTH_QUARANTINED), "{body}");
+    }
+
+    /// **A TIME OF DAY OF ONE FIELD OR FOUR IS REFUSED, AND AN OPEN END RUNS
+    /// TO THE DAY'S LAST SECOND.**
+    ///
+    /// Extremes: singles — `09` (one field), `09:15:00:00` (four), a lower
+    /// bound alone (to 23:59:59), an upper bound alone (from 00:00:00);
+    /// combinations — a lower bound of the day's last second with no upper
+    /// one (a window of one second), an upper bound of midnight with no lower
+    /// one (a window of one second); out of the box — a time of day with more
+    /// fields than a clock has.
+    #[test]
+    fn a_time_of_day_of_one_field_or_four_is_refused_and_an_open_end_runs_to_the_last_second() {
+        let base = "feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&from=2024-01&to=2024-01";
+        for (bound, text) in [("tod_from", "09"), ("tod_to", "09:15:00:00")] {
+            let Err(why) = WindowAsk::parse(&format!("{base}&{bound}={text}")) else {
+                panic!("{bound}={text} was read");
+            };
+            assert_eq!(
+                why,
+                format!("{text:?} is not an IST time of day HH:MM:SS for {bound:?}")
+            );
+        }
+        for (tail, tod) in [
+            ("tod_from=09:15", (33_300, 86_399)),
+            ("tod_from=23:59:59", (86_399, 86_399)),
+            ("tod_to=00:00", (0, 0)),
+        ] {
+            let asked = WindowAsk::parse(&format!("{base}&{tail}")).expect("a legal window");
+            assert_eq!(asked.filter.tod, Some(tod), "{tail}");
+        }
+    }
+
+    /// **A WINDOW NAMES DAMAGED RECORDS, WITHHOLDS A VALUE PAST A BROWSER'S
+    /// NUMBER, AND COUNTS ITS COVERAGE.** A month whose last record is zeroed
+    /// fails its checksum block: `206`, the records counted, never "ask
+    /// again". A page holding a volume of 2^53 + 1 and no fault is `206` with
+    /// the bar named. The same page beside a month a writer holds is still
+    /// `206` with both named: the writer's "ask again" answers a page that is
+    /// short only while it holds, and this one is short for the value too.
+    /// `coverage=1` counts each held month's rows and days; a coverage row of
+    /// a series the window does not hold names no key. A month a writer takes
+    /// after a window read its header is planned from that header, and the
+    /// instant `at=` asks for inside it is "ask again", `503`.
+    ///
+    /// Extremes: singles — a zeroed record (three records refused), a volume
+    /// of 2^53 + 1 with no fault, coverage of a three-day month, a coverage
+    /// row of a series index the window does not hold (`null`), an instant
+    /// asked inside a month a writer took after its header was read (503);
+    /// combinations — an inexact bar and a month a writer holds in one page
+    /// at once (206, never 503), damaged records with no writer (never "ask
+    /// again"); out of the box — a month held by another writer while the
+    /// page is read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_window_names_damaged_records_withholds_an_inexact_value_and_counts_coverage() {
+        // DAMAGED RECORDS: the last record of a three-bar month zeroed.
+        let (damaged, loaded) = january("cover-window-damaged", &[1, 2, 3]);
+        let (status, body) =
+            dhan_get(&loaded, "/bars/window.json", "from=2024-01&to=2024-01").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let (status, body) = dhan_get(
+            &loaded,
+            "/bars/window.json",
+            "from=2024-01&to=2024-01&coverage=1",
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            body.contains(
+                r#""coverage":[{"key":"NSE-INDEX-NIFTY","month":"2024-01","rows":3,"days_covered":3}]"#
+            ),
+            "{body}"
+        );
+        let path = january_path().to_path_buf(&damaged);
+        let len = std::fs::metadata(&path).expect("the month").len();
+        let record = store::format::RECORD_LEN as u64;
+        {
+            use std::os::unix::fs::FileExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("writable fixture")
+                .write_all_at(&[0u8; store::format::RECORD_LEN], len - record)
+                .expect("zeroed");
+        }
+        let (status, body) =
+            dhan_get(&loaded, "/bars/window.json", "from=2024-01&to=2024-01").await;
+        assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+        let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert!(
+            got["faulted_records"].as_u64().expect("a count") >= 1,
+            "{body}"
+        );
+        assert!(!body.contains("being_written"), "{body}");
+
+        // AN INEXACT VALUE, NO FAULT.
+        let root = store_root("cover-window-inexact");
+        plant(
+            &root,
+            1,
+            &[
+                noon_bar(january_noon(1), 1),
+                noon_bar(january_noon(2), PAST_EXACT),
+            ],
+        );
+        plant(&root, 2, &[noon_bar(february_noon(1), 1)]);
+        let loaded = std::sync::Arc::new(Site::serving(
+            &masters("cover-window-inexact", None, None),
+            &root,
+        ));
+        let (status, body) =
+            dhan_get(&loaded, "/bars/window.json", "from=2024-01&to=2024-01").await;
+        assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+        assert_eq!(body.matches("\"t\":").count(), 1, "{body}");
+        assert!(body.contains("`v` = 9007199254740993"), "{body}");
+        assert!(body.contains("\"faulted_records\":0"), "{body}");
+
+        // BESIDE A MONTH A WRITER HOLDS.
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer_root = root.clone();
+        let writer = std::thread::Builder::new()
+            .name("cover-window-writer".to_owned())
+            .spawn(move || {
+                let held =
+                    store::file::BarFile::open_or_create(&writer_root, dhan_month(2), nifty_id())
+                        .expect("the writer takes the month");
+                holding_tx.send(()).expect("the test waits for the writer");
+                let _ = release_rx.recv();
+                drop(held);
+            })
+            .expect("a writer thread");
+        holding_rx.recv().expect("the writer holds February");
+        let (status, body) =
+            dhan_get(&loaded, "/bars/window.json", "from=2024-01&to=2024-02").await;
+        release_tx.send(()).expect("the writer lets go");
+        writer.join().expect("the writer thread");
+        assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+        assert!(body.contains("cover-window-writer"), "{body}");
+        assert!(body.contains("`v` = 9007199254740993"), "{body}");
+        assert_eq!(body.matches("\"t\":").count(), 1, "{body}");
+
+        // A MONTH A WRITER TAKES AFTER ITS HEADER WAS READ: the next window
+        // plans it from the header it already read, and the instant `at=` asks
+        // for is looked for record by record, so the month is opened then and
+        // the window is "ask again", never a page read in part.
+        let (memo, loaded) = january("cover-window-memo", &[1, 2, 3]);
+        let (status, body) =
+            dhan_get(&loaded, "/bars/window.json", "from=2024-01&to=2024-01").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = std::thread::Builder::new()
+            .name("cover-memo-writer".to_owned())
+            .spawn(move || {
+                let held = store::file::BarFile::open_or_create(&memo, january_path(), nifty_id())
+                    .expect("the writer takes the month");
+                holding_tx.send(()).expect("the test waits for the writer");
+                let _ = release_rx.recv();
+                drop(held);
+            })
+            .expect("a writer thread");
+        holding_rx.recv().expect("the writer holds January");
+        let at = january_noon(2) / 1_000_000;
+        let (status, body) = dhan_get(
+            &loaded,
+            "/bars/window.json",
+            &format!("from=2024-01&to=2024-01&at={at}"),
+        )
+        .await;
+        release_tx.send(()).expect("the writer lets go");
+        writer.join().expect("the writer thread");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        assert!(body.contains("\"being_written\":true"), "{body}");
+        assert!(body.contains("cover-memo-writer"), "{body}");
+        assert!(!body.contains("\"bars\""), "{body}");
+
+        // A COVERAGE ROW OF A SERIES THE WINDOW DOES NOT HOLD.
+        let window = bars::Window {
+            coverage: vec![bars::MonthCoverage {
+                series: 3,
+                month: store::path::YearMonth::new(2024, 1).expect("a legal month"),
+                rows: 5,
+                days_covered: 2,
+            }],
+            ..bars::Window::default()
+        };
+        let (rendered, withheld, faulted) = render_window(&window, false);
+        assert!(
+            rendered.contains(
+                r#""coverage":[{"key":null,"month":"2024-01","rows":5,"days_covered":2}]"#
+            ),
+            "{rendered}"
+        );
+        assert_eq!((withheld, faulted), (0, false));
+    }
+
+    /// **AN ABANDONED SCAN STOPS, AND AN ANSWERED ONE CANCELS NOTHING, PAST A
+    /// FULL POOL.** With every scan slot taken, a scan's work does not begin
+    /// and its future answers the pool's refusal; asked again once the slots
+    /// are given back, it begins, and dropping its future sets the flag its
+    /// work reads. A scan answered past a full pool sees no flag.
+    ///
+    /// Extremes: singles — every scan slot taken (the work never begins), the
+    /// slots given back (it begins); combinations — a full pool and an
+    /// abandoned request in one test at once, a full pool and an answered
+    /// request at once; out of the box — a future dropped while the blocking
+    /// work it started still runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_abandoned_scan_stops_and_an_answered_one_cancels_nothing_past_a_full_pool() {
+        let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
+        let (task, done_rx) = begun(true, &mut || drop(crowd.take())).await;
+        assert!(
+            crowd.is_none(),
+            "the full pool was met once, then given back"
+        );
+        task.abort();
+        assert_eq!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "the scan's work saw the client go"
+        );
+        let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        past_saturation(
+            true,
+            || {
+                let held = std::sync::Arc::clone(&seen);
+                move |cancel: &bars::Cancel| {
+                    *held.lock().expect("the slot") = Some(cancel.clone());
+                }
+            },
+            &mut || drop(crowd.take()),
+        )
+        .await;
+        assert!(
+            crowd.is_none(),
+            "the full pool was met once, then given back"
+        );
+        let kept = seen
+            .lock()
+            .expect("the slot")
+            .clone()
+            .expect("the work ran");
+        assert!(!kept.is_cancelled());
     }
 }

@@ -3668,6 +3668,8 @@ mod tests {
                 );
                 continue;
             }
+            // THE RUNG IS NAMED ON THE ASSERT'S OWN LINE: a message argument
+            // on a line of its own is a line only a failure ever reaches.
             let dir = rung.dir();
             let refused = out.expect_err("every other rung is refused");
             let want = Refusal::ExpiredSeriesIsOneMinuteOnly {
@@ -3700,6 +3702,9 @@ mod tests {
                 continue;
             }
             let refused = out.expect_err("every other rung is refused");
+            // As above: the refusal wanted is built before the assert, so the
+            // assert names the rung on the line that runs, and no line of the
+            // check is one that only a failing run reaches.
             let dir = rung.dir();
             let want = Refusal::ExpiredFutureAtItsRouteRungOnly {
                 got: dir.to_owned(),
@@ -3734,6 +3739,8 @@ mod tests {
                  &granularity=1day",
                 feed.wire()
             );
+            // The feed is named on the assert's own line, as above, so every
+            // line of this check runs whether it holds or not.
             let wire = feed.wire();
             let refused = parse_fno(&body, today()).expect_err("a daily future");
             let want = Refusal::ExpiredSeriesIsOneMinuteOnly {

@@ -100,32 +100,63 @@ impl Fixture {
 /// shared by every test in this binary, so a `429` (a full pool, by name) is
 /// asked again rather than read as the answer.
 async fn window_get(site: &Loaded, query: &str) -> (StatusCode, Value) {
-    for _ in 0..400 {
-        let uri = format!("/bars/window.json?{query}").parse().expect("URI");
-        let (status, headers, body) =
-            bars_window_json(axum::extract::State(Loaded::clone(site)), uri).await;
-        assert_eq!(headers[0].1, "application/json; charset=utf-8");
-        if status != StatusCode::TOO_MANY_REQUESTS {
-            return (status, serde_json::from_str(&body).expect("window JSON"));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    panic!("the window pool stayed full for two seconds");
+    window_get_freeing(site, query, &mut || ()).await
+}
+
+/// [`window_get`], calling `free` after each full pool's 429.
+async fn window_get_freeing(
+    site: &Loaded,
+    query: &str,
+    free: &mut dyn FnMut(),
+) -> (StatusCode, Value) {
+    past_full_pools(
+        || {
+            let uri: axum::http::Uri = format!("/bars/window.json?{query}").parse().expect("URI");
+            bars_window_json(axum::extract::State(Loaded::clone(site)), uri)
+        },
+        "window JSON",
+        free,
+    )
+    .await
 }
 
 /// `/bars.json?{query}` through the handler, asked again on a full pool.
 async fn month_get(site: &Loaded, query: &str) -> (StatusCode, Value) {
+    past_full_pools(
+        || {
+            let uri: axum::http::Uri = format!("/bars.json?{query}").parse().expect("month URI");
+            bars_json(axum::extract::State(Loaded::clone(site)), uri)
+        },
+        "month JSON",
+        &mut || (),
+    )
+    .await
+}
+
+/// Asks `ask` again while it answers 429 (a pool full, by another test or by
+/// this one), calling `free` after each refusal; at most 400 times. Every
+/// answer is JSON, and the one returned is parsed as `what`.
+async fn past_full_pools<F, Fut>(ask: F, what: &str, free: &mut dyn FnMut()) -> (StatusCode, Value)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<
+            Output = (
+                StatusCode,
+                [(axum::http::HeaderName, &'static str); 1],
+                String,
+            ),
+        >,
+{
     for _ in 0..400 {
-        let uri = format!("/bars.json?{query}").parse().expect("month URI");
-        let (status, headers, body) =
-            bars_json(axum::extract::State(Loaded::clone(site)), uri).await;
+        let (status, headers, body) = ask().await;
         assert_eq!(headers[0].1, "application/json; charset=utf-8");
         if status != StatusCode::TOO_MANY_REQUESTS {
-            return (status, serde_json::from_str(&body).expect("month JSON"));
+            return (status, serde_json::from_str(&body).expect(what));
         }
+        free();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    panic!("the store-read pool stayed full for two seconds");
+    panic!("the pool stayed full for two seconds");
 }
 
 impl Drop for Fixture {
@@ -1635,10 +1666,7 @@ async fn the_route_reads_keys_at_day_and_time_bounds_and_refuses_each_by_name() 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["total"], 320);
     assert_eq!(body["series_totals"][1]["key"], PE);
-    assert_eq!(
-        body["bars"][0]["key"],
-        if truth[0].1 == 0 { CE } else { PE }
-    );
+    assert_eq!(body["bars"][0]["key"], [CE, PE][truth[0].1]);
     assert_eq!(body["bars"][0]["month"], "2019-02");
     let at = ist(2019, 3, 19, 9, 15, 30) / 1_000_000;
     let (_, found) = window_get(
@@ -2096,22 +2124,23 @@ fn provenance_names_the_rekey_for_a_copied_a_superseded_and_a_retired_key() {
         (STATED, "2020-06"),
         (IMPOSSIBLE, "2019-05"),
     ] {
+        let said = notes(key, month);
+        assert!(!said.join("\n").contains("gdfl-rekey"), "{key}: {said:?}");
         assert!(
-            !notes(key, month)
+            !said
                 .iter()
-                .any(|note| note.contains("gdfl-rekey")
-                    || pull::gdfl_lineage::is_contract_refused(note)),
-            "{key}"
+                .map(String::as_str)
+                .any(pull::gdfl_lineage::is_contract_refused),
+            "{key}: {said:?}"
         );
     }
     record_rekey(&store);
     let copied = notes(SETTLED, "2020-06");
-    assert!(
-        copied.iter().any(|note| note.starts_with(&format!(
-            "the bars of {STATED} were copied into {SETTLED} by `cli gdfl-rekey`"
-        )) && note.contains(&"03".repeat(32))),
-        "{copied:?}"
-    );
+    let copy = format!("the bars of {STATED} were copied into {SETTLED} by `cli gdfl-rekey`");
+    let Some(note) = copied.iter().find(|note| note.starts_with(&copy)) else {
+        panic!("{copied:?}");
+    };
+    assert!(note.contains(&"03".repeat(32)), "{copied:?}");
     let moved = notes(STATED, "2020-06");
     assert!(
         moved
@@ -2433,4 +2462,30 @@ fn change_percent_is_ordered_by_the_server() {
     assert_eq!(top.bars[0].chg, largest);
     assert_eq!(top.bars[0].bar.ts_micros, ist(2024, 1, 2, 9, 32, 0));
     assert_eq!(bars::SortKey::parse("chg"), Some(bars::SortKey::Change));
+}
+
+/// **A WINDOW REFUSED BY A FULL SCAN POOL IS ASKED AGAIN, AND ANSWERED THERE.**
+/// With every scan slot taken, a window bounded by a time of day (a scan)
+/// answers `429`; the helper every test here asks through gives the slots
+/// back after that refusal and asks again, and the same window is answered
+/// from the scan pool, whole.
+///
+/// Extremes: singles — every scan slot taken (refused), the slots given back
+/// (answered); combinations — a full pool and a time-of-day bound at once;
+/// out of the box — a pool this test fills itself, met by the same helper
+/// that meets one another test fills.
+#[tokio::test]
+async fn a_window_refused_by_a_full_scan_pool_is_asked_again_and_answered_there() {
+    let fixture = Fixture::new("window-full-scan-pool");
+    let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
+    let (status, body) = window_get_freeing(
+        &fixture.site,
+        &format!("{QUERY}&tod_from=09:15&tod_to=09:16"),
+        &mut || drop(crowd.take()),
+    )
+    .await;
+    assert!(crowd.is_none(), "refused once, then given back");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["admitted"], "scan", "{body}");
+    assert_eq!(body["total"], 4, "{body}");
 }

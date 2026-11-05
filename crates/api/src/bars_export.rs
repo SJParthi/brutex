@@ -1098,46 +1098,98 @@ mod tests {
             method: Method,
             query: &str,
         ) -> (StatusCode, HeaderMap, Result<String, String>) {
-            for _ in 0..400 {
-                let uri = format!("{ROUTE}?{query}").parse().expect("a URI");
-                let answer = bars_export_csv(
-                    axum::extract::State(Loaded::clone(&self.site)),
-                    method.clone(),
-                    uri,
-                )
-                .await;
-                if answer.status() == StatusCode::TOO_MANY_REQUESTS {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    continue;
-                }
-                let (parts, body) = answer.into_parts();
-                let body = axum::body::to_bytes(body, usize::MAX)
-                    .await
-                    .map(|bytes| String::from_utf8(bytes.to_vec()).expect("UTF-8 text"))
-                    .map_err(|why| why.to_string());
-                return (parts.status, parts.headers, body);
-            }
-            panic!("the pools stayed full");
+            self.export_freeing(method, query, &mut || ()).await
+        }
+
+        /// [`Self::export_as`], calling `free` after each full pool's 429.
+        async fn export_freeing(
+            &self,
+            method: Method,
+            query: &str,
+            free: &mut dyn FnMut(),
+        ) -> (StatusCode, HeaderMap, Result<String, String>) {
+            let (_, answer) = self.answered(method, query, free).await;
+            let (parts, body) = answer.into_parts();
+            let body = axum::body::to_bytes(body, usize::MAX)
+                .await
+                .map(|bytes| String::from_utf8(bytes.to_vec()).expect("UTF-8 text"))
+                .map_err(|why| why.to_string());
+            (parts.status, parts.headers, body)
+        }
+
+        /// The handler's answer to `query`, asked again past a full pool.
+        async fn answered(
+            &self,
+            method: Method,
+            query: &str,
+            free: &mut dyn FnMut(),
+        ) -> (StatusCode, axum::response::Response) {
+            past_full_pools(
+                async || {
+                    let uri: axum::http::Uri = format!("{ROUTE}?{query}").parse().expect("a URI");
+                    let answer = bars_export_csv(
+                        axum::extract::State(Loaded::clone(&self.site)),
+                        method.clone(),
+                        uri,
+                    )
+                    .await;
+                    (answer.status(), answer)
+                },
+                free,
+            )
+            .await
         }
 
         /// One `/bars/window.json` page, as JSON.
         async fn window(&self, query: &str) -> serde_json::Value {
-            for _ in 0..400 {
-                let uri = format!("/bars/window.json?{query}").parse().expect("a URI");
-                let (status, _, body) = super::super::bars_window_json(
-                    axum::extract::State(Loaded::clone(&self.site)),
-                    uri,
-                )
-                .await;
-                if status == StatusCode::TOO_MANY_REQUESTS {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    continue;
-                }
-                assert_eq!(status, StatusCode::OK, "{body}");
-                return serde_json::from_str(&body).expect("window JSON");
-            }
-            panic!("the pools stayed full");
+            self.window_freeing(query, &mut || ()).await
         }
+
+        /// [`Self::window`], calling `free` after each full pool's 429.
+        async fn window_freeing(&self, query: &str, free: &mut dyn FnMut()) -> serde_json::Value {
+            let (status, body) = past_full_pools(
+                async || {
+                    let uri: axum::http::Uri =
+                        format!("/bars/window.json?{query}").parse().expect("a URI");
+                    let (status, _, body) = super::super::bars_window_json(
+                        axum::extract::State(Loaded::clone(&self.site)),
+                        uri,
+                    )
+                    .await;
+                    (status, body)
+                },
+                free,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            serde_json::from_str(&body).expect("window JSON")
+        }
+    }
+
+    /// Asks `ask` again while it answers 429 (a pool full, by another test
+    /// or by this one), calling `free` after each refusal; at most 400 times.
+    async fn past_full_pools<T>(
+        mut ask: impl AsyncFnMut() -> (StatusCode, T),
+        free: &mut dyn FnMut(),
+    ) -> (StatusCode, T) {
+        for _ in 0..400 {
+            let (status, answer) = ask().await;
+            if status != StatusCode::TOO_MANY_REQUESTS {
+                return (status, answer);
+            }
+            free();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the pools stayed full");
+    }
+
+    /// The status and body text of an answer.
+    async fn said(answer: axum::response::Response) -> (StatusCode, String) {
+        let status = answer.status();
+        let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        (status, String::from_utf8(bytes.to_vec()).expect("UTF-8"))
     }
 
     /// The query every spot fixture is asked with.
@@ -1172,58 +1224,79 @@ mod tests {
         std::future::poll_fn(move |cx| Pin::new(&mut *body).poll_frame(cx))
     }
 
-    /// The export's one line of `message` for `total` rows, from `from`.
+    /// The export's one line of `message` for `total` rows, from `from`: each
+    /// line of that message and total names this route.
     fn line(from: u64, message: &str, total: u64) -> Vec<telemetry::Record> {
-        crate::emitted::landed(from, TARGET, message)
+        let lines: Vec<telemetry::Record> = crate::emitted::landed(from, TARGET, message)
             .into_iter()
-            .filter(|record| {
-                crate::emitted::says(record, "route", ROUTE)
-                    && crate::emitted::counts(record, "total", total)
-            })
-            .collect()
+            .filter(|record| crate::emitted::counts(record, "total", total))
+            .collect();
+        for record in &lines {
+            assert!(crate::emitted::says(record, "route", ROUTE), "{record:?}");
+        }
+        lines
     }
 
     /// THE NAMED TEST. The page being read when the client goes away is
     /// stopped by its cancellation flag, no later page is asked for, and one
     /// line says how far the export got. The reader is the window route's own
     /// `cancellable`, so the flag is the one every bar read honours.
+    /// A reader whose every page is one `cancellable` read in the pool
+    /// `heavy` names, asked again while that pool is full (the first refusal
+    /// frees `crowd`, a pool the test filled). Its work says it began on
+    /// `started`, waits for the cancellation flag up to `patience` (none: it
+    /// panics, a task that will not join), says on `saw` whether it saw the
+    /// flag, and answers an empty page. `asked` records each offset.
+    fn held_reader(
+        heavy: bool,
+        patience: Option<Duration>,
+        crowd: Arc<std::sync::Mutex<Option<crate::detail::Crowd>>>,
+        asked: Arc<std::sync::Mutex<Vec<usize>>>,
+        (started_tx, saw_tx): (std::sync::mpsc::Sender<()>, std::sync::mpsc::Sender<bool>),
+    ) -> PageReader {
+        Arc::new(move |offset: usize| {
+            asked.lock().expect("the offsets asked").push(offset);
+            let (started, saw, crowd) = (started_tx.clone(), saw_tx.clone(), Arc::clone(&crowd));
+            let page: PageFuture = Box::pin(async move {
+                loop {
+                    let (started, saw) = (started.clone(), saw.clone());
+                    let read = cancellable(heavy, move |cancel: &bars::Cancel| {
+                        let _ = started.send(());
+                        let patience = patience.expect("a work with a patience");
+                        let began = std::time::Instant::now();
+                        while !cancel.is_cancelled() && began.elapsed() < patience {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        let _ = saw.send(cancel.is_cancelled());
+                        Page::default()
+                    })
+                    .await;
+                    match read {
+                        Ok(page) => return Ok(page),
+                        Err(crate::detail::RunError::Saturated) => {
+                            drop(crowd.lock().expect("the crowd").take());
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        Err(why) => return Err(Refused::Pool(why, false)),
+                    }
+                }
+            });
+            page
+        })
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_streamed_export_stops_when_cancelled() {
         let asked = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
         let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
         let (saw_tx, saw_rx) = std::sync::mpsc::channel::<bool>();
-        let reader: PageReader = {
-            let asked = Arc::clone(&asked);
-            Arc::new(move |offset: usize| {
-                asked.lock().expect("the offsets asked").push(offset);
-                let (started, saw) = (started_tx.clone(), saw_tx.clone());
-                let page: PageFuture = Box::pin(async move {
-                    loop {
-                        let (started, saw) = (started.clone(), saw.clone());
-                        let read = cancellable(false, move |cancel: &bars::Cancel| {
-                            let _ = started.send(());
-                            let began = std::time::Instant::now();
-                            while !cancel.is_cancelled()
-                                && began.elapsed() < Duration::from_secs(30)
-                            {
-                                std::thread::sleep(Duration::from_millis(2));
-                            }
-                            let _ = saw.send(cancel.is_cancelled());
-                            Page::default()
-                        })
-                        .await;
-                        match read {
-                            Ok(page) => return Ok(page),
-                            Err(crate::detail::RunError::Saturated) => {
-                                tokio::time::sleep(Duration::from_millis(20)).await;
-                            }
-                            Err(why) => return Err(Refused::Pool(why, false)),
-                        }
-                    }
-                });
-                page
-            })
-        };
+        let reader = held_reader(
+            false,
+            Some(Duration::from_secs(30)),
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::clone(&asked),
+            (started_tx, saw_tx),
+        );
         let from = crate::emitted::mark();
         let mut body = ExportBody::new(Bytes::from_static(b"page one\r\n"), 1_000, 3_000, reader);
         let first = next_frame(&mut body).await.expect("a frame").expect("data");
@@ -1233,13 +1306,10 @@ mod tests {
         );
         // PAGE TWO BEGINS, AND IS STILL BEING READ WHEN THE CLIENT GOES.
         let began = std::time::Instant::now();
-        loop {
+        while started_rx.try_recv().is_err() {
             let polled =
                 tokio::time::timeout(Duration::from_millis(20), next_frame(&mut body)).await;
             assert!(polled.is_err(), "page two answered while its read was held");
-            if started_rx.try_recv().is_ok() {
-                break;
-            }
             assert!(
                 began.elapsed() < Duration::from_secs(45),
                 "page two never began"
@@ -1612,20 +1682,8 @@ mod tests {
         store.write("INDEX", None, 6, 0, 1_200);
         let query = format!("{SPOT}&from=2025-05&to=2025-06&dir=asc");
         let from = crate::emitted::mark();
-        let answer = loop {
-            let uri = format!("{ROUTE}?{query}").parse().expect("a URI");
-            let answer = bars_export_csv(
-                axum::extract::State(Loaded::clone(&store.site)),
-                Method::GET,
-                uri,
-            )
-            .await;
-            if answer.status() != StatusCode::TOO_MANY_REQUESTS {
-                break answer;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert_eq!(answer.status(), StatusCode::OK);
+        let (status, answer) = store.answered(Method::GET, &query, &mut || ()).await;
+        assert_eq!(status, StatusCode::OK);
         let mut body = answer.into_body();
         let first = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
             .await
@@ -1640,15 +1698,10 @@ mod tests {
             1_002
         );
         store.write("INDEX", None, 6, 1_200, 5);
-        let mut cut = None;
-        while let Some(frame) = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await
-        {
-            if let Err(why) = frame {
-                cut = Some(why.to_string());
-                break;
-            }
-        }
-        let cut = cut.expect("the stream ended in an error");
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+            .await
+            .expect("a frame after the first page");
+        let cut = frame.expect_err("the stream ended in an error").to_string();
         assert!(
             cut.contains("2500 when it began, 2505 at row 1000"),
             "{cut}"
@@ -1824,5 +1877,435 @@ mod tests {
         let mut out = String::new();
         push_field(&mut out, "BAJAJ-AUTO");
         assert_eq!(out, "BAJAJ-AUTO");
+    }
+
+    /// A reader that answers `pages` in turn, whatever offset it is asked.
+    fn scripted(pages: Vec<Result<Page, Refused>>) -> PageReader {
+        let pages = std::sync::Mutex::new(pages.into_iter());
+        Arc::new(move |_offset: usize| {
+            let next = pages
+                .lock()
+                .expect("the script")
+                .next()
+                .expect("a scripted page");
+            let page: PageFuture = Box::pin(std::future::ready(next));
+            page
+        })
+    }
+
+    /// **EVERY PAGE THAT CANNOT BE WRITTEN WHOLE CUTS THE STREAM BY NAME, AND
+    /// AN ENDED STREAM STAYS ENDED.** After a first page of 1,000 rows, the
+    /// next page names a record that would not read, holds no row, holds more
+    /// than the query keeps, or was refused by the scan pool, the store-read
+    /// pool or the reader: each cuts the stream with its own sentence, the
+    /// next poll ends it, and the body says it has ended. A stream written
+    /// whole ends too, and says so only once it has.
+    ///
+    /// Extremes: singles — a page naming 4 records that would not read, a
+    /// page of 0 rows, a page of 2,204 rows where 2,203 were owed, the scan
+    /// pool full after every try, a store-read task that would not join, the
+    /// reader's own refusal; combinations — a cut stream polled again (ended,
+    /// never a second error) and asked whether it ended at once, a whole
+    /// stream asked before its last page and after it; out of the box — a
+    /// page holding more rows than the whole query keeps.
+    #[tokio::test]
+    async fn every_page_that_cannot_be_written_whole_cuts_the_stream_by_name() {
+        let page = |total: u64, rows: u64, fault: Option<(&str, u64)>| -> Result<Page, Refused> {
+            Ok(Page {
+                total,
+                rows,
+                fault: fault.map(|(first, count)| (first.to_owned(), count)),
+                ..Page::default()
+            })
+        };
+        let from = crate::emitted::mark();
+        for (total, next, says) in [
+            (
+                3_201,
+                page(3_201, 1_000, Some(("2025-06: a record would not read", 4))),
+                "4 record(s) or month(s) of this query would not read past row 1000, first: \
+                 2025-06: a record would not read",
+            ),
+            (
+                3_202,
+                page(3_202, 0, None),
+                "the page at row 1000 held 0 row(s) of a query keeping 3202",
+            ),
+            (
+                3_203,
+                page(3_203, 2_204, None),
+                "the page at row 1000 held 2204 row(s) of a query keeping 3203",
+            ),
+            (
+                3_204,
+                Err(Refused::Pool(crate::detail::RunError::Saturated, true)),
+                "the scan pool did not admit the next page after 8 tries (Saturated)",
+            ),
+            (
+                3_205,
+                Err(Refused::Pool(
+                    crate::detail::RunError::Join("lost".to_owned()),
+                    false,
+                )),
+                "the store-read pool did not admit the next page after 8 tries (Join(\"lost\"))",
+            ),
+            (
+                3_206,
+                Err(Refused::Read("unknown_series: invented".to_owned())),
+                "unknown_series: invented",
+            ),
+        ] {
+            let mut body = ExportBody::new(
+                Bytes::from_static(b"head\r\n"),
+                1_000,
+                total,
+                scripted(vec![next]),
+            );
+            assert!(!body.is_end_stream(), "{says}");
+            let head = next_frame(&mut body).await.expect("a frame").expect("data");
+            assert_eq!(head.into_data().expect("bytes"), "head\r\n");
+            let cut = next_frame(&mut body)
+                .await
+                .expect("a frame")
+                .expect_err("the stream is cut");
+            assert_eq!(cut.to_string(), says);
+            assert!(next_frame(&mut body).await.is_none(), "{says}: ended");
+            assert!(body.is_end_stream(), "{says}");
+            let warned = line(from, "export stopped short", total);
+            assert_eq!(warned.len(), 1, "{says}: {warned:?}");
+            assert!(crate::emitted::says(&warned[0], "why", says));
+        }
+        // A WHOLE STREAM ends once its last page is sent, and stays ended.
+        let rest = Ok(Page {
+            total: 3_210,
+            rows: 2_210,
+            csv: Bytes::from_static(b"rows\r\n"),
+            ..Page::default()
+        });
+        let mut body = ExportBody::new(
+            Bytes::from_static(b"head\r\n"),
+            1_000,
+            3_210,
+            scripted(vec![rest]),
+        );
+        let _head = next_frame(&mut body).await.expect("a frame").expect("data");
+        let rows = next_frame(&mut body).await.expect("a frame").expect("data");
+        assert_eq!(rows.into_data().expect("bytes"), "rows\r\n");
+        assert!(!body.is_end_stream(), "not ended before its end is read");
+        assert!(next_frame(&mut body).await.is_none());
+        assert!(body.is_end_stream());
+        assert!(next_frame(&mut body).await.is_none(), "ended, and stays so");
+        assert_eq!(line(from, "export written", 3_210).len(), 1);
+    }
+
+    /// **A PAGE READ PAST A FULL POOL IS READ, AND A TASK THAT WILL NOT JOIN
+    /// CUTS THE STREAM.** The page reader of the cancellation test, asked
+    /// with every scan slot taken: its first read is refused, which frees the
+    /// pool; the second is admitted, its work runs once and sees no flag, and
+    /// the empty page it answers is not the query's, so the stream is cut by
+    /// name. A work that panics is a task that will not join: the stream is
+    /// cut naming the store-read pool and the join.
+    ///
+    /// Extremes: singles — a full scan pool (refused, then freed by the
+    /// refusal), a work with a patience of zero (it never waits), a work that
+    /// panics; combinations — a full pool and an answered page in one read at
+    /// once, an empty page after a full pool (cut as rows that changed); out
+    /// of the box — a blocking task that panics inside the store-read pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_read_past_a_full_pool_is_read_and_a_task_that_will_not_join_cuts_the_stream() {
+        let crowd = Arc::new(std::sync::Mutex::new(Some(crate::detail::crowd(
+            crate::detail::Named::Scan,
+        ))));
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (saw_tx, saw_rx) = std::sync::mpsc::channel::<bool>();
+        let reader = held_reader(
+            true,
+            Some(Duration::ZERO),
+            Arc::clone(&crowd),
+            Arc::clone(&asked),
+            (started_tx.clone(), saw_tx.clone()),
+        );
+        let mut body = ExportBody::new(Bytes::from_static(b"head\r\n"), 0, 3_301, reader);
+        let _head = next_frame(&mut body).await.expect("a frame").expect("data");
+        let cut = next_frame(&mut body)
+            .await
+            .expect("a frame")
+            .expect_err("an empty page is not the query's");
+        assert_eq!(
+            cut.to_string(),
+            "the query's rows changed while it was exported: 3301 when it began, 0 at row 0 \
+             (a writer added to or replaced a month it reads); nothing past row 0 was \
+             written -- export again"
+        );
+        assert!(
+            crowd.lock().expect("the crowd").is_none(),
+            "the refusal freed it"
+        );
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(10)), Ok(()));
+        assert_eq!(saw_rx.recv_timeout(Duration::from_secs(10)), Ok(false));
+        assert_eq!(*asked.lock().expect("the offsets"), vec![0]);
+        // A TASK THAT WILL NOT JOIN.
+        let reader = held_reader(
+            false,
+            None,
+            Arc::new(std::sync::Mutex::new(None)),
+            Arc::clone(&asked),
+            (started_tx, saw_tx),
+        );
+        let mut body = ExportBody::new(Bytes::from_static(b"head\r\n"), 0, 3_302, reader);
+        let _head = next_frame(&mut body).await.expect("a frame").expect("data");
+        let cut = next_frame(&mut body)
+            .await
+            .expect("a frame")
+            .expect_err("a task that will not join")
+            .to_string();
+        assert!(
+            cut.starts_with("the store-read pool did not admit the next page after 8 tries (Join("),
+            "{cut}"
+        );
+    }
+
+    /// **A REFUSAL BEFORE A BYTE IS THE WINDOW'S, AND A NAME IS ALWAYS A FILE
+    /// NAME.** A read refused by the full scan pool is 429 naming the export
+    /// scan; a retired contract is 410; a month a writer holds is 503 "ask
+    /// again"; any other refusal is 400. A first page holding no row, or more
+    /// than the query keeps, is refused whole. A page with no row and no end
+    /// read is not named; ends that agree name it. A file name keeps only
+    /// letters, digits, `.`, `_` and `-`, one dash for a run of anything
+    /// else, and names a selection of several symbols or none `selection`. A
+    /// contract that is not a dated one has no expiry day, and an open
+    /// interest the vendor never gave is empty beside `oi_null`.
+    ///
+    /// Extremes: singles — the scan pool full, a retired contract, a month a
+    /// writer holds, an unknown series, a first page of 0 rows, one of 9 rows
+    /// where 7 are kept, an empty page with no end read, a symbol of `&`
+    /// alone, no series at all, a contract of letters where its date should
+    /// be, a future's null open interest; combinations — two symbols in one
+    /// export (`selection`), a run of two `&` between letters (one dash), an
+    /// empty page whose two ends agree on nothing at once; out of the box — a
+    /// symbol made of nothing a file name may hold (`&&&`: one dash).
+    #[tokio::test]
+    async fn a_refusal_before_a_byte_is_the_windows_and_a_name_is_always_a_file_name() {
+        for (refusal, status, says) in [
+            (
+                Refused::Pool(crate::detail::RunError::Saturated, true),
+                StatusCode::TOO_MANY_REQUESTS,
+                "a bar export scan",
+            ),
+            (
+                Refused::Read(format!(
+                    "{}: NSE-FNO-ZZFIXTURE-2019-03-28-FUT is retired",
+                    pull::gdfl_lineage::CONTRACT_REFUSED
+                )),
+                StatusCode::GONE,
+                "\"code\":\"contract_refused\"",
+            ),
+            (
+                Refused::Read(format!(
+                    "2025-06: {}: another writer holds it",
+                    store::flock::BEING_WRITTEN
+                )),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "\"being_written\":true",
+            ),
+            (
+                Refused::Read("unknown_series: invented".to_owned()),
+                StatusCode::BAD_REQUEST,
+                "\"code\":\"bad_query\"",
+            ),
+        ] {
+            let (got, body) = said(refused_read(&refusal)).await;
+            assert_eq!(got, status, "{body}");
+            assert!(body.contains(says), "{body}");
+        }
+        for (rows, said_rows) in [(0, "held 0 row(s)"), (9, "held 9 row(s)")] {
+            let first = Page {
+                total: 7,
+                rows,
+                ..Page::default()
+            };
+            let refusal = first_page_refusal(&first).expect("refused whole");
+            let (status, body) = said(refusal).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+            assert!(body.contains(said_rows), "{body}");
+            assert!(body.contains("export_not_whole"), "{body}");
+        }
+        assert!(
+            first_page_refusal(&Page {
+                total: 7,
+                rows: 7,
+                ..Page::default()
+            })
+            .is_none()
+        );
+        let refused = file_days(&Page::default(), None).expect_err("no row and no end read");
+        assert_eq!(refused.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let none = || ("none".to_owned(), 0);
+        assert_eq!(
+            file_days(&Page::default(), Some((none(), none()))).expect("ends that agree"),
+            ("none".to_owned(), "none".to_owned())
+        );
+
+        let base = plan_of(&format!("{SPOT}&from=2025-05&to=2025-05")).expect("a plan");
+        let columns = Columns::of(&base);
+        let named = |symbols: &[&str]| bars::WindowQuery {
+            series: symbols
+                .iter()
+                .map(|symbol| bars::SeriesKey::new("NSE", "CASH", symbol, None))
+                .collect(),
+            ..base.clone()
+        };
+        for (symbols, what) in [
+            (&["M&&M"][..], "M-M"),
+            (&["&&&"][..], "-"),
+            (&["NIFTY", "BANKNIFTY"][..], "selection"),
+            (&[][..], "selection"),
+        ] {
+            assert_eq!(
+                file_name(&columns, &named(symbols), "2025-05-02", "2025-05-03", 7),
+                format!("brutex-db-bars_gdfl_1min_{what}_2025-05-02_2025-05-03_7rows.csv"),
+                "{symbols:?}"
+            );
+        }
+
+        let lettered =
+            ContractColumns::of(brutex_core::instrument::Contract::parse("ABCD-EF-GH-FUT"));
+        assert_eq!(lettered.expiry, "ABCD-EF-GH");
+        assert_eq!(lettered.expiry_day, None);
+        assert_eq!((lettered.side.as_str(), lettered.strike.as_str()), ("", ""));
+        let columns = Columns {
+            feed: "gdfl",
+            timeframe: "1min".to_owned(),
+            contracts: vec![ContractColumns::of(
+                brutex_core::instrument::Contract::parse("2025-06-26-FUT"),
+            )],
+        };
+        let row = bars::WindowBar {
+            bar: Bar {
+                ts_micros: 1_748_835_900_000_000,
+                open: 1_000_037,
+                high: 1_000_087,
+                low: 999_987,
+                close: 1_000_037,
+                volume: 10,
+                open_interest: OI_NULL,
+            },
+            chg: None,
+            chg_why: "no_earlier_stored_bar",
+            oichg: None,
+            oichg_why: "oi_null",
+            series: 0,
+            phase: None,
+            oi_applies: true,
+            v_why: None,
+        };
+        let mut out = String::new();
+        push_record(&mut out, &columns, "NSE-FNO-NIFTY-2025-06-26-FUT", &row);
+        let f = fields(out.trim_end());
+        assert_eq!(f.len(), COLUMNS.len(), "{out}");
+        assert_eq!(&f[15..19], ["", "oi_null", "", "oi_null"], "{out}");
+        assert_eq!(&f[19..21], ["2025-06-26", "24"], "{out}");
+    }
+
+    /// **A READ THE WINDOW REFUSES IS REFUSED BY NAME, AND ONE PAST THE CHEAP
+    /// BUDGET IS ASKED AGAIN WHERE THE SCANS ARE READ.** A series the store
+    /// holds no month of is refused `400 bad_query` with the window's own
+    /// sentence, asked with the seeks and asked as a scan (a time-of-day
+    /// bound); 70,000 rows ordered by time of day are past the cheap reads'
+    /// budget, so the read is asked again in the scan pool, where it counts
+    /// them, and the export refuses them by count.
+    ///
+    /// Extremes: singles — a series never held (cheap), the same with a
+    /// time-of-day bound (a scan from the start), 70,000 rows (past the
+    /// 65,536 the cheap reads take); combinations — a value order and a count
+    /// past both the cheap budget and the export ceiling at once (asked
+    /// again, then refused by count), a never-held series asked as a scan;
+    /// out of the box — seven months of a symbol asked by time of day.
+    #[tokio::test]
+    async fn a_refused_read_is_named_and_one_past_the_cheap_budget_is_asked_again_as_a_scan() {
+        let store = Store::new("budget");
+        for month in 5..=11 {
+            store.write("INDEX", None, month, 0, 10_000);
+        }
+        for extra in ["", "&tod_from=09:15&tod_to=09:20"] {
+            let (status, _, body) = store
+                .export(&format!(
+                    "feed=gdfl&timeframe=1min&exchange=NSE&segment=INDEX&symbol=BANKNIFTY\
+                     &from=2025-05&to=2025-05{extra}"
+                ))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}: {body:?}");
+            let body: serde_json::Value =
+                serde_json::from_str(&body.expect("a body")).expect("JSON");
+            assert_eq!(body["code"], "bad_query", "{extra}: {body}");
+            let why = body["error"].as_str().expect("a sentence");
+            assert!(
+                why.starts_with("unknown_series: NSE-INDEX-BANKNIFTY names no series"),
+                "{why}"
+            );
+        }
+        let (status, headers, body) = store
+            .export(&format!("{SPOT}&from=2025-05&to=2025-11&sort=tod"))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+        assert!(headers.get("x-export-rows").is_none());
+        let body: serde_json::Value = serde_json::from_str(&body.expect("a body")).expect("JSON");
+        assert_eq!(body["code"], "too_many_rows", "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("a sentence")
+                .contains("keeps 70000 bar(s)"),
+            "{body}"
+        );
+    }
+
+    /// **A FULL SCAN POOL REFUSES AN EXPORT BY NAME, AND THE SAME EXPORT IS
+    /// WRITTEN ONCE THE POOL FREES.** With every scan slot taken, an export
+    /// bounded by a time of day (a scan) is refused `429` naming the export's
+    /// scan, after every try; asked again, the refusal frees the pool and the
+    /// export is written whole. The window page of the same query is asked
+    /// again the same way, and answered from the scan pool.
+    ///
+    /// Extremes: singles — every scan slot taken (429 by name), the slots
+    /// given back by the refusal (written whole); combinations — a full pool
+    /// and a time-of-day bound at once, the export and its window page each
+    /// refused once and then answered; out of the box — a pool another test
+    /// may also be filling, asked again until it is free.
+    #[tokio::test]
+    async fn a_full_scan_pool_refuses_an_export_by_name_and_it_is_written_once_the_pool_frees() {
+        let store = Store::new("crowded");
+        store.write("INDEX", None, 5, 0, 750);
+        let query = format!("{SPOT}&from=2025-05&to=2025-05&tod_from=09:15&tod_to=09:16");
+        let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
+        let uri: axum::http::Uri = format!("{ROUTE}?{query}").parse().expect("a URI");
+        let (status, body) = said(
+            bars_export_csv(
+                axum::extract::State(Loaded::clone(&store.site)),
+                Method::GET,
+                uri,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert!(body.contains("a bar export scan"), "{body}");
+        let (status, headers, body) = store
+            .export_freeing(Method::GET, &query, &mut || drop(crowd.take()))
+            .await;
+        assert!(crowd.is_none(), "refused once, then freed");
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(headers["x-export-rows"], "4");
+        assert_eq!(records(&body.expect("a whole stream")).len(), 4);
+        let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
+        let page = store
+            .window_freeing(&format!("{query}&offset=0&limit=10"), &mut || {
+                drop(crowd.take());
+            })
+            .await;
+        assert!(crowd.is_none(), "refused once, then freed");
+        assert_eq!(page["total"], 4, "{page}");
+        assert_eq!(page["admitted"], "scan", "{page}");
     }
 }
