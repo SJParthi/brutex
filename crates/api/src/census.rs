@@ -3511,3 +3511,7 @@ mod tail_tests;
 #[cfg(test)]
 #[path = "census_epoch_link_tests.rs"]
 mod epoch_link_tests;
+
+#[cfg(test)]
+#[path = "census_cover_tests.rs"]
+mod cover_tests;
