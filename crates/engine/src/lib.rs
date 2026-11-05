@@ -2515,7 +2515,8 @@ const WORST_K3: usize = LIVE_POSITIONS * (LIVE_POSITIONS - 1) * (LIVE_POSITIONS 
 const WORST_K4: usize = WORST_K3 * (LIVE_POSITIONS - 3) / 4;
 
 /// The manifest reader behind V-06b. Declared here, past the shipping region, because
-/// several tests below read this file only up to its first `#[cfg(test)]`.
+/// several tests below read this file only up to its first `#[cfg(test)]` line at the
+/// margin (the test-only arm inside `reserved` is indented, D-7329).
 #[cfg(test)]
 mod manifest;
 
@@ -2966,17 +2967,27 @@ mod tests {
             hits: 2,
         };
 
-        // TWO BLOCKS OF KNOWN SIZE. `without_highest` strips the top bit, so
-        // {0,1} {0,2} {0,3} all key on {0} — a block of three — and {4,5} {4,6}
-        // key on {4} — a block of two.
+        // FIVE BLOCKS OF KNOWN SIZE. `without_highest` strips the top bit, so
+        // {0,1} {0,2} {0,3} all key on {0} — a block of three — {1,2} {1,3} key
+        // on {1} — a block of two — {2,3} alone keys on {2}, {4,5} {4,6} key on
+        // {4} — a block of two — and {5,6} alone keys on {5}. Every 2-subset of
+        // every union the pairs make is in this frontier, so the subset prune
+        // refuses none of them and the distinctness check below runs on real
+        // survivors (BASE-COV-LIBS-LSA: with {0,1} {0,2} {0,3} {4,5} {4,6} alone,
+        // each union lacked a 2-subset, `frequent` came back empty and that check
+        // held over nothing).
         let prev = Frontier {
             k: 2,
             frequent: vec![
                 one(&[0, 1]),
                 one(&[0, 2]),
                 one(&[0, 3]),
+                one(&[1, 2]),
+                one(&[1, 3]),
+                one(&[2, 3]),
                 one(&[4, 5]),
                 one(&[4, 6]),
+                one(&[5, 6]),
             ],
             generated: 0,
             duplicates: 0,
@@ -2991,18 +3002,28 @@ mod tests {
 
         // The block arithmetic, written as the formula rather than as its
         // answer: a block of `n` members contributes C(n,2) pairs, and this
-        // frontier has blocks of three and two. C(3,2) + C(2,2) = 3 + 1 = 4.
+        // frontier has blocks of three, two, one, two and one.
+        // C(3,2) + C(2,2) + C(1,2) + C(2,2) + C(1,2) = 3 + 1 + 0 + 1 + 0 = 5.
         let pairs_in = |n: u64| n.saturating_mul(n.saturating_sub(1)) / 2;
-        let expected = pairs_in(3) + pairs_in(2);
+        let expected = pairs_in(3) + pairs_in(2) + pairs_in(1) + pairs_in(2) + pairs_in(1);
         assert_eq!(
             level.generated, expected,
-            "one candidate per pair, and the block arithmetic says four"
+            "one candidate per pair, and the block arithmetic says five"
         );
         assert_eq!(
             pairs, expected,
             "and every pair walked produced one -- `generated` and `pairs` are \
              ONE quantity under a prefix join, which is the property the deleted \
              set used to be needed to confirm"
+        );
+        // Every one of the five candidates survives: {0,1,2} {0,1,3} {0,2,3}
+        // {1,2,3} from the bars holding 0..=3 and {4,5,6} from those holding
+        // 4..=6, each hit twice. So the distinctness below is checked on five
+        // survivors, never on an empty level.
+        assert_eq!(
+            level.frequent.len(),
+            5,
+            "every candidate the pairs made is frequent and survives the prune"
         );
         // No pair repeats a candidate another pair already made, witnessed by
         // DISTINCTNESS of what survived rather than by `duplicates`, which is a
@@ -4153,15 +4174,19 @@ mod tests {
     /// survive both prunes, and `offer` / `append` behave as the set and
     /// vector they front. D-0924.
     #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "test-only: a fixture-sized frontier always reserves"
+    )]
     fn the_bench_primitives_agree_with_the_level_they_stand_for() {
         let wide: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
         let b = bars(&[wide, wide, &[0, 1, 2], &[]]);
         let s = Ladder::with_min_hits(1).walk(&b, wide);
-        for pair in s.levels.windows(2) {
-            let [prev, next] = pair else { continue };
-            let built = primitives::JoinProbe::try_new(&prev.frequent);
-            assert!(built.is_ok(), "fixture-sized reservation");
-            let Ok(probe) = built else { continue };
+        // Each level beside the next: a pair always has both, so no arm is
+        // left for one that does not (BASE-COV-LIBS-LS4).
+        for (prev, next) in s.levels.iter().zip(s.levels.iter().skip(1)) {
+            let probe =
+                primitives::JoinProbe::try_new(&prev.frequent).expect("fixture-sized reservation");
             let (pairs, survivors) = probe.screen_every_pair();
             assert_eq!(pairs, next.generated, "k={} pairs", next.k);
             assert_eq!(
@@ -4387,7 +4412,7 @@ mod tests {
     #[test]
     #[expect(
         clippy::too_many_lines,
-        reason = "at 101 lines, and every one of them is the accounting this \
+        reason = "at 116 lines, and every one of them is the accounting this \
                   test exists to publish: it reads its own shipping region and \
                   names each early exit together with the budget that licenses \
                   it. The length IS the enumeration -- splitting it would leave \
@@ -4395,7 +4420,7 @@ mod tests {
                   which is precisely the drift the assertion refuses. Placed on \
                   this function rather than the module so it claims no more than \
                   it needs. Safe against the scan itself: the region examined is \
-                  `src.split(\"#[cfg(test)]\").next()`, which ends far above here"
+                  `src.split_once(\"\\n#[cfg(test)]\\n\")`, which ends far above here"
     )]
     fn the_walk_has_exactly_three_early_exits_and_each_is_a_budget() {
         let src = include_str!("lib.rs");
@@ -4410,8 +4435,12 @@ mod tests {
         //
         // `return` is counted only in the SHIPPING region: the test module below
         // is full of ordinary returns and closures, and scanning it would pin a
-        // number that moves whenever a test is added.
-        let shipping = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // number that moves whenever a test is added. The region ends at the
+        // first `#[cfg(test)]` line at the margin: the test-only arm inside
+        // `reserved` is indented and stands in it (D-7329).
+        let shipping = src
+            .split_once("\n#[cfg(test)]\n")
+            .map_or(src, |(code, _)| code);
         let count_exits = |text: &str| -> usize {
             text.lines()
                 .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
@@ -4712,10 +4741,14 @@ mod tests {
         // `drain` iterates it, so its call reads `support(mask)` on an already
         // borrowed item and the old needle stopped seeing it.
         //
-        // Splitting on the first `#[cfg(test)]` is the same discipline the
-        // `column.rs` check below already uses, and it separates the two by what
-        // they ARE rather than by how they happen to be written.
-        let shipped = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // Splitting on the first `#[cfg(test)]` line at the margin is the same
+        // discipline the `column.rs` check below already uses, and it separates
+        // the two by what they ARE rather than by how they happen to be written.
+        // At the margin, because the test-only arm inside `reserved` is indented
+        // and stands in the shipping region (D-7329).
+        let shipped = src
+            .split_once("\n#[cfg(test)]\n")
+            .map_or(src, |(code, _)| code);
         assert_eq!(
             shipped.matches(concat!("column.", "support(")).count(),
             2,
@@ -5144,8 +5177,23 @@ mod tests {
         // has somewhere to lose candidates rather than being masked by a frontier
         // small enough that every pair happens to be in one block.
         let wide: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7];
-        let b = bars(&[wide, wide, wide, &[0, 1, 2], &[3, 4, 5], &[8], &[8]]);
-        let live: Vec<u32> = (0..=8).collect();
+        // {9,10} and {9,11} are frequent and {10,11} is not, so the oracle
+        // meets a union with an infrequent subset and must refuse it, as the
+        // subset prune does (BASE-COV-LIBS-LS4).
+        let b = bars(&[
+            wide,
+            wide,
+            wide,
+            &[0, 1, 2],
+            &[3, 4, 5],
+            &[8],
+            &[8],
+            &[9, 10],
+            &[9, 10],
+            &[9, 11],
+            &[9, 11],
+        ]);
+        let live: Vec<u32> = (0..=11).collect();
         let min_hits = 2;
         let s = Ladder::with_min_hits(min_hits).walk(&b, &live);
         assert!(s.completed(), "the fixture must not breach a budget");
@@ -5285,10 +5333,7 @@ mod tests {
 
         // The cumulative counters only ever grow, which is what makes them
         // readable as progress rather than as a per-level figure.
-        for pair in reported.windows(2) {
-            let (Some(&(_, a0, p0)), Some(&(_, a1, p1))) = (pair.first(), pair.get(1)) else {
-                continue;
-            };
+        for (&(_, a0, p0), &(_, a1, p1)) in reported.iter().zip(reported.iter().skip(1)) {
             assert!(a1 >= a0, "admitted is cumulative and cannot shrink");
             assert!(p1 >= p0, "pairs walked is cumulative and cannot shrink");
         }
@@ -5606,10 +5651,12 @@ mod tests {
             let mut handed = Vec::new();
             let (next, halt, _, _) =
                 ladder.try_next_level_observing(&column, &first, 2, 0, 0, &mut |pending| {
-                    if pending > 0 {
-                        handed.push(pending);
-                    }
+                    handed.push(pending);
                 })?;
+            // Every handoff is a batch that holds something: none is empty
+            // (BASE-COV-LIBS-LS4; the filter that used to drop an empty one
+            // never had one to drop).
+            assert!(handed.iter().all(|&pending| pending > 0));
             let (tail, full_batches) = handed.split_last().ok_or("no actual support batch")?;
             assert!(
                 full_batches
@@ -5903,9 +5950,13 @@ mod caller_input {
             let sweep = Ladder::with_min_hits(1)
                 .with_support_lanes(1)
                 .walk_checkpointed(&column, &[0, 64], [0x7b; 32], &mut |view| {
-                    if terminal_seen {
-                        return Err("the walk advanced beyond its terminal boundary".into());
-                    }
+                    // A call after the terminal boundary would be the walk's
+                    // defect: the test fails there, by assertion (BASE-COV-LIBS-LSA;
+                    // it returned an `Err` whose only effect was the same failure).
+                    assert!(
+                        !terminal_seen,
+                        "the walk advanced beyond its terminal boundary"
+                    );
                     checkpoints += 1;
                     terminal_seen = view.terminal();
                     Ok(())
