@@ -245,15 +245,14 @@ fn a_day_a_held_month_lacks_lands_as_a_new_generation_every_reader_opens() {
     );
     let file = BarFile::open_existing(&holed, nifty_april(), id_of("NIFTY")).unwrap();
     // THE NEW GENERATION CARRIES A `.tix` EXACTLY WHEN IT REACHES THE
-    // SMALL-MONTH THRESHOLD (D-4933); under it, it is bisected by rule.
+    // SMALL-MONTH THRESHOLD (D-4933); under it, it is bisected by rule. This
+    // fixture's month (three days of a few seconds each) is under it, which
+    // is asserted rather than branched on (PS2: the other side was never run).
     let small = store::time_index::below_threshold(file.header().n_valid);
+    assert!(small, "a month of {} bars", file.header().n_valid);
     assert_eq!(
         file.time_lookup(),
-        if small {
-            store::file::TimeLookup::Bisection(store::time_index::Why::BelowThreshold)
-        } else {
-            store::file::TimeLookup::Indexed
-        }
+        store::file::TimeLookup::Bisection(store::time_index::Why::BelowThreshold)
     );
     let first_added = added.first().unwrap().ts_micros;
     let last_added = added.last().unwrap().ts_micros;
