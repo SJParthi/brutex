@@ -399,11 +399,8 @@ fn an_admission_over_a_store_that_is_not_there_is_refused_by_name() {
             .err()
             .expect("no store, no lease");
         assert_eq!(lease.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            lease.why().contains("execution lease is unavailable"),
-            "{}",
-            lease.why()
-        );
+        let said = lease.why();
+        assert!(said.contains("execution lease is unavailable"), "{said}");
     }
     assert!(!gone.store_root.exists(), "nothing was created");
     assert_eq!(
@@ -600,11 +597,8 @@ async fn unseen_presses(root: &std::path::Path) {
         .err()
         .expect("a sweep runs elsewhere");
     assert_eq!(elsewhere.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        elsewhere.why().contains("still reports activity"),
-        "{}",
-        elsewhere.why()
-    );
+    let said = elsewhere.why();
+    assert!(said.contains("still reports activity"), "{said}");
     let crowd = crate::detail::crowd(crate::detail::Named::Detail);
     let (status, _, answer) = run_json(
         axum::extract::State(std::sync::Arc::clone(&site)),

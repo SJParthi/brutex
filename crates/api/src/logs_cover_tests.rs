@@ -511,23 +511,16 @@ fn a_search_stopped_by_a_line_that_will_not_read_or_by_no_budget_still_answers()
     let query = "day=2020-01-02&from=5&to=9&limit=50";
     let (whole, whole_ts) = ask_ts(&intact, query);
     let (stopped, stopped_ts) = ask_ts(&torn, query);
-    assert_eq!(whole_ts, [9, 8, 7, 6, 5], "{:#}", whole["keyed"]);
-    assert_eq!(stopped_ts, whole_ts, "{:#}", stopped["keyed"]);
+    let (whole, stopped) = (&whole["keyed"], &stopped["keyed"]);
+    assert_eq!(whole_ts, [9, 8, 7, 6, 5], "{whole:#}");
+    assert_eq!(stopped_ts, whole_ts, "{stopped:#}");
+    assert_eq!(whole["index"]["passed"], 34, "{whole:#}");
+    assert_eq!(whole["index"]["rolled_off"], 0);
     assert_eq!(
-        whole["keyed"]["index"]["passed"], 34,
-        "{:#}",
-        whole["keyed"]
+        stopped["index"]["passed"], 19,
+        "the search stopped at the torn line: {stopped:#}"
     );
-    assert_eq!(whole["keyed"]["index"]["rolled_off"], 0);
-    assert_eq!(
-        stopped["keyed"]["index"]["passed"], 19,
-        "the search stopped at the torn line: {:#}",
-        stopped["keyed"]
-    );
-    assert_eq!(
-        stopped["keyed"]["index"]["rolled_off"], 1,
-        "met and counted"
-    );
+    assert_eq!(stopped["index"]["rolled_off"], 1, "met and counted");
     let spent = scratch("budget-spent-served");
     let late = scratch("budget-spent-cli");
     let many: Vec<i64> = (1..=2_000).collect();
