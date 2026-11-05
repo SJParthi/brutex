@@ -1,12 +1,12 @@
 # fu-LS2.txt.md: runner (F) and (U) items
 
-Shard BASE-COV-LIBS-LS2 (crate runner). FINAL: these lists are from the final Route B at code tip 2b998e4b (21:10-22:40 IST), which measures every code commit of this shard.
+Shard BASE-COV-LIBS-LS2 (crate runner). FINAL: these lists are from the final Route B at code tip 473f62e05b5b (11:41-13:11 IST, 5 Nov), which measures every code commit of this shard.
 One fenced block below holds the list.
 
 `````text
-(F) and (U) items of runner on tip 2b998e4b5f6e4cc77ab8bd32de00ba8a4d165f0b (recipe v4 step 4). (F) rows are classified by rule (scratchpad classify.mjs: the failing arm of assert!/assert_eq!/assert_ne!/panic!/unreachable! inside #[cfg(test)] code or tests/, the message argument of such an assert, a let-else or if whose block is only a panic, and the False side of an assert! condition operand that makes it fail); (U) items were each read and proved by hand from the code, for aarch64-apple-darwin as for this host (no proof below depends on the target). A (U) item names its rows as file:line[:column side]; gaps-LS2.txt.md tags each row it covers [U].
+(F) and (U) items of runner on tip 473f62e05b5b7220ad3c267a2a8e066a51c1188f (recipe v4 step 4). (F) rows: the failing arm of assert!/assert_eq!/assert_ne!/panic!/unreachable! inside #[cfg(test)] code or tests/, the message argument of such an assert, a let-else or if whose block is only a panic, and the failing side of an assert! condition operand (the False side of a conjunction's operand, or of a disjunction's last operand); rows on lines unchanged since 2b998e4b5f6e keep the earlier session's (F) classification, and this session classified the rest by the same rule. (U) items were each read and proved by hand from the code, for aarch64-apple-darwin as for this host (no proof below depends on the target). A (U) item names its rows as file:line[:column side]; gaps-LS2.txt.md tags each row it covers [U]. The first 76 (U) paragraphs are the earlier session's, carried unchanged (the code they read is unchanged: this session changed test code only), and they name lines as at 2b998e4b5f6e. Those numbers hold at 473f62e05b5b in every file but one: in crates/runner/src/exit_grid_policy.rs each line from 679 to 5862 is one higher at 473f62e05b5b (this session's test edit at 676-678, inside mod subslice_tests, added one line; the lines after 5862 are test code, which no proof names), so a line N of that range named in an earlier paragraph is N+1 here, and each [U] row of gaps-LS2.txt.md whose proof names its earlier line says so. (grid.rs's thin_to_budget, after its test module, also moved; no row or proof names it.) The last 11 paragraphs are this session's and name lines as at 473f62e05b5b.
 
-(F) ITEMS: 254
+(F) ITEMS: 274
 (F) LINE   crates/runner/src/admission.rs:7423  [assert_eq! message argument]  reason.name()
 (F) LINE   crates/runner/src/admission.rs:7429  [assert_eq! message argument]  reason.name()
 (F) LINE   crates/runner/src/admission.rs:7435  [assert_eq! message argument]  reason.name()
@@ -16,7 +16,9 @@ One fenced block below holds the list.
 (F) BRANCH crates/runner/src/admission_reader_cover_tests.rs:289:70 False  [assert! condition branch (failing side)]  Err(AdmissionCanonicalRefusalV1::Length { expected, .. }) if expected == at + 9
 (F) BRANCH crates/runner/src/audit.rs:2224:13 False  [assert! condition branch (failing side)]  ranked
 (F) BRANCH crates/runner/src/audit.rs:2227:20 False  [assert! condition branch (failing side)]  && ranked.ends_with("what selection ranks on, gross of every charge"),
-(F) BRANCH crates/runner/src/audit.rs:2641:21 False  [assert! condition branch (failing side)]  token
+(F) BRANCH crates/runner/src/audit.rs:2358:44 False  [assert! condition branch (failing side): the False side of a disjunction's last operand]  line.is_empty() || line.starts_with("  "),
+(F) BRANCH crates/runner/src/audit.rs:2467:29 False  [assert! condition branch (failing side): the False side of a disjunction's last operand]  decision || token == "V6",
+(F) BRANCH crates/runner/src/audit.rs:2620:40 False  [assert! condition branch (failing side): the False side of a disjunction's last operand]  line.is_empty() || line.starts_with("  "),
 (F) BRANCH crates/runner/src/audit.rs:2788:13 False  [assert! condition branch (failing side)]  out.contains("durable selected exit") && out.contains("0/-/-"),
 (F) BRANCH crates/runner/src/audit.rs:2788:54 False  [assert! condition branch (failing side)]  out.contains("durable selected exit") && out.contains("0/-/-"),
 (F) BRANCH crates/runner/src/audit.rs:3067:17 False  [assert! condition branch (failing side)]  assert!(best.is_some() && sharp.is_some() && best != sharp);
@@ -33,91 +35,92 @@ One fenced block below holds the list.
 (F) LINE   crates/runner/src/bootstrap.rs:3413  [assert! message argument]  set.len()
 (F) LINE   crates/runner/src/bootstrap.rs:3520  [assert! message argument]  rc.map(|v| v.p_value)
 (F) LINE   crates/runner/src/bootstrap.rs:3526  [assert! message argument]  v.map(|v| (v.p_value, v.clears()))
-(F) LINE   crates/runner/src/bootstrap.rs:3653  [assert! message argument]  disagreements.len()
 (F) BRANCH crates/runner/src/bootstrap.rs:2435:13 False  [assert! condition branch (failing side)]  names.contains(&18) && names.contains(&19),
 (F) BRANCH crates/runner/src/bootstrap.rs:2435:36 False  [assert! condition branch (failing side)]  names.contains(&18) && names.contains(&19),
 (F) BRANCH crates/runner/src/bootstrap.rs:2652:17 False  [assert! condition branch (failing side)]  assert!(fast > 0 && kept > 0, "both paths must be exercised");
 (F) BRANCH crates/runner/src/bootstrap.rs:2652:29 False  [assert! condition branch (failing side)]  assert!(fast > 0 && kept > 0, "both paths must be exercised");
-(F) BRANCH crates/runner/src/bootstrap.rs:3401:17 False  [assert! condition branch (failing side)]  r.round == expected_round || r.round == expected_round + 1,
 (F) BRANCH crates/runner/src/bootstrap.rs:3409:13 False  [assert! condition branch (failing side)]  rounds < rejected.len() && rejected.len() <= set.len(),
 (F) BRANCH crates/runner/src/bootstrap.rs:3409:40 False  [assert! condition branch (failing side)]  rounds < rejected.len() && rejected.len() <= set.len(),
 (F) BRANCH crates/runner/src/bootstrap_family_pass_tests.rs:183:13 False  [assert! condition branch (failing side)]  matched > 0 && matched < draws,
 (F) BRANCH crates/runner/src/bootstrap_family_pass_tests.rs:183:28 False  [assert! condition branch (failing side)]  matched > 0 && matched < draws,
-(F) LINE   crates/runner/src/excursion.rs:1685  [assert! message argument]  tightest(8),
-(F) LINE   crates/runner/src/excursion.rs:1686  [assert! message argument]  tightest(4)
-(F) LINE   crates/runner/src/excursion.rs:1691  [assert! message argument]  tightest(4),
-(F) LINE   crates/runner/src/excursion.rs:1692  [assert! message argument]  tightest(2)
-(F) LINE   crates/runner/src/excursion.rs:2584  [assert_eq! message argument]  sample.len()
-(F) LINE   crates/runner/src/exit_grid_policy.rs:7821  [unreachable! (failing arm)]  unreachable!("the fixture prices every path")
-(F) LINE   crates/runner/src/exit_grid_policy.rs:7963  [assert! message argument]  universe.candidates.len()
-(F) BRANCH crates/runner/src/exit_grid_policy.rs:7967:13 False  [assert! condition branch (failing side)]  first.entry_bar > 0 && matches!(first.path, crate::grid::ReplayPathV1::Priceable(_))
-(F) BRANCH crates/runner/src/exit_grid_policy.rs:8732:17 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars > 3 && cell.gapped <= 2, "{cell:?}");
-(F) BRANCH crates/runner/src/exit_grid_policy.rs:8732:44 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars > 3 && cell.gapped <= 2, "{cell:?}");
-(F) BRANCH crates/runner/src/exit_grid_policy.rs:8741:17 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars <= 3 && cell.gapped > 2, "{cell:?}");
-(F) BRANCH crates/runner/src/exit_grid_policy.rs:8741:45 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars <= 3 && cell.gapped > 2, "{cell:?}");
-(F) LINE   crates/runner/src/grid.rs:7081  [assert! message argument]  stopped.edge_ratio(),
-(F) LINE   crates/runner/src/grid.rs:7082  [assert! message argument]  stopless.edge_ratio()
-(F) LINE   crates/runner/src/grid.rs:8342  [assert! message argument]  c.uncertainty()
-(F) LINE   crates/runner/src/grid.rs:9776  [assert! message argument]  a.reward_to_risk_bp()
-(F) LINE   crates/runner/src/grid.rs:10244  [assert! message argument]  sniper.assurance_bp(),
-(F) LINE   crates/runner/src/grid.rs:10245  [assert! message argument]  grinder.assurance_bp()
-(F) LINE   crates/runner/src/grid.rs:10251  [assert! message argument]  grinder.assurance_bp(),
-(F) LINE   crates/runner/src/grid.rs:10252  [assert! message argument]  fluke.assurance_bp()
-(F) LINE   crates/runner/src/grid.rs:10291  [assert! message argument]  cell.win_rate_bp()
-(F) LINE   crates/runner/src/grid.rs:10325  [assert! message argument]  trades - 1
-(F) LINE   crates/runner/src/grid.rs:10960  [assert! message argument]  t.eligible.len(),
-(F) LINE   crates/runner/src/grid.rs:10961  [assert! message argument]  t.trades.len()
+(F) LINE   crates/runner/src/excursion.rs:1682  [assert! message argument]  tightest(8),
+(F) LINE   crates/runner/src/excursion.rs:1683  [assert! message argument]  tightest(4)
+(F) LINE   crates/runner/src/excursion.rs:1688  [assert! message argument]  tightest(4),
+(F) LINE   crates/runner/src/excursion.rs:1689  [assert! message argument]  tightest(2)
+(F) LINE   crates/runner/src/excursion.rs:2582  [assert_eq! message argument]  sample.len()
+(F) LINE   crates/runner/src/exit_grid_policy.rs:677  [unreachable!/panic! in test code (failing arm)]  unreachable!("the copy holds bars 17..250")
+(F) LINE   crates/runner/src/exit_grid_policy.rs:7843  [unreachable! (failing arm)]  unreachable!("the fixture prices every path")
+(F) LINE   crates/runner/src/exit_grid_policy.rs:7985  [assert! message argument]  universe.candidates.len()
+(F) BRANCH crates/runner/src/exit_grid_policy.rs:676:13 False  [let-else whose block is only unreachable!]  let Some(last) = forged.last_mut() else {
+(F) BRANCH crates/runner/src/exit_grid_policy.rs:7842:13 False  [let-else whose block is only unreachable!]  let crate::grid::ReplayPathV1::Priceable(price) = &mut candidate.path else {
+(F) BRANCH crates/runner/src/exit_grid_policy.rs:7989:13 False  [assert! condition branch (failing side)]  first.entry_bar > 0 && matches!(first.path, crate::grid::ReplayPathV1::Priceable(_))
+(F) BRANCH crates/runner/src/exit_grid_policy.rs:8754:17 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars > 3 && cell.gapped <= 2, "{cell:?}");
+(F) BRANCH crates/runner/src/exit_grid_policy.rs:8754:44 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars > 3 && cell.gapped <= 2, "{cell:?}");
+(F) BRANCH crates/runner/src/exit_grid_policy.rs:8763:17 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars <= 3 && cell.gapped > 2, "{cell:?}");
+(F) BRANCH crates/runner/src/exit_grid_policy.rs:8763:45 False  [assert! condition branch (failing side)]  assert!(cell.ambiguous_bars <= 3 && cell.gapped > 2, "{cell:?}");
+(F) LINE   crates/runner/src/grid.rs:7088  [assert! message argument]  stopped.edge_ratio(),
+(F) LINE   crates/runner/src/grid.rs:7089  [assert! message argument]  stopless.edge_ratio()
+(F) LINE   crates/runner/src/grid.rs:8100  [assert! condition: the matches! arm that fails the assert (llvm-cov counts this line 0 and its scrutinee on every pass)]  !matches!(
+(F) LINE   crates/runner/src/grid.rs:8380  [assert! message argument]  c.uncertainty()
+(F) LINE   crates/runner/src/grid.rs:9814  [assert! message argument]  a.reward_to_risk_bp()
+(F) LINE   crates/runner/src/grid.rs:10283  [assert! message argument]  sniper.assurance_bp(),
+(F) LINE   crates/runner/src/grid.rs:10284  [assert! message argument]  grinder.assurance_bp()
+(F) LINE   crates/runner/src/grid.rs:10290  [assert! message argument]  grinder.assurance_bp(),
+(F) LINE   crates/runner/src/grid.rs:10291  [assert! message argument]  fluke.assurance_bp()
+(F) LINE   crates/runner/src/grid.rs:10330  [assert! message argument]  cell.win_rate_bp()
+(F) LINE   crates/runner/src/grid.rs:10364  [assert! message argument]  trades - 1
+(F) LINE   crates/runner/src/grid.rs:11034  [assert! message argument]  t.eligible.len(),
+(F) LINE   crates/runner/src/grid.rs:11035  [assert! message argument]  t.trades.len()
 (F) BRANCH crates/runner/src/grid.rs:6254:13 False  [assert! condition branch (failing side)]  !replay.is_empty() && !replay.contains(built),
 (F) BRANCH crates/runner/src/grid.rs:6254:35 False  [assert! condition branch (failing side)]  !replay.is_empty() && !replay.contains(built),
 (F) BRANCH crates/runner/src/grid.rs:6275:13 False  [assert! condition branch (failing side)]  !in_loop.is_empty() && !in_loop.contains(built),
 (F) BRANCH crates/runner/src/grid.rs:6275:36 False  [assert! condition branch (failing side)]  !in_loop.is_empty() && !in_loop.contains(built),
-(F) BRANCH crates/runner/src/grid.rs:7975:13 False  [assert! condition branch (failing side)]  !long.cells.is_empty() && !short.cells.is_empty(),
-(F) BRANCH crates/runner/src/grid.rs:7975:39 False  [assert! condition branch (failing side)]  !long.cells.is_empty() && !short.cells.is_empty(),
-(F) BRANCH crates/runner/src/grid.rs:8064:21 False  [assert! condition branch (failing side)]  c.worst_trade <= 0 || c.pessimistic > 0,
-(F) BRANCH crates/runner/src/grid.rs:8156:17 False  [assert! condition branch (failing side)]  assert!(base.stop.is_none() && base.target.is_none());
-(F) BRANCH crates/runner/src/grid.rs:8156:40 False  [assert! condition branch (failing side)]  assert!(base.stop.is_none() && base.target.is_none());
-(F) BRANCH crates/runner/src/grid.rs:10077:17 False  [assert! condition branch (failing side)]  assert!(empty.cells.is_empty() || empty.baseline().is_some());
+(F) BRANCH crates/runner/src/grid.rs:7982:13 False  [assert! condition branch (failing side)]  !long.cells.is_empty() && !short.cells.is_empty(),
+(F) BRANCH crates/runner/src/grid.rs:7982:39 False  [assert! condition branch (failing side)]  !long.cells.is_empty() && !short.cells.is_empty(),
+(F) BRANCH crates/runner/src/grid.rs:8194:17 False  [assert! condition branch (failing side)]  assert!(base.stop.is_none() && base.target.is_none());
+(F) BRANCH crates/runner/src/grid.rs:8194:40 False  [assert! condition branch (failing side)]  assert!(base.stop.is_none() && base.target.is_none());
 (F) BRANCH crates/runner/src/grid_cover_tests.rs:59:13 False  [assert! condition branch (failing side)]  assert!(needed > 1 && needed < 10_000, "{needed}");
 (F) BRANCH crates/runner/src/grid_cover_tests.rs:59:27 False  [assert! condition branch (failing side)]  assert!(needed > 1 && needed < 10_000, "{needed}");
 (F) LINE   crates/runner/src/lib.rs:2028  [assert_eq! message argument]  reads.len()
-(F) LINE   crates/runner/src/outcome.rs:3152  [assert! message argument]  column.bits().len()
-(F) LINE   crates/runner/src/outcome.rs:3242  [assert! message argument]  minute_of(i)
-(F) LINE   crates/runner/src/outcome.rs:3317  [assert! message argument]  bars.len()
-(F) LINE   crates/runner/src/outcome.rs:3382  [assert_eq! message argument]  forced_minute - 1
-(F) LINE   crates/runner/src/outcome.rs:3412  [assert_eq! message argument]  forced_minute - 1,
-(F) LINE   crates/runner/src/outcome.rs:3413  [assert_eq! message argument]  forced_minute - 2
-(F) LINE   crates/runner/src/outcome.rs:4630  [assert_eq! message argument]  i + 1
-(F) LINE   crates/runner/src/outcome.rs:5292  [assert! message argument]  want[0]
-(F) LINE   crates/runner/src/outcome.rs:5297  [assert! message argument]  want[1]
-(F) LINE   crates/runner/src/outcome.rs:5302  [assert! message argument]  want[2]
-(F) BRANCH crates/runner/src/outcome.rs:3665:13 False  [assert! condition branch (failing side)]  session.fillable(5) && !session.fillable(6),
-(F) BRANCH crates/runner/src/outcome.rs:3665:36 False  [assert! condition branch (failing side)]  session.fillable(5) && !session.fillable(6),
-(F) BRANCH crates/runner/src/outcome.rs:3764:13 False  [assert! condition branch (failing side)]  exact_mean(-1, 3) < 0.0 && exact_mean(1, 3) > 0.0,
-(F) BRANCH crates/runner/src/outcome.rs:3764:40 False  [assert! condition branch (failing side)]  exact_mean(-1, 3) < 0.0 && exact_mean(1, 3) > 0.0,
-(F) BRANCH crates/runner/src/outcome.rs:4146:13 False  [assert! condition branch (failing side)]  e.t != 0.0 && e.t.is_finite(),
-(F) BRANCH crates/runner/src/outcome.rs:4146:27 False  [assert! condition branch (failing side)]  e.t != 0.0 && e.t.is_finite(),
-(F) BRANCH crates/runner/src/outcome.rs:4586:13 False  [assert! condition branch (failing side)]  jump.highs.len() <= 11 && jump.lows.len() <= 11,
-(F) BRANCH crates/runner/src/outcome.rs:4586:39 False  [assert! condition branch (failing side)]  jump.highs.len() <= 11 && jump.lows.len() <= 11,
-(F) BRANCH crates/runner/src/outcome.rs:4898:17 False  [assert! condition branch (failing side)]  e.t.is_finite() && (e.t - want).abs() <= 1e-6 * want.abs().max(1.0),
-(F) BRANCH crates/runner/src/outcome.rs:4898:36 False  [assert! condition branch (failing side)]  e.t.is_finite() && (e.t - want).abs() <= 1e-6 * want.abs().max(1.0),
-(F) BRANCH crates/runner/src/outcome.rs:4935:17 False  [assert! condition branch (failing side)]  assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
-(F) BRANCH crates/runner/src/outcome.rs:4935:30 False  [assert! condition branch (failing side)]  assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
-(F) BRANCH crates/runner/src/outcome.rs:4935:50 False  [assert! condition branch (failing side)]  assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
-(F) BRANCH crates/runner/src/outcome.rs:5319:17 False  [assert! condition branch (failing side)]  assert!(a.is_finite() && b.is_finite() && c.is_finite());
-(F) BRANCH crates/runner/src/outcome.rs:5319:34 False  [assert! condition branch (failing side)]  assert!(a.is_finite() && b.is_finite() && c.is_finite());
-(F) BRANCH crates/runner/src/outcome.rs:5319:51 False  [assert! condition branch (failing side)]  assert!(a.is_finite() && b.is_finite() && c.is_finite());
-(F) BRANCH crates/runner/src/outcome.rs:5447:17 False  [assert! condition branch (failing side)]  assert!(f.was_refused(victim - 2) && !f.was_missing(victim - 2));
-(F) BRANCH crates/runner/src/outcome.rs:5447:46 False  [assert! condition branch (failing side)]  assert!(f.was_refused(victim - 2) && !f.was_missing(victim - 2));
-(F) BRANCH crates/runner/src/outcome.rs:5474:13 False  [assert! condition branch (failing side)]  !f.was_refused(last) && !f.was_missing(last),
-(F) BRANCH crates/runner/src/outcome.rs:5474:37 False  [assert! condition branch (failing side)]  !f.was_refused(last) && !f.was_missing(last),
-(F) BRANCH crates/runner/src/outcome.rs:5477:17 False  [assert! condition branch (failing side)]  assert!(!f.was_refused(bars.len()) && !f.was_missing(bars.len()));
-(F) BRANCH crates/runner/src/outcome.rs:5477:47 False  [assert! condition branch (failing side)]  assert!(!f.was_refused(bars.len()) && !f.was_missing(bars.len()));
-(F) BRANCH crates/runner/src/outcome.rs:5533:13 False  [assert! condition branch (failing side)]  !bounds.day_ended(500) && !bounds.day_ended(501),
-(F) BRANCH crates/runner/src/outcome.rs:5533:39 False  [assert! condition branch (failing side)]  !bounds.day_ended(500) && !bounds.day_ended(501),
-(F) BRANCH crates/runner/src/outcome.rs:5536:17 False  [assert! condition branch (failing side)]  assert!(bounds.day_ended(499) && bounds.day_ended(502));
-(F) BRANCH crates/runner/src/outcome.rs:5536:42 False  [assert! condition branch (failing side)]  assert!(bounds.day_ended(499) && bounds.day_ended(502));
-(F) BRANCH crates/runner/src/portfolio.rs:916:18 False  [assert! condition branch (failing side)]  } if strategy_digest == StrategyDigest::new([7; 32])
-(F) BRANCH crates/runner/src/portfolio.rs:1018:18 False  [assert! condition branch (failing side)]  } if strategy_digest == StrategyDigest::new([3; 32])
+(F) BRANCH crates/runner/src/lib.rs:2032:33 False  [assert! condition branch (failing side): the False side of a conjunction's operand, through is_some_and]  |&(name, text)| name == "validate.rs" && text.contains("BRUTEX_GRID_RUNGS")
+(F) LINE   crates/runner/src/outcome.rs:3153  [assert! message argument]  column.bits().len()
+(F) LINE   crates/runner/src/outcome.rs:3243  [assert! message argument]  minute_of(i)
+(F) LINE   crates/runner/src/outcome.rs:3318  [assert! message argument]  bars.len()
+(F) LINE   crates/runner/src/outcome.rs:3383  [assert_eq! message argument]  forced_minute - 1
+(F) LINE   crates/runner/src/outcome.rs:3413  [assert_eq! message argument]  forced_minute - 1,
+(F) LINE   crates/runner/src/outcome.rs:3414  [assert_eq! message argument]  forced_minute - 2
+(F) LINE   crates/runner/src/outcome.rs:4631  [assert_eq! message argument]  i + 1
+(F) LINE   crates/runner/src/outcome.rs:5295  [assert! message argument]  want[0]
+(F) LINE   crates/runner/src/outcome.rs:5300  [assert! message argument]  want[1]
+(F) LINE   crates/runner/src/outcome.rs:5305  [assert! message argument]  want[2]
+(F) BRANCH crates/runner/src/outcome.rs:3666:13 False  [assert! condition branch (failing side)]  session.fillable(5) && !session.fillable(6),
+(F) BRANCH crates/runner/src/outcome.rs:3666:36 False  [assert! condition branch (failing side)]  session.fillable(5) && !session.fillable(6),
+(F) BRANCH crates/runner/src/outcome.rs:3765:13 False  [assert! condition branch (failing side)]  exact_mean(-1, 3) < 0.0 && exact_mean(1, 3) > 0.0,
+(F) BRANCH crates/runner/src/outcome.rs:3765:40 False  [assert! condition branch (failing side)]  exact_mean(-1, 3) < 0.0 && exact_mean(1, 3) > 0.0,
+(F) BRANCH crates/runner/src/outcome.rs:4147:13 False  [assert! condition branch (failing side)]  e.t != 0.0 && e.t.is_finite(),
+(F) BRANCH crates/runner/src/outcome.rs:4147:27 False  [assert! condition branch (failing side)]  e.t != 0.0 && e.t.is_finite(),
+(F) BRANCH crates/runner/src/outcome.rs:4587:13 False  [assert! condition branch (failing side)]  jump.highs.len() <= 11 && jump.lows.len() <= 11,
+(F) BRANCH crates/runner/src/outcome.rs:4587:39 False  [assert! condition branch (failing side)]  jump.highs.len() <= 11 && jump.lows.len() <= 11,
+(F) BRANCH crates/runner/src/outcome.rs:4899:17 False  [assert! condition branch (failing side)]  e.t.is_finite() && (e.t - want).abs() <= 1e-6 * want.abs().max(1.0),
+(F) BRANCH crates/runner/src/outcome.rs:4899:36 False  [assert! condition branch (failing side)]  e.t.is_finite() && (e.t - want).abs() <= 1e-6 * want.abs().max(1.0),
+(F) BRANCH crates/runner/src/outcome.rs:4937:17 False  [assert! condition branch (failing side)]  assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
+(F) BRANCH crates/runner/src/outcome.rs:4937:30 False  [assert! condition branch (failing side)]  assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
+(F) BRANCH crates/runner/src/outcome.rs:4937:50 False  [assert! condition branch (failing side)]  assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
+(F) BRANCH crates/runner/src/outcome.rs:5322:17 False  [assert! condition branch (failing side)]  assert!(a.is_finite() && b.is_finite() && c.is_finite());
+(F) BRANCH crates/runner/src/outcome.rs:5322:34 False  [assert! condition branch (failing side)]  assert!(a.is_finite() && b.is_finite() && c.is_finite());
+(F) BRANCH crates/runner/src/outcome.rs:5322:51 False  [assert! condition branch (failing side)]  assert!(a.is_finite() && b.is_finite() && c.is_finite());
+(F) BRANCH crates/runner/src/outcome.rs:5450:17 False  [assert! condition branch (failing side)]  assert!(f.was_refused(victim - 2) && !f.was_missing(victim - 2));
+(F) BRANCH crates/runner/src/outcome.rs:5450:46 False  [assert! condition branch (failing side)]  assert!(f.was_refused(victim - 2) && !f.was_missing(victim - 2));
+(F) BRANCH crates/runner/src/outcome.rs:5477:13 False  [assert! condition branch (failing side)]  !f.was_refused(last) && !f.was_missing(last),
+(F) BRANCH crates/runner/src/outcome.rs:5477:37 False  [assert! condition branch (failing side)]  !f.was_refused(last) && !f.was_missing(last),
+(F) BRANCH crates/runner/src/outcome.rs:5480:17 False  [assert! condition branch (failing side)]  assert!(!f.was_refused(bars.len()) && !f.was_missing(bars.len()));
+(F) BRANCH crates/runner/src/outcome.rs:5480:47 False  [assert! condition branch (failing side)]  assert!(!f.was_refused(bars.len()) && !f.was_missing(bars.len()));
+(F) BRANCH crates/runner/src/outcome.rs:5536:13 False  [assert! condition branch (failing side)]  !bounds.day_ended(500) && !bounds.day_ended(501),
+(F) BRANCH crates/runner/src/outcome.rs:5536:39 False  [assert! condition branch (failing side)]  !bounds.day_ended(500) && !bounds.day_ended(501),
+(F) BRANCH crates/runner/src/outcome.rs:5539:17 False  [assert! condition branch (failing side)]  assert!(bounds.day_ended(499) && bounds.day_ended(502));
+(F) BRANCH crates/runner/src/outcome.rs:5539:42 False  [assert! condition branch (failing side)]  assert!(bounds.day_ended(499) && bounds.day_ended(502));
+(F) BRANCH crates/runner/src/portfolio.rs:915:18 False  [assert! condition branch (failing side)]  } if strategy_digest == StrategyDigest::new([7; 32])
+(F) BRANCH crates/runner/src/portfolio.rs:1017:18 False  [assert! condition branch (failing side)]  } if strategy_digest == StrategyDigest::new([3; 32])
 (F) LINE   crates/runner/src/rank.rs:1264  [assert! message argument]  grinder.payoff_bp(),
 (F) LINE   crates/runner/src/rank.rs:1265  [assert! message argument]  grinder.worst_reward_risk_bp()
 (F) BRANCH crates/runner/src/report.rs:1508:13 False  [assert! condition branch (failing side)]  luck > 0.0 && luck < required,
@@ -128,10 +131,10 @@ One fenced block below holds the list.
 (F) BRANCH crates/runner/src/report_cover_tests.rs:192:45 False  [assert! condition branch (failing side)]  assert!(!clean.contains("MISPAIRED") && !clean.contains("REFUSED EXITS"));
 (F) BRANCH crates/runner/src/report_cover_tests.rs:276:13 False  [assert! condition branch (failing side)]  assert!(line.contains("9999") && line.contains(" ? "), "{line}");
 (F) BRANCH crates/runner/src/report_cover_tests.rs:276:38 False  [assert! condition branch (failing side)]  assert!(line.contains("9999") && line.contains(" ? "), "{line}");
-(F) BRANCH crates/runner/src/resample.rs:878:21 False  [assert! condition branch (failing side)]  assert!(b.open <= b.high && b.open >= b.low);
-(F) BRANCH crates/runner/src/resample.rs:878:41 False  [assert! condition branch (failing side)]  assert!(b.open <= b.high && b.open >= b.low);
-(F) BRANCH crates/runner/src/resample.rs:879:21 False  [assert! condition branch (failing side)]  assert!(b.close <= b.high && b.close >= b.low);
-(F) BRANCH crates/runner/src/resample.rs:879:42 False  [assert! condition branch (failing side)]  assert!(b.close <= b.high && b.close >= b.low);
+(F) BRANCH crates/runner/src/resample.rs:881:21 False  [assert! condition branch (failing side)]  assert!(b.open <= b.high && b.open >= b.low);
+(F) BRANCH crates/runner/src/resample.rs:881:41 False  [assert! condition branch (failing side)]  assert!(b.open <= b.high && b.open >= b.low);
+(F) BRANCH crates/runner/src/resample.rs:882:21 False  [assert! condition branch (failing side)]  assert!(b.close <= b.high && b.close >= b.low);
+(F) BRANCH crates/runner/src/resample.rs:882:42 False  [assert! condition branch (failing side)]  assert!(b.close <= b.high && b.close >= b.low);
 (F) LINE   crates/runner/src/signal_candle_stop_tests.rs:74  [unreachable! (failing arm)]  _ => unreachable!(),
 (F) BRANCH crates/runner/src/signal_candle_stop_tests.rs:1112:13 False  [assert! condition branch (failing side)]  assert!(event.entry_bar.is_some() && event.occupied_through_micros.is_some());
 (F) BRANCH crates/runner/src/signal_candle_stop_tests.rs:1112:42 False  [assert! condition branch (failing side)]  assert!(event.entry_bar.is_some() && event.occupied_through_micros.is_some());
@@ -145,9 +148,8 @@ One fenced block below holds the list.
 (F) BRANCH crates/runner/src/significance_cover_tests.rs:63:13 False  [assert! condition branch (failing side)]  assert!(converged.is_finite() && converged > 0.0, "{converged}");
 (F) BRANCH crates/runner/src/significance_cover_tests.rs:63:38 False  [assert! condition branch (failing side)]  assert!(converged.is_finite() && converged > 0.0, "{converged}");
 (F) LINE   crates/runner/src/split.rs:385  [assert! message argument]  bar + horizon,
-(F) BRANCH crates/runner/src/split.rs:513:21 False  [assert! condition branch (failing side)]  i.saturating_add(15) < f.test.start || f.test.is_empty(),
-(F) BRANCH crates/runner/src/split.rs:573:21 False  [assert! condition branch (failing side)]  assert!(f.train.0.is_empty() && f.train.1.is_empty());
-(F) BRANCH crates/runner/src/split.rs:573:45 False  [assert! condition branch (failing side)]  assert!(f.train.0.is_empty() && f.train.1.is_empty());
+(F) BRANCH crates/runner/src/split.rs:576:21 False  [assert! condition branch (failing side)]  assert!(f.train.0.is_empty() && f.train.1.is_empty());
+(F) BRANCH crates/runner/src/split.rs:576:45 False  [assert! condition branch (failing side)]  assert!(f.train.0.is_empty() && f.train.1.is_empty());
 (F) BRANCH crates/runner/src/synthetic.rs:130:25 False  [assert! condition branch (failing side)]  assert!(c.open <= c.high && c.open >= c.low);
 (F) BRANCH crates/runner/src/synthetic.rs:130:45 False  [assert! condition branch (failing side)]  assert!(c.open <= c.high && c.open >= c.low);
 (F) BRANCH crates/runner/src/synthetic.rs:131:25 False  [assert! condition branch (failing side)]  assert!(c.close <= c.high && c.close >= c.low);
@@ -155,74 +157,93 @@ One fenced block below holds the list.
 (F) BRANCH crates/runner/src/synthetic.rs:330:17 False  [assert! condition branch (failing side)]  assert!(up > 0 && down > 0, "the series moved in one direction only");
 (F) BRANCH crates/runner/src/synthetic.rs:330:27 False  [assert! condition branch (failing side)]  assert!(up > 0 && down > 0, "the series moved in one direction only");
 (F) LINE   crates/runner/src/trade.rs:1879  [unreachable! (failing arm)]  unreachable!("windows(2) always yields exactly two trades")
-(F) LINE   crates/runner/src/trade.rs:2238  [assert! message argument]  t.count(),
-(F) LINE   crates/runner/src/trade.rs:2382  [assert! message argument]  ist_minute_of(exit_ts)
-(F) LINE   crates/runner/src/trade.rs:3137  [assert! message argument]  body.len()
+(F) LINE   crates/runner/src/trade.rs:2234  [assert! message argument]  t.count(),
+(F) LINE   crates/runner/src/trade.rs:2378  [assert! message argument]  ist_minute_of(exit_ts)
+(F) LINE   crates/runner/src/trade.rs:3029  [assert! condition: the matches! arm that fails the assert (llvm-cov counts this line 0 and its scrutinee on every pass)]  matches!(
+(F) LINE   crates/runner/src/trade.rs:3138  [assert! message argument]  body.len()
 (F) BRANCH crates/runner/src/trade.rs:1692:25 False  [assert! condition branch (failing side)]  assert!(refused.signals > 0 && refused.reconciles());
 (F) BRANCH crates/runner/src/trade.rs:1692:48 False  [assert! condition branch (failing side)]  assert!(refused.signals > 0 && refused.reconciles());
-(F) BRANCH crates/runner/src/trade.rs:2086:21 False  [assert! condition branch (failing side)]  assert!(on_its_own.reconciles() && with_future.reconciles());
-(F) BRANCH crates/runner/src/trade.rs:2086:48 False  [assert! condition branch (failing side)]  assert!(on_its_own.reconciles() && with_future.reconciles());
-(F) BRANCH crates/runner/src/trade.rs:2205:17 False  [assert! condition branch (failing side)]  trade.entry_bar > previous_exit || n == 0,
-(F) BRANCH crates/runner/src/trade.rs:2594:17 False  [assert! condition branch (failing side)]  assert!(saw_refused && saw_missing, "both holes were located");
-(F) BRANCH crates/runner/src/trade.rs:2594:32 False  [assert! condition branch (failing side)]  assert!(saw_refused && saw_missing, "both holes were located");
-(F) BRANCH crates/runner/src/trade.rs:2708:13 False  [assert! condition branch (failing side)]  !path.priceable && path.first_refused == Some(refused),
-(F) BRANCH crates/runner/src/trade.rs:2708:32 False  [assert! condition branch (failing side)]  !path.priceable && path.first_refused == Some(refused),
-(F) BRANCH crates/runner/src/trade.rs:3211:13 False  [assert! condition branch (failing side)]  alone.fillable(0) && !alone.fillable(whole.len() - 1),
-(F) BRANCH crates/runner/src/trade.rs:3211:34 False  [assert! condition branch (failing side)]  alone.fillable(0) && !alone.fillable(whole.len() - 1),
-(F) BRANCH crates/runner/src/trade.rs:3235:17 False  [assert! condition branch (failing side)]  assert!(!after.day_ended(9_999) && !after.fillable(9_999));
-(F) BRANCH crates/runner/src/trade.rs:3235:44 False  [assert! condition branch (failing side)]  assert!(!after.day_ended(9_999) && !after.fillable(9_999));
-(F) BRANCH crates/runner/src/trade.rs:3241:13 False  [assert! condition branch (failing side)]  !after.same_day(0, 9_999) && !after.same_day(9_999, 0),
-(F) BRANCH crates/runner/src/trade.rs:3241:42 False  [assert! condition branch (failing side)]  !after.same_day(0, 9_999) && !after.same_day(9_999, 0),
-(F) BRANCH crates/runner/src/trade.rs:3538:17 False  [assert! condition branch (failing side)]  assert!(column.accepts(exit) && column.accepts(exit + 1));
-(F) BRANCH crates/runner/src/trade.rs:3538:41 False  [assert! condition branch (failing side)]  assert!(column.accepts(exit) && column.accepts(exit + 1));
-(F) BRANCH crates/runner/src/trade.rs:3592:17 False  [assert! condition branch (failing side)]  assert!(column.accepts(entry) && column.accepts(exit));
-(F) BRANCH crates/runner/src/trade.rs:3592:42 False  [assert! condition branch (failing side)]  assert!(column.accepts(entry) && column.accepts(exit));
-(F) BRANCH crates/runner/src/trade.rs:3673:17 False  [assert! condition branch (failing side)]  assert!(column.sources().contains(&late) && column.accepts(midnight));
-(F) BRANCH crates/runner/src/trade.rs:3673:53 False  [assert! condition branch (failing side)]  assert!(column.sources().contains(&late) && column.accepts(midnight));
-(F) BRANCH crates/runner/src/trade.rs:3732:17 False  [assert! condition branch (failing side)]  assert!(walked.signals > 0 && walked.reconciles());
-(F) BRANCH crates/runner/src/trade.rs:3732:39 False  [assert! condition branch (failing side)]  assert!(walked.signals > 0 && walked.reconciles());
-(F) BRANCH crates/runner/src/trade.rs:3734:17 False  [assert! condition branch (failing side)]  assert!(walked.trades.is_empty() && walked.eligible.is_empty());
-(F) BRANCH crates/runner/src/trade.rs:3734:45 False  [assert! condition branch (failing side)]  assert!(walked.trades.is_empty() && walked.eligible.is_empty());
-(F) BRANCH crates/runner/src/trade.rs:3800:17 False  [assert! condition branch (failing side)]  assert!(facts.accepts(at - 1) && facts.accepts(at + 1));
-(F) BRANCH crates/runner/src/trade.rs:3800:42 False  [assert! condition branch (failing side)]  assert!(facts.accepts(at - 1) && facts.accepts(at + 1));
+(F) BRANCH crates/runner/src/trade.rs:1878:17 False  [let-else whose block is only unreachable!]  let [previous, next] = pair else {
+(F) BRANCH crates/runner/src/trade.rs:2084:21 False  [assert! condition branch (failing side)]  assert!(on_its_own.reconciles() && with_future.reconciles());
+(F) BRANCH crates/runner/src/trade.rs:2084:48 False  [assert! condition branch (failing side)]  assert!(on_its_own.reconciles() && with_future.reconciles());
+(F) BRANCH crates/runner/src/trade.rs:2590:17 False  [assert! condition branch (failing side)]  assert!(saw_refused && saw_missing, "both holes were located");
+(F) BRANCH crates/runner/src/trade.rs:2590:32 False  [assert! condition branch (failing side)]  assert!(saw_refused && saw_missing, "both holes were located");
+(F) BRANCH crates/runner/src/trade.rs:2704:13 False  [assert! condition branch (failing side)]  !path.priceable && path.first_refused == Some(refused),
+(F) BRANCH crates/runner/src/trade.rs:2704:32 False  [assert! condition branch (failing side)]  !path.priceable && path.first_refused == Some(refused),
+(F) BRANCH crates/runner/src/trade.rs:3212:13 False  [assert! condition branch (failing side)]  alone.fillable(0) && !alone.fillable(whole.len() - 1),
+(F) BRANCH crates/runner/src/trade.rs:3212:34 False  [assert! condition branch (failing side)]  alone.fillable(0) && !alone.fillable(whole.len() - 1),
+(F) BRANCH crates/runner/src/trade.rs:3236:17 False  [assert! condition branch (failing side)]  assert!(!after.day_ended(9_999) && !after.fillable(9_999));
+(F) BRANCH crates/runner/src/trade.rs:3236:44 False  [assert! condition branch (failing side)]  assert!(!after.day_ended(9_999) && !after.fillable(9_999));
+(F) BRANCH crates/runner/src/trade.rs:3242:13 False  [assert! condition branch (failing side)]  !after.same_day(0, 9_999) && !after.same_day(9_999, 0),
+(F) BRANCH crates/runner/src/trade.rs:3242:42 False  [assert! condition branch (failing side)]  !after.same_day(0, 9_999) && !after.same_day(9_999, 0),
+(F) BRANCH crates/runner/src/trade.rs:3539:17 False  [assert! condition branch (failing side)]  assert!(column.accepts(exit) && column.accepts(exit + 1));
+(F) BRANCH crates/runner/src/trade.rs:3539:41 False  [assert! condition branch (failing side)]  assert!(column.accepts(exit) && column.accepts(exit + 1));
+(F) BRANCH crates/runner/src/trade.rs:3593:17 False  [assert! condition branch (failing side)]  assert!(column.accepts(entry) && column.accepts(exit));
+(F) BRANCH crates/runner/src/trade.rs:3593:42 False  [assert! condition branch (failing side)]  assert!(column.accepts(entry) && column.accepts(exit));
+(F) BRANCH crates/runner/src/trade.rs:3674:17 False  [assert! condition branch (failing side)]  assert!(column.sources().contains(&late) && column.accepts(midnight));
+(F) BRANCH crates/runner/src/trade.rs:3674:53 False  [assert! condition branch (failing side)]  assert!(column.sources().contains(&late) && column.accepts(midnight));
+(F) BRANCH crates/runner/src/trade.rs:3733:17 False  [assert! condition branch (failing side)]  assert!(walked.signals > 0 && walked.reconciles());
+(F) BRANCH crates/runner/src/trade.rs:3733:39 False  [assert! condition branch (failing side)]  assert!(walked.signals > 0 && walked.reconciles());
+(F) BRANCH crates/runner/src/trade.rs:3735:17 False  [assert! condition branch (failing side)]  assert!(walked.trades.is_empty() && walked.eligible.is_empty());
+(F) BRANCH crates/runner/src/trade.rs:3735:45 False  [assert! condition branch (failing side)]  assert!(walked.trades.is_empty() && walked.eligible.is_empty());
+(F) BRANCH crates/runner/src/trade.rs:3801:17 False  [assert! condition branch (failing side)]  assert!(facts.accepts(at - 1) && facts.accepts(at + 1));
+(F) BRANCH crates/runner/src/trade.rs:3801:42 False  [assert! condition branch (failing side)]  assert!(facts.accepts(at - 1) && facts.accepts(at + 1));
 (F) BRANCH crates/runner/src/trade_clock_tests.rs:38:13 False  [assert! condition branch (failing side)]  first <= i128::from(value) && i128::from(value) < first + i128::from(DAY),
 (F) BRANCH crates/runner/src/trade_clock_tests.rs:38:43 False  [assert! condition branch (failing side)]  first <= i128::from(value) && i128::from(value) < first + i128::from(DAY),
-(F) LINE   crates/runner/src/validate.rs:6783  [assert_eq! message argument]  f.considered.saturating_sub(f.priced)
-(F) LINE   crates/runner/src/validate.rs:7927  [assert! message argument]  body.len()
-(F) LINE   crates/runner/src/validate.rs:7986  [assert! message argument]  body.len()
-(F) BRANCH crates/runner/src/validate.rs:6842:13 False  [assert! condition branch (failing side)]  at.is_some() && collect.is_some() && collect < at,
-(F) BRANCH crates/runner/src/validate.rs:6842:29 False  [assert! condition branch (failing side)]  at.is_some() && collect.is_some() && collect < at,
-(F) BRANCH crates/runner/src/validate.rs:6842:50 False  [assert! condition branch (failing side)]  at.is_some() && collect.is_some() && collect < at,
-(F) BRANCH crates/runner/src/validate.rs:7340:19 False  [assert! condition branch (failing side)]  }) if refused_fold == fold
-(F) BRANCH crates/runner/src/validate.rs:7813:20 False  [assert! condition branch (failing side)]  if fold == fold_index
-(F) BRANCH crates/runner/src/validate.rs:7843:24 False  [assert! condition branch (failing side)]  if fold == fold_index
-(F) BRANCH crates/runner/src/validate.rs:7906:17 False  [assert! condition branch (failing side)]  assert!(tail.contains("walk_over_from(") && tail.contains("&test_facts,"));
-(F) BRANCH crates/runner/src/validate.rs:7906:53 False  [assert! condition branch (failing side)]  assert!(tail.contains("walk_over_from(") && tail.contains("&test_facts,"));
-(F) BRANCH crates/runner/src/validate.rs:7907:17 False  [assert! condition branch (failing side)]  assert!(!tail.contains("SliceFacts::of(") && !tail.contains("&walk("));
-(F) BRANCH crates/runner/src/validate.rs:7907:54 False  [assert! condition branch (failing side)]  assert!(!tail.contains("SliceFacts::of(") && !tail.contains("&walk("));
-(F) BRANCH crates/runner/src/validate.rs:7994:13 False  [assert! condition branch (failing side)]  body.contains(".par_iter()") && body.contains("evaluate_one(item.mask"),
-(F) BRANCH crates/runner/src/validate.rs:7994:45 False  [assert! condition branch (failing side)]  body.contains(".par_iter()") && body.contains("evaluate_one(item.mask"),
-(F) BRANCH crates/runner/src/validate.rs:8017:13 False  [assert! condition branch (failing side)]  !inner.contains("ExecutionRunV1::new(")
-(F) BRANCH crates/runner/src/validate.rs:8018:20 False  [assert! condition branch (failing side)]  && !inner.contains("ExecutionDigestsV1::of(")
-(F) BRANCH crates/runner/src/validate.rs:8019:20 False  [assert! condition branch (failing side)]  && inner.contains("ExecutionRunV1::with_digests(&run, &train_digests)"),
-(F) BRANCH crates/runner/src/validate.rs:8045:17 False  [assert! condition branch (failing side)]  assert!(pass.contains("with_levels_over_from(") && pass.contains("walk_over_from("));
-(F) BRANCH crates/runner/src/validate.rs:8045:60 False  [assert! condition branch (failing side)]  assert!(pass.contains("with_levels_over_from(") && pass.contains("walk_over_from("));
-(F) BRANCH crates/runner/src/validate.rs:8047:17 False  [assert! condition branch (failing side)]  assert!(!pass.contains("with_levels_over(") && !pass.contains("walk_over("));
-(F) BRANCH crates/runner/src/validate.rs:8047:56 False  [assert! condition branch (failing side)]  assert!(!pass.contains("with_levels_over(") && !pass.contains("walk_over("));
-(F) BRANCH crates/runner/src/validate.rs:8083:13 False  [assert! condition branch (failing side)]  !inner.contains("data_digest_with_execution(")
-(F) BRANCH crates/runner/src/validate.rs:8084:20 False  [assert! condition branch (failing side)]  && !inner.contains("ExecutionRunV1::new("),
-(F) BRANCH crates/runner/src/validate.rs:8119:13 False  [assert! condition branch (failing side)]  hoisted.contains("long.attest_training(") && hoisted.contains("short.attest_training("),
-(F) BRANCH crates/runner/src/validate.rs:8119:58 False  [assert! condition branch (failing side)]  hoisted.contains("long.attest_training(") && hoisted.contains("short.attest_training("),
-(F) BRANCH crates/runner/src/validate.rs:8123:13 False  [assert! condition branch (failing side)]  inner.contains(".par_iter()") && inner.contains("evaluate_with_attested("),
-(F) BRANCH crates/runner/src/validate.rs:8123:46 False  [assert! condition branch (failing side)]  inner.contains(".par_iter()") && inner.contains("evaluate_with_attested("),
-(F) BRANCH crates/runner/src/validate.rs:8127:13 False  [assert! condition branch (failing side)]  !inner.contains("attest_training(")
-(F) BRANCH crates/runner/src/validate.rs:8128:20 False  [assert! condition branch (failing side)]  && !inner.contains("evaluate_training_grid_attested("),
-(F) LINE   crates/runner/src/validate_cover_tests.rs:1871  [assert! message argument]  String::from_utf8_lossy(&child.stdout)
-(F) BRANCH crates/runner/src/validate_cover_tests.rs:1922:13 False  [assert! condition branch (failing side)]  assert!(windows[1].test.is_empty() && windows[1].test.start == bars.len());
-(F) BRANCH crates/runner/src/validate_cover_tests.rs:1922:43 False  [assert! condition branch (failing side)]  assert!(windows[1].test.is_empty() && windows[1].test.start == bars.len());
-(F) BRANCH crates/runner/tests/end_to_end.rs:115:9 False  [assert! condition branch (failing side)]  exits.baseline().is_some() || exits.cells.is_empty(),
-(F) BRANCH crates/runner/tests/end_to_end.rs:210:9 False  [assert! condition branch (failing side)]  rc.is_some() && spa.is_some(),
-(F) BRANCH crates/runner/tests/end_to_end.rs:210:25 False  [assert! condition branch (failing side)]  rc.is_some() && spa.is_some(),
+(F) LINE   crates/runner/src/validate.rs:5602  [unreachable!/panic! in test code (failing arm)]  unreachable!("the zero-rung door must refuse before building")
+(F) LINE   crates/runner/src/validate.rs:5735  [unreachable!/panic! in test code (failing arm)]  &|_| unreachable!("a refused walk reports no fold"),
+(F) LINE   crates/runner/src/validate.rs:5768  [unreachable!/panic! in test code (failing arm)]  &|_| unreachable!("a refused walk reports no fold"),
+(F) LINE   crates/runner/src/validate.rs:6027  [unreachable!/panic! in test code (failing arm)]  &|_| unreachable!("a refused walk finishes no fold, so the hook never speaks"),
+(F) LINE   crates/runner/src/validate.rs:6629  [assert! condition: the matches! arm that fails the assert (llvm-cov counts this line 0 and its scrutinee on every pass)]  !matches!(
+(F) LINE   crates/runner/src/validate.rs:6797  [assert_eq! message argument]  f.considered.saturating_sub(f.priced)
+(F) LINE   crates/runner/src/validate.rs:7941  [assert! message argument]  body.len()
+(F) LINE   crates/runner/src/validate.rs:8000  [assert! message argument]  body.len()
+(F) BRANCH crates/runner/src/validate.rs:6856:13 False  [assert! condition branch (failing side)]  at.is_some() && collect.is_some() && collect < at,
+(F) BRANCH crates/runner/src/validate.rs:6856:29 False  [assert! condition branch (failing side)]  at.is_some() && collect.is_some() && collect < at,
+(F) BRANCH crates/runner/src/validate.rs:6856:50 False  [assert! condition branch (failing side)]  at.is_some() && collect.is_some() && collect < at,
+(F) BRANCH crates/runner/src/validate.rs:7363:19 False  [assert! condition branch (failing side)]  }) if refused_fold == fold
+(F) BRANCH crates/runner/src/validate.rs:7827:20 False  [assert! condition branch (failing side)]  if fold == fold_index
+(F) BRANCH crates/runner/src/validate.rs:7857:24 False  [assert! condition branch (failing side)]  if fold == fold_index
+(F) BRANCH crates/runner/src/validate.rs:7920:17 False  [assert! condition branch (failing side)]  assert!(tail.contains("walk_over_from(") && tail.contains("&test_facts,"));
+(F) BRANCH crates/runner/src/validate.rs:7920:53 False  [assert! condition branch (failing side)]  assert!(tail.contains("walk_over_from(") && tail.contains("&test_facts,"));
+(F) BRANCH crates/runner/src/validate.rs:7921:17 False  [assert! condition branch (failing side)]  assert!(!tail.contains("SliceFacts::of(") && !tail.contains("&walk("));
+(F) BRANCH crates/runner/src/validate.rs:7921:54 False  [assert! condition branch (failing side)]  assert!(!tail.contains("SliceFacts::of(") && !tail.contains("&walk("));
+(F) BRANCH crates/runner/src/validate.rs:8008:13 False  [assert! condition branch (failing side)]  body.contains(".par_iter()") && body.contains("evaluate_one(item.mask"),
+(F) BRANCH crates/runner/src/validate.rs:8008:45 False  [assert! condition branch (failing side)]  body.contains(".par_iter()") && body.contains("evaluate_one(item.mask"),
+(F) BRANCH crates/runner/src/validate.rs:8031:13 False  [assert! condition branch (failing side)]  !inner.contains("ExecutionRunV1::new(")
+(F) BRANCH crates/runner/src/validate.rs:8032:20 False  [assert! condition branch (failing side)]  && !inner.contains("ExecutionDigestsV1::of(")
+(F) BRANCH crates/runner/src/validate.rs:8033:20 False  [assert! condition branch (failing side)]  && inner.contains("ExecutionRunV1::with_digests(&run, &train_digests)"),
+(F) BRANCH crates/runner/src/validate.rs:8059:17 False  [assert! condition branch (failing side)]  assert!(pass.contains("with_levels_over_from(") && pass.contains("walk_over_from("));
+(F) BRANCH crates/runner/src/validate.rs:8059:60 False  [assert! condition branch (failing side)]  assert!(pass.contains("with_levels_over_from(") && pass.contains("walk_over_from("));
+(F) BRANCH crates/runner/src/validate.rs:8061:17 False  [assert! condition branch (failing side)]  assert!(!pass.contains("with_levels_over(") && !pass.contains("walk_over("));
+(F) BRANCH crates/runner/src/validate.rs:8061:56 False  [assert! condition branch (failing side)]  assert!(!pass.contains("with_levels_over(") && !pass.contains("walk_over("));
+(F) BRANCH crates/runner/src/validate.rs:8097:13 False  [assert! condition branch (failing side)]  !inner.contains("data_digest_with_execution(")
+(F) BRANCH crates/runner/src/validate.rs:8098:20 False  [assert! condition branch (failing side)]  && !inner.contains("ExecutionRunV1::new("),
+(F) BRANCH crates/runner/src/validate.rs:8133:13 False  [assert! condition branch (failing side)]  hoisted.contains("long.attest_training(") && hoisted.contains("short.attest_training("),
+(F) BRANCH crates/runner/src/validate.rs:8133:58 False  [assert! condition branch (failing side)]  hoisted.contains("long.attest_training(") && hoisted.contains("short.attest_training("),
+(F) BRANCH crates/runner/src/validate.rs:8137:13 False  [assert! condition branch (failing side)]  inner.contains(".par_iter()") && inner.contains("evaluate_with_attested("),
+(F) BRANCH crates/runner/src/validate.rs:8137:46 False  [assert! condition branch (failing side)]  inner.contains(".par_iter()") && inner.contains("evaluate_with_attested("),
+(F) BRANCH crates/runner/src/validate.rs:8141:13 False  [assert! condition branch (failing side)]  !inner.contains("attest_training(")
+(F) BRANCH crates/runner/src/validate.rs:8142:20 False  [assert! condition branch (failing side)]  && !inner.contains("evaluate_training_grid_attested("),
+(F) LINE   crates/runner/src/validate_cover_tests.rs:1459  [unreachable!/panic! in test code (failing arm)]  unreachable!("no fold is built for a refused policy or execution path")
+(F) LINE   crates/runner/src/validate_cover_tests.rs:1869  [assert! message argument]  String::from_utf8_lossy(&child.stdout)
+(F) LINE   crates/runner/src/validate_cover_tests.rs:1894  [unreachable!/panic! in test code (failing arm)]  &|_| unreachable!("a refused walk reports no fold"),
+(F) LINE   crates/runner/src/validate_cover_tests.rs:1960  [unreachable!/panic! in test code (failing arm)]  &|_| unreachable!("a refused walk reports no fold"),
+(F) LINE   crates/runner/src/validate_cover_tests.rs:2156  [unreachable!/panic! in test code (failing arm)]  &|_| unreachable!("a refused walk reports no fold"),
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:1920:13 False  [assert! condition branch (failing side)]  assert!(windows[1].test.is_empty() && windows[1].test.start == bars.len());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:1920:43 False  [assert! condition branch (failing side)]  assert!(windows[1].test.is_empty() && windows[1].test.start == bars.len());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2317:13 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(swept.sweep.halted.is_none() && !swept.is_complete());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2317:45 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(swept.sweep.halted.is_none() && !swept.is_complete());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2368:13 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(fold.candidates.is_empty() && fold.choice.is_none());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2368:43 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(fold.candidates.is_empty() && fold.choice.is_none());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2371:13 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(visible.in_sample_all.is_empty() && visible.out_of_sample_all.is_empty());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2371:49 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(visible.in_sample_all.is_empty() && visible.out_of_sample_all.is_empty());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2401:19 False  [assert! condition branch (failing side): the False side of the guard of the condition's matches!]  )) if ambiguous_bars > 0
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2503:17 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(fold.in_sample_all.is_empty() && fold.out_of_sample_all.is_empty());
+(F) BRANCH crates/runner/src/validate_cover_tests.rs:2503:50 False  [assert! condition branch (failing side): the False side of a conjunction's operand]  assert!(fold.in_sample_all.is_empty() && fold.out_of_sample_all.is_empty());
+(F) BRANCH crates/runner/tests/base_cov_admission_words.rs:66:69 False  [assert! condition branch (failing side): the False side of a disjunction's last operand]  name.starts_with("min_") || name.starts_with("max_") || name.starts_with("require_")
+(F) BRANCH crates/runner/tests/end_to_end.rs:211:9 False  [assert! condition branch (failing side)]  rc.is_some() && spa.is_some(),
+(F) BRANCH crates/runner/tests/end_to_end.rs:211:25 False  [assert! condition branch (failing side)]  rc.is_some() && spa.is_some(),
 (F) BRANCH crates/runner/tests/fixed_deadline_readiness.rs:132:17 False  [assert! condition branch (failing side)]  assert!(!bounds.fillable(0) && !bounds.fillable(1));
 (F) BRANCH crates/runner/tests/fixed_deadline_readiness.rs:132:40 False  [assert! condition branch (failing side)]  assert!(!bounds.fillable(0) && !bounds.fillable(1));
 (F) BRANCH crates/runner/tests/fixed_deadline_readiness.rs:133:17 False  [assert! condition branch (failing side)]  assert!(!bounds.day_ended(0) && !bounds.day_ended(1));
@@ -257,8 +278,7 @@ One fenced block below holds the list.
 (F) BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:179:45 False  [assert! condition branch (failing side)]  assert!(mask.count() > 0 && mask.reconciles());
 (F) BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:250:21 False  [assert! condition branch (failing side)]  assert!(mask.signals > 0 && mask.reconciles());
 (F) BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:250:41 False  [assert! condition branch (failing side)]  assert!(mask.signals > 0 && mask.reconciles());
-(F) BRANCH crates/runner/tests/foreign_slice_deadline_readiness.rs:257:21 False  [assert! condition branch (failing side)]  item.forced || elapsed(&bars, item)? == 3 * MINUTE,
-(F) LINE   crates/runner/tests/hole_after_exit.rs:124  [assert! message argument]  probes.len()
+(F) LINE   crates/runner/tests/hole_after_exit.rs:129  [assert! message argument]  probes.len()
 (F) LINE   crates/runner/tests/join_answer_is_unchanged.rs:140  [assert_eq! message argument]  level.frequent.len(),
 (F) LINE   crates/runner/tests/unwired_validation_record.rs:129  [assert! message argument]  path.display()
 
@@ -339,4 +359,15 @@ One fenced block below holds the list.
 (U) crates/runner/src/exit_grid_policy.rs:3667:8 True, 3668 (`if out.is_empty() { return Err(EmptyResolvedAxis(axis)) }` in resolve_axis_with_forced). Proof: `percentiles` is one schedule of the policy's RungPlanV1 (the callers at 1105-1112 pass self.rungs.stop(), target() and trail()); RungPlanV1's fields are private and outside test code its only constructor is RungPlanV1::new (821-846), which refuses an empty schedule through validate_percentiles (3401-3403). The loop's first iteration either returns an Err or pushes its value, because `out.last()` is None and both arms of the inner if fall through to `out.push(value)`; so `out` is non-empty whenever the loop ends.
 (U) crates/runner/src/validate.rs:4515:13 False, 4516 (`let Some(train) = bars.get(fold.train.0.clone()) else { continue; }` in walk_forward_core). Proof: the folds are `shape.folds(bars.len(), horizon, splits)` (4510) over the same `bars`, and Shape has two arms (split.rs:154-159). Both anchored_folds (split.rs:276-306) and rolling_folds (213-243) return no fold unless n = bars.len() >= k + 1 >= 2 (k = splits), and give fold s < k the boundary (s + 1) * w with w = floor(n / (k + 1)), so boundary <= k * w <= k * n / (k + 1) < n with no saturating step reached; the anchored training range is 0..boundary and the rolling one (boundary - w)..boundary with boundary >= w. So the training range lies inside the slice and `get` is Some.
 (U) crates/runner/src/validate.rs:2863 (the `)?` of `ExecutionSeriesV1::new(..)` for a fold's OOS execution series in walk_forward_exact_grid_v4). Proof: as for 2600: ExecutionSeriesV1::new refuses only an empty feed, an empty commit or an all-zero calendar digest (exit_grid_policy.rs:210-233), never the bars; all three are copied from `execution`, an ExecutionSeriesV1 whose private fields only that same constructor sets, so it already admitted them.
+(U) crates/runner/src/grid.rs:3620:8 True, 3620:39 True (the two operands of `measured.ambiguous_bars > 1 || measured.gapped > 1` in priceable_candidate_path_v1, named 3620:12 and 3620:43 in the earlier paragraph above, which took its columns from the interim figures' layout). Proof: as written there, unchanged: one_variant runs over the one-element slice from_ref(candidate), its cell starts from Cell::default(), ambiguous_bars grows by u64::from(bool) once per counted trade and gapped by at most one per trade in `ordered`, so with measured.trades == 1 both are at most 1.
+(U) crates/runner/src/validate.rs:2951:12 True, 2951:55 True, 2952 (`final_candidates.len() != pending.len() || oos_all.len() != pending.len()` in walk_forward_exact_grid_v4). Proof: both vectors are created empty for the fold (2830-2831) and are written only inside `for (ordinal, candidate) in pending.iter().enumerate()` (2882-2948), which runs only under `if !pending.is_empty()`. Every iteration either returns Err through one of its `?` or pushes exactly once to each vector, `oos_all.push(outcome.pessimistic)` (2913) and `final_candidates.push(proof)` (2947), with no continue or break between; an empty `pending` leaves both empty. So both lengths equal pending.len() at 2951.
+(U) crates/runner/src/validate.rs:4971:21 False, 4972-4976 (`let Some(chosen_side) = chosen_side else { refused }` in walk_forward_core). Proof: `chosen` and `chosen_side` are bound together at 4952-4962 from one `best_ordinal.and_then(|ordinal| scored.get(ordinal)).map_or((None, Summary::default(), None, None, None), |candidate| (Some(candidate.mask), .., Some(candidate.side)))`: both None (the default) or both Some from the same candidate, and neither is reassigned before 4969. The let-else sits in the `Some(mask)` arm of `match chosen`, so `chosen_side` is Some there.
+(U) crates/runner/src/validate.rs:5091:24 True, 5092 (`if *mask == ConditionMask::ZERO { 0 }` in walk_forward_core's start_for closure). Proof: start_for is called with candidate.mask for each element of `scored` (5132) and with the chosen mask (5153); every one is the mask of an Itemset of `closed.kept`, a subset of `swept.sweep.all_frequent()` (closed.rs:196-200), and the sweep is `Sweeper::new(per_fold).run_prepared(..)`, i.e. engine::Ladder::walk, whose level-1 masks are `ConditionMask::default().with_bit(p)` (engine lib.rs:1566) and whose level-k candidates are `a.union(b)` of two frequent (k-1)-masks (join_screen, engine lib.rs:2158-2162). By induction every swept mask has a bit set, so none equals ZERO; start_for is a closure local to walk_forward_core, so no direct call reaches it.
+(U) crates/runner/src/grid.rs:2095 and 3088 (the `)?` of `trade::walk_expression_over(..)?` in evaluate_expression_over and materialize_expression_cell_over). Proof: as for grid.rs:2673 above: walk_expression_over's only refusal is its column alignment check (trade.rs:810-813), which no Column can fail (see the trade.rs:810 proof); the walk itself returns a value.
+(U) crates/runner/src/grid.rs:4748:12 False (`pess > 0` in `if pess > 0 && (cell.min_win == 0 || pess < cell.min_win)` in tally_trade). Proof: the test sits inside the block of `if pess > 0 {` (4687) of the same function, and `pess` is a by-value, non-`mut` parameter of `const fn tally_trade` (4686), assigned nowhere between; when 4748 runs, `pess > 0` is true. (The operand repeats the enclosing test: a finding of this session, not a defect.)
+(U) crates/runner/src/grid.rs:3637:8 True, 3638:12 True, 3640:12 True, 3641:12 True (`row.signal_bar != candidate.signal`, `row.entry_bar != candidate.entry`, `row.exit_micros != stamp`, `row.exit_bar < candidate.entry` in priceable_candidate_path_v1). Proof: `row` is the one row in one_row, which one_variant fills from the one-element slice from_ref(candidate) (the check before it refuses any other count) with `row_of(bars, c, exit, ..)` (grid.rs:4583) for c = that candidate; row_of sets signal_bar = c.signal and entry_bar = c.entry (4280-4281) and exit_micros = bars.get(exit).map_or(0, ..) (4286); exit = c.entry.saturating_add(pess_off) (4510) is never below c.entry; and `stamp` reads bars.get(row.exit_bar), the same index, refused by the `?` at 3636 when absent, so it equals exit_micros whenever 3640 is reached. This holds for any bars, candidate and variant, a direct call included. (The other three operands, 3639, 3642 and 3643, are driven by tests: an entry instant that is not its bar's, an occupancy ending before its entry, and an exit stamped before its entry.)
+(U) crates/runner/src/exit_grid_policy.rs:4139:12 True, 4140:12 True, 4141:12 True (`!census.reconciles()`, `census.offered != bars`, `census.refused() != 0` in require_complete_acceptance). Proof: they are evaluated only after `!column.acceptance_covers(bars)` and `refused_or_missing != 0` (4137-4138) are false, i.e. the column has a known acceptance of exactly `bars` verdicts, every one true (the let-else at 4127 refused an unknown one). indicators::Column's acceptance fields are private to indicators::column and set only by: build_withholding_from (every Signal column, and AnchoredColumn's, which calls it), which for each kept bar pushes one verdict and adds one to census.offered and exactly one to warming, to swept, or through Census::charge to one refusal bucket (indicators column.rs:686-726), then stores acceptance_census = census; reproject_checked, whose (accepted, census) come from acceptance_of over the execution bars, the same one-verdict-one-bucket loop (column.rs:314-336); reproject and Default, whose acceptance is unknown; try_clone_exact, which copies the fields; clear_before and replace_*, which never touch them. Census::refused() sums the seven buckets charge() increments, one per Corrupt variant (column.rs:239-247, 279-302). So offered = warming + swept + refused() (reconciles), offered is the number of verdicts (= bars), and with every verdict true no bar was charged (refused() = 0).
+(U) crates/runner/src/exit_grid_policy.rs:4156:8 True, 4157-4160 (`column.bits().len() != column.sources().len()` in validate_column_sources). Proof: as for trade.rs:810 and signal_candle_stop.rs:1349 above: every Column constructor keeps bits and source parallel, and no mutator changes either length.
+(U) crates/runner/src/exit_grid_policy.rs:4173:12 True, 4174-4177 (`previous.is_some_and(|before| source <= before)` in validate_column_sources). Proof: every Column's sources strictly increase. build_withholding_from pushes `index - withheld` for the kept bars in enumerate order, and between two kept bars the enumerate index grows by one more than the withheld count does, so each pushed source exceeds the one before (indicators column.rs:688-716); reproject_with returns None for a target below the last pushed source, counts an equal one as collided without pushing it, and pushes only a greater one (column.rs:1031-1048); try_clone_exact copies; clear_before and replace_* never write sources.
+(U) crates/runner/src/admission.rs:5056:36 True (`computed.canonical_bytes().as_slice() != verdict_bytes` in the #[cfg(test)] AdmissionDecisionV2::from_canonical_parts). Proof: as for the V1 and V3 doors at 2194:36 and 5228:36 above: it is evaluated only when `supplied == computed`, and `supplied` was decoded from verdict_bytes by AdmissionVerdictV1::from_canonical_bytes, a strict reader that reads every byte of its one canonical encoding, so verdict_bytes is the canonical encoding of supplied, which is that of computed.
 `````
