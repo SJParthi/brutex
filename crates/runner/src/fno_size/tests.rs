@@ -2309,7 +2309,8 @@ fn the_measurements_run_at_tiny_sizes() {
         assert!(!series.samples.is_empty());
     }
     assert_eq!(measure_network(300, 1, 1).refused, 1);
-    assert_eq!(measure_edge_reset(376, 1, 1).refused, 1);
+    // The untimed first reset and the one timed reset: both refuse a rung at minute 375.
+    assert_eq!(measure_edge_reset(376, 1, 1).refused, 2);
     assert_eq!(measure_score(0, 2).samples.len(), 2);
     // The verdict.
     assert!(steady(100, 120));

@@ -87600,6 +87600,196 @@ unused.
 
 <!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). Entries of other work go above this section's heading, never below its last slot. Other work takes its decision numbers from state/decision-blocks.json, never the largest number in this file plus one: this section's blocks are reserved. -->
 
+<!-- slot FNO-SIZE (D-8630..D-8639; state/fno-size-20261103/PARTS-FNO-SIZE.md) -->
+### D-8630 — FNO-SIZE: the sizing and admission policy is setting S82, four labelled policies each judged on its own — 2026-11-03
+
+**Context.** On 3 Nov 2026 the operator asked how to choose 20 when 50 or 100 entries can happen
+at the same time, or whether to drop the slot limit and split the capital, and set the account
+limits: margin in use at most Rs 20,00,000 and open exposure at most Rs 1,00,00,000 "at every
+instant". FNO-PORTFOLIO already owns the five caps (20 positions, 100 trades, Rs 1 crore of
+exposure, margin, one position a stock) and the cap tie-break order S81; FNO-NET owns the FIXED
+quantity (SPEC 11.2).
+
+**Decision.** The sizing and admission policy is setting S82, form V (all are run, never one
+silently), with four labelled policies: SIZE-FIXED-20-SEEDED (today's rule),
+SIZE-FIXED-20-RANKED, SIZE-SPLIT-ALL and SIZE-RISK. Each is walked and judged by the Winner Gate
+on its own and reported side by side. `runner::fno_size::plan` returns, for one batch of entry
+intents, who is offered, with what quantity and in what order; FNO-PORTFOLIO stays the one owner
+of the caps and of S81 and admits or refuses each entry. The operator's hard limits are checked
+at every entry for all four policies, on positions marked at their last traded price (SPEC
+11.3); the margin limit is `min(capital, Rs 20 lakh)`, so carried losses lower it and carried
+profit never lifts it. A mark between entries can carry either figure past its limit and forces
+no reduction (SPEC 11.3; Dhan's MTM rule acts on losses only): FNO-RUN reports each policy's
+peaks and the seconds above each limit, and whether "at every instant" asks for forced cuts is
+put to the operator. The module takes every other part's figures as plain integers and calls no
+other part's code.
+
+**Why.** The operator's question is answered with data, not opinion: every policy is a
+candidate of the walk-forward family and its trials count. Keeping FNO-PORTFOLIO the owner of
+the caps keeps one implementation of SPEC 11.3 to 11.5. A forced-cut reading would be a new SPEC
+rule for FNO-PORTFOLIO and FNO-RUN, the operator's to set; it would change `LIMITS_LABEL`'s words
+and nothing else of this part.
+
+### D-8631 — FNO-SIZE: the decision instant is one order start second — 2026-11-03
+
+**Context.** A plan divides margin among the signals that compete for it, so it must say which
+signals compete. SPEC 11.5 rule 1 queues entries by the second they may start, and
+FNO-PORTFOLIO's `schedule_second` takes every order that wants to go in one second.
+
+**Decision.** One batch is the entry intents whose order starts in one second. A batch whose
+candidates differ in start is refused `MixedStart`. A batch holds at most 256 candidates with
+distinct (stock, recipe); the duplicate check is a per-stock chain over two fixed arrays, each
+candidate compared only with the earlier candidates of its own stock, at most 32,640
+comparisons a batch (L-FNO-SIZE-03). A busy stock (a position in force or a queued entry, SPEC
+9.6) is refused `while_open` under every policy; two recipes of one stock in one batch are both
+sized and the stock counts once.
+
+**Why.** Two signals of one candle whose stocks first trade in different seconds are then two
+instants, the earlier first, exactly as SPEC 11.5 already orders them, and every report says so.
+A sort or a map would break gate 11 on a production line; the chain needs neither.
+
+### D-8632 — FNO-SIZE: SIZE-SPLIT-ALL splits the free margin and the exposure room equally, in whole shares — 2026-11-03
+
+**Context.** The operator's SIZE-SPLIT-ALL: the capital split equally across all concurrent
+signals, with no 20-slot cap.
+
+**Decision.** For a batch with `e` distinct non-busy stocks, the divisor is `k = min(e, room)`,
+`room` being the day's trades less those sent and queued (saturating), or `k = e` when no room is
+left (every row then meets `trade_cap` and the quantities stay defined). The free margin is
+`F = floor((min(capital, margin_cap) x 10^6 - margin_in_use - reserved_margin) / 10^6)`, the
+exposure room `X = exposure_cap - exposure - reserved_exposure`, and the shares `m = floor(F / k)`
+and `x = floor(X / k)`. Each eligible row gets
+`q = min(floor(m x 10^6 / (rate x price)), floor(x / price))`, labelled by the share that binds,
+a tie being the margin's. `F <= 0` refuses every eligible row `size_no_free_margin`, `X <= 0`
+`size_no_exposure_room`, and `q = 0` `size_below_one_share`, whose share stays free: there is no
+re-split. A later second splits only what is free then. Under the operator's limits (the
+exposure cap five margin caps) with every rate at or above 20%, the margin share always binds.
+
+**Why.** Floors, not SPEC 11.2's nearest integer: a rounded-up quantity could pass the free
+margin or the exposure room and get the last row refused by rounding. The minimum is one whole
+share, the exchange's minimum order; a typed rupee floor would be a static number the operator's
+rule 1 forbids, and FNO-NET prices every per-order charge per trade, so a position too small to
+pay its charges shows as a loss. A re-split would change other rows' shares after the fact. Each
+row's margin is at most `m x 10^6` and its value at most `x`, so any `k` rows admitted together
+keep the hard limits.
+
+### D-8633 — FNO-SIZE: SIZE-RISK sizes equal risk under an open-risk cap, both budgets learned — 2026-11-03
+
+**Context.** The operator's SIZE-RISK: equal risk per trade, the quantity the risk budget over
+the stop distance, capped by the stock's leverage, and the total open risk capped.
+
+**Decision.** After SIZE-SPLIT-ALL's steps (busy rows, `k`, `F`, `X`, `m`, `x`), with no
+learned budget every eligible row is refused `size_no_learned_risk`; with the risk room
+`Rr = open_cap - open_risk` at or below 0, `size_no_risk_room`; otherwise the risk each is
+`b = min(per_trade, floor(Rr / k))`. Per row, a missing stop is refused `size_no_stop`, a stop at
+the price `size_zero_stop` and one through it `size_stop_through_price`; else
+`q = min(floor(b / d), q_m, q_x)`, labelled `Risk` when the risk bound is the smallest (ties
+included), and `q = 0` is `size_below_one_share`. Both budgets come from the same candidate's
+SIZE-FIXED-20-SEEDED walk over the learning months only (tie-break (e), the run's first seed),
+counting only trades with a stop at a positive distance: `per_trade` is their median initial
+risk, the lower of an even count, and `open_cap` the peak open risk of that walk, read from
+`RiskBook::peak`. The `RiskBook` holds each position's initial risk through its last fill second,
+takes releases in any order and with a future last fill, and frees a row at the first settle
+after it.
+
+**Why.** One second's admitted risk is at most `k x b`, which is at most `Rr`, so open risk never
+passes the cap. Nothing is typed: the budgets are today's typical and peak risk, redistributed
+by stop distance. A stop moved to break-even frees nothing until the position closes, the
+reading that admits less.
+
+### D-8634 — FNO-SIZE: SIZE-FIXED-20-RANKED orders by a learned edge through a fixed network — 2026-11-03
+
+**Context.** The operator's SIZE-FIXED-20-RANKED: today's quantity and caps, with simultaneous
+signals offered in the order of a learned edge.
+
+**Decision.** The order is strict and total: (1) the edge, higher first, a score with no trade
+behind it after every score with one; (2) the stop in R, smaller first; (3) the liquidity,
+larger first; (4) the seeded key of FNO-PORTFOLIO's tie-break (e), restated byte for byte,
+smaller first; (5) the stock; (6) the recipe. The edge only orders and refuses nothing. The
+order is applied by Batcher's bitonic network over the next power of two at or above the batch,
+padded with entries that compare last, at most 4,608 compare-exchanges (L-FNO-SIZE-01), never a
+sort. The edge table holds net per rupee of entry value, `floor(net x 10^6 / value)` parts per
+million with the floor kept for a negative net, at three levels, (stock, side, time-of-day
+bucket), (stock, side) and (side), a score being the finest level's exact mean. Its source is the
+candidate's SEEDED walk over the window's learning months, a procedure's recipes pooled; its
+buckets are FNO-WFT's form-G quantile ladder of the learning entry minutes, handed in; a forward
+month is ordered by the whole table and a learning month by the table without its own trades
+(leave one month out), the bucket edges unchanged. One table is built per (candidate, scheme,
+window), so a RANKED walk is never shared between windows. RANKED's account orders its exits by
+symbol, so the seed reaches a RANKED walk only through the fourth key.
+
+**Why.** Gate 11 bans a sort on a production line and this part edits no `.github` file. A walk
+whose comparisons never reached the seeded key is identical under every seed, so FNO-RUN may
+walk it once and report its spread as 0. Under (e) the admitted trades at a binding second are a
+seeded draw, so the edge's source is chosen by no key that could correlate with its outcome. A
+walk shared between windows would let a month that is one window's learning month rank its own
+signals in the other.
+
+### D-8635 — FNO-SIZE: the liquidity key is the session-to-date traded value to the decision candle — 2026-11-03
+
+**Context.** RANKED's third key needs a liquidity figure known at the decision.
+
+**Decision.** The liquidity is the session-to-date traded value in paise from the Zerodha
+1-minute candles up to the decision candle's close, computed by FNO-RUN and handed in as
+`Candidate::liquidity`; the larger goes first.
+
+**Why.** It is causal (no candle after the decision is read), it comes from the signal feed every
+other signal key reads, and it is a plain integer, so FNO-SIZE derives nothing.
+
+### D-8636 — FNO-SIZE: the capital actually needed per policy is shown beside the Winner Gate's Rs 20 lakh — 2026-11-03
+
+**Context.** The Winner Gate's minimum returns are judged on Rs 20 lakh (OP-22, the stricter
+base). The FIXED quantities never read capital; SIZE-SPLIT-ALL's and SIZE-RISK's do.
+
+**Decision.** Under the FIXED policies the capital actually needed is
+`K = max over every admission of (ceil(margin in use right after it / 10^6) - carried net settled then)`
+over every window walk the gate reads; under SIZE-SPLIT-ALL and SIZE-RISK it is the window's
+starting capital, Rs 20 lakh. `CapitalNeeded` keeps the peak; with no admission there is no `K`
+and no return on it is printed. The peak is reported for every policy as the capital in use at
+peak. The gate stays on Rs 20 lakh, and the five minimum returns on `K` are shown beside it,
+labelled.
+
+**Why.** FNO-PORTFOLIO admits only while margin in use is at most the capital, so `K` is at most
+Rs 20 lakh at every admission, and a net that meets a minimum on Rs 20 lakh meets it on `K`: `K`
+never loosens a check. It answers the operator's capital-efficiency question as information.
+
+### D-8637 — FNO-SIZE: the labels and the refusal words, counted per policy — 2026-11-03
+
+**Context.** Every result a policy's numbers reach must say which policy and which limits made
+it.
+
+**Decision.** Each policy has a label, the operator's text byte for byte, led by its name;
+`LIMITS_LABEL`, `CAPITAL_FIXED_LABEL`, `CAPITAL_SHARE_LABEL` and `RETURNS_LABEL` say what the
+policies share. FNO-RUN puts them on every output, record header and route. A refused row is
+counted per policy under its word: `while_open` (SPEC 9.6's own name, meaning the same as
+FNO-PORTFOLIO's), `size_no_free_margin`, `size_no_exposure_room`, `size_below_one_share`,
+`size_no_learned_risk`, `size_no_risk_room`, `size_no_stop`, `size_zero_stop` and
+`size_stop_through_price`. A policy's canonical bytes, `fno-size/v1`, a zero byte and its name,
+join the candidate identity.
+
+**Why.** A result without its policy and limits would read as today's rule. The words collide
+with none of FNO-PORTFOLIO's (`position_cap`, `trade_cap`, `exposure_cap`, `margin_cap`), so a
+count can never be read under the wrong owner.
+
+### D-8638 — FNO-SIZE: its own anchors stand for its slot lines — 2026-11-03
+
+**Context.** FNO-SEAM's slot lines stop at FNO-WFT in the runner files and at FNO-BAND-FILES in
+the four ledgers, so FNO-SIZE has none.
+
+**Decision.** FNO-SIZE inserts directly after seven exact base lines (PARTS-FNO-SIZE.md section
+2): `pub mod family_allocation_v1;` in `crates/runner/src/lib.rs`; `use vocab::ConditionMask;` and
+`the_equity_column_build_stays_within_its_budget(),` in `crates/runner/benches/ratio.rs`; and
+the F&O section's comment line in each of `docs/04-invariants.md`, `docs/05-decisions.md`,
+`docs/06-limits.md` and `docs/07-plan.md`. These anchors stand for its slot lines wherever the F2
+rules say "under its own slot line". Its entries sit under the seam's heading "F&O strategy
+path: part blocks (D-8100..D-8339)" although D-8630..D-8639 is outside that range: the heading is
+the seam's, and FNO-SIZE edits none of its lines.
+
+**Why.** Each anchor is at least two unchanged base lines from every other part's edit, and no
+base or data branch edits these files, so the insertions merge clean. The module line sits
+outside the seam's F&O block, where every free line is one line from a slot, and keeps the
+module list in alphabetical order.
+
 <!-- slot FNO-LAW -->
 
 <!-- slot FNO-COSTS -->

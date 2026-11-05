@@ -22146,6 +22146,17 @@ stack peak is not a timing; these rows bound memory, not time.
 
 <!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). Entries of other work go above this section's heading, never below its last slot. -->
 
+<!-- slot FNO-SIZE (D-8630..D-8639; state/fno-size-20261103/PARTS-FNO-SIZE.md) -->
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-FNO-SIZE-01 | SIZE-FIXED-20-RANKED's offering order (`runner::fno_size::order`) | a fixed bitonic network, never a sort (gate 11 bans a sort on a production line): `P/2 x log2(P) x (log2(P) + 1) / 2` compare-exchanges for the next power of two `P` at or above the batch | at most 4,608 a batch (`P` = 256), bounded by the universe; measured by C-FNO-SIZE-03 | FNO-SIZE (D-8634) |
+| L-FNO-SIZE-02 | `EdgeTable::build` and `EdgeTable::judging` (`runner::fno_size::edge`) | building is O(trades + cells): the reset clears `256 x 2 x B` cells for `B` time-of-day buckets and a 375-entry minute map, then one insertion a trade; a month boundary moves the trades of the month taken out and the month put back | at most `256 x 2 x 376` cells; a boundary is O(trades of two months), amortized O(1) a trade; measured by C-FNO-SIZE-05 (per trade inserted, and the reset at the bound, timed apart) and C-FNO-SIZE-06 (per trade moved) | FNO-SIZE (D-8634) |
+| L-FNO-SIZE-03 | `plan`'s duplicate check (`runner::fno_size`) | each candidate is compared with the earlier candidates of its own stock, `c (c - 1) / 2` comparisons for `c` candidates on one stock, beside a fixed amount of work per candidate (O(n) a second, n at most 256) | at most 32,640 comparisons a batch, 256 candidates on one stock; measured by C-FNO-SIZE-07 | FNO-SIZE (D-8631) |
+| L-FNO-SIZE-04 | The bench figures of C-FNO-SIZE-01..07 | measured on one cloud machine (Intel Xeon at 2.1 GHz, 4 vCPUs under KVM), advisory | NOT MEASURED on the Mac or on CI; every budget is an ESTIMATE until the Mac measures it | FNO-SIZE |
+| L-FNO-SIZE-05 | SIZE-SPLIT-ALL and SIZE-RISK cannot be walked yet, and the FIXED pair does not yet keep the Rs 20 lakh margin limit | FNO-PORTFOLIO's 20-slot table must become a per-account slot cap (its `POSITION_SLOTS` and its slot array), and its margin check must read `min(capital, Rs 20 lakh)` (FNO-PORTFOLIO's repair, AMENDMENTS P1) | not closed by this part | FNO-PORTFOLIO, FNO-RUN |
+| L-FNO-SIZE-06 | Inputs FNO-SIZE takes and does not derive | the liquidity key, the edge table's source walk and its rungs, the two risk budgets, the account view and `busy` are FNO-RUN's adapters over FNO-PORTFOLIO, FNO-NET, FNO-LEVERAGE and FNO-WFT | not closed by this part: FNO-RUN's integration tests prove them (AMENDMENTS R7) | FNO-RUN |
+| L-FNO-SIZE-07 | `RiskBook::release` out of last-fill order (`runner::fno_size::risk`) | the release joins the released list at its place by last fill second, walking back from the tail | at most 255 steps, bounded by the universe; one in last-fill order; `settle` is amortized O(1); measured by C-FNO-SIZE-04 (b) | FNO-SIZE (D-8633) |
+
 <!-- slot FNO-LAW -->
 
 <!-- slot FNO-COSTS -->

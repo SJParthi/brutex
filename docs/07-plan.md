@@ -1124,6 +1124,14 @@ the first was closed in code afterwards.
 
 <!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). Entries of other work go above this section's heading, never below its last slot. -->
 
+<!-- slot FNO-SIZE (D-8630..D-8639; state/fno-size-20261103/PARTS-FNO-SIZE.md) -->
+| FNO-SIZE (wave 3, F2) | State |
+|---|---|
+| `runner::fno_size`: the four sizing and admission policies SIZE-FIXED-20-SEEDED, SIZE-FIXED-20-RANKED, SIZE-SPLIT-ALL and SIZE-RISK (`plan`), the edge table, the risk budget and book, the capital actually needed and the labels (D-8630..D-8638) | Built in the cloud on `cloud/fib-fno-size-20261103` (session FNO-SIZE-20261103-1, 5 Nov 2026), cut from FNO-SEAM's passed tip `1ad6e24ef8e0` through the kit commit; 79 tests green (FNO-SIZE-I01..I12); Route B on the pinned nightly 100% regions, functions, lines and branches of `crates/runner/src/fno_size/` |
+| Bench rows C-FNO-SIZE-01..07 (`runner::bench::fno_size::row`) | Measured in the cloud, advisory (L-FNO-SIZE-04); the Mac measures them |
+| Next | The Mac's check 1: Route B on its pin with the macOS rows, and its benches; gate 14's cover rows for C-FNO-SIZE-01..07 in `ci.yml`, added by the main session at F2's assembly |
+| Then | FNO-PORTFOLIO's slot cap, margin limit and lock reader (AMENDMENTS P1, L-FNO-SIZE-05), then FNO-RUN's wiring of every policy and its integration tests against the real account, FNO-NET and FNO-WFT (AMENDMENTS R2, R7) |
+
 <!-- slot FNO-LAW -->
 
 <!-- slot FNO-COSTS -->

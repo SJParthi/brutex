@@ -58,6 +58,10 @@ use runner::identity::{Direction, Params, Run, data_digest, identity};
 use runner::{Sweeper, report, synthetic};
 use vocab::ConditionMask;
 
+// FNO-SIZE (state/fno-size-20261103/PARTS-FNO-SIZE.md): its bench module.
+#[path = "ratio/fno_size.rs"]
+mod fno_size;
+
 // ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
 // ---- part; each part inserts its bench module (the path attribute naming
 // ---- benches/ratio/fno_<x>.rs and its mod line) directly under its slot.
@@ -587,6 +591,15 @@ fn main() {
         the_identity_does_not_depend_on_how_many_bars_the_digest_covered(),
         the_column_build_stays_within_its_budget(),
         the_equity_column_build_stays_within_its_budget(),
+        fno_size::row(&[
+            "C-FNO-SIZE-01",
+            "C-FNO-SIZE-02",
+            "C-FNO-SIZE-03",
+            "C-FNO-SIZE-04",
+            "C-FNO-SIZE-05",
+            "C-FNO-SIZE-06",
+            "C-FNO-SIZE-07",
+        ]),
         // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2): each part puts its row
         // call directly under its slot and names its bench ids in it, one string each:
         //     fno_<x>::row(&["C-FNO-<CODE>-01"]),

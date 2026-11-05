@@ -272,11 +272,16 @@ pub fn measure_score(trades: u32, samples: u32) -> Series {
     let keys: Vec<(StockId, Side, u16)> = (0..SCORES_PER_SAMPLE)
         .map(|_| (draw.stock(), draw.side(), draw.minute()))
         .collect();
-    for _ in 0..samples {
-        let began = Instant::now();
+    let pass = || {
         for &(stock, side, minute) in &keys {
             black_box(table.score(black_box(stock), side, minute));
         }
+    };
+    // One untimed pass, so a cold cache is not charged to the first sample.
+    pass();
+    for _ in 0..samples {
+        let began = Instant::now();
+        pass();
         series.take(began, u128::from(SCORES_PER_SAMPLE));
     }
     series
@@ -293,6 +298,8 @@ pub fn measure_network(rows: usize, reps: u32, samples: u32) -> Series {
     series.refused += u32::from(built.is_err()) + u32::from(rows > UNIVERSE);
     let edge = built.unwrap_or_default();
     let mut order = [0u16; UNIVERSE];
+    // One untimed network, so a cold cache is not charged to the first sample.
+    black_box(order::rank(black_box(&batch), &edge, 7, &mut order));
     for _ in 0..samples {
         let began = Instant::now();
         for _ in 0..reps {
@@ -338,28 +345,43 @@ pub fn measure_risk_cycle(history: u32, samples: u32) -> Series {
     series
 }
 
+/// One worst release on stock 255, held since `at`: released at `at`, before every other
+/// released row's last fill, so it walks back past all 255 of them to the head; then settled a
+/// second later and admitted again, which puts the book back as it was. Returns the calls
+/// refused, and a release that passed fewer than 255 rows as one more.
+fn worst(book: &mut RiskBook, at: &mut i64) -> u32 {
+    let last = StockId(255);
+    let passed = book.release(last, *at);
+    let refused = u32::from(passed != Ok(255))
+        + u32::from(book.settle(*at + 1).is_err())
+        + u32::from(book.admit(*at + 1, last, 1_000).is_err());
+    *at += 1;
+    refused
+}
+
 /// C-FNO-SIZE-04 (b): the worst [`RiskBook::release`], joining the list at its head behind 255
-/// released rows; `reps` releases a sample, each on its own copy of the book.
+/// released rows. Each repetition is that release plus the settle and the admission that put
+/// the book back, so every repetition walks the same 255 rows of one book; `reps` repetitions a
+/// sample.
 #[must_use]
 pub fn measure_risk_release(reps: u32, samples: u32) -> Series {
     let mut book = RiskBook::new();
     let mut series = Series::with_capacity(samples);
     for stock in 0..=254 {
-        series.refused += u32::from(book.admit(0, StockId(stock), 1_000).is_err());
-        series.refused += u32::from(
-            book.release(StockId(stock), 1_000 + i64::from(stock))
-                .is_err(),
-        );
+        let id = StockId(stock);
+        series.refused += u32::from(book.admit(0, id, 1_000).is_err());
+        // Last fills far ahead, so every later release of stock 255 comes before them.
+        series.refused += u32::from(book.release(id, i64::MAX - 255 + i64::from(stock)).is_err());
     }
     series.refused += u32::from(book.admit(0, StockId(255), 1_000).is_err());
-    let mut books = Vec::with_capacity(usize::try_from(reps).unwrap_or(0));
+    let mut at = 0;
+    // One untimed repetition, so a cold cache is not charged to the first sample.
+    series.refused += worst(&mut book, &mut at);
     for _ in 0..samples {
-        books.clear();
-        books.extend((0..reps).map(|_| book.clone()));
         let began = Instant::now();
         let mut refused = 0;
-        for copy in &mut books {
-            refused += u32::from(black_box(copy.release(StockId(255), 0)).is_err());
+        for _ in 0..reps {
+            refused += worst(black_box(&mut book), &mut at);
         }
         series.take(began, u128::from(reps));
         series.refused += refused;
@@ -375,13 +397,19 @@ pub fn measure_edge_insert(trades: u32, samples: u32) -> Series {
     let trades_in = learning(trades, 12, &mut draw);
     let mut table = EdgeTable::empty();
     let mut series = Series::with_capacity(samples);
-    for _ in 0..samples {
-        series.refused += u32::from(table.reset(&RUNGS, 0, 12).is_err());
-        let began = Instant::now();
+    let fill = |table: &mut EdgeTable| {
         let mut refused = 0;
         for trade in &trades_in {
             refused += u32::from(table.insert(black_box(trade)).is_err());
         }
+        refused
+    };
+    // One untimed fill, so the entries' first allocation is not charged to the first sample.
+    series.refused += u32::from(table.reset(&RUNGS, 0, 12).is_err()) + fill(&mut table);
+    for _ in 0..samples {
+        series.refused += u32::from(table.reset(&RUNGS, 0, 12).is_err());
+        let began = Instant::now();
+        let refused = fill(&mut table);
         series.take(began, u128::from(trades));
         series.refused += refused;
     }
@@ -395,6 +423,8 @@ pub fn measure_edge_reset(rungs: u16, reps: u32, samples: u32) -> Series {
     let ladder: Vec<u16> = (0..rungs).collect();
     let mut table = EdgeTable::empty();
     let mut series = Series::with_capacity(samples);
+    // One untimed reset: the table's first, which allocates its cells, is not a reset's cost.
+    series.refused += u32::from(table.reset(&ladder, 0, 12).is_err());
     for _ in 0..samples {
         let began = Instant::now();
         let mut refused = 0;
@@ -417,7 +447,8 @@ pub fn measure_judging(month_trades: u32, samples: u32) -> Series {
     let mut series = Series::with_capacity(samples);
     series.refused += u32::from(built.is_err());
     let mut table = built.unwrap_or_default();
-    series.refused += u32::from(table.judging(0).is_err());
+    // Two untimed boundaries: the first takes one month out, the second moves two.
+    series.refused += u32::from(table.judging(2).is_err()) + u32::from(table.judging(0).is_err());
     let moved = u128::from(month_trades) * 2;
     for (_, month) in (0..samples).zip([1, 2, 0].into_iter().cycle()) {
         let began = Instant::now();
@@ -436,20 +467,25 @@ pub fn measure_duplicates(candidates: usize, reps: u32, samples: u32) -> Series 
     let batch = crowd(candidates, &mut draw);
     let mut out = Plan::new();
     let mut series = Series::with_capacity(samples);
+    let once = |out: &mut Plan| {
+        u32::from(
+            plan(
+                &PolicyInput::FixedSeeded,
+                &VIEW,
+                &LIMITS,
+                black_box(&batch),
+                out,
+            )
+            .is_err(),
+        )
+    };
+    // One untimed plan, so a cold cache is not charged to the first sample.
+    series.refused += once(&mut out);
     for _ in 0..samples {
         let began = Instant::now();
         let mut refused = 0;
         for _ in 0..reps {
-            refused += u32::from(
-                plan(
-                    &PolicyInput::FixedSeeded,
-                    &VIEW,
-                    &LIMITS,
-                    black_box(&batch),
-                    &mut out,
-                )
-                .is_err(),
-            );
+            refused += once(&mut out);
         }
         series.take(began, u128::from(reps));
         series.refused += refused;
