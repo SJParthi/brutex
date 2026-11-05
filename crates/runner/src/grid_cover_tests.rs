@@ -579,3 +579,326 @@ fn a_stepped_grid_steps_its_own_stops_and_merges_the_forced_level() {
         assert!(unbuildable.trails.rungs().is_empty(), "{side:?}");
     }
 }
+
+/// BASE-COV-LIBS-LS2 (5 Nov): THE RESOLVED-POLICY DOOR REFUSES PRICES ITS
+/// MONEY ENVELOPE CANNOT HOLD, and says so as the population it could not
+/// enumerate. Unscaled, the door prices one cell per resolved coordinate;
+/// with every price scaled so four times the largest price on any path passes
+/// `i64::MAX`, the exact-ladder pass refuses before pricing (no cell), and the
+/// door answers the resolution's cell count against the zero it got. (The
+/// derived door and the replay doors refuse the same prices in
+/// `a_grid_that_could_saturate_is_refused_not_clamped`; this door checks the
+/// envelope itself.)
+#[test]
+fn the_resolved_policy_door_refuses_prices_past_the_money_envelope() {
+    use crate::exit_grid_policy::{
+        ExecutionResolutionV1, ExecutionSeriesV1, ExitGridErrorV1, ExitGridPolicyV1,
+        ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1,
+        RungPlanV1, printed_ohlcv_cost_model_id_v2,
+    };
+    let (bars, column) = swept(8);
+    let horizon = Horizon::bars(15).expect("a nonzero horizon");
+    let mask = ConditionMask::default();
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .expect("an allowed index");
+    let middle = RationalPercentileV1::new(1, 2).expect("one half");
+    let resolved = ExitGridPolicyV1::new(
+        ExecutionResolutionV1::OneMinuteOhlcv,
+        RangeResolutionV1::PpmCeiling,
+        Side::Long,
+        RungPlanV1::new(vec![middle], vec![middle], vec![middle], 1).expect("one rung each"),
+        RatioLimitsV1::new(1, 100_000, 1).expect("a broad single pair"),
+        32,
+        ExitGridSelectorV1::PessimisticTotal,
+        printed_ohlcv_cost_model_id_v2(),
+        ForcedStopV1::Disabled,
+        u64::MAX,
+        u64::MAX,
+    )
+    .expect("a valid policy")
+    .resolve_attested(
+        ExecutionSeriesV1::new(&key, "test-feed", "test-commit", [0xA5; 32], &bars)
+            .expect("complete identity"),
+    )
+    .expect("the grid resolves");
+    let facts = crate::trade::SliceFacts::of(&bars, &column);
+    let priced = evaluate_resolved_policy_v1(
+        &bars,
+        &column,
+        &mask,
+        horizon,
+        Side::Long,
+        &resolved,
+        &facts,
+    )
+    .expect("the whole population prices");
+    assert_eq!(priced.cells.len() as u64, resolved.cell_count());
+    assert!(priced.cells.iter().any(|cell| cell.trades > 0));
+
+    let smallest = bars
+        .iter()
+        .map(|bar| bar.low.min(bar.open).min(bar.close))
+        .min()
+        .expect("bars");
+    let scale = i64::MAX / 4 / smallest + 1;
+    let scaled: Vec<Candle> = bars
+        .iter()
+        .map(|bar| Candle {
+            open: bar.open * scale,
+            high: bar.high * scale,
+            low: bar.low * scale,
+            close: bar.close * scale,
+            ..*bar
+        })
+        .collect();
+    let scaled_facts = crate::trade::SliceFacts::of(&scaled, &column);
+    assert_eq!(
+        evaluate_resolved_policy_v1(
+            &scaled,
+            &column,
+            &mask,
+            horizon,
+            Side::Long,
+            &resolved,
+            &scaled_facts
+        ),
+        Err(ExitGridErrorV1::ReplayCellCountMismatch {
+            expected: resolved.cell_count(),
+            actual: 0,
+        })
+    );
+}
+
+/// One plain bar at the epoch: open and close 100,000, high 120,000, low
+/// 80,000.
+fn wide_bar() -> Candle {
+    Candle {
+        open: 100_000,
+        high: 120_000,
+        low: 80_000,
+        close: 100_000,
+        ..Candle::default()
+    }
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A LEVEL OR TRAIL EXIT WHOSE BAR IS NOT IN THE
+/// SLICE IS BOOKED FLAT, never invented (an empty slice, and an offset one past
+/// the only bar), on both sides; and a trail with no recorded peak, which
+/// `Trailing::ended` answers with an anchor of zero, is priced as the market
+/// order a time exit is, on the bar it fired on, under both readings.
+#[test]
+fn an_exit_off_the_slice_is_flat_and_a_peakless_trail_is_a_market_order() {
+    let fills = EntryPrices {
+        charged: 100_000,
+        anchor: 100_000,
+    };
+    let bar = wide_bar();
+    for side in [Side::Long, Side::Short] {
+        for (by, kind) in [
+            (Ended::Stop, Resting::Stop),
+            (Ended::Target, Resting::Target),
+        ] {
+            let level = Some(Level { kind, ppm: 100_000 });
+            for (slice, offset) in [(&[][..], 0), (core::slice::from_ref(&bar), 1)] {
+                let flat = realised(slice, 0, offset, fills, side, by, level, true);
+                assert_eq!((flat.paisa, flat.gapped), (0, false), "{side:?} {by:?}");
+            }
+        }
+        let trail = Ended::Trail {
+            anchor: 105_000,
+            ppm: 100_000,
+            kind: TrailKind::Live,
+            rested_at_open: true,
+        };
+        for (slice, offset) in [(&[][..], 0), (core::slice::from_ref(&bar), 1)] {
+            let flat = realised(slice, 0, offset, fills, side, trail, None, true);
+            assert_eq!((flat.paisa, flat.gapped), (0, false), "{side:?}");
+        }
+        for kind in [TrailKind::Live, TrailKind::Armed] {
+            let fired = Trailing {
+                kind,
+                at: 0,
+                before: None,
+                raised: None,
+                ppm: 100_000,
+            };
+            for pessimistic in [true, false] {
+                let peakless = fired.ended(pessimistic);
+                assert_eq!(
+                    peakless,
+                    Ended::Trail {
+                        anchor: 0,
+                        ppm: 100_000,
+                        kind,
+                        rested_at_open: pessimistic,
+                    }
+                );
+                let as_trail = realised(
+                    core::slice::from_ref(&bar),
+                    0,
+                    0,
+                    fills,
+                    side,
+                    peakless,
+                    None,
+                    pessimistic,
+                );
+                let as_time = realised(
+                    core::slice::from_ref(&bar),
+                    0,
+                    0,
+                    fills,
+                    side,
+                    Ended::Time,
+                    None,
+                    pessimistic,
+                );
+                assert_eq!(
+                    (as_trail.paisa, as_trail.gapped),
+                    (as_time.paisa, false),
+                    "{side:?} {kind:?} {pessimistic}"
+                );
+            }
+        }
+        // The market-order bracket itself: the worst reading is the bar's
+        // adverse extreme, the best its favourable one.
+        let worst = realised(
+            core::slice::from_ref(&bar),
+            0,
+            0,
+            fills,
+            side,
+            Ended::Time,
+            None,
+            true,
+        );
+        let best = realised(
+            core::slice::from_ref(&bar),
+            0,
+            0,
+            fills,
+            side,
+            Ended::Time,
+            None,
+            false,
+        );
+        assert!(worst.paisa < best.paisa, "{side:?}");
+    }
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): WHEN BOTH TRAILS HAVE FIRED BY THE CHOSEN EXIT,
+/// THE EARLIER ONE IS THE EXIT: the live trail when it fired first, the armed
+/// one when it fired first, and the armed one on a tie (the order the arms
+/// state). The chosen trail's own peaks are what both readings carry.
+#[test]
+fn of_two_fired_trails_the_earlier_one_exits() {
+    let trailing = |kind, at, before, raised| Trailing {
+        kind,
+        at,
+        before: Some(before),
+        raised: Some(raised),
+        ppm: 1_000,
+    };
+    let none_fixed = |live, armed| {
+        ExitChoices::of(
+            Firing {
+                stop_at: NEVER,
+                target_at: NEVER,
+                live,
+                armed,
+            },
+            9,
+            false,
+        )
+    };
+    for (live_at, armed_at, live_wins) in [(2, 5, true), (5, 2, false), (4, 4, false)] {
+        let live = trailing(TrailKind::Live, live_at, 104_000, 104_500);
+        let armed = trailing(TrailKind::Armed, armed_at, 106_000, 107_000);
+        let chosen = if live_wins { live } else { armed };
+        let choices = none_fixed(live, armed);
+        assert_eq!(
+            choices.trail_before,
+            Some(chosen.ended(true)),
+            "{live_at} {armed_at}"
+        );
+        assert_eq!(choices.trail_raised, Some(chosen.ended(false)));
+        assert_eq!(
+            (choices.stop, choices.target, choices.timed),
+            (None, None, None)
+        );
+    }
+    // A trail that fired after the chosen exit is not one of them.
+    let late = none_fixed(
+        trailing(TrailKind::Live, 2, 104_000, 104_000),
+        trailing(TrailKind::Armed, 11, 106_000, 107_000),
+    );
+    assert_eq!(
+        late.trail_before,
+        Some(trailing(TrailKind::Live, 2, 104_000, 104_000).ended(true))
+    );
+    assert_eq!(late.trail_raised, None, "an unraised peak reads once");
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): AN EXIT NAMES A LEVEL ONLY WHEN ITS VARIANT HAS
+/// THAT RUNG: a stop exit with no stop rung and a target exit with no target
+/// rung name none, whatever the other rung is, and a time or trail exit never
+/// names one.
+#[test]
+fn an_exit_names_a_level_only_when_its_variant_has_that_rung() {
+    assert_eq!(level_for(Ended::Stop, None, Some(5)), None);
+    assert_eq!(level_for(Ended::Target, Some(5), None), None);
+    assert_eq!(level_for(Ended::Stop, None, None), None);
+    assert_eq!(level_for(Ended::Target, None, None), None);
+    assert_eq!(
+        level_for(Ended::Stop, Some(7), None),
+        Some(Level {
+            kind: Resting::Stop,
+            ppm: 7
+        })
+    );
+    assert_eq!(
+        level_for(Ended::Target, None, Some(9)),
+        Some(Level {
+            kind: Resting::Target,
+            ppm: 9
+        })
+    );
+    assert_eq!(level_for(Ended::Time, Some(1), Some(2)), None);
+    let trail = Ended::Trail {
+        anchor: 1,
+        ppm: 1,
+        kind: TrailKind::Live,
+        rested_at_open: false,
+    };
+    assert_eq!(level_for(trail, Some(1), Some(2)), None);
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A RESTING LEVEL OUTSIDE ITS BAR'S PRINTED RANGE
+/// FILLS AT THE BAR'S OPEN AND IS COUNTED A GAP, below the low and above the
+/// high alike, for every order kind and side; a level inside the range fills
+/// at the level, at either edge of it, and is not a gap.
+#[test]
+fn a_resting_level_outside_its_bar_fills_at_the_open_as_a_gap() {
+    let bar = wide_bar();
+    for kind in [Resting::Stop, Resting::Target] {
+        for side in [Side::Long, Side::Short] {
+            for outside in [bar.low - 1, 60_000, bar.high + 1, 140_000] {
+                assert_eq!(
+                    level_fill(&bar, outside, kind, side, false),
+                    (bar.open, true),
+                    "{kind:?} {side:?} {outside}"
+                );
+            }
+            for inside in [bar.low, 95_000, bar.high] {
+                assert_eq!(
+                    level_fill(&bar, inside, kind, side, false),
+                    (inside, false),
+                    "{kind:?} {side:?} {inside}"
+                );
+            }
+        }
+    }
+}
