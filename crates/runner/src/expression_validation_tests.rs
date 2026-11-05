@@ -405,15 +405,14 @@ fn both_sides_reject_foreign_full_program_anchors_selections_and_ordinals() -> R
             .cells
             .iter()
             .map(|cell| {
-                Ok((
-                    resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell))?,
-                    resolved.classify_expression_coordinate(
-                        &foreign_validated,
-                        Chosen::from_cell(cell),
-                    )?,
-                ))
+                let classify = |against| {
+                    resolved
+                        .classify_expression_coordinate(against, Chosen::from_cell(cell))
+                        .expect("a validation of this resolution classifies every cell")
+                };
+                (classify(&validated), classify(&foreign_validated))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Vec<_>>();
         let (ordinal, selected, wrong) = dispositions
             .iter()
             .enumerate()
