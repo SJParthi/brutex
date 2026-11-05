@@ -68,6 +68,7 @@ pub mod fib;
 pub mod gap;
 pub mod orb;
 pub mod pattern;
+pub mod rsi;
 pub mod session;
 pub mod trend;
 pub mod vwap;
