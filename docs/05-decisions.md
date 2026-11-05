@@ -87822,3 +87822,347 @@ report, signal-candle stop, top-N, portfolio, split and rank cases) passed
 queue gave this part no slot (it is not on the priority file) and no deep
 target dir came free, so no Route B figure exists after D-7320's. The next
 attempt compiles them first.
+
+### D-8560 — BASE-COV-LIBS shard LS1: `store` measured whole by Route B; no production row is left without a test or a proof — 2026-11-05
+
+**Status: a shard's record inside D-8568's assembly, not a landing record.**
+Operator decision D2 part A, split by crate (D6) for the 3 Nov 2026 cloud
+wave: shard LS1 took `store`. Its branch is `cloud/cov-libs-ls1-20261103`;
+the assembly (D-8568) replayed its code commits onto START with
+`replay-minus-reports.sh`, so the `store` tree here is that branch's code tip
+byte for byte (the script's proof P1).
+
+**Instrument.** The kit's `d3-route-b-cloud.sh`, unchanged: the pinned
+nightly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)` with its own
+`llvm-profdata` and `llvm-cov` (LLVM 23.1.0-rust-1.99.0-nightly), `-C
+instrument-coverage -Z coverage-options=branch`, opt-level 0, set
+`reading whole:store` (117 tracked `.rs` files), on a Linux x86_64 cloud host
+running as root. A cloud figure: the Mac re-measures on aarch64-apple-darwin.
+
+**Figures, as measured (lines covered/counted, branch sides covered/counted).**
+Before, at START plus the seven root re-runs (the shard's `c7ccb0f7f7e2`):
+lines 50,033/51,607, sides 3,291/3,868, of which 225 lines and 104 sides in
+production code. After, at the shard's code tip `24bd3a62cd51`: lines
+53,276/54,692, sides 3,448/3,990. 112 files read; the four `benches/` files
+(L-BCL-1) and `src/lib.rs` (L-BCL-2) were not read.
+
+**What is left, by class.** Production: 81 rows, each (U) with its proof, and
+no GAP. Two more, `safe_open::Found::of`'s last arm, are covered on Linux and
+are (U) on aarch64-apple-darwin (D-8561 item 4). Test code: no GAP; the rest
+are the bodies of `#[ignore]`d tests and the helpers only they call
+(L-BCL-3), failing arms of assertions ((F)), the shard's step-4 arms with
+their proofs (bounding, skip, failure-collection and fault-mock guards of a
+test's own checks), (U) rows with proofs, and ten macOS-only rows of
+`tests/catalog.rs` owed to the Mac. The assembly's lists carry every row:
+`reports/base-cloud-20261103/base-cov-libs-gaps-a5.txt.md` and
+`base-cov-libs-fu.txt.md` on `cloud/cov-libs-lsa-20261103` (D-8568); the
+shard's own are on its branch.
+
+**Tests.** 112 new tests, each shown failing under a hand change of the rule
+it pins, then restored. Eight permission tests run their bodies as an
+unprivileged user through `crate::support::where_permission_binds` (the
+D-0995 pattern), so a root host cannot pass them vacuously; tests that need a
+fresh process-wide static run in a fresh child of their test binary. At the
+shard's tip, on the pinned stable, `cargo test -p store --locked`: 1,104
+passed, 0 failed, 8 ignored.
+
+### D-8561 — `store`: a host refusal or a race no disk can stage is driven through a `#[cfg(test)]` seam or race hook that runs the real code; `Found::of`'s last arm is (U) on aarch64-apple-darwin only — 2026-11-05
+
+**Decided by the main session's answers of 5 Nov 2026** to shard LS1's two
+questions (D-8560). Every production row of `store` that only a host refusal
+or a race reaches gets an asserting test that runs the real code; none becomes
+a limit in `docs/06-limits.md`.
+
+1. **Host refusals** (a refused write, flush, `fstat`, shared or patient
+   `flock`, read) are one-shot, per-thread refusals a test arms, in
+   `file.rs`'s pattern (D-6017), compiled only under `cfg(test)`, so the call
+   that ships is the call every test runs. `file::tests::refusal(operation,
+   path)` is matched by the operation word a module's own lift names the call
+   by, and by the path; `generation`'s, `quarantine`'s and `repair`'s `io_at`,
+   `provenance`'s `write_fully` and `settings`' staged write consult it in
+   `file::fault`'s shape: the host's answer is replaced after the call ran.
+   `flock::tests::take_host_refusal(HostCall)` refuses, with a skip count, the
+   registered `flock` attempt and `Flock::try_lock_shared`, each before the
+   call, and `try_lock_noted`'s `fstat` and the clear of a holder's note, each
+   after it ran.
+2. **Races** (a file or directory that changes between two system calls):
+   `file::tests::race(point, path)` is a hook at the moment between the two
+   calls, through which the test makes the REAL change on disk, so the second
+   call meets a real race and the code's own handling runs; no result is
+   faked. Fourteen points, from the quarantine index measured, opened and
+   header read to a staging leftover looked at.
+3. **Reclassified rows.** Three rows first filed as host refusals
+   (`quarantine.rs` 831, 861 and 2224 at the shard's lines) are reached by a
+   real race; two first labelled flushes (`repair.rs`, the reservation's and
+   the receipt's `create_new`) are reached by a real refusal (a directory that
+   takes no new name) and a real race.
+4. **`safe_open::Found::of`'s last arm** (a file of none of the seven kinds)
+   is driven on Linux by a real anonymous inode, the `inotify` instance a
+   child `tail -f` holds
+   (`safe_open::tests::a_file_of_none_of_the_seven_kinds_is_unknown`). On
+   aarch64-apple-darwin it is (U): `std::fs::FileType` has no constructor;
+   macOS's one such kind, a union mount's whiteout, cannot be made by a test;
+   a kqueue descriptor reports a pipe; `shm_open` needs the unsafe code the
+   crate forbids; and a seam cannot fake a `FileType`. The Mac's Route B
+   records it the same way.
+5. **Test-code rows.** A test's or a check module's own failing, bounding or
+   skip arm, failure-collection lines and fault-mock guards are listed (F)
+   with their proofs; macOS-only arms are owed to the Mac's Route B; every
+   other test-code arm is covered by a direct test of its helper. Two test
+   fixes ride with it: the D-0790 docs check runs on every run (D-1448
+   corrected the sentence it was gated on, so it had stopped checking
+   anything), and `safe_open`'s denied-file test runs where the mode bits
+   bind (D-0995); as root it asserted nothing.
+
+**Rejected:** recording these rows as limits (the main session's first
+answer), and restructuring a production path so data could reach it,
+`Found::of` included (D-6017's rejection; the second answer).
+
+### D-8562 — BASE-COV-LIBS shard LS2: `runner` measured whole by Route B; every row is covered, (F), (U) with its proof, or one of 41 rows for a ruling — 2026-11-05
+
+**Status: a shard's record inside D-8568's assembly.** Shard LS2 took
+`runner` (branch `cloud/cov-libs-ls2-20261103`, replayed onto the assembly
+like LS1's, D-8560). Instrument as D-8560's: the kit's Route B on the pinned
+nightly, set `reading whole:runner` (75 files), a Linux x86_64 cloud host.
+
+**Figures, as measured.** Before, at START plus a one-line compile fix of
+attempt 4's `signal_candle_stop_tests.rs` (the shard's `4f49dbf43e79`): lines
+46,145/47,136, sides 3,349/4,218 (991 lines and 869 sides uncovered). After,
+at the shard's code tip `473f62e05b5b`: lines 51,836/52,061, sides
+3,666/4,014 (225 and 348). `benches/ratio.rs` was not read (L-BCL-1). Of the
+573 uncovered rows, 274 are (F), 258 (U) with a proof from the code, 36 need
+a refusing allocator or an address-space-sized input and 5 a blake3
+collision (D-8563); none is open. No production line changed: every hunk of
+the shard lies in a test module, a `*_tests.rs` file, `tests/`, or the
+`#[cfg(test)]` module `exit_grid_policy::resolution_tamper`. 123 new tests,
+each shown failing under a hand change, then restored; `cargo test -p runner
+--locked` on the pinned stable: 980 passed, 0 failed.
+
+**Findings, reported and not changed** (production code; a fix needs its own
+id): F-LS2-1, recorded with D-8563; and these redundancies, none a defect:
+V3's zero-rung rule is written three times (the door,
+`AnchoredSearchCaptureV3::new`, `reconcile_anchored_search_v3`); the V4
+walk's empty refusal repeats the door's own check; `Ladder::stepped`'s and
+`from_excursions`' guards repeat `Ladder::new`'s; evidence decoding refuses a
+forged projection twice; `grid.rs`'s `pess > 0` repeats the enclosing test of
+`tally_trade`. Three of the crate's tests were vacuous on their fixtures (the
+hoisted-replay comparison on five sessions that never warm the evaluator, the
+sparse-slice mapping check, the foreign-facts eligible-row loop); the shard
+made each test what it claims.
+
+### D-8563 — `runner`: the rows only a refusing allocator, an address-space-sized input or a hash collision reaches; and finding F-LS2-1 — 2026-11-05
+
+**Shard LS2's question, and the assembly's answer to the part it can
+settle.** LS2 (D-8562) left 41 rows no test could reach and asked for a
+ruling: 36 [FAULT] (the `try_reserve_exact` refusal closures of the observed
+ranges, the admitted ratio pairs, the ratio bitmap, the replay buffers and a
+view's ladder copies and row offsets; the checked arithmetic of
+`ResolvedGridViewV1::coordinate_row_offsets` and
+`canonical_coordinate_ordinal`; the second per-day table of a
+signal-candle-stop preparation) and 5 [HASH]
+(`validate::authenticate_grid_pair_v4`'s refusal of a Long and a Short
+resolution whose policy or resolution digests are equal). It proposed a
+`#[cfg(test)]` allocation-refusal seam at each site, as `engine` has under
+D-7329, or a ruling that the rows count as unreachable.
+
+**Answered by the assembly (D-8568), from rulings already made, not a new
+one.** The method for an arm only a host refusal reaches is decided: a
+`#[cfg(test)]` seam that runs the real code (D-6017, D-7329, and the main
+session's answer to LS1, D-8561, which rejected recording such rows as
+limits). So:
+
+1. **Every allocator row is reached** through D-8569's seam: the refusal
+   closures of `observed_ranges`, `admitted_ratio_pairs`,
+   `ResolvedGridViewV1::ladders` and `coordinate_row_offsets`,
+   `grid::replay_universe_v1` and `replay_universe_from_candidates_v1`, and
+   the `?` after a preparation's second per-day table in
+   `signal_candle_stop::Prepared::new`.
+2. **`ratio_bitmap_of`'s refusal needs no seam**: it takes its counts, so a
+   direct call with a length of `isize::MAX + 1` is refused for capacity
+   before any allocator is asked, on every host.
+3. **`canonical_coordinate_ordinal`'s slot overflow is reached by a direct
+   call** with a stop rung of `usize::MAX`; LS2 had filed it with the
+   address-space rows.
+4. **Three checked additions are (U)**, with this proof: in
+   `coordinate_row_offsets` and `canonical_coordinate_ordinal` the operand of
+   each `len().checked_add(1)` is the length of a `Vec<Ppm>` (`Ppm` is `i64`),
+   which holds at most `isize::MAX / 8` elements, so the sum cannot pass
+   `usize::MAX` on any target.
+5. **Left for the operator's ruling**: the product `(S + 1)(T + 1)` of
+   `coordinate_row_offsets` passes `usize::MAX` only with a stop and a target
+   ladder of more than 2^32 rungs each (32 GiB per ladder); no test can build
+   that input, and a seam would fake the input rather than refuse a real
+   request. And the five [HASH] rows: both digests hash the side, and each is
+   checked against its preimage first, so equal digests need a blake3
+   collision; a seam that faked a digest would test nothing real. Both are in
+   `docs/06-limits.md` L-BCL-6.
+
+**F-LS2-1, a finding for the operator.** `grid::entry_fills` prices a Long
+entry against its own bar's printed extremes (its sell leg reads the ENTRY
+bar's low), while `trade::round_trip` sells at the EXIT bar's low. An entry
+bar whose low is below one tick (5 paisa) therefore gives the level-less walk
+a priced trade and the exit grid a refused path in every cell: the legacy
+walk ranks no candidate of such a fold
+(`validate::cover_tests::a_candidate_whose_every_cell_prices_no_trade_is_not_ranked`),
+and the replay door refuses with "pricing-refusal branch carried no refusal
+fact", because `refused_candidate_path_v1` knows block-only paths, holes and
+refused crossings but not a zero entry fill
+(`exit_grid_policy::tests::a_replay_entering_on_a_bar_below_one_tick_is_refused_by_its_path_classifier`).
+It is a loud refusal, not a silent wrong number, and it is not reachable at a
+real NSE price; but its reason misnames the cause. A fix changes production
+pricing and needs its own id; neither LS2 nor the assembly made one.
+
+### D-8564 — `lake`: two refusal paths say what reaches them (BASE-COV-LIBS shard LS3) — 2026-11-05
+
+1. `reader::Columns::{int64, int32, double}` pass the type they ask for to
+   `mismatch`, which now reports `ColumnTypeMismatch { want: <asked>, got:
+   <held> }`. It reported the layout spec's type as `want`, which for every
+   call that can reach the arm (a read asking for a column as the wrong type;
+   no file reaches it, since `schema::detect` refuses a wrongly typed column at
+   open) is the type the file holds, so the refusal read "should be DOUBLE but
+   the file holds DOUBLE". Proved by
+   `lake::reader::tests::a_column_read_as_the_wrong_type_names_the_type_asked_for_and_the_type_held`.
+2. `page::read_header` takes the header length as how far the `&[u8]`
+   advanced (`rest.len() - unread.len()`), replacing a `Cursor` position
+   turned from `u64` into `usize` through a refusal no 64-bit target reaches.
+   Proved by `lake::page::tests::a_header_length_is_exactly_the_bytes_the_parse_consumed`.
+
+Behaviour for every file is unchanged. With them, shard LS3 (`lake`,
+`indicators`, `vocab`; branch `cloud/cov-libs-ls3-20261103`, replayed onto
+the assembly, D-8568) measured by the kit's Route B on the pinned nightly,
+at START and at its code tip `dc3632704fdb` (lines covered/counted, sides):
+`indicators` 16,498/16,540 and 1,915/2,186 to 16,909/16,914 and
+1,892/2,078; `lake` 4,987/5,623 and 274/366 to 5,678/6,135 and 305/364;
+`vocab` 7,636/7,741 and 1,126/1,286 to 8,185/8,205 and 1,240/1,298. Every
+uncovered row of the three is (F) (428), (U) with its proof (4), or the body
+of an `#[ignore]`d real-lake test (353, L-BCL-3); none is a GAP. The
+real-lake scan's detectors are proved on synthetic files, so the ignored scan
+cannot pass vacuously. `benches/ratio.rs` of each crate (L-BCL-1) and `lake`'s
+`lib.rs` (L-BCL-2) were not read.
+
+### D-8565 — `indicators`, `vocab`: guard arms no input can reach are restructured away, each equivalent on every reachable input (BASE-COV-LIBS shard LS3) — 2026-11-05
+
+`indicators`: the exact-minute bridge carries the previous minute's stamp (a
+lookup of `index - 1` inside `index > 0` had an arm no slice reaches) and
+fetches the closing minute with its masks in one lookup (`minute_masks` holds
+one entry per minute); `Evaluator::crossings_of` walks `CROSSINGS`,
+`last_side` and `crossings_seen` together by `zip` (both arrays are
+`[_; CROSSINGS.len()]`) and chooses a crossing's edge with its side; the
+evaluator maps a VWAP refusal through `vwap::Refused::into_corrupt` (proved
+for both refusals by
+`vwap::vwap_cover_tests::each_refusal_keeps_its_own_name_through_the_evaluator`).
+`vocab`: an `And`/`Or` step takes both operands in one slice pattern, whose
+only refusal is the reachable underflow; `Expression::encode` splits its
+fixed-size buffer once; `render_program` seeds its work stack with the root.
+
+The documenting conjuncts kept on purpose (`Evaluator::warmed_up`'s
+`previous`, `known_after`'s `seeded`, the not-live clauses of `Orb`,
+`SessionState` and `Vwap`) are NOT removed: each is shown deciding on its own
+by a white-box state test, so a later edit cannot delete it unseen. In
+`vocab`'s own gate tests, two test-only restructures with no verdict changed:
+`tests/no_py_language.rs` (D-5250) runs `git` through a named program, so a
+test can hand it one that cannot run, and prints its absent-file line
+whatever the count; `tests/workspace_is_rust.rs` files each lock package
+beside its own seen flag, O(V + E) as its doc states. Every change was shown
+red under a hand change and green otherwise; the crates' suites pass.
+
+### D-8566 — `engine`: the source-shape tests of `lib.rs` read the shipping region up to the first `#[cfg(test)]` line at the margin (BASE-COV-LIBS shard LS4, applied by the assembly) — 2026-11-05
+
+Attempt 4's test-only arm in `reserved` (D-7329) is an indented
+`#[cfg(test)]` inside the shipping region. Two source-shape tests cut
+`lib.rs` at its first `#[cfg(test)]` TEXT, so their region ended there and
+`tests::the_sweep_counts_support_against_the_fixed_width_column` and
+`tests::the_walk_has_exactly_three_early_exits_and_each_is_a_budget` failed
+(left 0, right 2) on every host. Both now split on `"\n#[cfg(test)]\n"`, as
+their sibling `every_level_appends_its_survivors_through_the_one_primitive`
+already did, and read exactly the region they read before attempt 4. The
+`too_many_lines` reason's stale "101" is clippy's measured 116. Shard LS4
+could not edit `lib.rs` (the assembly's file), so it wrote the patch (sha256
+of its text `c4cbc10e…`) and the assembly applied it.
+
+With it, LS4's second patch (sha256 `1b62c7b0…`), test code only: the level
+pairs of `the_bench_primitives_agree_with_the_level_they_stand_for` and the
+cumulative-counter check are walked with `zip`, so no arm is left for a pair
+that has one member; the exhaustive-join oracle's fixture gains `{9,10}` and
+`{9,11}` without `{10,11}`, so its subset check meets a union it must refuse,
+and oracle and ladder still agree; every handed batch is pushed and then
+asserted non-empty, where a filter used to drop an empty batch it never had.
+
+### D-8567 — BASE-COV-LIBS shard LS4: `core`, `costs`, `engine`, `greeks`, `telemetry` measured whole by Route B; two vacuous checks and a fixture that held no bit, made to test what they claim — 2026-11-05
+
+**Status: a shard's record inside D-8568's assembly.** Shard LS4 (branch
+`cloud/cov-libs-ls4-20261103`, replayed onto the assembly) measured by the
+kit's Route B on the pinned nightly, its test binaries run as an unprivileged
+user (as CI and the Mac run them), on a Linux x86_64 cloud host. From 294
+uncovered lines and 193 uncovered sides (its first measurement) to 190 and
+145 at its code tip `bcbc6524bdb2`: `core` lines 7,746/7,774 and sides
+602/640; `costs` 11,568/11,670 and 480/502; `engine` 5,448/5,478 and 530/570;
+`greeks` 1,918/1,921 and 93/96; `telemetry` 9,370/9,397 and 636/678. No
+production line changed: every hunk in a production file is inside a
+`#[cfg(test)]` module or declares one.
+
+**Made to test what they claim.**
+- `engine/tests/adversarial.rs`: `one(nth)` set its bit through
+  `vocab::table::set_exact(..).unwrap_or(m)`; the seventh live position is a
+  `near_*` bit, which `set_exact` refuses without a tolerance, so the shape
+  "eight bars, one bit each, all different" always held one bar with no bit,
+  and the silent fallback hid it (`CLAUDE.md` §4). `one()` now sets the bit
+  by position, as the sweep sees it;
+  `adversarial::every_one_bit_fixture_holds_one_live_bit` checks every live
+  position.
+- `core/tests/findings.rs` `every_refuted_finding_carries_its_reason` ran on
+  no row (none is REFUTED today), and `core/tests/lint.rs`'s per-line float
+  check ran on no line; each is now a function of its input
+  (`refuted_without_reason`, `floats_off_the_boundary`), checked on input that
+  breaks the rule as well as on the real data.
+- `clippy -D warnings` refused both of attempt 4's never-compiled files
+  (`refusal_cover_tests.rs`, `sink_recovery_tests.rs`); fixed.
+- Test-code restructures, each the same verdict or a stricter one: silent
+  skips refuse by name (a crate directory named in no UTF-8; a `git` that
+  cannot start after it has just run); `else` arms that cannot happen are
+  replaced by forms with none; helpers that only walked the real tree take a
+  root, so a scratch tree drives their skips.
+
+**Production rows newly covered:** `core::alias`'s four own-field checks (a
+skewed table), `costs::stack`'s STT sum past `i64`, and `engine`'s
+`screen_blocks` refused pair. Two `costs::stack` rows are (U) with proofs: the
+calculator day's `Exact::sum` cannot overflow, since `page_lines` panics on
+any brokerage past `i128::MAX / 18` before it; `to_rupee`'s narrowing cannot
+fail for any `i64`. The three `#[ignore]`d tests of these crates stand in
+L-BCL-3, and their timing helpers are now checked where the gate runs.
+`telemetry/tests/global_absent.rs`'s two macro-argument lines are uncovered
+by design: the test asserts that argument never runs (L-BCL-6).
+
+### D-8569 — `runner`: a test-only door refuses the n-th seamed reservation, so every buffer only a refusing allocator fails is reached by its real path (BASE-COV-LIBS assembly) — 2026-11-05
+
+`engine::reserved`'s door (D-7329), kept for `runner`. Exhausting the host's
+allocator is no test, and a test allocator needs the unsafe code the
+workspace denies. So beside each reservation of `runner` that only a refusing
+allocator fails, a `#[cfg(test)]` line asks
+`crate::reservation_refusal::asked` for its size: on the n-th seamed
+reservation of the thread, armed by `refusing(n, ..)`, the answer is
+`usize::MAX`, so `try_reserve_exact` answers the genuine `TryReserveError`
+and everything after it is shipping code. Nothing of it is compiled into a
+build: the call that ships is the call every test runs, with the size it
+always asked for.
+
+The eight seamed sites: the observed stops, targets and trails of
+`exit_grid_policy::observed_ranges`; `admitted_ratio_pairs`; the ladder
+copies of `ResolvedGridViewV1::ladders`; `coordinate_row_offsets`;
+`grid::replay_universe_v1`'s candidates; the evidence rows and the one-row
+scratch of `replay_universe_from_candidates_v1`; and
+`signal_candle_stop::days_before`, the rows' table and then the periods'.
+Each refusal is the caller's named one (`BufferAllocationRefused` with its
+buffer and the size asked, `ReplayEvidenceAllocationRefused` with its paths,
+`Error::Allocation`), never a panic and never a partial answer; a refusal
+armed past every reservation leaves the answer unchanged.
+
+Proved by
+`exit_grid_policy::tests::every_buffer_only_a_refusing_allocator_fails_is_refused_by_name_with_its_size`
+(which also drives `ratio_bitmap_of` with a length past `isize::MAX` and
+`canonical_coordinate_ordinal` with a stop rung whose slot overflows),
+`grid::cover_tests::a_replay_whose_buffer_only_a_refusing_allocator_fails_names_its_paths`,
+`signal_candle_stop::tests::a_preparation_whose_day_table_the_allocator_refuses_is_an_allocation_error`
+and `reservation_refusal::the_armed_reservation_alone_is_refused_and_the_arming_is_spent`,
+each shown failing under a hand change of the rule it pins. Settles the
+allocator rows of D-8563; `docs/06-limits.md` L-BCL-4 records the door.
