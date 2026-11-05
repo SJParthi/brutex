@@ -2424,3 +2424,85 @@ fn a_v4_candidate_with_no_out_of_sample_trade_refuses_the_walk() {
         })
     );
 }
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A CANDIDATE WHOSE EVERY EXIT CELL PRICES NO
+/// TRADE IS NOT RANKED, never scored at a zero it did not earn. Every
+/// even-indexed bar's low is one paisa, below the one-tick fill floor, and a
+/// one-bar horizon puts every exit on the next bar, of the other parity. A
+/// Long round trip sells at its EXIT bar's printed low, so the level-less walk
+/// prices exactly the trades that enter on a one-paisa bar; the exit grid
+/// prices an entry against its OWN bar's printed extremes, so it refuses each
+/// of those in every cell, and every other path is refused by both. The grid
+/// has its cells and no trade in any of them: `best` names a tradeless cell,
+/// and the fold drops every candidate. A steady rise keeps every candidate's
+/// training side Long.
+#[test]
+fn a_candidate_whose_every_cell_prices_no_trade_is_not_ranked() {
+    let mut bars = crate::synthetic::sessions(18);
+    for (index, bar) in bars.iter_mut().enumerate() {
+        let lift = i64::try_from(index).expect("a small series") * 200;
+        bar.open += lift;
+        bar.high += lift;
+        bar.close += lift;
+        bar.low = if index % 2 == 0 { 1 } else { bar.low + lift };
+        assert!(bar.check().is_ok(), "{index}");
+    }
+    let horizon = super::tests::h(1);
+    let windows = super::Shape::Anchored.folds(bars.len(), horizon, 2);
+
+    // The premise, on the first fold's training bars and its first candidate.
+    let train = &bars[windows[0].train.0.clone()];
+    let column = built(train);
+    let swept = crate::Sweeper::new(engine::Ladder::with_min_hits(40).with_ceiling(20_000))
+        .run_prepared(&column);
+    let mask = crate::closed::closed(&swept.sweep)
+        .kept
+        .first()
+        .expect("a frequent candidate")
+        .mask;
+    let facts = crate::trade::SliceFacts::of(train, &column);
+    let timed = crate::trade::walk_over(train, &column, &mask, horizon, Direction::Long, &facts);
+    assert!(
+        !timed.trades.is_empty(),
+        "the level-less walk prices trades"
+    );
+    let grid = crate::grid::evaluate_from_walk(
+        train,
+        crate::excursion::Side::Long,
+        crate::grid::Levels::derived(super::DEFAULT_RUNGS),
+        &timed,
+        &facts,
+    );
+    assert!(!grid.cells.is_empty());
+    assert!(grid.cells.iter().all(|cell| cell.trades == 0));
+    assert_eq!(grid.sharpest(), None);
+    assert_eq!(grid.best().map(|cell| cell.trades), Some(0));
+
+    let walked = super::walk_forward_projected_with_rungs(
+        &bars,
+        super::ExecutionSeries {
+            bars: &bars,
+            signal_length_micros: 60_000_000,
+        },
+        horizon,
+        2,
+        Direction::Long,
+        &super::tests::sweeper(),
+        &mut super::tests::evaluator,
+        super::Shape::Anchored,
+        super::FoldRungs::Fixed(0),
+        &|_| {},
+    );
+    assert_eq!(walked.refused, None);
+    assert_eq!(walked.folds.len(), 2);
+    for fold in &walked.folds {
+        assert!(
+            fold.considered > 0,
+            "fold {}: candidates were priced",
+            fold.index
+        );
+        assert_eq!(fold.priced, fold.considered);
+        assert!(fold.in_sample_all.is_empty() && fold.out_of_sample_all.is_empty());
+        assert_eq!((fold.chosen, fold.chosen_side), (None, None));
+    }
+}
