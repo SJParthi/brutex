@@ -385,14 +385,16 @@ async fn a_one_second_cash_month_inside_the_withdrawal_reads_inactive_not_no_pri
 /// what the classification states, which must not depend on who asked first.
 fn stated(body: &str) -> serde_json::Value {
     let mut answer: serde_json::Value = serde_json::from_str(body).unwrap();
-    if let Some(top) = answer.as_object_mut() {
-        top.remove("summaries");
-    }
+    let Some(top) = answer.as_object_mut() else {
+        panic!("not an object: {body}")
+    };
+    top.remove("summaries");
     for month in answer["month"].as_array_mut().unwrap() {
-        if let Some(row) = month.as_object_mut() {
-            for how in ["summary", "summary_fallback", "bar_records_read"] {
-                row.remove(how);
-            }
+        let Some(row) = month.as_object_mut() else {
+            panic!("a month row: {body}")
+        };
+        for how in ["summary", "summary_fallback", "bar_records_read"] {
+            row.remove(how);
         }
     }
     answer

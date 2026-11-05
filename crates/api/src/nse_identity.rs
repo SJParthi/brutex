@@ -499,8 +499,8 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(Vendor::Zerodha.master_file()), "x").unwrap();
-        let Err(Refusal::FileUnavailable(why)) = Reference::read(&dir).confirm(&merged, "RELIANCE")
-        else {
+        let confirmed = Reference::read(&dir).confirm(&merged, "RELIANCE");
+        let Err(Refusal::FileUnavailable(why)) = confirmed else {
             panic!("an unreadable file refuses");
         };
         assert!(why.contains("Company Name"), "the header is named: {why}");
@@ -520,16 +520,16 @@ mod tests {
         assert!(landed.provenance().contains("1 rows"));
 
         std::fs::remove_file(dir.join(Vendor::Zerodha.master_file())).unwrap();
-        let Err(Refusal::ZerodhaUndated(why)) = Reference::read(&dir).confirm(&merged, "RELIANCE")
-        else {
+        let confirmed = Reference::read(&dir).confirm(&merged, "RELIANCE");
+        let Err(Refusal::ZerodhaUndated(why)) = confirmed else {
             panic!("an undated Zerodha dump refuses");
         };
         assert!(why.contains("modification time"), "{why}");
 
         let big = vec![b'x'; pull::nse::MAX_DOCUMENT_BYTES + 1];
         std::fs::write(dir.join(pull::masters::NSE_TOTAL_MARKET_FILE), big).unwrap();
-        let Err(Refusal::FileUnavailable(why)) = Reference::read(&dir).confirm(&merged, "RELIANCE")
-        else {
+        let confirmed = Reference::read(&dir).confirm(&merged, "RELIANCE");
+        let Err(Refusal::FileUnavailable(why)) = confirmed else {
             panic!("an oversized file refuses");
         };
         assert!(why.contains("at most"), "{why}");
@@ -537,8 +537,8 @@ mod tests {
         // Exactly at the bound is read, and refused only for what it holds.
         let at_bound = vec![b'x'; pull::nse::MAX_DOCUMENT_BYTES];
         std::fs::write(dir.join(pull::masters::NSE_TOTAL_MARKET_FILE), at_bound).unwrap();
-        let Err(Refusal::FileUnavailable(why)) = Reference::read(&dir).confirm(&merged, "RELIANCE")
-        else {
+        let confirmed = Reference::read(&dir).confirm(&merged, "RELIANCE");
+        let Err(Refusal::FileUnavailable(why)) = confirmed else {
             panic!("a file at the bound that is not the constituent file refuses");
         };
         assert!(!why.contains("at most"), "{why}");

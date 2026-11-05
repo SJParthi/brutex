@@ -1394,4 +1394,164 @@ mod tests {
         );
         println!("FRONTIER-ADMITTED {} rank1", routed.0.as_u16());
     }
+
+    /// A ROW THAT MEETS EVERY ELITE RULE: its record beats each floor by far
+    /// (95 of 100 trades won, losses of a few paisa), so the verdict admits it
+    /// whatever the exact formula behind each ratio.
+    fn admitted_row(identity: [u8; 32], rank: u16) -> cli::frontier::Row {
+        cli::frontier::Row {
+            hits: 100,
+            n: 100,
+            wins: 95,
+            trades: 100,
+            cell_wins: 95,
+            pessimistic: 1_000_000,
+            worst_trade: -10,
+            max_drawdown: 10,
+            min_win: 10_000,
+            gross_win: 1_000_050,
+            gross_loss: -50,
+            ..verdict_row(identity, rank)
+        }
+    }
+
+    /// EVERY FRONTIER ANSWER NO OTHER TEST ASKS FOR, BY NAME: a store whose
+    /// `results` is a file, a ledger that is not a ledger, a committed run
+    /// with no row in a frontier that holds another run's rows, a deleted
+    /// zero-row child or an unswept store asked past its one page, and a page
+    /// whose rows meet the rules.
+    ///
+    /// Extremes: singles — `results` a file where its folder goes (the ledger
+    /// cannot be measured: 503), a ledger of garbage bytes (400 before any
+    /// child is read), a committed zero-row run beside a frontier holding
+    /// another run's rows (200 with `"rules":null`), a deleted zero-row child
+    /// asked for page 1 (416), an unswept store asked for page 1 (416 with no
+    /// receipt to read), a page whose one row meets every elite rule
+    /// (admitted 1 of 1); combinations — an admitted row and a failing row on
+    /// one page at once (admitted 1 of 2, on the page and in the run), the
+    /// zero-row run asked for page 0 and page 1 at once (one answer, one
+    /// refusal); out of the box — a ledger whose bytes are a JSON document.
+    #[test]
+    fn every_unasked_frontier_answer_is_given_or_refused_by_name() {
+        let dir = crate::scratch::path("frontier-unasked");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch root");
+
+        let flat = dir.join("flat");
+        std::fs::create_dir_all(&flat).expect("a store");
+        std::fs::write(
+            flat.join("results"),
+            b"a file where the results folder goes",
+        )
+        .expect("the file");
+        let (status, _, body) = respond(Ok(flat), &format!("identity={}", "a1".repeat(32)));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        assert!(body.starts_with(r#"{"rows":null,"#), "{body}");
+        assert!(body.contains("results ledger at "), "{body}");
+        assert!(
+            body.contains("could not be measured before its bounded read"),
+            "{body}"
+        );
+
+        for (name, bytes) in [
+            ("garbage", &b"not a ledger at all"[..]),
+            ("json", &br#"{"runs":[{"identity":"a2"}]}"#[..]),
+        ] {
+            let damaged = dir.join(name);
+            std::fs::create_dir_all(damaged.join("results")).expect("a results folder");
+            std::fs::write(cli::results::Results::path(&damaged), bytes).expect("a ledger");
+            let (status, _, body) = respond(Ok(damaged), &format!("identity={}", "a2".repeat(32)));
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{name}: {body}"
+            );
+            assert!(body.starts_with(r#"{"rows":null,"#), "{name}: {body}");
+        }
+
+        let beside = dir.join("beside");
+        let (other, none) = ([0xa4; 32], [0xa5; 32]);
+        cli::frontier::Frontier::open(&beside)
+            .expect("frontier")
+            .append_all(&[verdict_row(other, 1)])
+            .expect("another run's row");
+        commit_frontier_fixture(&beside, other, 1);
+        commit_frontier_fixture(&beside, none, 0);
+        let (status, _, body) = respond(Ok(beside), &format!("identity={}", "a5".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_body_identity(&body, &"a5".repeat(32));
+        assert!(
+            body.contains(r#""rows":[],"count":0,"total_count":0"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""rules":null"#), "{body}");
+        assert!(body.contains(r#""refusal":null"#), "{body}");
+
+        let gone = dir.join("gone");
+        let zero = [0xa6; 32];
+        cli::frontier::Frontier::open(&gone).expect("an empty frontier header");
+        commit_frontier_fixture(&gone, zero, 0);
+        std::fs::remove_file(cli::frontier::Frontier::path(&gone)).expect("the child goes");
+        let asked = |page: u64| {
+            respond(
+                Ok(gone.clone()),
+                &format!("identity={}&page={page}", "a6".repeat(32)),
+            )
+        };
+        let (status, _, body) = asked(0);
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body.contains(r#""rows":[]"#), "{body}");
+        let (status, _, body) = asked(1);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
+            "{body}"
+        );
+        assert!(
+            body.contains("page 1 was requested for an empty detail result; only page 0 exists"),
+            "{body}"
+        );
+        let unswept = dir.join("unswept");
+        let (status, _, body) =
+            respond(Ok(unswept), &format!("identity={}&page=1", "a8".repeat(32)));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
+            "{body}"
+        );
+        assert!(
+            body.starts_with(&format!(r#"{{"identity":"{}","#, "a8".repeat(32))),
+            "{body}"
+        );
+        assert!(body.contains(r#""total_count":0"#), "{body}");
+
+        for (name, rows, admitted) in [
+            ("alone", vec![admitted_row([0xa7; 32], 1)], 1),
+            (
+                "mixed",
+                vec![admitted_row([0xa7; 32], 1), verdict_row([0xa7; 32], 2)],
+                1,
+            ),
+        ] {
+            let root = dir.join(name);
+            let count = u64::try_from(rows.len()).expect("a count");
+            cli::frontier::Frontier::open(&root)
+                .expect("frontier")
+                .append_all(&rows)
+                .expect("the run's rows");
+            commit_frontier_fixture(&root, [0xa7; 32], count);
+            let (status, _, body) = respond(Ok(root), &format!("identity={}", "a7".repeat(32)));
+            assert_eq!(status, axum::http::StatusCode::OK, "{name}: {body}");
+            let value: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            assert_eq!(value["count"], rows.len(), "{name}");
+            assert_eq!(value["admitted"], admitted, "{name}: {body}");
+            assert_eq!(value["total_admitted"], admitted, "{name}: {body}");
+            assert_eq!(value["rows"][0]["meets"]["all"], true, "{name}: {body}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

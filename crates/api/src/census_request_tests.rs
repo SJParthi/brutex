@@ -58,6 +58,7 @@
 //! that a name the census does not hold keeps no calendar.
 #![expect(
     clippy::expect_used,
+    clippy::panic,
     reason = "finite owned fixtures and exact response assertions"
 )]
 
@@ -938,9 +939,9 @@ fn concurrent_installs_and_readers_never_see_a_torn_census() {
                         .iter()
                         .find(|census| census.vendor == Vendor::Dhan)
                         .map(|census| census.state.name());
-                    if entries.len() != 1 || dhan != Some("held") {
-                        torn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
+                    // `|`, not `||`: both halves are read on every look.
+                    let tore = (entries.len() != 1) | (dhan != Some("held"));
+                    torn.fetch_add(usize::from(tore), std::sync::atomic::Ordering::Relaxed);
                     looked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             });
@@ -1204,14 +1205,15 @@ fn past_a_ctime_tick(path: &Path, change: impl Fn()) {
         (meta.ctime(), meta.ctime_nsec())
     };
     let before = changed();
-    change();
-    for _ in 0..1_000 {
-        if changed() != before {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(1));
+    // At most a thousand changes, each followed by a millisecond's wait only
+    // while the status-change time has not moved; the first that moves it
+    // ends the search.
+    let _moved = (0..1_000).find(|_| {
         change();
-    }
+        let moved = changed() != before;
+        std::thread::sleep(Duration::from_millis(u64::from(!moved)));
+        moved
+    });
     assert_ne!(
         changed(),
         before,
@@ -2028,16 +2030,15 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
         "the socket's `stat` answers with its times: {stamp:?}"
     );
     let state = census::read_vendor(&fixture.root, Vendor::Groww).state;
-    assert!(
-        matches!(
-            state,
-            census::Census::Unreadable {
-                fault: census::Fault::Io(kind),
-                ..
-            } if !matches!(kind, ErrorKind::PermissionDenied | ErrorKind::IsADirectory)
-        ),
-        "`read_vendor` names an I/O fault of a kind no stamp decides: {state:?}"
-    );
+    let census::Census::Unreadable { fault, .. } = &state else {
+        panic!("`read_vendor` names an unreadable census: {state:?}");
+    };
+    let census::Fault::Io(kind) = *fault else {
+        panic!("`read_vendor` names an I/O fault: {state:?}");
+    };
+    // An I/O fault of a kind no stamp decides.
+    assert_ne!(kind, ErrorKind::PermissionDenied, "{state:?}");
+    assert_ne!(kind, ErrorKind::IsADirectory, "{state:?}");
 
     let faulted = ["unreadable", "held", "absent", "absent", "absent"];
     cold(&fixture);
@@ -2332,9 +2333,10 @@ fn a_census_is_kept_only_under_a_stamp_that_could_have_read_it() {
     one_over.push(absent.first().cloned().expect("five rows"));
     assert!(!read_as_stamped(&stamps, &one_over), "one row over");
     let mut one_off = absent;
-    if let Some(dhan) = one_off.get_mut(1) {
-        dhan.state = held();
-    }
+    let Some(dhan) = one_off.get_mut(1) else {
+        panic!("five rows");
+    };
+    dhan.state = held();
     assert!(!read_as_stamped(&stamps, &one_off), "one row disagrees");
 }
 
@@ -2410,14 +2412,12 @@ fn only_an_absence_its_stamp_contradicts_is_served_unreadable() {
         refuse_contradicted_absences(&stamps, &mut served);
         for (before, after) in read.iter().zip(&served) {
             if replaced {
-                assert!(
-                    matches!(
-                        after.state,
-                        Census::Unreadable {
-                            ref reason,
-                            fault: Fault::Contradicted,
-                        } if reason == CONTRADICTED_ABSENCE
-                    ),
+                let Census::Unreadable { ref reason, fault } = after.state else {
+                    panic!("{why}: served unreadable, as {:?}", after.state);
+                };
+                assert_eq!(
+                    (reason.as_str(), fault),
+                    (CONTRADICTED_ABSENCE, Fault::Contradicted),
                     "{why}: served unreadable, as {:?}",
                     after.state
                 );
@@ -2581,14 +2581,11 @@ async fn an_absence_under_stamps_a_changing_root_tore_is_stamped_again_after_the
             stamps, empty_store,
             "{again:?}: the premise, torn stamps that are an empty store's key"
         );
-        let contradicted = |row: &census::VendorCensus| {
-            matches!(
-                row.state,
-                Census::Unreadable {
-                    ref reason,
-                    fault: Fault::Contradicted,
-                } if reason == CONTRADICTED_ABSENCE
-            )
+        let contradicted = |row: &census::VendorCensus| match &row.state {
+            Census::Unreadable { reason, fault } => {
+                (reason.as_str(), *fault) == (CONTRADICTED_ABSENCE, Fault::Contradicted)
+            }
+            _ => false,
         };
         match again {
             StampedAgain::Back => {
@@ -3295,11 +3292,10 @@ fn landing_june(
 /// What the ingest path would land for Dhan's NIFTY at one minute: the
 /// window `ingestion_observations` derives an observation for.
 fn landed_nifty() -> BrokerWindow {
-    let spec = match pull::vendor::Feed::Dhan.descriptor().transport {
-        pull::vendor::Transport::Http(spec) => Some(spec),
-        pull::vendor::Transport::LocalArchive(_) => None,
-    }
-    .expect("Dhan is an HTTP feed");
+    let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+    let pull::vendor::Transport::Http(spec) = transport else {
+        panic!("Dhan is an HTTP feed");
+    };
     let day = Day::new(2025, 5, 2).expect("fixture date");
     let window = pull::session::Window::new(day, day).expect("a one-day window");
     BrokerWindow {
@@ -3466,12 +3462,17 @@ enum Kept {
 }
 
 impl Kept {
-    /// Whether `other` is this very kept value, not an equal copy.
+    /// Whether `other` is this very kept value, not an equal copy: the same
+    /// allocation, which two values of different kinds can never share.
     fn same(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Answer(one), Self::Answer(two)) => Arc::ptr_eq(one, two),
-            (Self::Calendar(one), Self::Calendar(two)) => Arc::ptr_eq(one, two),
-            (Self::Answer(_), Self::Calendar(_)) | (Self::Calendar(_), Self::Answer(_)) => false,
+        std::ptr::eq(self.address(), other.address())
+    }
+
+    /// Where this kept value lives.
+    fn address(&self) -> *const () {
+        match self {
+            Self::Answer(kept) => Arc::as_ptr(kept).cast(),
+            Self::Calendar(kept) => Arc::as_ptr(kept).cast(),
         }
     }
 }
@@ -4008,15 +4009,6 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
 
 // Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
 
-/// A census reader that must never be asked: the guard answers first.
-#[allow(
-    clippy::panic,
-    reason = "being called at all is the failure this reader exists to report"
-)]
-fn census_never_read(_site: &Site) -> (CensusStamps, CensusNow) {
-    panic!("the census is read only for an NSE spot or cash one-minute window");
-}
-
 /// A window that is not an NSE spot or cash one-minute window derives no
 /// observation and never reads the census: another exchange, a contract,
 /// a derivatives segment, a day rung (kills each `||` of the guard turned
@@ -4036,6 +4028,12 @@ fn only_an_nse_spot_or_cash_minute_window_reads_the_census() {
     futures.segment = "FUTIDX";
     let mut daily = landed_nifty();
     daily.granularity = pull::vendor::Granularity::Day1;
+    // Every read of the census is counted: the guard must answer before any.
+    let reads = std::cell::Cell::new(0_u32);
+    let counted = |site: &Site| {
+        reads.set(reads.get() + 1);
+        census_now_stamped(site)
+    };
     for (why, landed) in [
         ("another exchange", bse),
         ("a contract", contract),
@@ -4043,15 +4041,16 @@ fn only_an_nse_spot_or_cash_minute_window_reads_the_census() {
         ("a day rung", daily),
     ] {
         assert!(
-            ingestion_observations_reading(&landed, &fixture.site, census_never_read).is_none(),
+            ingestion_observations_reading(&landed, &fixture.site, counted).is_none(),
             "{why}"
         );
+        assert_eq!(reads.get(), 0, "{why}: the census was read");
     }
     assert!(
-        ingestion_observations_reading(&landed_nifty(), &fixture.site, census_now_stamped)
-            .is_some(),
+        ingestion_observations_reading(&landed_nifty(), &fixture.site, counted).is_some(),
         "the premise: NIFTY's own window observes the NIFTY store"
     );
+    assert_eq!(reads.get(), 1, "NIFTY's own window reads the census once");
 }
 
 /// A BANKNIFTY index window observes BANKNIFTY's own months, and a NIFTY

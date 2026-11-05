@@ -2017,12 +2017,13 @@ async fn a_read_stops_when_its_reader_leaves() {
         })
         .await
         .expect("the client thread");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while crate::detail::route_tally("/verify.json").cancelled == route_before
-            && std::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        // At most two seconds; the count is asserted below either way.
+        let _waited = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while crate::detail::route_tally("/verify.json").cancelled == route_before {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
     })
     .await;
     drop(crowd);
@@ -2289,4 +2290,49 @@ async fn a_whole_month_past_the_row_cap_is_refused_by_name() {
     })
     .await;
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// THE TABLE'S READERS READ EVERY LITERAL SHAPE A HANDLER CAN HOLD, AND THE
+/// TABLE'S ROW BUILDER BUILDS AT RUN TIME WHAT `ROUTES` BUILDS AT COMPILE
+/// TIME. A brace inside a string, a raw string, an escaped character or after
+/// a raw identifier must not end a body early or keep it open, and a body that
+/// never closes is no body.
+///
+/// Extremes: singles — a body that never closes, a string that never closes,
+/// a raw string holding a brace, an `r` after a letter that opens no raw
+/// string, an `r` after an underscore, a raw identifier (`r#type`), an escaped
+/// character literal holding a brace, a lifetime that is no character
+/// literal; combinations — a raw identifier and an escaped brace in one body
+/// at once, a lifetime and a quoted brace in one body at once; out of the box
+/// — an answer of 700 two-byte characters cut to 600 characters, never to 600
+/// bytes.
+#[test]
+fn the_table_readers_read_every_literal_shape_and_the_row_builder_runs() {
+    let built = pool(Named::Scan, "window.rs", "window_json", RUN);
+    let written = Runs::Pool {
+        named: Named::Scan,
+        file: "window.rs",
+        function: "window_json",
+        takes: RUN,
+    };
+    assert_eq!(format!("{built:?}"), format!("{written:?}"));
+
+    assert_eq!(body_of("fn f() { never closed", "f"), None);
+    assert_eq!(body_of("fn f() { \"never closed", "f"), None);
+    for whole in [
+        "fn f() { let s = r#\"}\"#; }",
+        "fn f() { let x = br\"}\"; }",
+        "fn f() { call(_r\"}\"); }",
+        "fn f() { let r#type = 1; }",
+        "fn f() { let c = '\\u{7b}'; }",
+        "fn f() { let s: &'static str = \"{\"; }",
+        "fn f() { let r#type = '\\u{7d}'; }",
+        "fn f() { let s: &'static str = \"}{\"; }",
+    ] {
+        assert_eq!(body_of(whole, "f"), Some(whole), "{whole}");
+    }
+    let wide = "é".repeat(700);
+    let cut = head_text(&wide);
+    assert_eq!(cut.chars().count(), 600);
+    assert_eq!(cut.len(), 1_200);
 }

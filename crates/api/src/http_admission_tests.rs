@@ -645,3 +645,87 @@ async fn every_audited_route_refuses_another_sites_request_before_the_journal() 
     .await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Set in the child [`a_journaled_read_asked_while_every_slot_is_held_waits_for_one`]
+/// runs itself in, where every detail slot is that process's alone.
+const BUSY_CHILD: &str = "BRUTEX_HTTP_ADMISSION_BUSY_TEST_CHILD";
+
+/// **A JOURNALED READ ASKED WHILE EVERY DETAIL SLOT IS HELD IS ASKED AGAIN
+/// UNTIL ONE IS FREE**, and what it returns is the route's own answer with
+/// its audit id: the retry the journaled tests above lean on, driven through
+/// its busy arm. The slots are held for 700 ms, more than two admission
+/// waits, so at least two asks are refused before one is admitted. Run in a
+/// child: holding every slot here would refuse other tests' requests.
+///
+/// Extremes: singles — a plain ask of a full pool (429 with no audit id), a
+/// journaled ask of a full pool (asked again until admitted), the first ask
+/// after the slots come back (the route's answer, journaled once); combinations
+/// — a refused plain ask and a waiting journaled ask over one held pool at
+/// once, a pool freed while an ask waits in its queue; out of the box — the
+/// pool held by the test itself rather than by other requests.
+#[test]
+fn a_journaled_read_asked_while_every_slot_is_held_waits_for_one() {
+    if std::env::var_os(BUSY_CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+            .args([
+                "--exact",
+                "server::http_admission_tests::\
+                 a_journaled_read_asked_while_every_slot_is_held_waits_for_one",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(BUSY_CHILD, "1")
+            .output()
+            .expect("the child test process starts");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the child ran no test: {stdout}"
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    runtime.block_on(async {
+        let root = owned_root("busy-journaled-read");
+        let store = &root;
+        live(
+            |addr| audited(store, store, addr),
+            |addr| async move {
+                let local = addr.to_string();
+                let held = crate::detail::hold_every_slot()
+                    .await
+                    .expect("this child owns every slot");
+                let refused = ask(addr, "GET", "/backtest.json", &local, "").await;
+                assert!(status_line(&refused).contains("429"), "{refused}");
+                assert!(
+                    !head_of(&refused).contains("x-brutex-request-audit"),
+                    "{refused}"
+                );
+                let waiting = tokio::spawn(async move {
+                    ask_journaled(addr, "GET", "/backtest.json", &local, "").await
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                drop(held);
+                let answer = waiting.await.expect("the journaled ask returns");
+                assert!(!status_line(&answer).contains("429"), "{answer}");
+                assert!(
+                    head_of(&answer).contains("x-brutex-request-audit:"),
+                    "{answer}"
+                );
+                let rows = journal::page(store, None, 32).expect("a readable journal");
+                assert_eq!(rows.len(), 1, "one admitted read, one record");
+            },
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&root);
+    });
+}

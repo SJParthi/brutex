@@ -2791,10 +2791,7 @@ mod tests {
                 .unwrap();
         let (code, _, held) = gaps_json(axum::extract::State(site.clone()), uri).await;
         assert_eq!(code, axum::http::StatusCode::OK, "{held}");
-        assert!(
-            held.contains("does not exist") || held.contains("absent"),
-            "{held}"
-        );
+        assert!(held.contains("does not exist"), "{held}");
     }
 
     #[test]
@@ -5578,25 +5575,39 @@ mod cloud_mutant_tests {
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("a scratch root");
             let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
-            let gate = std::sync::Arc::new(std::sync::Barrier::new(
-                crate::detail::MAX_CALENDAR_CONCURRENT + 1,
-            ));
+            // ONE HOLDER PER SLOT THE POOL HAS ON THIS MACHINE, not per
+            // `MAX_CALENDAR_CONCURRENT`: the pool takes one slot a core up to
+            // that cap, so a 4-core host has four. Eight holders there left
+            // four queued, refused once their admission wait ran out, and the
+            // barrier of nine never met: the child hung for ever (5 Nov 2026).
+            let slots = crate::detail::Named::Calendar.pool().max();
+            let gate = std::sync::Arc::new(std::sync::Barrier::new(slots + 1));
             // THE HOLDERS ARE RELEASED HOWEVER THIS BODY ENDS. A failed
             // assertion unwinds through `release`, so the child exits failed
             // rather than hanging on a barrier its last party never reaches.
             let release = Release(std::sync::Arc::clone(&gate));
-            let holders: Vec<_> = (0..crate::detail::MAX_CALENDAR_CONCURRENT)
+            // EVERY HOLDER IS INSIDE ITS SLOT BEFORE THE POOL IS ASKED, so
+            // the one ask below meets a pool that is full, never one whose
+            // holders are still arriving.
+            let started = std::sync::Arc::new(std::sync::Barrier::new(slots + 1));
+            let holders: Vec<_> = (0..slots)
                 .map(|_| {
-                    let gate = std::sync::Arc::clone(&gate);
+                    let (gate, started) =
+                        (std::sync::Arc::clone(&gate), std::sync::Arc::clone(&started));
                     tokio::spawn(crate::detail::run_calendar(move || {
+                        started.wait();
                         gate.wait();
                     }))
                 })
                 .collect();
-            while crate::detail::run_calendar(|| ()).await != Err(crate::detail::RunError::Saturated)
-            {
-                tokio::task::yield_now().await;
-            }
+            tokio::task::spawn_blocking(move || started.wait())
+                .await
+                .expect("every holder is admitted");
+            assert_eq!(
+                crate::detail::run_calendar(|| ()).await,
+                Err(crate::detail::RunError::Saturated),
+                "every calendar slot is held"
+            );
             for query in [
                 "/gaps.json?feed=dhan&symbol=NIFTY&timeframe=1min&month=2025-05",
                 "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2025-05",

@@ -394,8 +394,7 @@ fn rejects_a_note_call_that_is_only_text(source: &str, function: &str, call: &st
         .unwrap();
     assert!(on_every_page(body, call), "the actual {function} statement");
     assert_eq!(body.matches(call).count(), 1, "one replacement site");
-    let mut admitted = Vec::new();
-    for (kind, replacement) in [
+    let admitted: Vec<&str> = [
         ("block comment", format!("/*\n    {call}\n    */")),
         (
             "nested block comment",
@@ -416,11 +415,12 @@ fn rejects_a_note_call_that_is_only_text(source: &str, function: &str, call: &st
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-    ] {
-        if on_every_page(&body.replacen(call, &replacement, 1), call) {
-            admitted.push(kind);
-        }
-    }
+    ]
+    .into_iter()
+    .filter_map(|(kind, replacement)| {
+        on_every_page(&body.replacen(call, &replacement, 1), call).then_some(kind)
+    })
+    .collect();
     assert!(
         admitted.is_empty(),
         "{function} accepted a note call only in: {admitted:?}"
@@ -629,4 +629,39 @@ fn a_held_reader_is_reused_only_for_the_identical_root_model_identity_and_budget
         );
     }
     Ok(())
+}
+
+/// THE SOURCE SCANNER READS AN UNCLOSED STRING OR COMMENT AS RUNNING TO THE
+/// END OF THE SOURCE, AND A LOOK-ALIKE OF A KEYWORD OR AN OPENER AS ORDINARY
+/// CODE, so the rule above can be neither fooled nor tripped by them.
+///
+/// Extremes: singles — a raw string never closed, a cooked string never
+/// closed, a block comment never closed, a slash that divides, a star inside
+/// a block comment that closes nothing, a `return` that ends a longer word, an
+/// error call whose parenthesis never closes, an `r` that opens no raw string;
+/// combinations — an unclosed raw string right after a closed block comment,
+/// a dividing slash and a lone star in one block comment; out of the box — an
+/// empty source.
+#[test]
+fn the_scanner_reads_unclosed_and_look_alike_tokens_as_the_rule_needs() {
+    assert_eq!(code_only("x = r#\"never closed"), "x = r\"\"");
+    assert_eq!(code_only("x = \"never closed"), "x = \"\"");
+    assert_eq!(code_only("a / b"), "a / b");
+    assert_eq!(
+        code_only("a /* never closed"),
+        format!("a{}", " ".repeat(16))
+    );
+    assert_eq!(code_only("/* a * b */"), " ".repeat(11));
+    assert_eq!(code_only("for x"), "for x");
+    assert!(only_errors_return("_return Err(x);"));
+    assert!(!only_errors_return("return Err(never closed;"));
+    assert!(!ends_where_it_closes("x"));
+    assert_eq!(
+        code_only("/* c */ r#\"open"),
+        format!("{}r\"\"", " ".repeat(8))
+    );
+    assert_eq!(code_only("/* a / b * c */"), " ".repeat(15));
+    assert_eq!(code_only(""), "");
+    assert!(only_errors_return(""));
+    assert!(!ends_where_it_closes(""));
 }
