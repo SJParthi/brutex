@@ -213,10 +213,7 @@ fn same_referenced_bits_do_not_collapse_or_not_or_unknown_programs() -> Result<(
             evaluated.summary().hits,
         ));
     }
-    for pair in seen.windows(2) {
-        let [left, right] = pair else {
-            return Err("pair".to_owned());
-        };
+    for (left, right) in seen.iter().zip(seen.iter().skip(1)) {
         assert_ne!(left.0, right.0);
         assert_ne!(left.1, right.1);
         assert_ne!(left.2, right.2);
@@ -358,7 +355,8 @@ fn evaluated_fixture(
         &program,
         bars,
         None,
-    )?;
+    )
+    .expect("the fixture program has an expression run");
     let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
     let validated = resolved.validate_expression_evaluation(&evaluated)?;
     let (offsets, digest) = (validated.offsets.clone(), validated.digest);
@@ -407,7 +405,8 @@ fn every_run_door_and_read_face_answers_what_it_bound() -> Result<(), String> {
         &bars,
         &bars,
         reference,
-    )?;
+    )
+    .expect("the daily-reference run binds");
     assert_eq!(daily.program(), &program);
     assert_ne!(
         daily.run_id(),

@@ -1659,10 +1659,7 @@ mod tests {
                  exceeded, so nothing is ever measured against it -- got {rungs:?}"
             );
             assert!(
-                rungs.windows(2).all(|w| match w {
-                    [a, b] => a < b,
-                    _ => true,
-                }),
+                rungs.iter().zip(rungs.iter().skip(1)).all(|(a, b)| a < b),
                 "count {count}: rungs must ascend strictly -- got {rungs:?}"
             );
         }
@@ -2560,6 +2557,7 @@ mod ladder_selection_tests {
     #[test]
     fn the_selected_ladder_is_the_sorted_ladder_rung_for_rung() {
         let samples: Vec<Vec<Ppm>> = vec![
+            Vec::new(),
             vec![5],
             vec![0],
             vec![-3],
@@ -2574,7 +2572,7 @@ mod ladder_selection_tests {
             vec![i64::MAX, i64::MIN, 0, 1, i64::MAX],
         ];
         for sample in &samples {
-            for count in [1_usize, 2, 3, 4, 8, 13, 63, 64, 65, 66, 200] {
+            for count in [0_usize, 1, 2, 3, 4, 8, 13, 63, 64, 65, 66, 200] {
                 let got =
                     Ladder::from_excursions(&mut sample.clone(), count).map(|l| l.rungs().to_vec());
                 assert_eq!(

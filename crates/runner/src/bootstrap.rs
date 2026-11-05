@@ -3398,7 +3398,7 @@ mod stepdown_partition_tests {
             assert!(!*slot, "strategy {} rejected twice", r.strategy);
             *slot = true;
             assert!(
-                r.round == expected_round || r.round == expected_round + 1,
+                matches!(r.round.checked_sub(expected_round), Some(0 | 1)),
                 "round {} after round {expected_round}: a gap or a step back",
                 r.round
             );
@@ -3620,7 +3620,6 @@ mod exact_stepdown_tests {
     #[test]
     fn the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects() {
         let mut compared = 0_usize;
-        let mut disagreements: Vec<(u64, i64, u64, usize)> = Vec::new();
         for seed in 0..40_u64 {
             for shift in 1..=5_i64 {
                 let returns = family(seed, shift);
@@ -3636,22 +3635,24 @@ mod exact_stepdown_tests {
                             .candidate(strategy)
                             .and_then(|row| row.adjusted_p_value().rejects_at_ppm(alpha))
                             .expect("every candidate has a probability");
-                        if legacy.iter().any(|row| row.strategy == strategy) != exact
-                            || receipt.is_rejected(strategy) != Some(exact)
-                        {
-                            disagreements.push((seed, shift, alpha, strategy));
-                        }
+                        assert_eq!(
+                            legacy.iter().any(|row| row.strategy == strategy),
+                            exact,
+                            "the legacy stepdown disagrees: (seed, shift, alpha, strategy) \
+                             = ({seed}, {shift}, {alpha}, {strategy})"
+                        );
+                        assert_eq!(
+                            receipt.is_rejected(strategy),
+                            Some(exact),
+                            "the receipt disagrees: (seed, shift, alpha, strategy) \
+                             = ({seed}, {shift}, {alpha}, {strategy})"
+                        );
                         compared = compared.saturating_add(1);
                     }
                 }
             }
         }
         assert_eq!(compared, 40 * 5 * 5 * 3);
-        assert!(
-            disagreements.is_empty(),
-            "{} disagreements (seed, shift, alpha, strategy): {disagreements:?}",
-            disagreements.len()
-        );
     }
 
     /// At alpha zero nothing is rejected: `(1 + count) / (B + 1)` is never 0.

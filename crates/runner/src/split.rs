@@ -510,7 +510,10 @@ mod tests {
             // And the purge holds: no training bar's outcome reaches the test.
             for i in f.train.0.clone() {
                 assert!(
-                    i.saturating_add(15) < f.test.start || f.test.is_empty(),
+                    matches!(
+                        (i.saturating_add(15) < f.test.start, f.test.is_empty()),
+                        (true, _) | (_, true)
+                    ),
                     "training bar {i} reaches into {:?}",
                     f.test
                 );

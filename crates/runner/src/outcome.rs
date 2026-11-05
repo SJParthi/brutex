@@ -2623,7 +2623,8 @@ mod tests {
         let short_column = Column::build(shorter, &mut evaluator());
         let foreign = crate::trade::SliceFacts::of(shorter, &short_column);
         let refused = super::forward_over(&bars, h(5), &foreign);
-        assert!((0..bars.len()).all(|i| refused.at(i).is_none() && refused.was_refused(i)));
+        assert!((0..bars.len()).all(|i| refused.at(i).is_none()));
+        assert!((0..bars.len()).all(|i| refused.was_refused(i)));
     }
 
     /// Build the evaluator-produced acceptance map beside a test forward.
@@ -4871,7 +4872,7 @@ mod overlap_tests {
             // different days closer than the horizon.
             let crossing = measured
                 .windows(2)
-                .filter(|w| matches!(w, [a, b] if a.2 != b.2 && b.0 - a.0 < horizon as usize))
+                .filter(|w| matches!(w, [a, b] if (a.2 != b.2, b.0 - a.0 < horizon as usize) == (true, true)))
                 .count();
             assert!(crossing > 0, "H={horizon}: no cross-day pair to refuse");
             let got = edge(&column, &f, &ConditionMask::default()).t;
@@ -4914,8 +4915,9 @@ mod overlap_tests {
         assert!(measured.len() >= 2, "the fixture must measure a sample");
         assert!(
             measured
-                .windows(2)
-                .all(|w| matches!(w, [a, b] if a.2 == b.2)),
+                .iter()
+                .zip(measured.iter().skip(1))
+                .all(|(a, b)| a.2 == b.2),
             "the fixture must be one day"
         );
         let e = edge(&column, &f, &ConditionMask::default());
@@ -5135,9 +5137,10 @@ mod money_tests {
             let up = f.favourable_at(s).expect("measured");
             adverse += i128::from(down);
             favourable += i128::from(up);
-            if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
-                beyond_i32 += 1;
-            }
+            beyond_i32 += u32::from(matches!(
+                (i32::try_from(down), i32::try_from(up)),
+                (Err(_), _) | (_, Err(_))
+            ));
         }
         assert!(
             beyond_i32 > 0,

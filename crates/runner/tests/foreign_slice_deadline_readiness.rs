@@ -252,15 +252,14 @@ fn matching_forced_boundary_cannot_hide_a_foreign_earlier_horizon_lookup() -> Re
                 !mask.occupancy.is_empty(),
                 "missing exact horizons retain conservative occupancy"
             );
-            for item in &mask.eligible {
-                assert!(
-                    item.forced || elapsed(&bars, item)? == 3 * MINUTE,
-                    "a matching forced row cannot authorize a fourteen-minute ordinary hold"
-                );
-            }
+            // BASE-COV-LIBS-LS2 (5 Nov 2026): exactly, no row at all is eligible
+            // over the foreign facts: no forced row, and so no fourteen-minute
+            // ordinary hold, can be authorized (a loop over the eligible rows
+            // that this replaced never ran).
             assert!(
-                mask.eligible.iter().all(|item| item.forced),
-                "every cached ordinary lookup was translated"
+                mask.eligible.is_empty(),
+                "a foreign fact authorized a row: {:?}",
+                mask.eligible
             );
         }
     }
@@ -311,8 +310,13 @@ fn checked_grids_refuse_an_actual_late_or_foreign_day_inside_cached_endpoints() 
                     direction,
                     &facts,
                 );
-                assert!(timed.eligible.iter().any(|item| item.entry_bar < corrupt_index && corrupt_index < item.exit_bar),
-                    "the attack must lie strictly inside a timed path whose endpoints still pass");
+                assert!(
+                    timed
+                        .eligible
+                        .iter()
+                        .any(|item| (item.entry_bar + 1..item.exit_bar).contains(&corrupt_index)),
+                    "the attack must lie strictly inside a timed path whose endpoints still pass"
+                );
                 let mask = grid::evaluate_over(
                     &corrupted,
                     column,

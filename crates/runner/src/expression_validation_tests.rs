@@ -131,16 +131,21 @@ fn with_projection(
     let (requested, parts) = windows(&later)?;
     let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
     let bound = plan.bind(&observed, 100_000)?;
-    let mut chosen = None;
-    for (ordinal, cell) in training.grid().cells.iter().enumerate() {
-        let disposition =
-            resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell))?;
-        if let Some(selected) = disposition.selected() {
-            chosen = Some((ordinal, selected.clone()));
-            break;
-        }
-    }
-    let (ordinal, selected) = chosen.ok_or("fixture has no authorized original coordinate")?;
+    let dispositions = training
+        .grid()
+        .cells
+        .iter()
+        .map(|cell| resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (ordinal, selected) = dispositions
+        .iter()
+        .enumerate()
+        .find_map(|(ordinal, disposition)| {
+            disposition
+                .selected()
+                .map(|selected| (ordinal, selected.clone()))
+        })
+        .ok_or("fixture has no authorized original coordinate")?;
     let (trades, proof) = bound.materialize_coordinate(&selected, ordinal)?;
     assert!(!trades.is_empty());
     test(&proof, &trades)
@@ -395,38 +400,47 @@ fn both_sides_reject_foreign_full_program_anchors_selections_and_ordinals() -> R
         corrupted.digest[0] ^= 1;
         assert!(FixedTrainingFoldPlanV1::new(&resolved, &corrupted, requested, &parts, 2).is_err());
         let bound = plan.bind(&observed, 100_000)?;
-        let mut exercised = false;
-        for (ordinal, cell) in training.grid().cells.iter().enumerate() {
-            let disposition =
-                resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell))?;
-            let foreign = resolved
-                .classify_expression_coordinate(&foreign_validated, Chosen::from_cell(cell))?;
-            if let Some((selected, wrong)) = disposition.selected().zip(foreign.selected()) {
-                let (trades, proof) = bound.materialize_coordinate(selected, ordinal)?;
-                assert!(!trades.is_empty());
-                assert_eq!(
-                    proof.aggregate_oos_paisa()?,
-                    observed
-                        .grid()
-                        .cells
-                        .get(ordinal)
-                        .ok_or("cell")?
-                        .pessimistic
-                );
-                assert!(bound.materialize_coordinate(wrong, ordinal).is_err());
-                assert!(bound.materialize_coordinate(selected, usize::MAX).is_err());
-                assert!(
-                    bound
-                        .materialize_coordinate(selected, usize::from(ordinal == 0))
-                        .is_err()
-                );
-                exercised = true;
-                break;
-            }
-        }
+        let dispositions = training
+            .grid()
+            .cells
+            .iter()
+            .map(|cell| {
+                Ok((
+                    resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell))?,
+                    resolved.classify_expression_coordinate(
+                        &foreign_validated,
+                        Chosen::from_cell(cell),
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let (ordinal, selected, wrong) = dispositions
+            .iter()
+            .enumerate()
+            .find_map(|(ordinal, (disposition, foreign))| {
+                disposition
+                    .selected()
+                    .zip(foreign.selected())
+                    .map(|(selected, wrong)| (ordinal, selected, wrong))
+            })
+            .ok_or("generated side has an authorized comparison coordinate")?;
+        let (trades, proof) = bound.materialize_coordinate(selected, ordinal)?;
+        assert!(!trades.is_empty());
+        assert_eq!(
+            proof.aggregate_oos_paisa()?,
+            observed
+                .grid()
+                .cells
+                .get(ordinal)
+                .ok_or("cell")?
+                .pessimistic
+        );
+        assert!(bound.materialize_coordinate(wrong, ordinal).is_err());
+        assert!(bound.materialize_coordinate(selected, usize::MAX).is_err());
         assert!(
-            exercised,
-            "generated side has an authorized comparison coordinate"
+            bound
+                .materialize_coordinate(selected, usize::from(ordinal == 0))
+                .is_err()
         );
     }
     Ok(())
@@ -683,19 +697,15 @@ fn every_fixed_training_authority_refusal_names_its_cause() -> Result<(), String
         )
         .map_err(display)?;
     let program = Expression::parse("30").map_err(|e| format!("{e:?}"))?;
-    let training = resolved.evaluate_expression_with_attested(
-        &attested,
-        &run(&key, &bars, &program, Direction::Long)?,
-    )?;
+    let training = resolved
+        .evaluate_expression_with_attested(&attested, &run(&key, &bars, &program, Direction::Long)?)
+        .expect("the training program prices");
     let validated = resolved.validate_expression_evaluation(&training)?;
     let anchor = validated.later_period_anchor();
     let later_run = run(&key, &later, &program, Direction::Long)?;
-    let mut observed = resolved.evaluate_expression_oos(
-        &anchor,
-        series(&key, &later)?,
-        &later_column,
-        &later_run,
-    )?;
+    let mut observed = resolved
+        .evaluate_expression_oos(&anchor, series(&key, &later)?, &later_column, &later_run)
+        .expect("the later period prices");
     let (requested, parts) = windows(&later)?;
     let short = policy(crate::excursion::Side::Short)?
         .resolve_research_attested(series(&key, &bars)?)
@@ -713,16 +723,21 @@ fn every_fixed_training_authority_refusal_names_its_cause() -> Result<(), String
     );
     let map = LaterFoldMapV1::new(&parts, &later, &later_column, 100_000)?;
     assert!(plan.bind_with(&observed, &map, 100_000).is_ok());
-    let mut chosen = None;
-    for (ordinal, cell) in training.grid().cells.iter().enumerate() {
-        let disposition =
-            resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell))?;
-        if let Some(selected) = disposition.selected() {
-            chosen = Some((ordinal, selected.clone()));
-            break;
-        }
-    }
-    let (ordinal, selected) = chosen.ok_or("fixture has no authorized original coordinate")?;
+    let dispositions = training
+        .grid()
+        .cells
+        .iter()
+        .map(|cell| resolved.classify_expression_coordinate(&validated, Chosen::from_cell(cell)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (ordinal, selected) = dispositions
+        .iter()
+        .enumerate()
+        .find_map(|(ordinal, disposition)| {
+            disposition
+                .selected()
+                .map(|selected| (ordinal, selected.clone()))
+        })
+        .ok_or("fixture has no authorized original coordinate")?;
     {
         let bound = plan.bind(&observed, 100_000)?;
         assert!(bound.materialize_coordinate(&selected, ordinal).is_ok());

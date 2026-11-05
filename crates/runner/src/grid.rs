@@ -6290,7 +6290,10 @@ mod exit_family_tests {
     /// D-1184: the hoisted doors answer exactly what the per-call doors answer.
     #[test]
     fn the_hoisted_replay_doors_equal_the_per_call_doors() {
-        for sessions in [3_i64, 5] {
+        // BASE-COV-LIBS-LS2 (5 Nov 2026): six and eight sessions, not three and
+        // five. Five sessions never warm the evaluator, so those grids were empty
+        // and the comparison below never ran.
+        for sessions in [6_i64, 8] {
             let bars = crate::synthetic::sessions(sessions);
             let column = column(&bars);
             let facts = SliceFacts::of(&bars, &column);
@@ -6305,6 +6308,10 @@ mod exit_family_tests {
                     side,
                     Levels::derived(3),
                     &facts,
+                );
+                assert!(
+                    !grid.cells.is_empty(),
+                    "{sessions} sessions, {side:?}: the fixture prices cells"
                 );
                 for cell in grid.cells.iter().take(8) {
                     assert_eq!(
@@ -7864,7 +7871,7 @@ mod tests {
         let probe = rows
             .iter()
             .copied()
-            .find(|row| row.exit_bar > row.entry_bar && row.exit_bar + 2 < row.entry_bar + 30)
+            .find(|row| (row.entry_bar + 1..row.entry_bar + 28).contains(&row.exit_bar))
             .expect("a stop well inside its hold");
         let hole = probe.exit_bar + 1;
         let mut refused = clean.clone();
@@ -8039,7 +8046,37 @@ mod tests {
         );
         assert!(!g.cells.is_empty());
 
-        for c in &g.cells {
+        // BASE-COV-LIBS-LS2 (5 Nov 2026): every cell of this fixture loses, so the
+        // same invariants are checked on a steadily lifted copy too, whose Long
+        // cells win: each conditional below meets both of its sides.
+        let lifted: Vec<indicators::Candle> = bars
+            .iter()
+            .zip(0_i64..)
+            .map(|(bar, minute)| {
+                let lift = minute * 40;
+                indicators::Candle {
+                    open: bar.open + lift,
+                    high: bar.high + lift,
+                    low: bar.low + lift,
+                    close: bar.close + lift,
+                    ..*bar
+                }
+            })
+            .collect();
+        let winning = evaluate(
+            &lifted,
+            &Column::build(&lifted, &mut evaluator()),
+            &ConditionMask::default(),
+            h(15),
+            Side::Long,
+            Levels::derived(4),
+        );
+        assert!(
+            winning.cells.iter().any(|c| c.pessimistic > 0),
+            "the lifted copy has a winning cell"
+        );
+
+        for c in g.cells.iter().chain(&winning.cells) {
             // Drawdown is a peak-to-trough FALL, so it can never be negative,
             // and a variant that lost overall must have fallen at least as far
             // as it lost.
@@ -8059,12 +8096,13 @@ mod tests {
             // The worst single trade cannot be better than the total when only
             // one trade was taken, and can never be positive-only by accident:
             // a variant with any losing trade must carry a negative here.
-            if c.trades > 0 {
-                assert!(
-                    c.worst_trade <= 0 || c.pessimistic > 0,
-                    "every trade won yet the total is not positive"
-                );
-            }
+            assert!(
+                !matches!(
+                    (c.trades > 0, c.worst_trade <= 0, c.pessimistic > 0),
+                    (true, false, false)
+                ),
+                "every trade won yet the total is not positive"
+            );
             // The ratio never rewards a loser.
             if c.pessimistic <= 0 {
                 assert_eq!(
@@ -10074,7 +10112,10 @@ mod tests {
             Side::Long,
             Levels::derived(4),
         );
-        assert!(empty.cells.is_empty() || empty.baseline().is_some());
+        assert!(
+            empty.cells.is_empty(),
+            "a mask that never fires prices no cell"
+        );
     }
 
     #[test]
@@ -10123,13 +10164,11 @@ mod tests {
             Side::Long,
             Levels::derived(4),
         );
-        if !g.cells.is_empty() {
-            assert_eq!(
-                g.cells.len(),
-                super::variants(g.stops.len(), g.targets.len(), g.trails.len()),
-                "the grid built a different number of cells than `variants` says it holds"
-            );
-        }
+        assert_eq!(
+            g.cells.len(),
+            super::variants(g.stops.len(), g.targets.len(), g.trails.len()),
+            "the grid built a different number of cells than `variants` says it holds"
+        );
     }
 
     #[test]
@@ -10483,7 +10522,7 @@ mod arming_tests {
                 assert!(!rows.is_empty(), "later clean paths must still materialize");
                 assert!(
                     rows.iter()
-                        .all(|row| victim < row.entry_bar || victim > row.exit_bar),
+                        .all(|row| !(row.entry_bar..=row.exit_bar).contains(&victim)),
                     "{poison:?}/{side:?}: chosen detail contains the rejected interior"
                 );
             }
@@ -10681,13 +10720,47 @@ mod arming_tests {
         );
         // AND THE SECOND REFUSAL STILL HOLDS: an arm at or above the target is
         // pre-empted by it.
-        assert!(
-            g.cells.iter().all(|c| match (c.target, c.ttp) {
-                (Some(t), Some(ttp)) => ttp.arm < t,
-                _ => true,
-            }),
-            "an arm the target pre-empts can never fire"
+        // BASE-COV-LIBS-LS2 (5 Nov 2026): a derived grid holds one far target, so
+        // no cell of `g` carries a target and an arm at once; the check also runs
+        // on exact ladders of two rungs each, whose grid does.
+        let facts = crate::trade::SliceFacts::of(&bars, &column);
+        let timed = crate::trade::walk_over(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            Horizon::bars(15).expect("a non-zero horizon"),
+            super::direction_of(Side::Long),
+            &facts,
         );
+        let two = || Ladder::new(vec![500, 1_000]).expect("two ascending rungs");
+        let two_targets = super::evaluate_timed_with_exact_ladders(
+            &bars,
+            Side::Long,
+            &timed,
+            &facts,
+            two(),
+            two(),
+            two(),
+            None,
+            Vec::new(),
+            super::ExitFamilies::All,
+        );
+        assert!(
+            two_targets
+                .cells
+                .iter()
+                .any(|c| matches!((c.target, c.ttp), (Some(_), Some(_)))),
+            "the exact grid carries a target and an arm together"
+        );
+        for grid in [&g, &two_targets] {
+            assert!(
+                grid.cells.iter().all(|c| match (c.target, c.ttp) {
+                    (Some(t), Some(ttp)) => ttp.arm < t,
+                    _ => true,
+                }),
+                "an arm the target pre-empts can never fire"
+            );
+        }
         // AND NO TWO CELLS CARRY THE SAME SETTING. A duplicate would mean the
         // loop emitted one variant twice, which is how the trail factor came to
         // be missing from the reservation in the first place.
@@ -10903,8 +10976,9 @@ mod rewalk_tests {
             selected.optimistic
         );
         assert!(
-            rows.windows(2)
-                .all(|pair| matches!(pair, [first, second] if second.entry_bar > first.exit_bar)),
+            rows.iter()
+                .zip(rows.iter().skip(1))
+                .all(|(first, second)| second.entry_bar > first.exit_bar),
             "one selected-variant position must finish before the next enters"
         );
     }

@@ -558,7 +558,10 @@ mod tests {
                 .expect("a fixture index inside the collection");
             b.open_interest = 500;
         }
-        if let Some(b) = bars.get_mut(1) {
+        {
+            let b = bars
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             b.open_interest = OI_NULL; // absent, and must not erase 500
         }
         {

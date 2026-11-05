@@ -191,7 +191,7 @@ fn pure_noise_exercises_both_sides_of_every_comparison() {
                 .candidate(position)
                 .unwrap()
                 .strict_exceedances();
-            strict > 0 && strict < draws
+            (1..draws).contains(&strict)
         }),
         "no Romano-Wolf rank was exceeded on some draws and not on others"
     );

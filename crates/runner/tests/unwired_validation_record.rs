@@ -131,3 +131,42 @@ fn every_unwired_validation_primitive_says_so_and_has_no_cli_or_api_caller() {
         }
     }
 }
+
+/// BASE-COV-LIBS-LS2 (5 Nov 2026): THE PRODUCTION WALK SKIPS A `tests`
+/// DIRECTORY, TEST FILES AND NON-SOURCES, AND RECURSES INTO EVERY OTHER
+/// DIRECTORY. A scratch tree holds a source at the top and one in a nested
+/// directory (both kept), a source inside `tests/`, a `_tests.rs`, a
+/// `tests.rs` and a Markdown file (all skipped).
+#[test]
+fn the_production_walk_skips_test_directories_test_files_and_non_sources() {
+    let root =
+        std::env::temp_dir().join(format!("brutex-ls2-production-walk-{}", std::process::id()));
+    for directory in ["tests", "nested"] {
+        std::fs::create_dir_all(root.join(directory)).expect("a scratch tree");
+    }
+    for file in [
+        "kept.rs",
+        "nested/also_kept.rs",
+        "tests/skipped.rs",
+        "skipped_tests.rs",
+        "tests.rs",
+        "notes.md",
+    ] {
+        std::fs::write(root.join(file), "fn f() {}").expect("a scratch file");
+    }
+    let mut found = Vec::new();
+    production_sources(&root, &mut found);
+    std::fs::remove_dir_all(&root).expect("the scratch tree is removed");
+    let mut relative: Vec<PathBuf> = found
+        .iter()
+        .map(|path| path.strip_prefix(&root).expect("below the root").to_owned())
+        .collect();
+    relative.sort();
+    assert_eq!(
+        relative,
+        [
+            PathBuf::from("kept.rs"),
+            PathBuf::from("nested/also_kept.rs")
+        ]
+    );
+}

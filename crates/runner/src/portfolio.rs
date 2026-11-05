@@ -779,11 +779,10 @@ mod tests {
             .collect();
         assert_eq!(keys, [(1, 1), (1, 2), (1, 3), (2, 4)]);
         assert!(matches!(got[0].disposition, Disposition::Admitted { .. }));
-        assert!(got[1..].iter().all(|decision| matches!(
-            decision.disposition,
-            Disposition::BlockedSimultaneous { admitted }
-                if admitted == StrategyDigest::new([1; 32])
-        )));
+        assert!(got[1..].iter().all(|decision| decision.disposition
+            == Disposition::BlockedSimultaneous {
+                admitted: StrategyDigest::new([1; 32])
+            }));
     }
 
     #[test]

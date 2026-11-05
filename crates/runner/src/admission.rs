@@ -7541,6 +7541,19 @@ mod tests {
         refused.losing_trades = ObservedU64V1::Refused;
         refused.win_rate_ppm = ObservedU64V1::Refused;
         refused.losing_trade_rate_ppm = ObservedU64V1::Refused;
+        // BASE-COV-LIBS-LS2 (5 Nov): the fixture helper refuses the tuple field
+        // by field, the same five fields and nothing else.
+        let mut through_the_helper = passing_values();
+        for reason in [
+            AdmissionReasonV1::Trades,
+            AdmissionReasonV1::WinningTrades,
+            AdmissionReasonV1::LosingTrades,
+            AdmissionReasonV1::WinRate,
+            AdmissionReasonV1::LosingTradeRate,
+        ] {
+            set_refused(&mut through_the_helper, reason);
+        }
+        assert_eq!(through_the_helper, refused);
         let verdict = policy().evaluate(&evidence(&refused));
         assert_eq!(verdict.status(), AdmissionStatusV1::Refused);
         assert_eq!(verdict.refused(), affected);
