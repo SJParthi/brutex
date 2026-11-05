@@ -926,6 +926,12 @@ input/file/system proportional; only admitted fixed-record address arithmetic
 is worst-case O(1). No universal O(1) space/latency or customer-scale guarantee
 is inferred.
 
+## PSRB-CCI: the Commodity Channel Index — 2026-11-05 (D-8650 to D-8655)
+
+| Part | What | State |
+|---|---|---|
+| PSRB-CCI | `indicators::cci`: the Commodity Channel Index on the typical price (`CCI = (TP - SMA) / (0.015 MD)`, `MD` the mean absolute deviation from the same SMA, the current candle included), exact in thirds and n-multiples as `200 n dev / (3 D)` with every comparison a cross-multiplication in `i128`; a runtime period of 1 to 65,535 candles in a ring allocated once; a window of one typical price a named state with no value; levels in thousandths of a point within +/-10,000 points; `fold` O(1) and `reading()` O(period) by design (D-8653); no vocabulary position; benches C-PSRB-CCI-01 and -02 and one unjudged reading line | Built on `cloud/psrb-cci-20261105`; not merged (D1). PSRB-STRAT is its first caller |
+
 ## Cash-stock research checkpoint — 2026-09-05
 
 The operator has not started the full Zerodha cash-stock pull and requires an
