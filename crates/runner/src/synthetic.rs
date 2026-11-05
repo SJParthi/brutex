@@ -331,7 +331,7 @@ mod two_sided_tests {
 
         // Within a factor of two of each other. Not exactly equal -- that would
         // be a suspiciously engineered series -- but neither side dominant.
-        let (lo, hi) = if up < down { (up, down) } else { (down, up) };
+        let (lo, hi) = (up.min(down), up.max(down));
         assert!(
             hi <= lo.saturating_mul(2),
             "the series is {hi} one way against {lo} the other, which is not two-sided"

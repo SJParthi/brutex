@@ -1457,10 +1457,7 @@ mod tests {
         let id = identity(&run_over(&k, data_digest(&[]), ConditionMask::default()));
         let hex = id.hex();
         assert_eq!(hex.len(), 64);
-        assert!(
-            hex.chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
-        );
+        assert!(hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
         assert_eq!(id.bytes().len(), 32);
     }
 

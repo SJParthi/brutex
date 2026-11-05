@@ -97,9 +97,14 @@ fn early_stops(clean: &[TradeRow]) -> Vec<TradeRow> {
         .iter()
         .copied()
         .filter(|row| {
-            row.entry_bar % BARS_PER_SESSION < 300
-                && row.exit_bar.saturating_add(2) < row.entry_bar.saturating_add(HOLD as usize)
-                && row.exit_bar > row.entry_bar
+            matches!(
+                (
+                    row.entry_bar % BARS_PER_SESSION < 300,
+                    row.exit_bar.saturating_add(2) < row.entry_bar.saturating_add(HOLD as usize),
+                    row.exit_bar > row.entry_bar,
+                ),
+                (true, true, true)
+            )
         })
         .take(6)
         .collect()

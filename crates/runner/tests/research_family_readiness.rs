@@ -434,11 +434,9 @@ fn legacy_resolution_identity_matches_the_recorded_pre_extraction_library() -> T
             printed_ohlcv_cost_model_id_v1(),
         )
         .expect("a V1-cost policy is constructible; only its resolution is refused");
-        assert!(
-            matches!(
-                old.resolve_attested(series),
-                Err(ExitGridErrorV1::SupersededCostModelIdV1)
-            ),
+        assert_eq!(
+            old.resolve_attested(series).map(|_| ()),
+            Err(ExitGridErrorV1::SupersededCostModelIdV1),
             "{name} {side:?}: a V1 policy is refused by name"
         );
     }

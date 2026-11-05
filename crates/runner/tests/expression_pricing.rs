@@ -105,11 +105,13 @@ fn mixed_operators_price_only_definite_signals_and_replay_exact_selected_cells()
             .iter()
             .zip(column.known())
             .filter(|(truth, known)| {
-                let either = (known.get(0) && truth.get(0)) || (known.get(369) && truth.get(369));
+                // A bit is TRUE when it is known and set, FALSE when known and clear.
+                let reads = |bit| (known.get(bit), truth.get(bit));
+                let either = [reads(0), reads(369)].contains(&(true, true));
                 match source {
                     "0 | 369" => either,
-                    "!0" => known.get(0) && !truth.get(0),
-                    _ => either && known.get(63) && !truth.get(63),
+                    "!0" => reads(0) == (true, false),
+                    _ => (either, reads(63)) == (true, (true, false)),
                 }
             })
             .count();
@@ -131,37 +133,36 @@ fn mixed_operators_price_only_definite_signals_and_replay_exact_selected_cells()
                 priced.signals,
                 u64::try_from(expected).expect("a small count")
             );
-            if let Some(cell) = priced.best() {
-                let rows = grid::materialize_expression_cell(
+            let cell = priced.best().expect("the expression grid has a best cell");
+            let rows = grid::materialize_expression_cell(
+                &bars,
+                &column,
+                &expression,
+                horizon,
+                side,
+                &priced,
+                cell,
+            )
+            .expect("the best cell replays");
+            priced_rows += rows.len();
+            assert_eq!(
+                u64::try_from(rows.len()).expect("a small count"),
+                cell.trades
+            );
+            let mut changed = *cell;
+            changed.pessimistic = changed.pessimistic.checked_add(1).ok_or("fixture money")?;
+            assert!(
+                grid::materialize_expression_cell(
                     &bars,
                     &column,
                     &expression,
                     horizon,
                     side,
                     &priced,
-                    cell,
+                    &changed
                 )
-                .expect("the best cell replays");
-                priced_rows += rows.len();
-                assert_eq!(
-                    u64::try_from(rows.len()).expect("a small count"),
-                    cell.trades
-                );
-                let mut changed = *cell;
-                changed.pessimistic = changed.pessimistic.checked_add(1).ok_or("fixture money")?;
-                assert!(
-                    grid::materialize_expression_cell(
-                        &bars,
-                        &column,
-                        &expression,
-                        horizon,
-                        side,
-                        &priced,
-                        &changed
-                    )
-                    .is_err()
-                );
-            }
+                .is_err()
+            );
         }
     }
     assert!(

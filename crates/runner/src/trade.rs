@@ -2035,12 +2035,10 @@ mod tests {
         // minutes: about 2,600 two-minute gaps outvote 2,244 one-minute ones.
         let dense = crate::synthetic::sessions(20);
         let mut day_starts = dense
-            .windows(2)
+            .iter()
+            .zip(dense.iter().skip(1))
             .enumerate()
-            .filter(|(_, pair)| {
-                let [before, after] = pair else {
-                    return false;
-                };
+            .filter(|(_, (before, after))| {
                 indicators::ist_day(before.ts_micros) != indicators::ist_day(after.ts_micros)
             })
             .map(|(index, _)| index + 1);
@@ -2129,16 +2127,14 @@ mod tests {
             alignment.unreachable > 0,
             "signals without their exact next minute must be counted as dropped"
         );
-        for (&source, target) in column.sources().iter().zip(alignment.onto.iter()) {
-            if let Some(fill) = *target {
-                assert_eq!(
-                    bars.get(fill).map(|bar| bar.ts_micros),
-                    bars.get(source)
-                        .and_then(|bar| bar.ts_micros.checked_add(60_000_000)),
-                    "every admitted mapping is the exact next minute"
-                );
-            }
-        }
+        // BASE-COV-LIBS-LS2 (5 Nov 2026): exactly, no row maps at all: every
+        // signal of this every-other-minute slice lacks its exact next minute (a
+        // loop over the admitted mappings that this replaced never ran).
+        assert!(alignment.onto.iter().all(Option::is_none));
+        assert_eq!(
+            alignment.unreachable,
+            u64::try_from(column.sources().len()).expect("a small column")
+        );
         let (projected, _) = column
             .reproject_checked(&alignment.onto, &bars)
             .expect("checked self-projection");
@@ -2202,7 +2198,7 @@ mod tests {
         let mut previous_exit = 0_usize;
         for (n, trade) in t.trades.iter().enumerate() {
             assert!(
-                trade.entry_bar > previous_exit || n == 0,
+                matches!((n, trade.entry_bar > previous_exit), (0, _) | (_, true)),
                 "trade {n} entered at {} on or before the previous exit bar {previous_exit}",
                 trade.entry_bar
             );
@@ -2637,7 +2633,7 @@ mod tests {
             let mut met = (false, false);
             for path in &walked.occupancy {
                 let holed = !facts.path_accepts(path.entry_bar, path.exit_bar);
-                if path.priceable || !holed {
+                if matches!((path.priceable, holed), (true, _) | (_, false)) {
                     assert!(!path.priceable_before_hole, "{path:?}");
                     assert_eq!(path.hole_offset(), None, "{path:?}");
                     continue;
@@ -2816,16 +2812,18 @@ mod tests {
                         walked
                             .trades
                             .iter()
-                            .all(|trade| victim < trade.entry_bar || victim > trade.exit_bar),
+                            .all(|trade| !(trade.entry_bar..=trade.exit_bar).contains(&victim)),
                         "{poison:?}/{role:?}/{direction:?}: a refused bar entered a priced trade"
                     );
                     if role != Role::Entry {
                         assert!(
-                            walked.occupancy.iter().any(|held| {
-                                !held.priceable
-                                    && held.entry_bar <= victim
-                                    && held.exit_bar >= victim
-                            }),
+                            walked.occupancy.iter().any(|held| matches!(
+                                (
+                                    held.priceable,
+                                    (held.entry_bar..=held.exit_bar).contains(&victim)
+                                ),
+                                (false, true)
+                            )),
                             "{poison:?}/{role:?}/{direction:?}: the unresolved \
                              position vanished instead of blocking overlap"
                         );
@@ -3028,7 +3026,10 @@ mod tests {
             // The general form: an exit called forced must belong to a day with
             // exactly one raw 15:09 row.
             assert!(
-                !trade.forced || forced_price_exists(&bars, trade.exit_bar),
+                matches!(
+                    (trade.forced, forced_price_exists(&bars, trade.exit_bar)),
+                    (false, _) | (true, true)
+                ),
                 "trade exited at bar {} and flagged it as a square-off, but \
                  that day has no unique 15:09 price",
                 trade.exit_bar

@@ -805,7 +805,7 @@ fn a_tabled_day_window_seals_exactly_what_the_full_row_walk_did() {
                     result
                         .periods()
                         .iter()
-                        .all(|period| period.day >= first && period.day <= last)
+                        .all(|period| (first..=last).contains(&period.day))
                 );
                 fold.update(&result.digest());
                 windows += 1;

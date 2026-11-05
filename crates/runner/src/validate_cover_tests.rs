@@ -1454,10 +1454,9 @@ fn a_fold_that_cannot_be_projected_is_refused_by_name() {
 #[test]
 fn the_search_doors_refuse_zero_rungs_and_a_coarse_execution_path() {
     let bars = crate::synthetic::sessions(2);
-    let called = std::cell::Cell::new(false);
-    let mut builder = |slice: &[indicators::Candle]| {
-        called.set(true);
-        Ok(built(slice))
+    // Both doors refuse before any fold is built, so a call is a failure.
+    let mut builder = |_: &[indicators::Candle]| -> Result<indicators::column::Column, String> {
+        unreachable!("no fold is built for a refused policy or execution path")
     };
     assert_eq!(
         super::walk_forward_projected_prepared_anchored_search_v3(
@@ -1475,7 +1474,6 @@ fn the_search_doors_refuse_zero_rungs_and_a_coarse_execution_path() {
         .map(|_| ()),
         Err(AnchoredSearchValidationRefusalV3::ZeroResolvedRungs)
     );
-    assert!(!called.get(), "no fold is built for a refused policy");
     let instrument = brutex_core::instrument::InstrumentKey::index(
         brutex_core::instrument::Exchange::Nse,
         "NIFTY",
@@ -1893,7 +1891,7 @@ fn a_signal_timeframe_without_positive_duration_is_refused_before_any_fold() {
             &mut super::tests::evaluator,
             super::Shape::Anchored,
             super::FoldRungs::Fixed(0),
-            &|_| {},
+            &|_| unreachable!("a refused walk reports no fold"),
         );
         assert!(refused.folds.is_empty(), "{signal_length_micros}");
         assert_eq!(
@@ -1959,7 +1957,7 @@ fn a_builder_column_of_other_bars_is_refused_at_the_fold_projection() {
         &mut answers_the_whole_series,
         super::Shape::Anchored,
         super::FoldRungs::Fixed(0),
-        &|_| {},
+        &|_| unreachable!("a refused walk reports no fold"),
     );
     assert!(refused.folds.is_empty());
     assert_eq!(
@@ -2155,7 +2153,7 @@ fn an_oos_builder_column_of_other_bars_is_refused_at_the_oos_projection() {
             &mut builder,
             super::Shape::Anchored,
             super::FoldRungs::Fixed(0),
-            &|_| {},
+            &|_| unreachable!("a refused walk reports no fold"),
         )
     };
     assert!(walked.folds.is_empty());

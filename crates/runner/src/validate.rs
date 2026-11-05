@@ -5380,6 +5380,23 @@ pub(crate) mod tests {
         Horizon::bars(n).expect("a non-zero horizon")
     }
 
+    /// The other side (BASE-COV-LIBS-LS2, 5 Nov 2026: one flip for the
+    /// cross-wire tests, which only ever flip a Long).
+    fn opposite(side: Direction) -> Direction {
+        match side {
+            Direction::Long => Direction::Short,
+            Direction::Short => Direction::Long,
+        }
+    }
+
+    #[test]
+    fn the_other_side_of_the_other_side_is_the_side() {
+        for side in [Direction::Long, Direction::Short] {
+            assert_ne!(opposite(side), side);
+            assert_eq!(opposite(opposite(side)), side);
+        }
+    }
+
     pub(super) fn sweeper() -> Sweeper {
         Sweeper::new(
             Ladder::with_min_hits(120)
@@ -5580,10 +5597,9 @@ pub(crate) mod tests {
     #[test]
     fn anchored_admission_v2_refuses_zero_rungs_before_running_any_search() {
         let bars = [];
-        let mut builder_was_called = false;
+        // The door refuses before any fold is built, so a call is a failure.
         let mut builder = |_slice: &[indicators::Candle]| -> Result<Column, String> {
-            builder_was_called = true;
-            Err("the zero-rung door must refuse before building".to_owned())
+            unreachable!("the zero-rung door must refuse before building")
         };
         let result = walk_forward_projected_prepared_anchored_admission_v2(
             &bars,
@@ -5602,10 +5618,6 @@ pub(crate) mod tests {
             result,
             Err(AnchoredAdmissionValidationRefusalV2::ZeroResolvedRungs)
         ));
-        assert!(
-            !builder_was_called,
-            "zero is a malformed resolved Admission policy, not permission to run a default search"
-        );
     }
 
     #[test]
@@ -5720,7 +5732,7 @@ pub(crate) mod tests {
             &mut evaluator,
             Shape::Anchored,
             FoldRungs::Fixed(DEFAULT_RUNGS),
-            &|_| {},
+            &|_| unreachable!("a refused walk reports no fold"),
         );
         assert!(refused.folds.is_empty());
         assert!(
@@ -5753,7 +5765,7 @@ pub(crate) mod tests {
             },
             Shape::Anchored,
             FoldRungs::Fixed(DEFAULT_RUNGS),
-            &|_| {},
+            &|_| unreachable!("a refused walk reports no fold"),
         );
         assert_eq!(called, 1, "the first refused fold stops the walk");
         assert!(refused.folds.is_empty());
@@ -5999,7 +6011,6 @@ pub(crate) mod tests {
         // A REFUSED WALK FINISHES NO FOLD, so the hook never speaks: a line
         // saying a fold finished on a walk that ran none would be the fallback
         // that hides a failure.
-        let silent = std::sync::atomic::AtomicUsize::new(0);
         let refused = walk_forward_projected_prepared_with_rungs(
             &bars,
             ExecutionSeries {
@@ -6013,12 +6024,9 @@ pub(crate) mod tests {
             &mut |_| Err("refused before any fold could finish".to_owned()),
             Shape::Anchored,
             FoldRungs::Fixed(DEFAULT_RUNGS),
-            &|_| {
-                silent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            },
+            &|_| unreachable!("a refused walk finishes no fold, so the hook never speaks"),
         );
         assert!(refused.folds.is_empty());
-        assert_eq!(silent.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     /// Fold ranges stay in signal-index space. Only after the training column
@@ -6586,9 +6594,9 @@ pub(crate) mod tests {
             .folds
             .iter()
             .filter(|f| f.chosen.is_some())
-            .filter(|f| match f.out_of_sample_exit {
-                Some(total) => total > 0,
-                None => f.out_of_sample.worst_case_positive(),
+            .filter(|f| {
+                f.out_of_sample_exit
+                    .map_or(f.out_of_sample.worst_case_positive(), |total| total > 0)
             })
             .count();
         assert_eq!(
@@ -6617,15 +6625,19 @@ pub(crate) mod tests {
         // level-less one won is a real outcome and not a bug, but it must come
         // from the exit figure rather than from the rule being dropped.
         for f in v.folds.iter().filter(|f| f.chosen.is_some()) {
-            if f.out_of_sample.worst_case_positive() && f.out_of_sample_exit.is_some_and(|t| t <= 0)
-            {
-                assert!(
-                    f.chosen_exit.is_some(),
-                    "fold {} lost with levels and won without, and carries no \
-                     chosen exit to explain it",
-                    f.index
-                );
-            }
+            assert!(
+                !matches!(
+                    (
+                        f.out_of_sample.worst_case_positive(),
+                        f.out_of_sample_exit.is_some_and(|t| t <= 0),
+                        f.chosen_exit.is_some()
+                    ),
+                    (true, true, false)
+                ),
+                "fold {} lost with levels and won without, and carries no \
+                 chosen exit to explain it",
+                f.index
+            );
         }
     }
 
@@ -6647,21 +6659,23 @@ pub(crate) mod tests {
 
         let mut applied = 0_usize;
         let mut differed = 0_usize;
-        for f in v.folds.iter().filter(|f| f.chosen.is_some()) {
-            // A fold whose combination took no trade on the test window has no
-            // exit figure, and that is an answer rather than a zero.
-            if f.out_of_sample.trades == 0 {
-                continue;
-            }
+        // A fold whose combination took no trade on the test window has no exit
+        // figure, and that is an answer rather than a zero.
+        for f in v
+            .folds
+            .iter()
+            .filter(|f| f.chosen.is_some())
+            .filter(|f| f.out_of_sample.trades > 0)
+        {
             assert!(
                 f.out_of_sample_exit.is_some(),
                 "fold {} chose an exit and reported no out-of-sample figure for it",
                 f.index
             );
             applied = applied.saturating_add(1);
-            if f.out_of_sample_exit != Some(f.out_of_sample.worst) {
-                differed = differed.saturating_add(1);
-            }
+            differed = differed.saturating_add(usize::from(
+                f.out_of_sample_exit != Some(f.out_of_sample.worst),
+            ));
         }
         assert!(
             applied > 0,
@@ -6935,29 +6949,38 @@ pub(crate) mod tests {
             // own sweep, its own closed set and its own argmax from scratch. It
             // simply stops pricing candidates on a side the fold refuses to use.
             let forward = crate::outcome::forward(train, &column, h(15));
-            let mut top: Option<(ConditionMask, i64)> = None;
-            for item in &closed.kept {
-                let own = super::direction_from_training_edge(
-                    crate::outcome::edge(&column, &forward, &item.mask).mean_paisa,
+            // A candidate whose grid names no cell, or only a tradeless one, is
+            // not ranked; the strict `>` keeps the first of equals.
+            let top = closed
+                .kept
+                .iter()
+                .filter_map(|item| {
+                    let own = super::direction_from_training_edge(
+                        crate::outcome::edge(&column, &forward, &item.mask).mean_paisa,
+                    );
+                    let g = crate::grid::evaluate(
+                        train,
+                        &column,
+                        &item.mask,
+                        h(15),
+                        super::side_of(own),
+                        crate::grid::Levels::derived(super::DEFAULT_RUNGS),
+                    );
+                    g.sharpest()
+                        .or(g.best())
+                        .filter(|cell| cell.trades > 0)
+                        .map(|cell| (item.mask, cell.pessimistic))
+                })
+                .fold(
+                    None,
+                    |top: Option<(ConditionMask, i64)>, (mask, pessimistic)| {
+                        if top.is_none_or(|(_, best)| pessimistic > best) {
+                            Some((mask, pessimistic))
+                        } else {
+                            top
+                        }
+                    },
                 );
-                let g = crate::grid::evaluate(
-                    train,
-                    &column,
-                    &item.mask,
-                    h(15),
-                    super::side_of(own),
-                    crate::grid::Levels::derived(super::DEFAULT_RUNGS),
-                );
-                let Some(cell) = g.sharpest().or_else(|| g.best()) else {
-                    continue;
-                };
-                if cell.trades == 0 {
-                    continue;
-                }
-                if top.is_none_or(|(_, best)| cell.pessimistic > best) {
-                    top = Some((item.mask, cell.pessimistic));
-                }
-            }
 
             assert_eq!(
                 f.chosen,
@@ -7312,7 +7335,7 @@ pub(crate) mod tests {
                     .iter()
                     .copied()
                     .enumerate()
-                    .find(|(other, value)| *other != ordinal && *value != expected)
+                    .find(|(other, value)| (*other != ordinal, *value != expected) == (true, true))
                     .map(|(_, value)| (fold, ordinal, value))
             })
             .expect("fixture has a decided fold with a distinguishable foreign ordinal")
@@ -7363,18 +7386,12 @@ pub(crate) mod tests {
             .get_mut(fold)
             .expect("selected fold remains present");
         let mask = visible.chosen.expect("selected fold has a mask");
-        let high_bit_set = mask
-            .words()
-            .get(5)
-            .copied()
-            .expect("ConditionMask has six stable words")
-            & (1_u64 << 63)
-            != 0;
-        visible.chosen = Some(if high_bit_set {
-            mask.without_bit(383)
-        } else {
-            mask.with_bit(383)
-        });
+        // Bit 383 toggled: the last bit of the sixth word.
+        let mut words = mask.words();
+        *words
+            .last_mut()
+            .expect("ConditionMask has six stable words") ^= 1_u64 << 63;
+        visible.chosen = Some(ConditionMask::from_words(words));
         assert_eq!(
             swapped_mask.admission_projection(),
             Err(AnchoredAdmissionValidationRefusalV2::ProvenanceMismatch { fold })
@@ -7386,12 +7403,9 @@ pub(crate) mod tests {
             .folds
             .get_mut(fold)
             .expect("selected fold remains present");
-        visible.chosen_side = Some(
-            match visible.chosen_side.expect("selected fold has a side") {
-                Direction::Long => Direction::Short,
-                Direction::Short => Direction::Long,
-            },
-        );
+        visible.chosen_side = Some(opposite(
+            visible.chosen_side.expect("selected fold has a side"),
+        ));
         assert_eq!(
             swapped_side.admission_projection(),
             Err(AnchoredAdmissionValidationRefusalV2::ProvenanceMismatch { fold })
@@ -7411,7 +7425,7 @@ pub(crate) mod tests {
             .chosen_exit
             .as_mut()
             .expect("selected fold has an exit");
-        exit.stop = if exit.stop.is_some() { None } else { Some(0) };
+        exit.stop = exit.stop.xor(Some(0));
         assert_eq!(
             swapped_exit.admission_projection(),
             Err(AnchoredAdmissionValidationRefusalV2::ProvenanceMismatch { fold })
@@ -7568,11 +7582,11 @@ pub(crate) mod tests {
             resealed_unknown_rule.validation_family_digest,
             &resealed_unknown_rule.folds,
         );
-        assert!(
-            matches!(
-                resealed_unknown_rule.search_authority_projection(),
-                Err(super::AnchoredSearchValidationRefusalV3::SealMismatch)
-            ),
+        assert_eq!(
+            resealed_unknown_rule
+                .search_authority_projection()
+                .map(|_| ()),
+            Err(super::AnchoredSearchValidationRefusalV3::SealMismatch),
             "recomputing hashes cannot authorize an unknown side rule"
         );
 
@@ -7582,15 +7596,10 @@ pub(crate) mod tests {
             .iter_mut()
             .find_map(|fold| fold.choice.as_mut())
             .expect("the complete fixture has a selected fold");
-        choice.side = match choice.side {
-            Direction::Long => Direction::Short,
-            Direction::Short => Direction::Long,
-        };
-        assert!(
-            matches!(
-                changed_choice.search_authority_projection(),
-                Err(super::AnchoredSearchValidationRefusalV3::SealMismatch)
-            ),
+        choice.side = opposite(choice.side);
+        assert_eq!(
+            changed_choice.search_authority_projection().map(|_| ()),
+            Err(super::AnchoredSearchValidationRefusalV3::SealMismatch),
             "a selected side is part of the sealed walk facts"
         );
     }
@@ -7671,25 +7680,30 @@ pub(crate) mod tests {
             "the causal happy path must exercise selector and OOS replay, not only an empty family: {fold_populations:?}"
         );
         for (proof, visible) in exact.folds.iter().zip(&exact.validated.folds) {
-            assert!(proof.candidates.iter().all(|candidate| {
-                candidate.oos_cell_digest.is_some() && candidate.out_of_sample_pessimistic.is_some()
-            }));
+            assert!(proof.candidates.iter().all(|candidate| matches!(
+                (
+                    candidate.oos_cell_digest,
+                    candidate.out_of_sample_pessimistic
+                ),
+                (Some(_), Some(_))
+            )));
             assert_eq!(
                 visible.in_sample,
                 super::Summary::default(),
                 "V4 must not publish a legacy scalar-exit walk as the exact-grid summary"
             );
             assert_eq!(visible.out_of_sample, super::Summary::default());
-            if let Some(choice) = proof.choice {
-                assert_eq!(
-                    visible.chosen_exit_total,
-                    Some(choice.in_sample_pessimistic)
-                );
-                assert_eq!(
-                    visible.out_of_sample_exit,
-                    Some(choice.out_of_sample_pessimistic)
-                );
-            }
+            let choice = proof
+                .choice
+                .expect("every fold of the causal happy path decides");
+            assert_eq!(
+                visible.chosen_exit_total,
+                Some(choice.in_sample_pessimistic)
+            );
+            assert_eq!(
+                visible.out_of_sample_exit,
+                Some(choice.out_of_sample_pessimistic)
+            );
         }
     }
 

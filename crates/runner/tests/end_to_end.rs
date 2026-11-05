@@ -111,9 +111,10 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
         Side::Long,
         grid::Levels::derived(4),
     );
-    assert!(
-        exits.baseline().is_some() || exits.cells.is_empty(),
-        "a populated grid must carry the no-levels baseline row"
+    assert_eq!(
+        exits.baseline().is_some(),
+        !exits.cells.is_empty(),
+        "a populated grid must carry the no-levels baseline row, and an empty one has none"
     );
     for cell in &exits.cells {
         assert!(
@@ -379,10 +380,12 @@ fn an_equity_audit_is_byte_identical_on_a_rerun_and_differs_from_the_index_one_o
             .map(|(_, rest)| rest.to_owned())
     };
     assert!(
-        below(&equity).is_some_and(|rest| {
-            !rest.starts_with("  NOT SUPPLIED") && rest.contains("variants evaluated")
-        }),
-        "the equity audit must carry the swept trades and a populated exit grid:\n{equity}"
+        below(&equity).is_some_and(|rest| !rest.starts_with("  NOT SUPPLIED")),
+        "the equity audit must carry the swept trades:\n{equity}"
+    );
+    assert!(
+        below(&equity).is_some_and(|rest| rest.contains("variants evaluated")),
+        "the equity audit must carry a populated exit grid:\n{equity}"
     );
     let mut swapped = below(&equity).expect("the equity audit carries TRADES");
     for (stock, index_words) in [
@@ -461,9 +464,22 @@ fn the_ladder_reaches_further_as_support_falls_unless_a_budget_stops_it_first() 
     // budget under instrumentation. Candidate limits and all five thresholds
     // stay unchanged; engine's batched-versus-single-lane test proves the
     // scheduling choice preserves the answer.
-    for min_hits in [1_500_u64, 1_000, 600, 300, 150] {
-        let swept = Sweeper::new(Ladder::with_min_hits(min_hits).with_support_lanes(1))
-            .run(&bars, &mut evaluator());
+    // BASE-COV-LIBS-LS2 (5 Nov 2026): and the last support once more under a
+    // ceiling of one, so a rung a budget stops is rendered and checked too.
+    for (min_hits, ceiling) in [
+        (1_500_u64, None),
+        (1_000, None),
+        (600, None),
+        (300, None),
+        (150, None),
+        (150, Some(1_usize)),
+    ] {
+        let shipped = Ladder::with_min_hits(min_hits).with_support_lanes(1);
+        let ladder = match ceiling {
+            Some(ceiling) => shipped.with_ceiling(ceiling),
+            None => shipped,
+        };
+        let swept = Sweeper::new(ladder).run(&bars, &mut evaluator());
         let depth = swept.sweep.depth();
         let frequent = swept.sweep.all_frequent().count();
         let generated: u64 = swept.sweep.levels.iter().map(|l| l.generated).sum();
@@ -499,6 +515,10 @@ fn the_ladder_reaches_further_as_support_falls_unless_a_budget_stops_it_first() 
     assert!(
         deepest_extinct > 1,
         "the deepest extinct rung must climb past k=1, or nothing is climbing"
+    );
+    assert!(
+        rows.last().is_some_and(|row| row.contains("HALTED k=")),
+        "a ceiling of one stops the last rung, and its row names the budget: {rows:?}"
     );
 
     println!("\nDRILL-DOWN LADDER   (synthetic::sessions(12), no stored bars)");

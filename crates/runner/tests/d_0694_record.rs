@@ -263,3 +263,33 @@ fn no_correction_of_d_0694_since_2026_09_25_says_nothing_above_it_is_edited() {
         "D-0694 must name the sentence edited in place above its later corrections"
     );
 }
+
+/// BASE-COV-LIBS-LS2 (5 Nov 2026): THE SOURCE WALK READS ONLY NON-TEST RUST
+/// FILES, AT ANY DEPTH. A scratch tree holds a source naming `minute_gaps::`
+/// (found), another below a sub-directory (found), one that does not name it,
+/// a `_tests.rs` and a `tests.rs` that name it (test files, skipped), and a
+/// text file that names it (not a source, skipped).
+#[test]
+fn the_minute_gaps_walk_reads_only_non_test_sources_at_any_depth() {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-ls2-minute-gaps-walk-{}",
+        std::process::id()
+    ));
+    let nested = root.join("deep");
+    std::fs::create_dir_all(&nested).expect("a scratch tree");
+    for (path, text) in [
+        (root.join("named.rs"), "use crate::minute_gaps::Census;"),
+        (root.join("silent.rs"), "fn unrelated() {}"),
+        (root.join("named_tests.rs"), "crate::minute_gaps::x"),
+        (root.join("tests.rs"), "crate::minute_gaps::x"),
+        (root.join("notes.txt"), "crate::minute_gaps::x"),
+        (nested.join("inner.rs"), "crate::minute_gaps::x"),
+    ] {
+        std::fs::write(path, text).expect("a scratch file");
+    }
+    let mut found = Vec::new();
+    naming_minute_gaps(&root, &root, &mut found);
+    std::fs::remove_dir_all(&root).expect("the scratch tree is removed");
+    found.sort();
+    assert_eq!(found, ["deep/inner.rs", "named.rs"]);
+}

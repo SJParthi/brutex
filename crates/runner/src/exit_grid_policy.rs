@@ -673,9 +673,10 @@ mod subslice_tests {
         let copy: Vec<Candle> = context.get(17..250).unwrap_or_default().to_vec();
         assert_eq!(require_exact_execution_subslice(&context, &copy), Ok(()));
         let mut forged = copy.clone();
-        if let Some(last) = forged.last_mut() {
-            last.close += 1;
-        }
+        let Some(last) = forged.last_mut() else {
+            unreachable!("the copy holds bars 17..250")
+        };
+        last.close += 1;
         assert_eq!(
             require_exact_execution_subslice(&context, &forged),
             Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
@@ -5860,7 +5861,10 @@ mod tests {
                 .expect("a fixture index inside the collection");
             bar.ts_micros = bar.ts_micros.saturating_add(ONE_MINUTE_MICROS);
         }
-        if let Some(bar) = gapped.get_mut(3) {
+        {
+            let bar = gapped
+                .get_mut(3)
+                .expect("a fixture index inside the collection");
             bar.ts_micros = bar.ts_micros.saturating_add(ONE_MINUTE_MICROS);
         }
         let compact_grid = policy()
@@ -6194,21 +6198,21 @@ mod tests {
             .grid
             .cells
             .iter()
-            .find(|cell| cell.stop.is_none() && cell.target.is_some() && cell.ttp.is_none())
+            .find(|cell| matches!((cell.stop, cell.target, cell.ttp), (None, Some(_), None)))
             .map(Chosen::from_cell)
             .expect("the complete grid contains a stop-less comparison row");
         let missing_target = evaluated
             .grid
             .cells
             .iter()
-            .find(|cell| cell.stop.is_some() && cell.target.is_none() && cell.ttp.is_none())
+            .find(|cell| matches!((cell.stop, cell.target, cell.ttp), (Some(_), None, None)))
             .map(Chosen::from_cell)
             .expect("the complete grid contains a target-less comparison row");
         let complete: Vec<Chosen> = evaluated
             .grid
             .cells
             .iter()
-            .filter(|cell| cell.stop.is_some() && cell.target.is_some() && cell.ttp.is_none())
+            .filter(|cell| matches!((cell.stop, cell.target, cell.ttp), (Some(_), Some(_), None)))
             .map(Chosen::from_cell)
             .take(4)
             .collect();
@@ -6342,7 +6346,7 @@ mod tests {
             .grid
             .cells
             .iter()
-            .filter(|cell| cell.stop.is_none() && cell.target.is_some() && cell.ttp.is_none())
+            .filter(|cell| matches!((cell.stop, cell.target, cell.ttp), (None, Some(_), None)))
             .map(Chosen::from_cell)
             .take(2)
             .collect();
@@ -6422,9 +6426,14 @@ mod tests {
             .cells
             .iter()
             .find(|cell| {
-                cell.stop.is_some_and(|stop| stop != forced_stop_index)
-                    && cell.target.is_some()
-                    && cell.ttp.is_none()
+                matches!(
+                    (
+                        cell.stop.map(|stop| stop != forced_stop_index),
+                        cell.target,
+                        cell.ttp
+                    ),
+                    (Some(true), Some(_), None)
+                )
             })
             .map(Chosen::from_cell)
             .expect("the grid retains a non-forced comparison coordinate");
@@ -7227,7 +7236,8 @@ mod tests {
                 "test-commit",
                 [0xA5; 32],
                 candidate,
-            )?;
+            )
+            .expect("complete identity");
             let oos = OosExecutionSeriesV1::new(series, 0)?;
             resolved.replay_selected(
                 oos,
@@ -7238,7 +7248,8 @@ mod tests {
                     &ConditionMask::ZERO,
                     crate::excursion::Side::Long,
                     candidate,
-                )?,
+                )
+                .expect("the canonical OOS run"),
             )
         };
         assert_eq!(
@@ -7593,7 +7604,10 @@ mod tests {
             slot.wins = 6;
             slot.pessimistic = 100;
         }
-        if let Some(slot) = cells.get_mut(1) {
+        {
+            let slot = cells
+                .get_mut(1)
+                .expect("a fixture index inside the collection");
             slot.trades = 10;
             slot.wins = 10;
             slot.pessimistic = 1_000;
@@ -7637,12 +7651,11 @@ mod tests {
         );
         let rejected_coordinate = evaluated.grid.cells.get(1).map(Chosen::from_cell);
         assert!(rejected_coordinate.is_some());
-        if let Some(rejected_coordinate) = rejected_coordinate {
-            assert_eq!(
-                resolved.authorize_coordinate(&validated, rejected_coordinate),
-                Err(ExitGridErrorV1::ChosenCellNotAdmitted)
-            );
-        }
+        let rejected_coordinate = rejected_coordinate.expect("the fixture has a second cell");
+        assert_eq!(
+            resolved.authorize_coordinate(&validated, rejected_coordinate),
+            Err(ExitGridErrorV1::ChosenCellNotAdmitted)
+        );
         assert_eq!(
             resolved.authorize_coordinate(
                 &validated,
@@ -7658,7 +7671,13 @@ mod tests {
 
         let mut duplicated = evaluated.clone();
         let first_coordinate = duplicated.grid.cells.first().map(Chosen::from_cell);
-        if let (Some(first), Some(second)) = (first_coordinate, duplicated.grid.cells.get_mut(1)) {
+        {
+            let first = first_coordinate.expect("the fixture has a first cell");
+            let second = duplicated
+                .grid
+                .cells
+                .get_mut(1)
+                .expect("the fixture has a second cell");
             second.stop = first.stop;
             second.target = first.target;
             second.tsl = first.tsl;
@@ -7676,9 +7695,12 @@ mod tests {
         let wrong_offset = resolved.validate_evaluation(&evaluated);
         assert!(wrong_offset.is_ok());
         let mut wrong_offset = wrong_offset.expect("a fixture step that must succeed");
-        if let Some(Some(offset)) = wrong_offset.coordinate_row_offsets.first_mut() {
-            *offset = offset.saturating_add(1);
-        }
+        let offset = wrong_offset
+            .coordinate_row_offsets
+            .first_mut()
+            .and_then(Option::as_mut)
+            .expect("the first coordinate row has an offset");
+        *offset = offset.saturating_add(1);
         assert_eq!(
             resolved.authorize_coordinate(&wrong_offset, clean_coordinate),
             Err(ExitGridErrorV1::ReplayCoordinatePopulationMismatch),

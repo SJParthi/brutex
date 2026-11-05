@@ -2462,7 +2462,7 @@ mod tests {
         for token in numbered {
             let decision = token
                 .strip_prefix("D-")
-                .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit()));
+                .is_some_and(|n| (n.len(), n.bytes().all(|b| b.is_ascii_digit())) == (4, true));
             assert!(
                 decision || token == "V6",
                 "{token:?} is a number that is neither a decision reference nor \
@@ -2635,17 +2635,17 @@ mod tests {
                 .filter(|token| token.bytes().any(|b| b.is_ascii_digit()))
             {
                 // `V6` is the Selection V6 the gross paragraph withholds, the one
-                // name the header test allows too (D-0696). The sentence names no
-                // policy, so it may carry none.
+                // name the header test allows too (D-0696). It is replaced above,
+                // before the split, so every token left that carries a digit must be
+                // a decision reference (BASE-COV-LIBS-LS2, 5 Nov 2026: the V6
+                // alternative that stood here could never be reached).
                 assert!(
                     token
                         .strip_prefix("D-")
-                        .is_some_and(|n| n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit()))
-                        || (what != "the sentence"
-                            && token == "V6"
-                            && text.contains("Selection V6")),
-                    "{what}: {token:?} is a number that is neither a decision reference nor \
-                     the Selection V6 name:\n{text}"
+                        .is_some_and(
+                            |n| (n.len(), n.bytes().all(|b| b.is_ascii_digit())) == (4, true)
+                        ),
+                    "{what}: {token:?} is a number that is not a decision reference:\n{text}"
                 );
             }
         }
@@ -2971,7 +2971,7 @@ mod tests {
             "the p-value must be printed to enough places to be read"
         );
         assert!(
-            out.contains("Only Romano-Wolf \nsays WHICH") || out.contains("says WHICH"),
+            out.contains("says WHICH"),
             "the report must say which test answers which question"
         );
     }
