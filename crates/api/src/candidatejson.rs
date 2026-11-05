@@ -377,6 +377,10 @@ fn trade_json(row: cli::trades::Row) -> Value {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "a test that cannot panic cannot fail: a step that does not happen fails the test by name"
+)]
 mod tests {
     use super::*;
     const ID: &str = "4242424242424242424242424242424242424242424242424242424242424242";
@@ -451,11 +455,9 @@ mod tests {
     -> Result<(), String> {
         let root =
             std::env::temp_dir().join(format!("candidate-api-expression-{}", std::process::id()));
-        let attempt = cli::sweep_evidence::begin(
-            &root,
-            [42; 32],
-            cli::sweep_evidence::Operation::Expression,
-        )?;
+        let attempt =
+            cli::sweep_evidence::begin(&root, [42; 32], cli::sweep_evidence::Operation::Expression)
+                .expect("the sweep evidence attempt begins");
         let expression =
             vocab::expression::Expression::parse("0 | !1").map_err(|why| format!("{why:?}"))?;
         #[expect(
@@ -463,13 +465,9 @@ mod tests {
             reason = "the public capture API infers Column without adding an api-to-indicators graph edge"
         )]
         let column = Default::default();
-        let capture = candidate_trades::Capture::begin_expression(
-            &root,
-            &attempt,
-            &[],
-            &column,
-            &expression,
-        )?;
+        let capture =
+            candidate_trades::Capture::begin_expression(&root, &attempt, &[], &column, &expression)
+                .expect("the expression capture begins");
         capture.finish()?;
         let base = format!(
             "identity={}&attempt={}",
@@ -478,10 +476,10 @@ mod tests {
         );
         let and = render(&root, &Asked::parse(&base)?)?;
         assert!(and.contains("\"status\":\"missing\""));
-        let saved: Value = serde_json::from_str(&render(
-            &root,
-            &Asked::parse(&format!("{base}&model=expression"))?,
-        )?)
+        let saved: Value = serde_json::from_str(
+            &render(&root, &Asked::parse(&format!("{base}&model=expression"))?)
+                .expect("the saved page renders"),
+        )
         .map_err(|why| why.to_string())?;
         assert_eq!(saved.get("model"), Some(&json!("expression")));
         assert_eq!(saved.get("status"), Some(&json!("saved")));
@@ -523,16 +521,18 @@ mod tests {
         let mask = vocab::ConditionMask::default();
         for rank in 1..=129 {
             for direction in [Direction::Long, Direction::Short] {
-                capture.record(
-                    &tier,
-                    &candidate_trades::Evaluated {
-                        rank,
-                        mask: &mask,
-                        direction,
-                        grid: &grid,
-                        selected: None,
-                    },
-                )?;
+                capture
+                    .record(
+                        &tier,
+                        &candidate_trades::Evaluated {
+                            rank,
+                            mask: &mask,
+                            direction,
+                            grid: &grid,
+                            selected: None,
+                        },
+                    )
+                    .expect("a trade of the capture is recorded");
             }
         }
         let summary = capture.finish()?;
@@ -613,7 +613,8 @@ mod tests {
             asked.attempt,
             asked.model,
             crate::detail::MAX_SCAN_BYTES,
-        )?
+        )
+        .expect("the model reads back")
         .ok_or("the capture is sealed")?;
         let key = Key {
             tier: 0,
@@ -780,16 +781,18 @@ mod tests {
                 ..no_cell_tier()
             })?;
             for direction in [Direction::Long, Direction::Short] {
-                capture.record(
-                    &tier,
-                    &candidate_trades::Evaluated {
-                        rank: 1,
-                        mask: &vocab::ConditionMask::default(),
-                        direction,
-                        grid: &grid,
-                        selected: None,
-                    },
-                )?;
+                capture
+                    .record(
+                        &tier,
+                        &candidate_trades::Evaluated {
+                            rank: 1,
+                            mask: &vocab::ConditionMask::default(),
+                            direction,
+                            grid: &grid,
+                            selected: None,
+                        },
+                    )
+                    .expect("a trade of the capture is recorded");
             }
         }
         capture.finish()?;

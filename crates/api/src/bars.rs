@@ -2861,6 +2861,29 @@ mod tests {
              see WHICH month is absent: {why}"
         );
 
+        // THE WALKER SEES WHAT IT MUST, so an empty walk below is evidence and
+        // not a walker that finds nothing (BASE-COV-API repair 3, D-8661): a
+        // nested file and its folder are both found, a missing folder holds
+        // nothing.
+        let probe = root.with_extension("walk-probe");
+        let _ = std::fs::remove_dir_all(&probe);
+        std::fs::create_dir_all(probe.join("nested")).expect("a probe folder");
+        std::fs::write(probe.join("nested").join("file"), b"x").expect("a probe file");
+        let mut seen = Vec::new();
+        walk(&probe, &mut seen);
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                probe.join("nested").display().to_string(),
+                probe.join("nested").join("file").display().to_string()
+            ]
+        );
+        let mut nothing = Vec::new();
+        walk(&probe.join("missing"), &mut nothing);
+        assert!(nothing.is_empty(), "{nothing:?}");
+        let _ = std::fs::remove_dir_all(&probe);
+
         let mut found = Vec::new();
         walk(&root, &mut found);
         assert!(

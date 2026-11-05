@@ -2188,8 +2188,12 @@ mod tests {
         )
         .await;
         assert!(
-            status == axum::http::StatusCode::OK
-                || status == axum::http::StatusCode::SERVICE_UNAVAILABLE
+            [
+                axum::http::StatusCode::OK,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            ]
+            .contains(&status),
+            "{status}"
         );
         assert!(body.contains(r#""runs":"#), "{body}");
     }

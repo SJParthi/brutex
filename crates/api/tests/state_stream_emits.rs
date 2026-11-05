@@ -816,3 +816,84 @@ mod more;
     assert_eq!(literal("x"), None);
     assert_eq!(const_str(source, "TARGET"), Some("api.fake".to_owned()));
 }
+
+/// **THE SCANNER READS EVERY OPEN END OF SOURCE IT CAN MEET, AND PASSES OVER
+/// WHAT IS NO CALL** (BASE-COV-API repair 3, D-8661): the helpers the scan
+/// above stands on, over text made here. Extremes: a line comment that ends
+/// the text; a block comment never closed; a raw string never closed; a
+/// string never closed; a char escape never closed; an item with no `;` or
+/// block; a `;` and a brace inside brackets; a block never closed; a literal
+/// holding a bare quote; `\n` and `\t` escapes; a comment that is no literal;
+/// a target named through a path; a target `const` one other file spells,
+/// and two files spell two ways; a call never closed; `Event::` with no call,
+/// with a method that is no level, with `new(` never closed and with one
+/// argument only; a folder in the scanned tree and a file that is not Rust;
+/// and, at once, a raw string with hashes never closed at the end of the
+/// text, and a `new` call with a level and no message; out of the box, an
+/// empty text.
+#[test]
+fn the_scanner_reads_every_open_end_of_source_and_passes_over_what_is_no_call() {
+    let chars = |text: &str| text.chars().collect::<Vec<char>>();
+    for text in [
+        "x // to the end",
+        "x /* never closed",
+        "x r\"never closed",
+        "x r##\"never closed",
+        "x \"never closed",
+        "x '\\u{41",
+    ] {
+        let read = chars(text);
+        let mask = code_mask(&read);
+        assert!(mask[0], "{text}");
+        assert!(!mask[read.len() - 1], "{text}: its open end is no code");
+    }
+    assert!(code_mask(&[]).is_empty(), "an empty text");
+    let end = |text: &str| {
+        let read = chars(text);
+        item_end(&read, &code_mask(&read), 0)
+    };
+    assert_eq!(end("a b c"), 5, "no `;` and no block: the text's end");
+    assert_eq!(end("f(x; y) z;"), 10, "a `;` inside brackets ends nothing");
+    assert_eq!(end("f({) ;"), 6, "a brace inside brackets opens nothing");
+    assert_eq!(end("x { never closed"), 16, "a block never closed");
+    assert_eq!(literal("\"a\"b\""), None, "a bare quote inside");
+    assert_eq!(literal("\"a\\nb\\tc\""), Some("a\nb\tc".to_owned()));
+    assert_eq!(literals_of("x /* note */ \"y\""), ["y"]);
+    assert!(literals_of("x \"never closed").is_empty());
+    assert_eq!(resolve("a::B", "", &[]), None, "a path is not resolved");
+    let one = ["const NAME: &str = \"v\";".to_owned()];
+    assert_eq!(
+        resolve("NAME", "const OTHER: &str = \"x\";", &one),
+        Some("v".to_owned())
+    );
+    let two = [one[0].clone(), "const NAME: &str = \"w\";".to_owned()];
+    assert_eq!(resolve("NAME", "", &two), None, "two files, two values");
+    let call = chars("f(a, b");
+    assert_eq!(split_args(&call, &code_mask(&call), 1), ["a"]);
+    let none = emits_in(
+        "crates/api/src/fake.rs",
+        "Event::warn; Event::with(\"t\", \"m\"); Event::info(\"t\"); \
+         Event::new(Level::Warn, \"t\"); Event::new(",
+        &[],
+    );
+    assert!(none.is_empty(), "{none:?}");
+    let tree = std::env::temp_dir().join(format!("brutex-{}-scan-tree", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tree);
+    std::fs::create_dir_all(tree.join("sub")).expect("a folder");
+    std::fs::write(tree.join("sub").join("a.rs"), "// a").expect("a file");
+    std::fs::write(tree.join("b.txt"), "not rust").expect("a file");
+    std::fs::write(tree.join("c.rs"), "// c").expect("a file");
+    let mut found = Vec::new();
+    sources(&tree, &mut found);
+    let names: Vec<String> = found
+        .iter()
+        .map(|(path, _)| {
+            path.strip_prefix(&tree)
+                .expect("under")
+                .display()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(names, ["c.rs", "sub/a.rs"]);
+    let _ = std::fs::remove_dir_all(&tree);
+}

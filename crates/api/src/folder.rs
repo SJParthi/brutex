@@ -737,4 +737,113 @@ mod tests {
             "{one}"
         );
     }
+
+    /// Names the handler child's scratch folder.
+    const FOLDER_CHILD: &str = "BRUTEX_TEST_FOLDER_HANDLER_CHILD";
+    /// Names which environment the child was given: `no-root` or `archives`.
+    const FOLDER_MODE: &str = "BRUTEX_TEST_FOLDER_HANDLER_MODE";
+
+    /// `GET /folder.json?<query>`, through the handler.
+    async fn asked(
+        query: &str,
+    ) -> (
+        axum::http::StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        String,
+    ) {
+        super::folder_json(
+            format!("/folder.json?{query}")
+                .parse()
+                .expect("a request line"),
+        )
+        .await
+    }
+
+    /// **THE HANDLER REFUSES A SEGMENT THAT IS NONE, HALTS WITH NO ROOT TO
+    /// NAME, AND OTHERWISE SERVES WHAT THE FOLDER READ ANSWERS**
+    /// (BASE-COV-API repair 3, D-8661): `folder_json` end to end. The root is
+    /// read from the environment, so those reads run in children of this test
+    /// binary (`crate::isolated`), each proved by a file its parent reads.
+    /// Extremes: a word that is no segment; a segment the feed never
+    /// measured; a segment of sixty-four letters; no `BRUTEX_ARCHIVES` and no
+    /// `HOME` (a halt that names the variables); an archive root that exists
+    /// and holds nothing; one that does not exist; GDFL's F&O read; True
+    /// Data's F&O read; and, at once, a word that is no segment with no root
+    /// at all (the segment's refusal speaks first, no root is asked), and True
+    /// Data with no segment over an archive root (two layouts, refused before
+    /// the root); out of the box, the feed word in upper case, read as the same
+    /// feed.
+    #[tokio::test]
+    async fn the_handler_refuses_a_bad_segment_halts_with_no_root_and_serves_the_read() {
+        let bad_request = axum::http::StatusCode::BAD_REQUEST;
+        if let Some(root) = std::env::var_os(FOLDER_CHILD) {
+            let root = std::path::PathBuf::from(root);
+            let mode = std::env::var(FOLDER_MODE).unwrap_or_default();
+            let (status, _, said) = asked("feed=gdfl&segment=OPTIONS").await;
+            assert_eq!(status, bad_request, "the segment speaks first: {said}");
+            if mode == "no-root" {
+                let (status, _, said) = asked("feed=gdfl&segment=FNO").await;
+                assert_eq!(status, axum::http::StatusCode::CONFLICT, "{said}");
+                assert!(said.contains("neither BRUTEX_ARCHIVES nor HOME"), "{said}");
+            } else {
+                let named = pull::folder::root().expect("the variable names a root");
+                for (query, feed, shape) in [
+                    ("feed=gdfl&segment=FNO", Feed::Gdfl, Columns::Gdfl),
+                    (
+                        "feed=truedata&segment=FNO",
+                        Feed::TrueData,
+                        Columns::TrueDataFno,
+                    ),
+                    ("feed=GDFL&segment=FNO", Feed::Gdfl, Columns::Gdfl),
+                ] {
+                    let (status, _, said) = asked(query).await;
+                    assert_eq!((status, said), answer(feed, shape, &named), "{query}");
+                }
+                let (status, _, said) = asked("feed=truedata").await;
+                assert_eq!(status, bad_request, "two layouts and no segment: {said}");
+            }
+            std::fs::write(root.join("child-ran"), mode.as_bytes()).expect("the child's proof");
+            return;
+        }
+        let (status, _, said) = asked("feed=gdfl&segment=OPTIONS").await;
+        assert_eq!(status, bad_request);
+        assert!(said.contains("is not a segment"), "{said}");
+        let (status, _, said) = asked("feed=gdfl&segment=INDEX").await;
+        assert_eq!(status, bad_request);
+        assert!(
+            said.contains("no column layout was ever measured"),
+            "{said}"
+        );
+        let (status, _, said) = asked(&format!("feed=gdfl&segment={}", "Z".repeat(64))).await;
+        assert_eq!(status, bad_request, "{said}");
+        let root =
+            std::env::temp_dir().join(format!("brutex-{}-folder-handler", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("archives")).expect("a scratch root");
+        let name = "folder::tests::the_handler_refuses_a_bad_segment_halts_with_no_root_and_serves_the_read";
+        for (mode, archives) in [
+            ("no-root", None),
+            ("archives", Some(root.join("archives"))),
+            ("archives", Some(root.join("not-made"))),
+        ] {
+            let _ = std::fs::remove_file(root.join("child-ran"));
+            let mut env: Vec<(&str, &std::ffi::OsStr)> = vec![
+                (FOLDER_CHILD, root.as_os_str()),
+                (FOLDER_MODE, std::ffi::OsStr::new(mode)),
+            ];
+            let unset: &[&str] = if let Some(ref dir) = archives {
+                env.push(("BRUTEX_ARCHIVES", dir.as_os_str()));
+                &[]
+            } else {
+                &["BRUTEX_ARCHIVES", "HOME"]
+            };
+            let _ = crate::isolated::rerun_unsetting(name, &env, unset);
+            assert_eq!(
+                std::fs::read(root.join("child-ran")).ok().as_deref(),
+                Some(mode.as_bytes()),
+                "the child asked every query of {mode}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
