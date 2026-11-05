@@ -114,7 +114,7 @@ fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
         ("BRUTEX_INDEX_STOP_BATCH_PROGRAMS", "2"),
         ("BRUTEX_INDEX_STOP_NODE_ALLOWANCE", "128"),
         ("BRUTEX_INDEX_STOP_BATCH_ALLOWANCE", "1"),
-        ("BRUTEX_INDEX_STOP_BOOTSTRAP_DRAWS", "63"),
+        ("BRUTEX_INDEX_STOP_BOOTSTRAP_DRAWS", "319"),
         ("BRUTEX_INDEX_STOP_WORKERS", "1"),
     ]
     .into_iter()
