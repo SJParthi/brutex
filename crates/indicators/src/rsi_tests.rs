@@ -765,7 +765,8 @@ fn the_faithful_edge_is_one_thousand_units_per_period() {
     closes.extend([101; 26]);
     let states = stream(14, &closes);
     let seeded = states[14].reading().unwrap();
-    assert!(seeded.flat() && !seeded.faithful());
+    assert!(seeded.flat());
+    assert!(!seeded.faithful());
     let moved = states[15].reading().unwrap();
     assert_eq!(averages(&moved), (71_428, 0));
     assert!(moved.faithful());
@@ -795,7 +796,8 @@ fn the_largest_moves_and_period_never_overflow() {
             state.fold(&extreme).unwrap();
             if let Some(reading) = state.reading() {
                 let (gain, loss) = averages(&reading);
-                assert!((0..GAIN_LIMIT).contains(&gain) && (0..GAIN_LIMIT).contains(&loss));
+                assert!((0..GAIN_LIMIT).contains(&gain));
+                assert!((0..GAIN_LIMIT).contains(&loss));
                 assert!(reading.ppm() <= MAX_LEVEL_PPM);
             }
         }

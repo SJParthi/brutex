@@ -980,6 +980,12 @@ component checks, not a full-workspace test result, coverage/mutation proof,
 live vendor entitlement check, deployed workflow or completed stock sweep.
 No release binary was replaced and no new research result was persisted.
 
+## PSRB-RSI: Wilder RSI — 2026-11-03 (D-8580 to D-8584)
+
+| Part | What | State |
+|---|---|---|
+| PSRB-RSI | `indicators::rsi`: Wilder's RSI over closes in exact integers for the PSRB family (Pivot R1, Supertrend, RSI, Bollinger; NSE F&O stocks, cash, intraday): averages scaled by `trend::SCALE` and floored, a saturating `u32` change counter, `flat()` and `faithful()`, exact comparisons against a level; its 27 tests and the `C-PSRB-RSI-01` and `C-PSRB-RSI-02` bench rows; no vocabulary position | Built on `cloud/psrb-rsi-20261103`; not merged (D1). PSRB-STRAT is its first caller |
+
 ## Historical sweep completion follow-through — 2026-09-06 (D-0524)
 
 The highlighted index sweep work now includes the stored AND continuation,
