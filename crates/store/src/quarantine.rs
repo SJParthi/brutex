@@ -638,11 +638,20 @@ impl fmt::Display for QuarantineError {
 
 impl std::error::Error for QuarantineError {}
 
+/// Lifts a host answer into [`QuarantineError::Io`], naming the step.
+///
+/// Under `cfg(test)` a refusal armed on this thread for `operation` on
+/// `path` replaces the host's answer, once, after the call has run: the
+/// shape of `crate::file`'s `fault`, for the calls whose refusal no test can
+/// stage on a file this module has just opened and measured (D-6017,
+/// D-8561).
 fn io_at<T>(
     result: io::Result<T>,
     path: &Path,
     operation: &'static str,
 ) -> Result<T, QuarantineError> {
+    #[cfg(test)]
+    let result = crate::file::tests::refusal(operation, path).map_or(result, Err);
     result.map_err(|why| QuarantineError::Io {
         path: path.to_path_buf(),
         operation,
@@ -824,6 +833,10 @@ pub fn probe_at(
     let hash = hash_of(key, month);
     let home = home_of(&hash);
     let mut run = [0u8; BUCKET_BYTES];
+    // Under `cfg(test)` another actor may cut the index here, between its
+    // header read and the bucket's (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("quarantine index header read", &index);
     io_at(
         file.read_exact_at(&mut run, HEADER_LEN + home * SLOT_LEN),
         &index,
@@ -854,6 +867,10 @@ fn open_index(index: &Path) -> Result<Option<(File, u64)>, QuarantineError> {
         });
     }
     let mut header = [0u8; HEADER];
+    // Under `cfg(test)` another actor may cut the index here, between its
+    // `fstat` and its header read (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("quarantine index opened", index);
     io_at(
         file.read_exact_at(&mut header, 0),
         index,
@@ -1179,6 +1196,10 @@ fn read_image(index: &Path) -> Result<Option<Vec<u8>>, QuarantineError> {
         });
     }
     let mut image = Vec::with_capacity(INDEX_BYTES);
+    // Under `cfg(test)` another actor may change the index here, between its
+    // `fstat` and its read: the race the length check below answers (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("quarantine index measured", index);
     io_at(
         file.read_to_end(&mut image),
         index,
@@ -1435,12 +1456,18 @@ fn audit_dir(root: &Path) -> Result<PathBuf, QuarantineError> {
     match fs::symlink_metadata(&dir) {
         Ok(meta) if meta.file_type().is_symlink() => Err(QuarantineError::Linked(dir)),
         Ok(_) => Ok(dir),
-        Err(why) if why.kind() == io::ErrorKind::NotFound => match fs::create_dir(&dir) {
-            Err(why) if why.kind() != io::ErrorKind::AlreadyExists => {
-                io_at(Err(why), &dir, "create the audit directory")
+        Err(why) if why.kind() == io::ErrorKind::NotFound => {
+            // Under `cfg(test)` another actor may make the directory here,
+            // between the look and the creation (D-8561).
+            #[cfg(test)]
+            crate::file::tests::race("audit directory looked for", &dir);
+            match fs::create_dir(&dir) {
+                Err(why) if why.kind() != io::ErrorKind::AlreadyExists => {
+                    io_at(Err(why), &dir, "create the audit directory")
+                }
+                _ => Ok(dir),
             }
-            _ => Ok(dir),
-        },
+        }
         Err(why) => io_at(Err(why), &dir, "inspect the audit directory"),
     }
 }
@@ -2217,6 +2244,10 @@ fn publish_image(root: &Path, feed: Vendor, image: &[u8]) -> Result<(), Quaranti
         "write the index image",
     )?;
     io_at(staged.file.sync_all(), &staging, "sync the index image")?;
+    // Under `cfg(test)` another actor may put something at the index's name
+    // here, after the image was read and staged (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("index image staged", &index);
     io_at(
         fs::rename(&staging, &index),
         &index,

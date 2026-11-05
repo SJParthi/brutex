@@ -9,7 +9,8 @@
 //! BASE-COV-LIBS-LS1: the generation pointer at its two edges no other test
 //! reached: a pointer that already holds its last record refuses the next
 //! promotion, and a non-directory inside the pointer tree refuses the read
-//! by the pointer's path. Every bar is invented.
+//! by the pointer's path. And (D-8561) a pointer record whose write the host
+//! refuses, through the host refusal seam. Every bar is invented.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -240,4 +241,45 @@ fn a_promotion_the_pointers_path_refuses_is_refused_by_that_step() {
         Ok(Promoted::Promoted(_))
     ));
     assert_eq!(served(&root.0, month()).unwrap().ordinal(), 1);
+}
+
+/// **A POINTER RECORD WHOSE WRITE THE HOST REFUSES REFUSES THE PROMOTION BY
+/// THAT STEP, AND SAYS IT MAY BE VISIBLE** (D-8561): the record's write on
+/// the pointer file the promoter has just opened and locked is refused (the
+/// host refusal seam, after the call ran, in `io_at`'s shape), and the
+/// promotion answers `Io` naming the pointer file, the step and the host's
+/// kind, with `publication_may_be_visible`: a refused write may still have
+/// reached the file. Every step before it was answered, and the flush after
+/// it was never asked.
+#[test]
+fn a_pointer_record_whose_write_is_refused_refuses_the_promotion_as_maybe_visible() {
+    let root = Root::new("pointer-write");
+    let held = bars(0..6);
+    let original = {
+        let mut writer = BarFile::open_or_create(&root.0, month(), SYMBOL).unwrap();
+        writer.append(&held).unwrap();
+        writer.header()
+    };
+    let first = Revision::new(1).unwrap();
+    repair::publish(&root.0, month(), SYMBOL, first, original, &held).unwrap();
+    let pointer_file = pointer_path(&root.0, month());
+    crate::file::tests::arm_refusal(
+        "write pointer record",
+        &pointer_file,
+        0,
+        ErrorKind::StorageFull,
+    );
+    match promote(&root.0, month(), SYMBOL, first) {
+        Err(RepairError::Io {
+            path,
+            operation: "write pointer record",
+            kind: ErrorKind::StorageFull,
+            publication_may_be_visible: true,
+        }) => assert_eq!(path, pointer_file),
+        other => panic!("the record's write is refused: {other:?}"),
+    }
+    assert!(
+        !crate::file::tests::refusal_armed(),
+        "the write asked the seam"
+    );
 }

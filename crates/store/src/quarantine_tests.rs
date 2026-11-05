@@ -2473,3 +2473,307 @@ fn a_resume_whose_dropped_line_the_ledger_refuses_is_still_owed_body() {
         Ok(Applied::Resumed { bars: 1, .. })
     ));
 }
+
+/// A store whose Zerodha index is level with a ledger of one whole-month
+/// act on QRACA, and a second month QRACB to record next.
+fn one_act_recorded(tag: &str) -> (Store, StorePath<'static>, Vec<Bar>) {
+    let store = Store::new(tag);
+    let rows: Vec<Bar> = (0..3).map(|i| bar(i, 512)).collect();
+    let first = minute("QRACA", march());
+    store.month(first, &rows);
+    record(&store.root, &whole_act(first, &rows, "test")).expect("the first act lands");
+    let next = minute("QRACB", march());
+    store.month(next, &rows);
+    (store, next, rows)
+}
+
+/// The ledger's lines, as many as it holds.
+fn ledger_lines(store: &Store) -> usize {
+    read_ledger(&store.root, Vendor::Zerodha)
+        .expect("the ledger reads")
+        .lines
+        .len()
+}
+
+/// **AN INDEX CUT BETWEEN A WRITER'S `fstat` AND ITS READ IS TORN, AND THE
+/// WRITER REBUILDS IT FROM THE LEDGER** (D-8561): the index measured
+/// exactly `INDEX_LEN` bytes, and before it is read another actor cuts it to
+/// 100 (a real change, the race hook's). The image read back is 100 bytes,
+/// refused `Torn` by its read length, so the act is written and the index
+/// rebuilt from the ledger first; the control, unraced, takes the index as
+/// it is.
+#[test]
+fn an_index_cut_between_its_measure_and_its_read_is_rebuilt_by_the_writer() {
+    let (store, next, rows) = one_act_recorded("measured-race");
+    crate::file::tests::arm_race("quarantine index measured", |index| {
+        let bytes = fs::read(index).expect("the index");
+        fs::write(index, &bytes[..100]).expect("cut it");
+    });
+    let done = record(&store.root, &whole_act(next, &rows, "test")).expect("the act lands");
+    assert!(!crate::file::tests::race_armed(), "the race ran");
+    assert!(done.rebuilt, "the torn image is rebuilt from the ledger");
+    assert_eq!(ledger_lines(&store), 2);
+    assert!(matches!(
+        probe(&store.root, next),
+        Ok(Probe::Quarantined(_))
+    ));
+    let (control, next, rows) = one_act_recorded("measured-control");
+    let done = record(&control.root, &whole_act(next, &rows, "test")).expect("the act lands");
+    assert!(!done.rebuilt, "a level index is taken as it is");
+}
+
+/// **AN INDEX READ THE HOST REFUSES REFUSES THE ACT BEFORE ITS LINE IS
+/// WRITTEN** (D-8561): the writer's whole read of the index it has just
+/// measured is refused (the host refusal seam, after the call ran, in
+/// `io_at`'s shape): the act answers `Io` naming the index, the read and
+/// the host's kind, and the ledger holds no new line.
+#[test]
+fn an_index_read_the_host_refuses_refuses_the_act_before_its_line() {
+    let (store, next, rows) = one_act_recorded("read-refused");
+    let index = index_path(&store.root, Vendor::Zerodha);
+    crate::file::tests::arm_refusal(
+        "read the quarantine index",
+        &index,
+        0,
+        std::io::ErrorKind::Interrupted,
+    );
+    match record(&store.root, &whole_act(next, &rows, "test")) {
+        Err(QuarantineError::Io {
+            path,
+            operation: "read the quarantine index",
+            kind: std::io::ErrorKind::Interrupted,
+        }) => assert_eq!(path, index),
+        other => panic!("the index read refuses the act: {other:?}"),
+    }
+    assert!(
+        !crate::file::tests::refusal_armed(),
+        "the read asked the seam"
+    );
+    assert_eq!(ledger_lines(&store), 1, "no line was written");
+}
+
+/// **A LEDGER READ THE HOST REFUSES IS REFUSED BY THE LEDGER'S NAME**
+/// (D-8561): the ledger opened as a regular file, its whole read refused
+/// (the host refusal seam, after the call ran), is `Io` naming the ledger,
+/// the read and the host's kind, never an empty ledger.
+#[test]
+fn a_ledger_read_the_host_refuses_is_refused_by_the_ledgers_name() {
+    let (store, _next, _rows) = one_act_recorded("ledger-refused");
+    let ledger = ledger_path(&store.root, Vendor::Zerodha);
+    crate::file::tests::arm_refusal(
+        "read the quarantine ledger",
+        &ledger,
+        0,
+        std::io::ErrorKind::Interrupted,
+    );
+    match read_ledger(&store.root, Vendor::Zerodha) {
+        Err(QuarantineError::Io {
+            path,
+            operation: "read the quarantine ledger",
+            kind: std::io::ErrorKind::Interrupted,
+        }) => assert_eq!(path, ledger),
+        other => panic!("the ledger read is refused: {other:?}"),
+    }
+    assert!(!crate::file::tests::refusal_armed());
+    assert_eq!(ledger_lines(&store), 1, "the control reads it");
+}
+
+/// **AN INDEX IMAGE WHOSE STAGED WRITE THE HOST REFUSES IS NEVER PUBLISHED,
+/// AND ITS ACT'S LINE STANDS** (D-8561): the new image's write to its
+/// staging file is refused (the host refusal seam, after the call ran): the
+/// act answers `Io` naming the staging file, the write and the host's kind,
+/// the published index is the one before the act, and the ledger keeps the
+/// act's line, which the next writer indexes (the index is behind it).
+#[test]
+fn an_index_image_whose_staged_write_is_refused_is_never_published() {
+    let (store, next, rows) = one_act_recorded("staged-refused");
+    let index = index_path(&store.root, Vendor::Zerodha);
+    let before = fs::read(&index).expect("the index");
+    let staging = store.root.join(super::DIR).join(format!(
+        ".{}.quarantine.{}.staging",
+        Vendor::Zerodha.as_str(),
+        std::process::id()
+    ));
+    crate::file::tests::arm_refusal(
+        "write the index image",
+        &staging,
+        0,
+        std::io::ErrorKind::StorageFull,
+    );
+    match record(&store.root, &whole_act(next, &rows, "test")) {
+        Err(QuarantineError::Io {
+            path,
+            operation: "write the index image",
+            kind: std::io::ErrorKind::StorageFull,
+        }) => assert_eq!(path, staging),
+        other => panic!("the staged write refuses the act: {other:?}"),
+    }
+    assert!(!crate::file::tests::refusal_armed());
+    assert_eq!(
+        fs::read(&index).expect("the index"),
+        before,
+        "not published"
+    );
+    assert_eq!(ledger_lines(&store), 2, "the act's line stands");
+}
+
+/// **A DIRECTORY MADE AT THE INDEX'S NAME BEFORE THE RENAME REFUSES THE
+/// PUBLICATION BY THE INDEX'S NAME** (D-8561): after the new image is
+/// staged, another actor puts a directory where the index was (a real
+/// change, the race hook's): the rename onto it is refused by the host, and
+/// the act answers `Io` "publish the index image" naming the index, in the
+/// host's kind for a directory.
+#[test]
+fn a_directory_made_at_the_index_before_its_rename_refuses_the_publication() {
+    let (store, next, rows) = one_act_recorded("staged-race");
+    let index = index_path(&store.root, Vendor::Zerodha);
+    crate::file::tests::arm_race("index image staged", |index| {
+        fs::remove_file(index).expect("the index goes");
+        fs::create_dir(index).expect("a directory comes");
+        fs::write(index.join("held"), b"another actor's").expect("and holds a file");
+    });
+    match record(&store.root, &whole_act(next, &rows, "test")) {
+        Err(QuarantineError::Io {
+            path,
+            operation: "publish the index image",
+            kind: std::io::ErrorKind::IsADirectory,
+        }) => assert_eq!(path, index),
+        other => panic!("the rename is refused: {other:?}"),
+    }
+    assert!(!crate::file::tests::race_armed(), "the race ran");
+    assert!(index.is_dir(), "the other actor's directory is left");
+}
+
+/// **AN INDEX CUT AFTER ITS `fstat` REFUSES THE PROBE AT THE READ IT
+/// CUT** (D-8561): an index level with its ledger, cut by another actor
+/// (a real change, the race hook's) after the probe measured it and before
+/// its header is read, refuses the probe `Io` naming the header read; cut
+/// after the header is read and before the bucket's, it refuses naming the
+/// index read. Both in the host's kind for a short read, never "clear".
+#[test]
+fn an_index_cut_under_a_probe_refuses_it_at_the_read_it_cut() {
+    for (point, keep, operation) in [
+        (
+            "quarantine index opened",
+            0,
+            "read the quarantine index header",
+        ),
+        (
+            "quarantine index header read",
+            64,
+            "read the quarantine index",
+        ),
+    ] {
+        let (store, next, rows) = one_act_recorded("probe-race");
+        record(&store.root, &whole_act(next, &rows, "test")).expect("the second act lands");
+        let index = index_path(&store.root, Vendor::Zerodha);
+        crate::file::tests::arm_race(point, move |index| {
+            let bytes = fs::read(index).expect("the index");
+            fs::write(index, &bytes[..keep]).expect("cut it");
+        });
+        match probe(&store.root, next) {
+            Err(QuarantineError::Io {
+                path,
+                operation: refused,
+                kind: std::io::ErrorKind::UnexpectedEof,
+            }) => assert_eq!((path, refused), (index.clone(), operation)),
+            other => panic!("{point}: the probe is refused: {other:?}"),
+        }
+        assert!(!crate::file::tests::race_armed(), "{point}: the race ran");
+    }
+}
+
+/// **AN AUDIT DIRECTORY MADE BETWEEN THE WRITER'S LOOK AND ITS CREATION IS
+/// TAKEN AS MADE** (D-8561): on a store with no audit directory, another
+/// actor makes it (a real change, the race hook's) after the writer looked
+/// and found none: the creation answers "already there", which is the
+/// directory the writer wanted, and the act lands.
+#[test]
+fn an_audit_directory_made_between_the_look_and_the_creation_is_taken() {
+    let store = Store::new("audit-race");
+    let rows: Vec<Bar> = (0..3).map(|i| bar(i, 640)).collect();
+    let path = minute("QRACC", march());
+    store.month(path, &rows);
+    assert!(!store.root.join(super::DIR).exists());
+    crate::file::tests::arm_race("audit directory looked for", |dir| {
+        fs::create_dir(dir).expect("another actor makes it");
+    });
+    record(&store.root, &whole_act(path, &rows, "test")).expect("the act lands");
+    assert!(!crate::file::tests::race_armed(), "the race ran");
+    assert!(store.root.join(super::DIR).is_dir());
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(_))
+    ));
+}
+
+/// **A WRITER'S LOCK THE HOST REFUSES TO ASK ABOUT IS NO WRITER, SO A
+/// LAGGING INDEX IS `Stale`, NOT `BeingWritten`** (D-8561): with the feed's
+/// lock held and the index behind its ledger, a probe's two looks each ask
+/// whether a writer holds it. Unrefused, both find the holder: the probe is
+/// `BeingWritten`. With the second look's shared `flock` refused otherwise
+/// than by a holder (the flock test seam, before the call), that look finds
+/// no writer, and the probe answers `Stale`: an index that lags with nobody
+/// writing it.
+#[test]
+fn a_lock_the_host_will_not_ask_about_is_no_writer_to_a_probe() {
+    let (store, next, rows) = one_act_recorded("writer-asked");
+    record(&store.root, &whole_act(next, &rows, "test")).expect("the second act lands");
+    let lock = super::lock_path(&store.root, Vendor::Zerodha);
+    let held = crate::flock::Flock::try_lock(fs::File::open(&lock).expect("the lock"), lock)
+        .expect("this test holds the feed's lock");
+    let ledger = ledger_path(&store.root, Vendor::Zerodha);
+    let mut text = fs::read(&ledger).expect("the ledger");
+    text.extend_from_slice(b"1");
+    fs::write(&ledger, &text).expect("the ledger grows past its index");
+    assert!(
+        matches!(
+            probe(&store.root, next),
+            Err(QuarantineError::BeingWritten { .. })
+        ),
+        "the control finds the holder"
+    );
+    crate::flock::tests::refuse_host(
+        crate::flock::tests::HostCall::Shared,
+        1,
+        std::io::ErrorKind::Unsupported,
+    );
+    match probe(&store.root, next) {
+        Err(QuarantineError::Stale {
+            built_from,
+            ledger_len,
+            ..
+        }) => assert_eq!(ledger_len, built_from + 1),
+        other => panic!("a refused ask is no writer: {other:?}"),
+    }
+    assert!(
+        !crate::flock::tests::host_refusal_armed(),
+        "the second look asked"
+    );
+    drop(held);
+}
+
+/// **A QUARANTINE LOCK THE HOST REFUSES IS REFUSED IN THE HOST'S KIND
+/// BEFORE ANYTHING IS WRITTEN** (D-8561): the feed's patient writer lock
+/// refused otherwise than by a holder (the flock test seam, before the
+/// call) is `Io` "lock the quarantine" naming the lock file, never `Held`,
+/// and the ledger holds no new line.
+#[test]
+fn a_quarantine_lock_the_host_refuses_is_refused_before_anything_is_written() {
+    let (store, next, rows) = one_act_recorded("lock-refused");
+    let lock = super::lock_path(&store.root, Vendor::Zerodha);
+    crate::flock::tests::refuse_next_host(
+        crate::flock::tests::HostCall::Registered,
+        std::io::ErrorKind::Unsupported,
+    );
+    match record(&store.root, &whole_act(next, &rows, "test")) {
+        Err(QuarantineError::Io {
+            path,
+            operation: "lock the quarantine",
+            kind: std::io::ErrorKind::Unsupported,
+        }) => assert_eq!(path, lock),
+        other => panic!("the lock refuses the act: {other:?}"),
+    }
+    assert!(!crate::flock::tests::host_refusal_armed());
+    assert_eq!(ledger_lines(&store), 1, "nothing was written");
+}

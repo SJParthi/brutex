@@ -11,7 +11,11 @@
 //! request holds, an indexed sibling at the drop door, a restatement that
 //! only adds bars, an empty month under a basis-witness policy, a published
 //! revision written from another source or other bars, and a revision the
-//! host will not let the door create. Every bar and reason is invented.
+//! host will not let the door create. And (D-8561) the host refusals and
+//! races no input reaches: a reservation or receipt the host will not write
+//! or flush and a source shared lock it refuses (the test seams), and a
+//! revision another writer changes before either read-back (the race hook,
+//! making that change on disk). Every bar and reason is invented.
 
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -467,4 +471,204 @@ fn a_restate_that_restated_nothing_says_nothing() {
             assert_eq!(lines(), 1, "a restate says so once");
         },
     );
+}
+
+/// Revision 1's path for `extension` (`reserved-v1`, `repair-v1`) beside its
+/// bars.
+fn revision_file(root: &Root, extension: &str) -> PathBuf {
+    month()
+        .to_path_buf(&Revision::new(1).unwrap().root(&root.0))
+        .with_extension(extension)
+}
+
+/// THE REAL CHANGE ANOTHER WRITER PAST THE REVISION'S LOCK MAKES (D-8561):
+/// the bar and checksum files at `revision_bars` replaced, byte for byte, by
+/// those of the same month holding `bars`, written as the revision writer
+/// writes them (one batch, so the header is the same) in a root of its own.
+fn written_over(revision_bars: &Path, bars: &[Bar]) {
+    let other = Root::new("other-writer");
+    let mut writer = BarFile::open_or_create(&other.0, month(), SYMBOL).unwrap();
+    writer.append(bars).unwrap();
+    drop(writer);
+    let theirs = month().to_path_buf(&other.0);
+    fs::copy(&theirs, revision_bars).unwrap();
+    fs::copy(
+        theirs.with_extension("crc"),
+        revision_bars.with_extension("crc"),
+    )
+    .unwrap();
+}
+
+/// `bars` with bar 4's close moved: the same stamps, the same count, one
+/// value of another writer's.
+fn with_bar_four_moved(bars: &[Bar]) -> Vec<Bar> {
+    let mut theirs = bars.to_vec();
+    theirs[4].close += 300;
+    theirs
+}
+
+/// **A REVISION WHOSE RESERVATION OR RECEIPT THE HOST WILL NOT WRITE OR
+/// FLUSH IS REFUSED BY THAT STEP** (D-8561): the reservation's flush, the
+/// receipt's write and the receipt's flush, each refused on the file
+/// `publish` has just created (the host refusal seam, after the call ran,
+/// in `io_at`'s shape), answer `Io` naming that file, step and kind. The
+/// reservation's refusal comes before any bar of the revision and claims
+/// nothing visible; the receipt's come after every bar is written and read
+/// back, and say the publication may be visible. Each leaves the file it
+/// refused (a reservation is never removed), so each ordinal is spent.
+#[test]
+fn a_revision_whose_reservation_or_receipt_is_refused_is_refused_by_that_step() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let held = bars(0..6);
+    for (operation, extension, visible) in [
+        ("sync reservation", "reserved-v1", false),
+        ("write receipt", "repair-v1", true),
+        ("sync receipt", "repair-v1", true),
+    ] {
+        let root = Root::new("receipt-refused");
+        let source = original(&root, &held);
+        let at = revision_file(&root, extension);
+        crate::file::tests::arm_refusal(operation, &at, 0, std::io::ErrorKind::StorageFull);
+        match publish(
+            &root.0,
+            month(),
+            SYMBOL,
+            Revision::new(1).unwrap(),
+            source,
+            &held,
+        ) {
+            Err(RepairError::Io {
+                path,
+                operation: refused,
+                kind: std::io::ErrorKind::StorageFull,
+                publication_may_be_visible,
+            }) => {
+                assert_eq!((path, refused), (at.clone(), operation));
+                assert_eq!(publication_may_be_visible, visible, "{operation}");
+            }
+            other => panic!("{operation} refuses the publication: {other:?}"),
+        }
+        assert!(!crate::file::tests::refusal_armed(), "{operation} asked");
+        assert!(at.exists(), "{operation}: the refused file is kept");
+        assert_eq!(served_ordinal(&root), 0, "{operation}: nothing is served");
+    }
+}
+
+/// **A SOURCE WHOSE SHARED LOCK THE HOST REFUSES REFUSES THE PUBLICATION
+/// BEFORE ANYTHING IS RESERVED** (D-8561): the month's shared lock refused
+/// otherwise than by a holder (the flock test seam, before the call) is
+/// `Io` "lock shared" naming the month's lock, in the host's kind, claiming
+/// nothing visible, and no reservation is made. The control: the same
+/// publication then lands.
+#[test]
+fn a_source_whose_shared_lock_the_host_refuses_reserves_nothing() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("shared-refused");
+    let held = bars(0..6);
+    let source = original(&root, &held);
+    let lock = month().with_file(FileKind::Lock).to_path_buf(&root.0);
+    crate::flock::tests::refuse_next_host(
+        crate::flock::tests::HostCall::Shared,
+        std::io::ErrorKind::Unsupported,
+    );
+    match publish(
+        &root.0,
+        month(),
+        SYMBOL,
+        Revision::new(1).unwrap(),
+        source,
+        &held,
+    ) {
+        Err(RepairError::Io {
+            path,
+            operation: "lock shared",
+            kind: std::io::ErrorKind::Unsupported,
+            publication_may_be_visible: false,
+        }) => assert_eq!(path, lock),
+        other => panic!("the shared lock refuses the publication: {other:?}"),
+    }
+    assert!(!crate::flock::tests::host_refusal_armed());
+    assert!(
+        !revision_file(&root, "reserved-v1").exists(),
+        "nothing reserved"
+    );
+    assert_eq!(
+        publish(
+            &root.0,
+            month(),
+            SYMBOL,
+            Revision::new(1).unwrap(),
+            source,
+            &held
+        ),
+        Ok(Published::Created)
+    );
+}
+
+/// **A REVISION ANOTHER WRITER CHANGES BETWEEN ITS APPENDS AND THEIR
+/// READ-BACK IS A CONFLICT, AND NO RECEIPT IS WRITTEN** (D-8561): between
+/// the revision writer's last append and its read-back, another writer past
+/// the revision's lock puts a valid month of its own in the revision's
+/// files (a real change, the race hook's): the read-back meets bar 4 as the
+/// other writer wrote it and answers `Conflict`; the reservation is kept,
+/// no receipt is written and the original is still served.
+#[test]
+fn a_revision_changed_before_its_read_back_is_a_conflict_with_no_receipt() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("appended-race");
+    let held = bars(0..6);
+    let source = original(&root, &held);
+    let theirs = with_bar_four_moved(&held);
+    crate::file::tests::arm_race("revision appended", move |bars| {
+        written_over(bars, &theirs);
+    });
+    assert_eq!(
+        publish(
+            &root.0,
+            month(),
+            SYMBOL,
+            Revision::new(1).unwrap(),
+            source,
+            &held
+        ),
+        Err(RepairError::Conflict)
+    );
+    assert!(!crate::file::tests::race_armed(), "the race ran");
+    assert!(revision_file(&root, "reserved-v1").exists());
+    assert!(!revision_file(&root, "repair-v1").exists(), "no receipt");
+    assert_eq!(served_ordinal(&root), 0);
+}
+
+/// **A PUBLISHED REVISION ANOTHER WRITER CHANGES BEFORE IT IS READ BACK IS
+/// REFUSED `ReadBack` AT THE BAR IT CHANGED, AND NEVER SERVED** (D-8561):
+/// a restatement's revision is published (its own read-back passed and its
+/// receipt names its header); before the door reads it back as a reader
+/// would, another writer puts a valid month with the same header in its
+/// files (a real change, the race hook's). The read-back opens it (the
+/// receipt still matches), meets bar 4 as the other writer wrote it, and
+/// refuses `ReadBack { index: 4 }`; the original is still served.
+#[test]
+fn a_published_revision_changed_before_its_read_back_is_never_served() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("published-race");
+    let held = bars(0..6);
+    original(&root, &held);
+    let mut corrected = held[2];
+    corrected.close += 100;
+    let mut merged = held.clone();
+    merged[2] = corrected;
+    let theirs = with_bar_four_moved(&merged);
+    crate::file::tests::arm_race("revision published", move |bars| {
+        written_over(bars, &theirs);
+    });
+    assert_eq!(
+        restate_month(&root.0, month(), SYMBOL, &[corrected], RESTATE, REASON),
+        Err(RepairError::ReadBack { index: 4 })
+    );
+    assert!(!crate::file::tests::race_armed(), "the race ran");
+    assert!(
+        revision_file(&root, "repair-v1").exists(),
+        "it was published"
+    );
+    assert_eq!(served_ordinal(&root), 0, "and never served");
 }

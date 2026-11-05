@@ -49,6 +49,66 @@ pub(super) fn take_lock_refusal() -> Option<io::ErrorKind> {
     REFUSE_LOCK.with(Cell::take)
 }
 
+/// The other host calls of this module a test can have refused, once, on
+/// its thread (BASE-COV-LIBS-LS1, D-8561): no lock file refuses a `flock`
+/// other than `EWOULDBLOCK`, an `fstat` or a truncate on request, and the
+/// arms that answer those refusals must still be driven.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostCall {
+    /// The one `flock(2)` attempt of a REGISTERED lock (`super::take_held`):
+    /// the noted lock, the patient shared lock and the patient exclusive
+    /// lock. Refused before it is made, so nothing is locked or recorded.
+    Registered,
+    /// `Flock::try_lock_shared`'s `flock(2)`, refused before it is made.
+    Shared,
+    /// `Flock::try_lock_noted`'s `fstat` of the lock file, refused after it
+    /// ran (the shape of `crate::file`'s `fault`).
+    Measure,
+    /// The truncate and `futimens` that clear a holder's note as the guard
+    /// ends, refused after they ran.
+    Clear,
+}
+
+thread_local! {
+    /// Armed by [`refuse_host`]: the call, how many such calls pass first,
+    /// and the kind the refusal carries; consumed by that one call.
+    static REFUSE_HOST: Cell<Option<(HostCall, u32, io::ErrorKind)>> = const { Cell::new(None) };
+}
+
+/// Makes the next `call` on this thread fail, once, with an `io::Error` of
+/// `kind`.
+pub(crate) fn refuse_next_host(call: HostCall, kind: io::ErrorKind) {
+    refuse_host(call, 0, kind);
+}
+
+/// Lets `after` such calls on this thread through, then makes the next one
+/// fail, once, with an `io::Error` of `kind`.
+pub(crate) fn refuse_host(call: HostCall, after: u32, kind: io::ErrorKind) {
+    REFUSE_HOST.with(|armed| armed.set(Some((call, after, kind))));
+}
+
+/// Whether a refusal armed by [`refuse_host`] is still waiting.
+pub(crate) fn host_refusal_armed() -> bool {
+    REFUSE_HOST.with(Cell::get).is_some()
+}
+
+/// The seam each of those calls asks: the armed refusal, taken, when it is
+/// armed for `call` and the calls it lets through have passed; a refusal
+/// armed for another call waits.
+pub(super) fn take_host_refusal(call: HostCall) -> Option<io::Error> {
+    REFUSE_HOST.with(|armed| match armed.get() {
+        Some((armed_for, 0, kind)) if armed_for == call => {
+            armed.set(None);
+            Some(io::Error::new(kind, "refused by the flock test seam"))
+        }
+        Some((armed_for, after, kind)) if armed_for == call => {
+            armed.set(Some((armed_for, after - 1, kind)));
+            None
+        }
+        _ => None,
+    })
+}
+
 /// Makes the next `Flock` unlock on this thread fail, once, with kind
 /// `Other`.
 ///
