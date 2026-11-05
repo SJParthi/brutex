@@ -112,3 +112,59 @@ fn each_header_fact_the_two_forms_disagree_on_refuses_the_audit_by_name() {
     let audited = BarFile::open_existing_audited(&root.0, path, SYMBOL, u64::MAX).unwrap();
     assert_eq!(audited.evidence().header().n_valid, 900);
 }
+
+/// **A SEALED AUDIT OF ANOTHER SYMBOL OR ANOTHER TIMEFRAME DISAGREES WITH
+/// THE RAW MONTH, NAMED** (the comparison asked directly: a sealed form the
+/// door opens was already refused for either by its own head check, so only
+/// a direct call hands the comparison such a pair). An audit equal in every
+/// fact agrees, and none at all has nothing to compare.
+#[test]
+fn a_sealed_audit_of_another_symbol_or_timeframe_disagrees_with_the_raw_month() {
+    let root = Root::new("ls1-agree-direct");
+    let path = month_path(None);
+    write_raw(&root.0, path, &seconds(80));
+    let raw = BarFile::open_existing(&root.0, path, SYMBOL)
+        .unwrap()
+        .audit_checksums(u64::MAX)
+        .unwrap();
+    let evidence = raw.evidence();
+    let same = super::SealedAudit {
+        path: root.0.join("same.sbar"),
+        header: evidence.header(),
+        records_blake3: evidence.data_digest(),
+        audited: crate::sealed::Audited {
+            rows: 80,
+            frames: 1,
+            bytes: 4_096,
+        },
+    };
+    assert_eq!(super::agree(None, &raw), Ok(()));
+    assert_eq!(super::agree(Some(&same), &raw), Ok(()));
+    for (case, header) in [
+        (
+            "symbol",
+            crate::header::Header {
+                symbol_id: SYMBOL + 1,
+                ..evidence.header()
+            },
+        ),
+        (
+            "timeframe",
+            crate::header::Header {
+                timeframe_secs: 60,
+                ..evidence.header()
+            },
+        ),
+    ] {
+        let other = super::SealedAudit {
+            header,
+            path: root.0.join("other.sbar"),
+            ..same
+        };
+        let refused = super::agree(Some(&other), &raw).unwrap_err();
+        assert!(
+            refused.contains("other.sbar") && refused.contains("disagree"),
+            "{case}: {refused}"
+        );
+    }
+}

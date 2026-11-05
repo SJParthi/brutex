@@ -6,8 +6,9 @@
     reason = "the same exception every test module in this workspace takes: a test that cannot \
               panic cannot fail"
 )]
-//! BASE-COV-LIBS-LS1: the write door's time-index steps and its overlap
-//! diagnosis where no other test of this module reached them. A daily month
+//! BASE-COV-LIBS-LS1: the write door's time-index steps, its overlap
+//! diagnosis, its seal and verify steps and its offer, where no other test of
+//! this module reached them. A daily month
 //! that reaches the small-month threshold with two bars in one IST day, and
 //! a header that claims a later last stamp than its last record, through
 //! the doors; the index steps' own refusals and their answers for a handle
@@ -404,4 +405,145 @@ fn a_bar_past_the_last_record_but_inside_the_claimed_range_is_not_held() {
     );
     assert_eq!(fs::read(&bars_path).unwrap(), before, "nothing was written");
     assert_eq!(writer.header().n_valid, 10);
+}
+
+/// **A SEAL PAST EVERY OFFSET THE FILE CAN HOLD IS REFUSED BY THE OFFSET,
+/// AND WRITES NOTHING** (the seal step asked directly: an append asks it
+/// only for blocks its own counter commits). The first block asked starts
+/// past `u64`'s last byte.
+#[test]
+fn a_seal_past_every_offset_is_refused_by_the_offset_and_writes_nothing() {
+    let root = Root::new("seal-past");
+    let tf = Timeframe::MINUTE_1;
+    let mut writer = root.writer(tf);
+    writer.append(&minutes(0, 10)).unwrap();
+    let crc = root.at(tf, FileKind::Checksums);
+    let before = fs::read(&crc).unwrap();
+    let block = u64::MAX / 4_088 + 1;
+    assert_eq!(
+        writer.seal_committed(block * 73, u64::MAX),
+        Err(StoreError::Format {
+            path: root.at(tf, FileKind::Bars),
+            source: crate::format::FormatError::OffsetOverflow,
+        })
+    );
+    assert_eq!(fs::read(&crc).unwrap(), before, "nothing was sealed");
+    assert!(matches!(
+        writer.append(&minutes(10, 1)),
+        Ok(Appended::Committed { n_valid: 11, .. })
+    ));
+}
+
+/// **A BLOCK THE COUNTER DOES NOT COMMIT IS REFUSED BY THE GEOMETRY BEFORE
+/// ANY BYTE OF IT IS READ** (the verify step asked directly: a read asks it
+/// only for the block of a committed record).
+#[test]
+fn a_block_the_counter_does_not_commit_is_refused_before_it_is_read() {
+    let root = Root::new("verify-past");
+    let tf = Timeframe::MINUTE_1;
+    root.writer(tf).append(&minutes(0, 10)).unwrap();
+    let reader = BarFile::open_existing(&root.0, path(tf, FileKind::Bars), SYMBOL).unwrap();
+    let sidecar = root.at(tf, FileKind::Checksums);
+    let mut image = [0_u8; 56];
+    let mut cache = super::VerifiedBlock::EMPTY;
+    assert_eq!(
+        reader.verify_block_of(&sidecar, 5, 0, &mut image, &mut cache),
+        Err(StoreError::Format {
+            path: root.at(tf, FileKind::Bars),
+            source: crate::format::FormatError::BlockNotCommitted {
+                block: 5,
+                blocks: 1
+            },
+        })
+    );
+    assert_eq!(image, [0_u8; 56], "nothing was read");
+}
+
+/// **A MONTH AT ITS LAST GENERATION ANSWERS AN OFFER AS ITS APPEND REFUSES
+/// IT: THE COUNTER'S END, BY NAME, WITH NOTHING WRITTEN.** The header slot
+/// is re-committed at generation `u64::MAX`; a bar that follows the month is
+/// refused by both doors, never wrapped.
+#[test]
+fn a_month_at_its_last_generation_answers_an_offer_as_its_append_refuses() {
+    let root = Root::new("last-generation");
+    let tf = Timeframe::MINUTE_1;
+    let bars_path = root.at(tf, FileKind::Bars);
+    let mut writer = root.writer(tf);
+    writer.append(&minutes(0, 3)).unwrap();
+    let held = writer.header();
+    drop(writer);
+    let last = super::Header {
+        generation: u64::MAX,
+        ..held
+    }
+    .commit()
+    .unwrap();
+    let file = fs::OpenOptions::new().write(true).open(&bars_path).unwrap();
+    file.write_all_at(&last.bytes, last.offset).unwrap();
+    drop(file);
+    let mut writer = root.writer(tf);
+    assert_eq!(writer.header().generation, u64::MAX);
+    let before = fs::read(&bars_path).unwrap();
+    let exhausted = StoreError::Format {
+        path: bars_path.clone(),
+        source: crate::format::FormatError::GenerationExhausted,
+    };
+    assert_eq!(writer.offer(&minutes(3, 1)), Err(exhausted.clone()));
+    assert_eq!(writer.append(&minutes(3, 1)).err(), Some(exhausted));
+    assert_eq!(fs::read(&bars_path).unwrap(), before, "nothing was written");
+}
+
+/// **EVERY READ THE OFFER DOOR MAKES, REFUSED, REFUSES THE OFFER WITH THE
+/// HOST'S REFUSAL BY THE BARS' NAME; PAST THE LAST, IT ANSWERS THE
+/// RESTATEMENT** (the file test seam, one refused read per pass on a fresh
+/// handle). The batch re-offers 72 held bars across two blocks and restates
+/// its last, so the door locates it, compares it, finds no suffix and walks
+/// the overlap: a refused read in that walk is that refusal, named, never a
+/// diagnosis.
+#[test]
+fn every_refused_read_of_an_offer_refuses_it_by_the_bars_name() {
+    let root = Root::new("offer-reads");
+    let tf = Timeframe::MINUTE_1;
+    root.writer(tf).append(&minutes(0, 200)).unwrap();
+    let bars_path = root.at(tf, FileKind::Bars);
+    let mut batch = minutes(10, 72);
+    batch[71].close += 1;
+    let mut refused = 0_u32;
+    for skip in 0.. {
+        let reader = BarFile::open_existing(&root.0, path(tf, FileKind::Bars), SYMBOL).unwrap();
+        super::tests::arm_host_fault(
+            super::Action::Read,
+            &bars_path,
+            skip,
+            std::io::ErrorKind::PermissionDenied,
+        );
+        let offered = reader.offer(&batch);
+        let fired = !super::tests::host_fault_armed();
+        super::tests::disarm_host_fault();
+        if !fired {
+            assert_eq!(
+                offered,
+                Ok(Offered::Unheld {
+                    at: 71,
+                    ts_micros: batch[71].ts_micros,
+                    offer: SealedOffer::Disagrees(Conflict::Restated),
+                }),
+                "past the last read"
+            );
+            break;
+        }
+        assert_eq!(
+            offered,
+            Err(StoreError::Denied {
+                path: bars_path.clone(),
+                action: super::Action::Read,
+            }),
+            "read {skip}"
+        );
+        refused += 1;
+    }
+    assert!(
+        refused >= 3,
+        "the locate, the comparison and the walk read: {refused}"
+    );
 }
