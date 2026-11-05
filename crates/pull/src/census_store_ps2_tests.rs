@@ -1548,3 +1548,31 @@ fn a_seal_whose_stub_cannot_be_written_leaves_the_census_in_place() {
     );
     assert_eq!(fs::read(&legacy).expect("the single file"), vec![7_u8; 40]);
 }
+
+/// A SINGLE FILE AT ITS CEILING ([`MAX_ENTRIES`] entries: one key written
+/// that many times) refuses a new row as too many entries, in the census's
+/// own words, and nothing compacts it: a single file has no partition to
+/// compact into (its guard's other side; the single-file check of
+/// `census_store_tests` stops at a row count that went backwards first).
+#[test]
+fn a_single_file_at_its_ceiling_refuses_a_new_row_uncompacted() {
+    let mut single = Manifest::open(Vendor::Gdfl, &[], &[]).expect("genesis");
+    for rows in 1..=MAX_ENTRIES {
+        single
+            .record_held(row(0, rows))
+            .expect("room below the ceiling");
+    }
+    assert_eq!(single.entries(), MAX_ENTRIES);
+    let mut compacted = false;
+    let why = count_growing(&mut single, row(1, 1), &mut compacted).expect_err("full");
+    assert_eq!(
+        why,
+        ManifestError::TooManyEntries {
+            n_valid: MAX_ENTRIES,
+            batch: 1,
+            limit: MAX_ENTRIES,
+        }
+        .to_string()
+    );
+    assert!(!compacted, "a single file is never compacted");
+}
