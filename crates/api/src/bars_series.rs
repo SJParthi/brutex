@@ -2042,6 +2042,37 @@ mod generation_tests {
             month_of_text("2026-09")
         );
     }
+
+    /// **A JOURNAL THE STORE CANNOT READ IS NO EVIDENCE OF A DELIVERY**
+    /// (D-8664). With a file where the journal's folder belongs, the journal
+    /// read is refused (not "absent"), and an index's life ends at the
+    /// descriptor's archive end exactly as on a store with no journal: a
+    /// refusal never moves the owed span either way.
+    #[test]
+    fn a_journal_that_cannot_be_read_moves_no_index_life() {
+        let held = months(&["2019-01", "2019-03"]);
+        let index = SeriesKey::parse("NSE-INDEX-INDIAVIX").expect("key");
+        let root = crate::scratch::path("lifeof-unreadable-journal");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a root");
+        std::fs::write(
+            root.join("imports"),
+            b"a file where the journal folder belongs",
+        )
+        .expect("a file");
+        assert!(
+            crate::server::import_journal::snapshot(&root).is_err(),
+            "the premise: the journal read is refused, not absent"
+        );
+        assert_eq!(
+            life_of(&root, &index, Vendor::Gdfl, &held),
+            Some((
+                month_of_text("2019-01").expect("m"),
+                month_of_text("2026-09").expect("m")
+            ))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
@@ -2241,14 +2272,29 @@ mod tod_index_tests {
     );
 
     /// **A SUMMARY THAT DOES NOT DESCRIBE ITS FILE IS REFUSED BY NAME, FIELD BY
-    /// FIELD** (BASE-COV-API, D-7346). A minute month's own kept summary
-    /// indexes it; that same summary with one field changed is refused in the
-    /// words of the check it fails: another month, another rung, another
-    /// generation, a row more, a first stamp moved, and each count a gap audit
-    /// cannot certify (rows folded, off the grid, out of order, outside the
-    /// month); and, at once, another month with another generation, which the
-    /// first check names.
+    /// FIELD** (BASE-COV-API, D-7346; widened by D-8664). A minute month's own
+    /// kept summary indexes it; that same summary with one field changed is
+    /// refused in the words of the check it fails: another month, another rung,
+    /// another generation, a row more, a first stamp moved, and each count a
+    /// gap audit cannot certify (rows folded, off the grid, out of order,
+    /// outside the month); and, at once, another month with another generation,
+    /// which the first check names.
+    ///
+    /// Extremes: singles — another month, another rung, another generation, a
+    /// row more, the first stamp a minute early, the last stamp a minute late,
+    /// a row folded more, one off the grid, one out of order, one outside the
+    /// month, the generation at `u64::MAX`; combinations — another month with
+    /// another generation (the month check speaks first), every count a gap
+    /// audit refuses wrong at once (all four named in one sentence), the
+    /// generation, the rows and both stamps moved at once; out of the box —
+    /// the summary left whole and the ASK changed instead (February asked, the
+    /// one-second rung asked), and the summary held against an EMPTY file of
+    /// its own generation (no stamp to compare, so the rows alone refuse it).
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of every field a summary can get wrong, read in one place"
+    )]
     fn a_summary_that_does_not_describe_its_file_is_refused_field_by_field() {
         let mut rows = Vec::new();
         for date in [2_i64, 3, 4] {
@@ -2262,7 +2308,7 @@ mod tod_index_tests {
         assert!(index.is_ok(), "the premise: its own summary indexes it");
         let summary = store::month_summary::read_kept(&bars, held.n_valid).expect("a kept summary");
         let january = YearMonth::new(2024, 1).expect("a month");
-        let changed: [Change; 10] = [
+        let changed: [Change; 14] = [
             (
                 "month",
                 |s| s.month = YearMonth::new(2024, 2).expect("a month"),
@@ -2270,11 +2316,41 @@ mod tod_index_tests {
             ),
             ("rung", |s| s.timeframe_secs = 1, "another month or rung"),
             ("generation", |s| s.generation += 1, "describes generation"),
+            (
+                "generation at its maximum",
+                |s| s.generation = u64::MAX,
+                "describes generation 18446744073709551615 with",
+            ),
             ("rows", |s| s.n_valid += 1, "describes generation"),
             (
                 "first stamp",
                 |s| s.first_ts_micros -= 60 * MICROS,
                 "describes generation",
+            ),
+            (
+                "last stamp",
+                |s| s.last_ts_micros += 60 * MICROS,
+                "describes generation",
+            ),
+            (
+                "generation, rows and both stamps",
+                |s| {
+                    s.generation += 2;
+                    s.n_valid -= 1;
+                    s.first_ts_micros += 60 * MICROS;
+                    s.last_ts_micros -= 60 * MICROS;
+                },
+                "describes generation",
+            ),
+            (
+                "every count at once",
+                |s| {
+                    s.counts.folded += 3;
+                    s.counts.invalid = 4;
+                    s.counts.decreasing = 5;
+                    s.counts.outside_month = 6;
+                },
+                "with 4 off the grid or repeated, 5 out of order and 6 outside the month",
             ),
             ("folded", |s| s.counts.folded += 1, "cannot be counted"),
             (
@@ -2309,6 +2385,276 @@ mod tod_index_tests {
                 .unwrap_or_else(|| format!("{field}: indexed from a summary of another file"));
             assert!(why.contains(said), "{field}: {why}");
         }
+        // OUT OF THE BOX: the summary is whole and the ASK is another month
+        // or another rung; the first check names it all the same.
+        let february = YearMonth::new(2024, 2).expect("a month");
+        for (asked, rung) in [
+            (february, Timeframe::MINUTE_1),
+            (january, Timeframe::SECOND_1),
+        ] {
+            let why = TodIndex::from_summary(&summary, asked, rung, held)
+                .err()
+                .unwrap_or_else(|| format!("{asked} at {}s: indexed", rung.secs()));
+            assert_eq!(why, "its summary describes another month or rung");
+        }
+        // OUT OF THE BOX: the FILE moved, emptied at the summary's own
+        // generation. An empty header has no stamp to compare, so the stamp
+        // check passes and the rows alone refuse the summary.
+        let empty = Held {
+            n_valid: 0,
+            first_ts: 0,
+            last_ts: 0,
+            ..held
+        };
+        let why = TodIndex::from_summary(&summary, january, Timeframe::MINUTE_1, empty)
+            .err()
+            .unwrap_or_else(|| "an empty file indexed from a summary of 1,125 rows".to_owned());
+        assert_eq!(
+            why,
+            format!(
+                "its summary describes generation {g} with 1125 rows, the file is at \
+                 generation {g} with 0 rows",
+                g = held.generation
+            )
+        );
+    }
+
+    /// January 2024's summary of `rows` at `timeframe`, bound to generation 3
+    /// and its own row count, and the header facts it describes. No file: the
+    /// summary is folded in memory, the way the writer folds it.
+    fn folded(rows: &[Bar], timeframe: Timeframe) -> (store::month_summary::MonthSummary, Held) {
+        let january = YearMonth::new(2024, 1).expect("a month");
+        let mut summary = store::month_summary::MonthSummary::new(7, timeframe.secs(), january);
+        for row in rows {
+            summary.fold(row);
+        }
+        summary.generation = 3;
+        summary.n_valid = u64::try_from(rows.len()).expect("a row count");
+        let held = Held {
+            n_valid: summary.n_valid,
+            first_ts: summary.first_ts_micros,
+            last_ts: summary.last_ts_micros,
+            generation: summary.generation,
+        };
+        (summary, held)
+    }
+
+    /// The first `cut` payload bytes of `head` over the rest of `rest`'s,
+    /// decoded: two summaries of one geometry (the same held days, each with
+    /// the same first and last second) spliced into one the decoder accepts,
+    /// because it checks a summary's shape and not that its counts agree.
+    fn spliced(
+        head: &store::month_summary::MonthSummary,
+        rest: &store::month_summary::MonthSummary,
+        cut: usize,
+    ) -> store::month_summary::MonthSummary {
+        let (mut bytes, other) = (head.payload(), rest.payload());
+        assert_eq!(bytes.len(), other.len(), "two summaries of one geometry");
+        bytes.truncate(cut);
+        bytes.extend_from_slice(other.get(cut..).expect("bytes past the cut"));
+        store::month_summary::MonthSummary::decode(store::month_summary::VERSION, &bytes)
+            .expect("a spliced summary of one geometry decodes")
+    }
+
+    /// The payload offsets of January's day entries and of its bitmaps.
+    const DAYS_AT: usize = store::month_summary::HEAD_LEN;
+    const BITS_AT: usize = DAYS_AT + 31 * store::month_summary::DAY_LEN;
+
+    /// Minute bars on each of `dates` from 09:15, `minutes` of them, less
+    /// every (date, minute) in `gaps`.
+    fn minutes_of(dates: &[i64], minutes: i64, gaps: &[(i64, i64)]) -> Vec<Bar> {
+        let mut rows = Vec::new();
+        for &date in dates {
+            for minute in 0..minutes {
+                if !gaps.contains(&(date, minute)) {
+                    rows.push(bar(ist(date, 9, 15 + minute, 0), minute));
+                }
+            }
+        }
+        rows
+    }
+
+    /// **A SUMMARY WHOSE DAYS DO NOT ADD UP IS REFUSED BY NAME** (D-8664).
+    /// The decoder checks a summary's geometry, not that a day's count is the
+    /// units it holds, so a summary read from disk can say a day counts a bar
+    /// it does not hold, or hold days that add up to a row the file does not
+    /// have. Each is built here as a file could carry it: the head of one
+    /// summary over the days of another of the same geometry. The first day
+    /// that disagrees is named with both counts; days that agree one by one
+    /// but not with the file are named by their sum.
+    ///
+    /// Extremes: singles — a minute day counting one bar fewer than it holds,
+    /// one counting one bar more, a one-second day counting one fewer than
+    /// its held seconds, days holding one row more than the file, days
+    /// holding one row fewer, days of a one-second month holding one row more;
+    /// combinations — two days wrong at once (the earlier is named, never the
+    /// later), the month's first and last days each a row short at once (the
+    /// sum says two); out of the box — a splice of two summaries of different
+    /// generations that agree on every count indexes, so the refusals above
+    /// are the counts' and not the splice's.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of every way a summary's days can disagree, read in one place"
+    )]
+    fn a_summary_whose_days_do_not_add_up_is_refused_by_name() {
+        let january = YearMonth::new(2024, 1).expect("a month");
+        let minute = Timeframe::MINUTE_1;
+        let (whole, whole_held) = folded(&minutes_of(&[2, 3, 4], 375, &[]), minute);
+        let (gapped, gapped_held) = folded(&minutes_of(&[2, 3, 4], 375, &[(3, 100)]), minute);
+        let day = |date: i64| 19_722 + date;
+        // THE PREMISE AND THE OUT OF THE BOX CASE: a splice that agrees on
+        // every count indexes, whatever generation either half was bound to.
+        let (mut other, _) = folded(&minutes_of(&[2, 3, 4], 375, &[]), minute);
+        other.generation = 99;
+        let agreeing = spliced(&whole, &other, DAYS_AT);
+        let index = TodIndex::from_summary(&agreeing, january, minute, whole_held)
+            .expect("a splice that agrees on every count indexes");
+        assert_eq!(index.rows_before(ist(3, 0, 0, 0)), 375);
+        let refusals: [(&str, store::month_summary::MonthSummary, Held, String); 4] = [
+            (
+                "a day counting one bar fewer than it holds",
+                spliced(&gapped, &whole, BITS_AT),
+                gapped_held,
+                format!(
+                    "its summary counts 374 bars on day {} and 375 held minutes",
+                    day(3)
+                ),
+            ),
+            (
+                "a day counting one bar more than it holds",
+                spliced(&whole, &gapped, BITS_AT),
+                whole_held,
+                format!(
+                    "its summary counts 375 bars on day {} and 374 held minutes",
+                    day(3)
+                ),
+            ),
+            (
+                "days holding one row more than the file",
+                spliced(&gapped, &whole, DAYS_AT),
+                gapped_held,
+                "its summary's days hold 1125 rows, the file 1124".to_owned(),
+            ),
+            (
+                "days holding one row fewer than the file",
+                spliced(&whole, &gapped, DAYS_AT),
+                whole_held,
+                "its summary's days hold 1124 rows, the file 1125".to_owned(),
+            ),
+        ];
+        for (case, summary, held, said) in refusals {
+            let why = TodIndex::from_summary(&summary, january, minute, held)
+                .err()
+                .unwrap_or_else(|| format!("{case}: indexed"));
+            assert_eq!(why, said, "{case}");
+        }
+        // COMBINED: two days wrong at once; the earlier is the one named.
+        let (twice, twice_held) =
+            folded(&minutes_of(&[2, 3, 4], 375, &[(2, 10), (4, 200)]), minute);
+        let why = TodIndex::from_summary(
+            &spliced(&twice, &whole, BITS_AT),
+            january,
+            minute,
+            twice_held,
+        )
+        .err()
+        .unwrap_or_else(|| "two wrong days indexed".to_owned());
+        assert_eq!(
+            why,
+            format!(
+                "its summary counts 374 bars on day {} and 375 held minutes",
+                day(2)
+            )
+        );
+        // COMBINED: the month's first and last days, each a row short.
+        let (edges, edges_held) = folded(&minutes_of(&[1, 31], 375, &[(1, 0), (31, 374)]), minute);
+        let (edges_whole, _) = folded(&minutes_of(&[1, 31], 375, &[]), minute);
+        assert_eq!(
+            (edges.first_ts_micros, edges.last_ts_micros),
+            (ist(1, 9, 16, 0), ist(31, 15, 28, 0)),
+            "the premise: the gaps are the month's first and last rows"
+        );
+        // Each edge day loses a minute at its own edge, so its first or last
+        // second moves; its bitmap is still 47 bytes either way, so the
+        // halves remain one geometry and only the sum disagrees.
+        let why = TodIndex::from_summary(
+            &spliced(&edges, &edges_whole, DAYS_AT),
+            january,
+            minute,
+            edges_held,
+        )
+        .err()
+        .unwrap_or_else(|| "the month's edge days indexed".to_owned());
+        assert_eq!(why, "its summary's days hold 750 rows, the file 748");
+        // A ONE-SECOND MONTH: the held units are seconds.
+        let second = Timeframe::SECOND_1;
+        let seconds_of = |gaps: &[i64]| -> Vec<Bar> {
+            (0..600)
+                .filter(|s| !gaps.contains(s))
+                .map(|s| bar(ist(2, 9, 15, s), s))
+                .collect()
+        };
+        let (whole_s, _) = folded(&seconds_of(&[]), second);
+        let (gapped_s, gapped_s_held) = folded(&seconds_of(&[301]), second);
+        assert!(
+            whole_s.keeps_seconds() && gapped_s.keeps_seconds(),
+            "dense seconds are kept"
+        );
+        let why = TodIndex::from_summary(
+            &spliced(&gapped_s, &whole_s, BITS_AT),
+            january,
+            second,
+            gapped_s_held,
+        )
+        .err()
+        .unwrap_or_else(|| "a one-second day counting less than it holds indexed".to_owned());
+        assert_eq!(
+            why,
+            format!(
+                "its summary counts 599 bars on day {} and 600 held seconds",
+                day(2)
+            )
+        );
+        let why = TodIndex::from_summary(
+            &spliced(&gapped_s, &whole_s, DAYS_AT),
+            january,
+            second,
+            gapped_s_held,
+        )
+        .err()
+        .unwrap_or_else(|| "one-second days holding a row more indexed".to_owned());
+        assert_eq!(why, "its summary's days hold 600 rows, the file 599");
+    }
+
+    /// **AN INSTANT BEFORE THE MONTH HAS NO ROW BEFORE IT, AND A UNIT PAST A
+    /// DAY'S SPAN SETS NO BIT** (D-8664). `rows_before` of a stamp on the day
+    /// before the month's first is zero, and so is the first instant of the
+    /// month; `TodDay::of` handed a unit past the span its first and last units
+    /// make (an order its callers never hand it) counts the unit and holds no
+    /// bit for it, so a unit below it is still ranked.
+    #[test]
+    fn an_instant_before_the_month_and_a_unit_past_the_span_answer_nothing() {
+        let (summary, held) = folded(&minutes_of(&[2, 3], 375, &[]), Timeframe::MINUTE_1);
+        let january = YearMonth::new(2024, 1).expect("a month");
+        let index = TodIndex::from_summary(&summary, january, Timeframe::MINUTE_1, held)
+            .expect("a whole summary indexes");
+        assert_eq!(
+            index.rows_before(ist(1, 0, 0, 0) - MICROS),
+            0,
+            "31 December"
+        );
+        assert_eq!(index.rows_before(ist(1, 0, 0, 0)), 0, "1 January, midnight");
+        assert_eq!(
+            index.rows_before(ist(3, 0, 0, 0)),
+            375,
+            "2 January held whole"
+        );
+        let day = TodDay::of(5, &[3, 200, 100]);
+        assert_eq!(day.bars, 3, "every unit handed is counted");
+        assert_eq!(day.words.len(), 2, "the span is units 3 to 100: two words");
+        assert_eq!(day.below(101), 2, "units 3 and 100 are held below 101");
+        assert_eq!(day.below(64), 1, "unit 3 alone below 64");
     }
 
     /// **A MONTH WITHOUT A USABLE SUMMARY IS NAMED, NEVER INDEXED FROM COUNTS
@@ -2565,20 +2911,161 @@ mod cloud_mutant_tests {
         };
         assert!(!held.previous_is_kept(past));
         let mut since = 0;
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut reader = |row: u64, _: &Bar| seen.borrow_mut().push(row);
+        let never = super::super::Cancel::never();
         assert_eq!(
-            held.read_stretch(
-                &root,
-                0,
-                (1, 1),
-                &super::super::Cancel::never(),
-                &mut since,
-                |_, _| { unreachable!("an empty stretch reads no row") }
-            ),
+            held.read_stretch(&root, 0, (1, 1), &never, &mut since, &mut reader),
             Ok(0)
         );
+        assert!(seen.borrow().is_empty(), "an empty stretch reads no row");
         assert_eq!(since, 0, "and counts none toward the stride");
+        // THE SAME READER ON A STRETCH OF ONE ROW reads exactly that row, so
+        // the empty answer above is the stretch's and not the reader's.
+        assert_eq!(
+            held.read_stretch(&root, 0, (1, 2), &never, &mut since, &mut reader),
+            Ok(0)
+        );
+        assert_eq!(*seen.borrow(), [1], "the one row of the stretch, read once");
+        assert_eq!(since, 1, "and counted toward the stride");
         assert_eq!(held.days_covered(&root, held.slots.len()), Ok(0));
         assert_eq!(held.days_covered(&root, 0), Ok(1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Records `scope` for `month` of the fixture series in `root`'s ledger.
+    fn quarantine(root: &Path, month: YearMonth, scope: store::quarantine::Scope, stamps: &[i64]) {
+        let series = key();
+        let path = StorePath::new(series.parts(Vendor::Dhan, Timeframe::MINUTE_1, month))
+            .expect("a legal path");
+        store::quarantine::record(
+            root,
+            &store::quarantine::Record {
+                path,
+                scope,
+                cause: store::quarantine::Cause::ZeroPrice,
+                stamps,
+                bars: u64::try_from(stamps.len().max(1)).expect("a count"),
+                revision: 0,
+                source_digest: [9; 32],
+                who: "test",
+                reason: "invented: a quarantine of a generated month",
+            },
+        )
+        .expect("recorded");
+    }
+
+    /// **A PLAN SERVES EVERY MONTH IT CAN AND NAMES EVERY ONE IT CANNOT**
+    /// (D-8664). The quarantine probe answers per held month: a ledger the
+    /// store cannot read is named for that month, a month quarantined whole
+    /// is named and not served, a month quarantined in part is served (the
+    /// served generation is the store's answer, not the plan's). The plan's
+    /// own edges hold too: `admit` asked directly for a key no path can hold
+    /// adds nothing (the build refuses such a key before any month), and a run
+    /// pointing at a slot the plan does not hold is refused by that slot's
+    /// name when ranked, never answered from another month.
+    ///
+    /// Extremes: singles — a ledger that is a folder, a month quarantined
+    /// whole, a month quarantined in part, `admit` of a key no path holds, a
+    /// run whose slot the plan does not hold, an instant at a run's lower edge
+    /// (answered with no lookup); combinations — whole, in part and clean
+    /// months in one window at once (one named, two served), an unreadable
+    /// ledger under a three-month window (every month named, none served);
+    /// out of the box — an unreadable ledger with a month the store does not
+    /// hold: the probe is asked only of held months, so the missing month is
+    /// outside the life and never a fault.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of every way a month is served or named, read in one place"
+    )]
+    fn a_plan_serves_every_month_it_can_and_names_every_one_it_cannot() {
+        use store::quarantine::Scope;
+        let window = [month(5), month(6), month(7)];
+        // SINGLE: a ledger that is a folder names the month it was asked for.
+        let unreadable = scratch("plan-ledger-folder");
+        plant(&unreadable, month(5), 2, &[555, 556]);
+        std::fs::create_dir_all(store::quarantine::ledger_path(&unreadable, Vendor::Dhan))
+            .expect("a folder where the ledger belongs");
+        let named = plan(&unreadable, &[month(5)], Filter::default());
+        assert_eq!(named.slots.len(), 0, "an unprobed month is not served");
+        assert_eq!(named.faults.len(), 1, "{:?}", named.faults);
+        assert!(
+            named.faults[0].starts_with(&format!("{}: ", month(5))),
+            "{:?}",
+            named.faults
+        );
+        // OUT OF THE BOX: a month the store does not hold is never probed.
+        let absent = plan(&unreadable, &[month(5), month(8)], Filter::default());
+        assert_eq!(absent.faults.len(), 1, "{:?}", absent.faults);
+        assert_eq!(absent.outside_life, 1, "August is outside the held life");
+        assert!(absent.holes.is_empty());
+        // COMBINED: an unreadable ledger under three held months.
+        plant(&unreadable, month(6), 3, &[600]);
+        plant(&unreadable, month(7), 4, &[601, 602]);
+        let none = plan(&unreadable, &window, Filter::default());
+        assert_eq!(
+            (none.slots.len(), none.faults.len()),
+            (0, 3),
+            "{:?}",
+            none.faults
+        );
+        assert_eq!(none.total(), 0);
+        let _ = std::fs::remove_dir_all(&unreadable);
+        // SINGLES AND THEIR COMBINATION: whole, in part and clean at once.
+        let root = scratch("plan-quarantines");
+        plant(&root, month(5), 2, &[555, 556]);
+        let june = plant(&root, month(6), 3, &[600, 601, 602]);
+        plant(&root, month(7), 4, &[603]);
+        quarantine(&root, month(5), Scope::WholeMonth, &[]);
+        let june_first = BarFile::open_existing(
+            &root,
+            StorePath::new(key().parts(Vendor::Dhan, Timeframe::MINUTE_1, month(6)))
+                .expect("a legal path"),
+            u32::try_from(brutex_core::universe::fnv1a(SYMBOL) & u64::from(u32::MAX))
+                .expect("the low 32 bits"),
+        )
+        .expect("June opens")
+        .header()
+        .first_ts_micros;
+        assert!(june.exists());
+        quarantine(&root, month(6), Scope::Dropped, &[june_first]);
+        let mut served = plan(&root, &window, Filter::default());
+        assert_eq!(served.faults.len(), 1, "{:?}", served.faults);
+        assert!(
+            served.faults[0].contains("quarantined, not served"),
+            "{:?}",
+            served.faults
+        );
+        assert_eq!(
+            served
+                .slots
+                .iter()
+                .map(|slot| slot.month)
+                .collect::<Vec<_>>(),
+            [month(6), month(7)],
+            "June (in part) and July (clean) are served"
+        );
+        assert_eq!(served.total(), 4);
+        // SINGLE: the lower edge of a run answers its start with no lookup.
+        let run = served.runs[0];
+        let at = served.rank(&root, run.lo).expect("ranked at the edge");
+        assert_eq!((at.count, at.run, at.row), (0, 0, run.start));
+        // SINGLE: `admit` of a key no path can hold adds nothing.
+        let held = (served.slots.len(), served.faults.len(), served.outside_life);
+        served.key = SeriesKey::new("NSE", "INDEX", "not a symbol", None);
+        served.admit(&root, month(8));
+        assert_eq!(
+            (served.slots.len(), served.faults.len(), served.outside_life),
+            held
+        );
+        served.key = key();
+        // SINGLE: a run whose slot the plan does not hold is refused by name.
+        served.runs[0].slot = 9;
+        assert_eq!(
+            served.rank(&root, june_first + 60 * MICROS),
+            Err("slot 9 is not a month of this window".to_owned())
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

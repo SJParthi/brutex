@@ -2969,23 +2969,42 @@ mod tests {
     #[test]
     #[ignore = "a growth bench: cargo test --release -p api held_span_growth -- --ignored --nocapture"]
     fn held_span_growth_bench() {
-        held_span_growth([1_000, 10_000, 100_000], 200, 4);
+        held_span_growth("bench", [1_000, 10_000, 100_000], 200, 4);
     }
 
     /// The bench's own path at 20, 30 and 40 keys and two samples a round,
     /// its growth ratio lifted: a walk per scale, no more, and the span's
-    /// last day hold at any size (BASE-COV-API, D-7344).
+    /// last day hold at any size (BASE-COV-API, D-7344). Its extremes are
+    /// [`the_held_span_answers_at_every_edge_of_its_census`]'s, which runs
+    /// this same path at the sizes where its answer turns.
+    ///
+    /// Extremes: the span's last day at the day cycle's top (20 keys) and
+    /// past it (30 and 40 keys wrap and keep it), asserted before and after
+    /// six one-key appends a scale; one walk a scale at every size.
     #[test]
     fn the_held_span_bench_runs_at_a_small_size() {
-        held_span_growth([20, 30, 40], 2, u128::MAX);
+        held_span_growth("small", [20, 30, 40], 2, u128::MAX);
     }
 
-    /// One census per entry of `sizes`: the first measure, `reps` repeats and
-    /// `reps` one-key appends, in three rounds; the largest scale's quietest
-    /// p99 stays within `ratio` times the smallest's.
-    fn held_span_growth(sizes: [u32; 3], reps: u32, ratio: u128) {
-        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
-        let entry = |n: u32| Entry {
+    /// A GDFL census of `keys` NIFTY option months of September 2020 in
+    /// `root`, written as a manifest, the way the bench builds one.
+    fn option_months(root: &std::path::Path, keys: u32) -> pull::manifest::Manifest {
+        let path = pull::manifest::manifest_path(root, brutex_core::vendor::Vendor::Gdfl);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        let mut manifest =
+            pull::manifest::Manifest::open(brutex_core::vendor::Vendor::Gdfl, &[], &[])
+                .expect("genesis");
+        for n in 0..keys {
+            manifest.record(option_month(n)).expect("records");
+        }
+        std::fs::write(&path, manifest.image()).expect("writes");
+        manifest
+    }
+
+    /// The `n`th invented option month: its last bar on 2020-09-(1 + n % 20).
+    fn option_month(n: u32) -> pull::manifest::Entry {
+        use pull::manifest::{Entry, EntryKey};
+        Entry {
             key: EntryKey {
                 contract: Some(
                     brutex_core::instrument::Contract::parse(&format!(
@@ -3008,26 +3027,137 @@ mod tests {
                 29,
                 59,
             ),
+        }
+    }
+
+    /// The last day a census of the first `keys` option months holds.
+    fn last_day_of(keys: u32) -> String {
+        format!("2020-09-{:02}", 1 + keys.saturating_sub(1).min(19))
+    }
+
+    /// **THE HELD SPAN ANSWERS AT EVERY EDGE OF ITS CENSUS** (BASE-COV-API,
+    /// verify r3 item 3 for this file; D-8665). The bench's own path
+    /// (`held_span_growth`) at the sizes, sample counts and appends where its
+    /// answer turns, each scale's last day asserted before and after its
+    /// appends and its walks counted; then the census shapes the bench never
+    /// builds, each read through `held_spans` and its walks counted.
+    ///
+    /// Extremes: singles — the smallest census (one key: its last day is the
+    /// first of the month), one sample a round, the day cycle's top (20 keys:
+    /// 2020-09-20), one past it (21 keys wrap to the first and keep the
+    /// 20th), appends that move the last day, appends that cannot (40 keys);
+    /// combinations — one key with one sample a round and appends that move
+    /// the last day at once, the cycle's edge (19 keys) with appends that
+    /// cross it at once; out of the box — the part file rewritten at an OLDER
+    /// generation (a store restored from a copy: the remembered span is from
+    /// the future and is walked again, never served), the part file replaced
+    /// by another file between the census read and the span's read-back
+    /// (walked again, never folded from a file it was not read from), and a
+    /// census built in memory with no file (walked at every ask, never
+    /// remembered).
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of every census edge the held span meets, read in one place"
+    )]
+    fn the_held_span_answers_at_every_edge_of_its_census() {
+        let gdfl = brutex_core::vendor::Vendor::Gdfl;
+        // SINGLES AND COMBINATIONS through the bench's own path.
+        held_span_growth("edge-one", [1, 1, 1], 1, u128::MAX);
+        held_span_growth("edge-cycle", [19, 20, 21], 1, u128::MAX);
+        held_span_growth("edge-still", [40, 40, 40], 2, u128::MAX);
+        assert_eq!(last_day_of(1), "2020-09-01");
+        assert_eq!(last_day_of(1 + 3), "2020-09-04", "appends move it");
+        assert_eq!(last_day_of(19), "2020-09-19");
+        assert_eq!(last_day_of(19 + 3), "2020-09-20", "appends cross the edge");
+        assert_eq!(last_day_of(21), "2020-09-20", "past the cycle it holds");
+        // OUT OF THE BOX: the part rewritten at an older generation.
+        let root = store_root("held-edge-older");
+        let path = pull::manifest::manifest_path(&root, gdfl);
+        let newer = option_months(&root, 7);
+        let census = census::read_vendor(&root, gdfl);
+        let (_, spans) = held_spans(Some(&census)).expect("a span");
+        assert_eq!(spans[2].map(|s| day_text(s.last)), Some(last_day_of(7)));
+        assert_eq!(walks_of(&path), 1);
+        let older = option_months(&root, 3);
+        assert!(
+            older.header().generation < newer.header().generation,
+            "the premise: the file went back"
+        );
+        let census = census::read_vendor(&root, gdfl);
+        let (_, spans) = held_spans(Some(&census)).expect("a span");
+        assert_eq!(
+            spans[2].map(|s| day_text(s.last)),
+            Some(last_day_of(3)),
+            "the older file's own span, never the remembered newer one"
+        );
+        assert_eq!(walks_of(&path), 2, "walked again");
+        // OUT OF THE BOX: the part file replaced between the census read and
+        // the span's read-back.
+        let root = store_root("held-edge-replaced");
+        let path = pull::manifest::manifest_path(&root, gdfl);
+        let mut manifest = option_months(&root, 5);
+        let census = census::read_vendor(&root, gdfl);
+        let _ = held_spans(Some(&census)).expect("a span");
+        assert_eq!(walks_of(&path), 1);
+        for n in 5..7 {
+            manifest.record(option_month(n)).expect("records");
+        }
+        std::fs::write(&path, manifest.image()).expect("writes");
+        let census = census::read_vendor(&root, gdfl);
+        let beside = path.with_extension("replaced");
+        std::fs::write(&beside, manifest.image()).expect("writes");
+        std::fs::rename(&beside, &path).expect("replaced under the census");
+        let (_, spans) = held_spans(Some(&census)).expect("a span");
+        assert_eq!(spans[2].map(|s| day_text(s.last)), Some(last_day_of(7)));
+        assert_eq!(walks_of(&path), 2, "walked again, not read back");
+        // OUT OF THE BOX: a census with no file, built in memory.
+        let mut memory = pull::manifest::Manifest::open(gdfl, &[], &[]).expect("genesis");
+        for n in 0..4 {
+            memory.record(option_month(n)).expect("records");
+        }
+        let census = census::VendorCensus {
+            vendor: gdfl,
+            path: std::path::PathBuf::new(),
+            state: census::Census::Held {
+                manifest: census::Manifests::single(memory),
+            },
         };
+        for ask in 0..2 {
+            let (_, spans) = held_spans(Some(&census)).expect("a span");
+            assert_eq!(
+                spans[2].map(|s| day_text(s.last)),
+                Some(last_day_of(4)),
+                "ask {ask}"
+            );
+        }
+        assert_eq!(
+            walks_of(std::path::Path::new("")),
+            0,
+            "a part with no file is never remembered"
+        );
+    }
+
+    /// One census per entry of `sizes` (its stores tagged `tag`): the first
+    /// measure, `reps` repeats and `reps` one-key appends, in three rounds;
+    /// the span's last day asserted before and after the appends and one walk
+    /// a scale; the largest scale's quietest p99 stays within `ratio` times
+    /// the smallest's.
+    fn held_span_growth(tag: &str, sizes: [u32; 3], reps: u32, ratio: u128) {
         let mut hits_p99 = Vec::new();
         let mut appends_p99 = Vec::new();
-        for keys in sizes {
-            let root = store_root(&format!("held-bench-{keys}"));
-            let path = manifest_path(&root, brutex_core::vendor::Vendor::Gdfl);
-            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
-            let mut manifest =
-                Manifest::open(brutex_core::vendor::Vendor::Gdfl, &[], &[]).expect("genesis");
-            for n in 0..keys {
-                manifest.record(entry(n)).expect("records");
-            }
-            std::fs::write(&path, manifest.image()).expect("writes");
+        for (scale, keys) in sizes.into_iter().enumerate() {
+            let root = store_root(&format!("held-bench-{tag}-{scale}-{keys}"));
+            let path = pull::manifest::manifest_path(&root, brutex_core::vendor::Vendor::Gdfl);
+            let mut manifest = option_months(&root, keys);
             let mut census = census::read_vendor(&root, brutex_core::vendor::Vendor::Gdfl);
             let started = std::time::Instant::now();
             let (_, spans) = held_spans(Some(&census)).expect("a span");
             let walk = started.elapsed().as_nanos();
             assert_eq!(
                 spans[2].map(|s| day_text(s.last)),
-                Some("2020-09-20".to_owned())
+                Some(last_day_of(keys)),
+                "{keys} keys"
             );
             // THREE ROUNDS PER SCALE, THE GATE ON THE QUIETEST: on a shared
             // host one round's p99 is the third-largest of 200 samples, and
@@ -3048,7 +3178,7 @@ mod tests {
                 let mut appends = Vec::new();
                 for n in 0..reps {
                     manifest
-                        .record(entry(keys + round * reps + n))
+                        .record(option_month(keys + round * reps + n))
                         .expect("records");
                     std::fs::write(&path, manifest.image()).expect("writes");
                     census = census::read_vendor_after(
@@ -3077,6 +3207,16 @@ mod tests {
                 walks, 1,
                 "{keys} keys: a hit or an append walked the census"
             );
+            // THE APPENDS ARE IN THE SPAN: its last day is the census's after
+            // all three rounds, and asking it again walks nothing.
+            let (_, spans) = held_spans(Some(&census)).expect("a span");
+            assert_eq!(
+                spans[2].map(|s| day_text(s.last)),
+                Some(last_day_of(keys + 3 * reps)),
+                "{keys} keys and {} appends",
+                3 * reps
+            );
+            assert_eq!(walks_of(&path), 1, "{keys} keys: the last ask walked");
             hits_p99.push(hit_rounds.into_iter().min().expect("three rounds"));
             appends_p99.push(append_rounds.into_iter().min().expect("three rounds"));
         }
