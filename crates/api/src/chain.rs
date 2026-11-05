@@ -1209,3 +1209,7 @@ pub(super) async fn chain_json(
 #[cfg(test)]
 #[path = "chain_route_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "chain_cover_tests.rs"]
+mod cover_tests;
