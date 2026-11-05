@@ -3034,7 +3034,7 @@ fn the_cold_share_page_timing_holds_at_its_extremes() {
     let root = root_of("r3-13-cold-share-extremes");
     timing_store(&root, 1);
     let page = |days, open, taken| SharePage { days, open, taken };
-    let cases: [(&[(&str, &str, &str)], usize, [usize; 2], Vec<SharePage>); 6] = [
+    let cases: [ShareCase; 6] = [
         (
             &[("NSE-CASH-RELIANCE", "2024-07-01", "2024-07-01")],
             0,
@@ -3084,6 +3084,20 @@ fn the_cold_share_page_timing_holds_at_its_extremes() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// One extreme of the share-page timing: its `(instrument, from, to)`
+/// pages, the samples of each kind, the `[rounds, readers]` at once, and
+/// what each page must be.
+type ShareCase = (
+    &'static [(&'static str, &'static str, &'static str)],
+    usize,
+    [usize; 2],
+    Vec<SharePage>,
+);
+
+/// One extreme of the profiler's pages: the rounds, the pages, and each
+/// page's day count per answer.
+type ProfileCase = (usize, Vec<&'static str>, Vec<Vec<usize>>);
 
 /// One page of the share-page timing: its days, the open sessions among
 /// them, and the samples taken: cold, warm, flags-only and concurrent.
@@ -3232,7 +3246,7 @@ fn the_profilers_pages_hold_at_their_extremes() {
     );
     let root = root_of("r3-13-profile-extremes");
     timing_store(&root, 1);
-    let cases: [(usize, Vec<&str>, Vec<Vec<usize>>); 8] = [
+    let cases: [ProfileCase; 8] = [
         (0, TIMED.to_vec(), vec![Vec::new(); 5]),
         (1, TIMED.to_vec(), vec![vec![92]; 5]),
         (3, vec![TIMED[2]], vec![vec![92; 3]]),
