@@ -2365,9 +2365,11 @@ function measuredRow(r, page, phase, n, o = {}) {
     const said = /^\d+ loads still had a request in flight after 30 s(?:: (.+))?$/.exec(f.slice(`${page} ${phase}: `.length));
     // On a page that polls, a capped settle is the machine's clock whatever it names.
     if (said !== null && o.polls === true) continue;
+    /** @type {((asked: string) => boolean) | undefined} */
     const answers = o.answers;
-    // Of the requests the cap names, those its stand-in does not answer in full within STAND_IN_AT_ONCE_MS (none: the machine's).
-    const late = said === null || said[1] === undefined || answers === undefined ? null : said[1].split(', ').filter((asked) => !answers(asked));
+    /** Of the requests the cap names, those its stand-in does not answer in full within STAND_IN_AT_ONCE_MS (none: the machine's); null when it names none or no stand-in said. @type {string[] | null} */
+    let late = null;
+    if (said !== null && said[1] !== undefined && answers !== undefined) late = said[1].split(', ').filter((asked) => !answers(asked));
     const named = late === null || late.length === 0 ? '' : ` (its stand-in does not answer in full within ${STAND_IN_AT_ONCE_MS} ms of being asked: ${late.join(', ')})`;
     assert.ok(late !== null && late.length === 0, `${page} ${phase} fails only on how fast the machine drew it, never on: ${f}${named}`);
   }
@@ -6198,6 +6200,27 @@ test('a --writer the sheet had to kill fails the sheet whatever the list of its 
   const plain = await sheetWith(null, 'plain');
   assert.ok(plain.failures.includes(killed('')), plain.failures.join('\n'));
   assert.deepEqual(writerNotes(plain), []);
+});
+
+test('a process that leaves its command\'s group is no longer the group\'s: the stop neither asks nor kills it and says the group left, as L-BRED23-24 states (BASE-REDS-1023 repair 10)', { timeout: 60_000 }, async () => {
+  // Check r10, follow-up E5: a stop follows its command's process group, not
+  // every process that came from it. Pinned here so the limit is a tested
+  // statement: node's detached spawn starts its child in a session of its own.
+  const dir = mkdtempSync(join(tmpdir(), 'bred1023-r10-escape-'));
+  const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
+  const launcher = join(dir, 'escape.mjs');
+  const escaped = join(dir, 'escaped.pid');
+  writeFileSync(launcher, "import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';\nconst c = spawn('sleep', ['1000'], { detached: true, stdio: 'ignore' });\nwriteFileSync(process.argv[2], String(c.pid));\nc.unref();\n");
+  const cmd = sheet.run(`'${process.execPath}' '${launcher}' '${escaped}'; exec sleep 1000`, logFd);
+  const pid = await pidIn(escaped);
+  try {
+    await nap(200);
+    assert.deepEqual(await cmd.stop(), { said: 'was sent SIGTERM and left', killed: false });
+    assert.equal(sheet.groupRunning(cmd.child.pid), false, 'no process of its group is left');
+    assert.ok(running(pid), 'the process that left the group was neither asked nor killed');
+  } finally {
+    process.kill(pid, 'SIGKILL');
+  }
 });
 
 test('a capped settle is the machine\'s only for requests asked of its own stand-in that it answers in full within STAND_IN_AT_ONCE_MS: one asked of another origin, held open, dropped or answered later is refused by name (BASE-REDS-1023 repair 10)', async () => {

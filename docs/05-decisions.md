@@ -85152,8 +85152,10 @@ addendum to the entry it extends; nothing above is edited.
     wording, so no reason added to the words can turn a kill into a pass
     again. Every bound and word is unchanged (BRED-64; L-BRED23-24, which
     now also states a process that leaves the group with `setpgid` or
-    `setsid`, check r10's follow-up E5). Refused: reading the kill from the
-    start of the words, which the next change of wording can break again.
+    `setsid`, check r10's follow-up E5, a limit its own test pins: such a
+    process is neither asked nor killed, and the stop says the group left).
+    Refused: reading the kill from the start of the words, which the next
+    change of wording can break again.
 29. **D-7152: a real browser's row takes the settle cap as the machine's
     only for requests asked of its own stand-in that it answers in full
     within `STAND_IN_AT_ONCE_MS` (check r10, B2).** Addendum 26's name of a
