@@ -1921,15 +1921,14 @@ mod tests {
     fn a_held_reader_is_reused_when_pinned_or_current_and_admitted_again_otherwise() {
         for pinned in [false, true] {
             for current in [false, true] {
-                let mut asked = 0;
+                // NOTHING HELD IS NEVER ASKED ABOUT CURRENCY: the question is
+                // the check's failing arm.
                 assert!(
-                    must_admit(false, pinned, || {
-                        asked += 1;
-                        current
-                    }),
+                    must_admit(false, pinned, || unreachable!(
+                        "nothing held is never asked"
+                    )),
                     "nothing held: pinned={pinned} current={current}"
                 );
-                assert_eq!(asked, 0, "nothing held is never asked about currency");
                 let mut asked = 0;
                 let admit = must_admit(true, pinned, || {
                     asked += 1;
@@ -2335,21 +2334,15 @@ mod tests {
             cache.with_verified(root, || Ok(7), |_| Ok(()), |v| *v),
             Ok(7)
         );
-        let mut reopened = false;
+        // THE REOPEN NEVER RUNS: a successful fallback must not hide the
+        // failed validation, so its closure is the check's failing arm.
         let result = cache.with_verified(
             root,
-            || {
-                reopened = true;
-                Ok(9)
-            },
+            || -> Result<u32, String> { unreachable!("a fallback never hides the failed check") },
             |_| Err("corrupted generation".to_owned()),
             |v| *v,
         );
         assert_eq!(result, Err("corrupted generation".to_owned()));
-        assert!(
-            !reopened,
-            "a successful fallback must not hide the failed validation"
-        );
         assert_eq!(
             cache.with_verified(root, || Ok(9), |_| Err("must open".to_owned()), |v| *v),
             Ok(9)
@@ -2377,13 +2370,13 @@ mod tests {
                 let other = cache.with(
                     std::path::Path::new("/slot-lock-other"),
                     || Ok(5),
-                    |_| Ok(()),
+                    |_| -> Result<(), String> { unreachable!("a new root is opened") },
                     |h| *h,
                 );
                 assert_eq!(other, Ok(5), "another root is served during the open");
                 Ok(7)
             },
-            |_| Err("nothing was cached for this root".to_owned()),
+            |_| -> Result<(), String> { unreachable!("nothing cached here, so nothing refreshes") },
             |h| {
                 assert!(free(&cache), "`f` on a fresh handle runs outside it");
                 *h
@@ -2393,7 +2386,7 @@ mod tests {
 
         let refreshed = cache.with_verified(
             root,
-            || Err("the handle is cached".to_owned()),
+            || -> Result<u32, String> { unreachable!("the handle is cached, so nothing opens") },
             |h| {
                 assert!(free(&cache), "a verified refresh runs outside it");
                 *h += 1;
@@ -2449,10 +2442,7 @@ mod tests {
                 opens += 1;
                 Ok(7)
             },
-            |_| {
-                refreshes += 1;
-                Ok(())
-            },
+            |_| -> Result<(), String> { unreachable!("the first call never refreshes") },
             |h| *h,
         );
         assert_eq!(
@@ -2464,10 +2454,7 @@ mod tests {
 
         let second = cache.with(
             root,
-            || {
-                opens += 1;
-                Ok(99)
-            },
+            || -> Result<u32, String> { unreachable!("the second call reuses the handle") },
             |_| {
                 refreshes += 1;
                 Ok(())
@@ -2502,10 +2489,7 @@ mod tests {
                 opens += 1;
                 Ok(13)
             },
-            |_| {
-                refreshes += 1;
-                Ok(())
-            },
+            |_| -> Result<(), String> { unreachable!("another root opens, it does not refresh") },
             |h| *h,
         );
         assert_eq!(other_root, Ok(13), "a different root is a different handle");
@@ -2521,10 +2505,7 @@ mod tests {
                 opens += 1;
                 Err("no such file".to_owned())
             },
-            |_| {
-                refreshes += 1;
-                Ok(())
-            },
+            |_| -> Result<(), String> { unreachable!("a third root has nothing to refresh") },
             |h| *h,
         );
         assert_eq!(
@@ -2536,10 +2517,7 @@ mod tests {
 
         let still_previous = cache.with(
             std::path::Path::new("/another-root"),
-            || {
-                opens += 1;
-                Ok(0)
-            },
+            || -> Result<u32, String> { unreachable!("the prior handle refreshes, never reopens") },
             |_| {
                 refreshes += 1;
                 Ok(())

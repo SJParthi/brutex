@@ -1428,6 +1428,8 @@ fn restart_cost_with_64_open_runs() {
 /// are still checked and each spread is printed as none.
 #[test]
 fn the_open_runs_timing_runs_at_a_small_size() {
+    // THE HAND-RUN PATH ITSELF, over 65 records twice, before its extremes.
+    costs_with_64_open_runs(65, 2);
     // (runs opened, records, timed calls, runs the scan finds open)
     for (open, size, rounds, found) in [
         (64, 65, 2, 64),
@@ -1572,6 +1574,8 @@ fn restart_cost_of_the_walks_worst_case() {
 /// spread is printed as none.
 #[test]
 fn the_walks_worst_case_timing_runs_at_a_small_size() {
+    // THE HAND-RUN PATH ITSELF, each timed call made twice, before its extremes.
+    costs_of_the_walks_worst_case(2);
     for (walks, rounds) in [
         (432, 2),
         (2, 2),

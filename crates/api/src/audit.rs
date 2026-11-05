@@ -5381,6 +5381,8 @@ mod tests {
     /// timed and no file is made.
     #[test]
     fn the_append_timing_runs_at_a_small_size() {
+        // THE HAND-RUN PATH ITSELF, at three appends, before its extremes.
+        appends_timed("audit-append-timing-small-path", 3, u128::MAX);
         let plain = run_entry(1, 2_000, None);
         let largest = run_entry(u64::MAX, i64::MAX, Some(brutex_core::vendor::Vendor::Gdfl));
         let zero = run_entry(0, i64::MIN, None);

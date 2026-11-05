@@ -67,10 +67,6 @@ async fn text_of(response: axum::response::Response) -> String {
 /// in place of the body); out of the box, a being-written field inside a
 /// body that is not UTF-8 around it, which is not read as being written.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "every arm of the one bounded read beside the others it is read against"
-)]
 async fn a_503_is_read_once_and_what_it_already_says_is_kept() {
     let said = format!(r#"{{"error":"a writer holds the month",{BEING_WRITTEN_FIELD}}}"#);
     let retry_of = |response: &axum::response::Response| {

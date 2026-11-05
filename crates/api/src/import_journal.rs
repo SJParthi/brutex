@@ -861,6 +861,8 @@ pub(crate) mod tests {
     /// printed as none.
     #[test]
     fn the_end_line_timing_runs_at_a_small_size() {
+        // THE HAND-RUN PATH ITSELF, at three runs, before its extremes.
+        end_lines_folded_beside(3);
         // (first id, runs, ends a run, start fields, the ranks timed)
         for (first, runs, ends, start, ranks) in [
             (1, 3, 1, " source=tickstore", Some([1, 2, 2])),

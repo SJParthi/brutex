@@ -2295,3 +2295,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&site.store_root);
     }
 }
+
+#[cfg(test)]
+#[path = "audit_json_cover_tests.rs"]
+mod cover_tests;
