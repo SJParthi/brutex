@@ -84673,6 +84673,176 @@ INT-15's counts.
 `pull::padded::tests::padded_minutes_per_day_match_a_full_read`,
 `a_v1_summary_is_read_as_not_counted_never_as_zero`.
 
+### D-8580 — PSRB-RSI: Wilder's RSI is `indicators::rsi`, a reading with no vocabulary position, the first reading after `period` changes and a `u32` change counter — 2026-11-03
+
+**Decision.** Wilder's RSI over closes for the PSRB strategy family (Pivot R1,
+Supertrend, RSI and Bollinger Bands; NSE F&O stocks, cash, intraday) is the
+module `indicators::rsi`: `Rsi::new(period)` takes a runtime `u16` period,
+1 to 65,535, and `Rsi::fold` takes one candle. It emits no condition bit and
+holds no vocabulary position; it is a reading for the F&O strategy path, whose
+first caller is PSRB-STRAT. The definition is `TradingView`'s published form as
+research report A read it on 3 Nov 2026 (its D3): `change = C_t - C_(t-1)`,
+`avgGain = RMA(max(change, 0), n)`, `avgLoss = RMA(max(-change, 0), n)`, each
+RMA seeded by the simple mean of its first `n` values, `RSI = 100 - 100 / (1 +
+avgGain / avgLoss)`. The first candle only records its close; the first reading
+is after exactly `period` changes, at candle `period` counting from 0, where
+`ta.rma` seeded by `ta.sma` gives its first value. The change counter is a
+`u32` that saturates at `u32::MAX`, far above every `u16` period, so once past
+the seed it never meets the period again and a Wilder step never re-seeds. A
+state carried across sessions keeps smoothing; a daily reset is a new state.
+
+**Rejected.** A `u16` counter: at period 65,535 it saturates at 65,535, meets
+the period again on the next change and re-seeds instead of stepping, and every
+later reading is wrong while 100% coverage still holds (PARTS.md 3.3, repair 2,
+check2 B1); `the_largest_period_smooths_after_its_seed` pins it. A vocabulary
+position: the strategy reads the value against searched levels, which a fixed
+bit cannot carry.
+
+**Why.** The PSRB first run needs the RSI (PARTS.md 3), and the published form
+is the one the strategy's source states. Parity here is parity with the
+published formulas: no output of `TradingView`'s was compared with this module,
+which is UNVERIFIED until PSRB-LAW's charter rows (PARTS.md section 8).
+
+**Proof.** `wilder_smoothing_matches_fixture_rsi_1`,
+`the_reading_appears_after_exactly_period_changes`,
+`the_largest_period_smooths_after_its_seed` in
+`crates/indicators/src/rsi_tests.rs` (PSRB-RSI-I01). Written 5 Nov 2026 on
+`cloud/psrb-rsi-20261103`.
+
+### D-8581 — PSRB-RSI: averages scaled by `trend::SCALE` in `i128`, floored; the ratio bound and `faithful()`; exact comparisons; `ppm` the floor; bounds const-asserted — 2026-11-03
+
+**Decision.** Both averages are held scaled by `trend::SCALE` (10^6, six digits
+below a paisa) in `i128`. The seed is the floored mean (`div_euclid`) and each
+later change takes the floored Wilder step `avg += (x - avg).div_euclid(n)`,
+the form `trend::Atr` uses. Each average then stays within `n` units of `10^-6`
+paisa of the exact real Wilder average and never above it: with the error
+`e = exact - floored`, a step gives `e' = e (1 - 1/n) + d` with `0 <= d < 1`, so
+`0 <= e < n` holds at every step. The RSI is a ratio, so its own bound is
+relative: with `g = G + a`, `l = L + b`, `0 <= a, b < n`,
+`G/(G + L) - g/(g + l) = (bG - aL) / ((G + L)(g + l))` and
+`|bG - aL| < n max(G, L) <= n (G + L)`, so the reading is within
+`10^6 n / (G + L)` ppm of exact Wilder (L-PSRB-RSI-01). `Reading::faithful()` is
+`G + L >= FAITHFUL_FACTOR * period` with `FAITHFUL_FACTOR = 1,000`: true only
+where that bound is within 1,000 ppm, 0.1 RSI point. `above(level)` and
+`below(level)` compare `10^6 G` with `level (G + L)` exactly, so a tie is
+neither; `ppm()` is `floor(10^6 G / (G + L))`, 1,000,000 when `L = 0`, for
+records and seeds only. Every product is bounded below `2^127` by `const`
+assertions taken with `checked_mul` (a move below `2^63`, a scaled move and an
+average below `2^83`, a seed sum below `2^99`, `10^6 G` below `2^103`,
+`level (G + L)` below `2^105`, `FAITHFUL_FACTOR * period` below `2^26`), so no
+checked or saturating arithmetic hides a wrong value.
+
+**Rejected.** A float (`CLAUDE.md` section 7). Rounding to nearest: it can put
+an average above the exact one, so neither bound would hold one-sided. Deciding
+on `ppm`: the floor can equal a level the state is above
+(`a_floor_ppm_equal_to_the_level_is_not_a_tie`).
+
+**Why.** Deterministic integers on every machine, with every error bounded and
+stated rather than hidden, and a guard that says where the bound stops being
+small.
+
+**Proof.** `the_fixed_point_stays_within_period_units_of_exact_wilder`,
+`the_stream_equals_a_from_scratch_recomputation`,
+`a_tie_at_the_level_is_neither_above_nor_below`,
+`ppm_is_the_floor_of_the_exact_ratio`,
+`the_faithful_edge_is_one_thousand_units_per_period`,
+`the_largest_moves_and_period_never_overflow` in
+`crates/indicators/src/rsi_tests.rs` (PSRB-RSI-I02, -I04, -I05).
+
+### D-8582 — PSRB-RSI: both averages zero read 100 with `flat()` true; a long run of unchanged closes departs only where `faithful()` is false — 2026-11-03
+
+**Decision.** When the average loss is 0 the reading is 100, both averages 0
+included: the guard of `TradingView`'s built-in RSI script
+(`down == 0 ? 100 : up == 0 ? 0 : ...`), read from secondary sources and
+UNVERIFIED on their help page, which leaves the case open (the verifier of
+PARTS.md section 1). It is the VIDEO-ORIGINAL reading. `Reading::flat()` says
+both averages are 0, so a caller can treat that reading as undefined instead, a
+labelled variant. In a long run of unchanged closes the exact RSI does not move,
+but each floored average loses `ceil(X / n)` per close, so one reaches 0 before
+the other and the reading is exactly 0 or 100 with `flat()` false where the
+exact RSI has not moved (measured on PARTS.md 3.5's drift: after 20, 58 and 159
+unchanged closes at periods 2, 5 and 14). Every reading more than 0.1 point
+from exact Wilder reads `faithful()` false, so such a reading is unfaithful
+whenever the exact RSI is at least 0.1 and at most 99.9 points, and one that
+reads faithful is within 0.1 point of exact (period 2, closes 100, 10,100,
+10,099, then unchanged: after 19 the reading is 100 and faithful, 100 ppm from
+the exact floor of 999,900; PARTS.md 3.3, repair 2, check2 N1). PSRB-STRAT
+decides only on faithful readings. The argument that such a departure cannot
+make VIDEO-ORIGINAL's signal holds only at the video's 14/20 (an unfaithful
+reading at period 14 needs at least 22 unchanged closes, so the 20-close band
+has no spread and its close-above-band condition is false); it never holds for
+searched periods.
+
+**Rejected.** Reading the both-zero case as 50, or as an error: neither is what
+the source script does. Silently clamping a departure to the last faithful
+value: a fallback that hides a failure (`CLAUDE.md` section 4).
+
+**Why.** The source's own reading stays the default, the undefined reading is
+one call away, and the one place the fixed point can mislead is marked by a
+guard that holds at every period.
+
+**Proof.** `a_flat_series_reads_one_hundred_and_says_it_is_flat`,
+`a_long_unchanged_run_departs_only_where_the_ratio_bound_allows`,
+`the_faithful_edge_is_one_thousand_units_per_period` in
+`crates/indicators/src/rsi_tests.rs` (PSRB-RSI-I03, -I04).
+
+### D-8583 — PSRB-RSI: refusals first and the state unchanged; closes only, timestamps not read; no look-ahead — 2026-11-03
+
+**Decision.** `Rsi::new(0)` is refused (`Refusal::PeriodZero`);
+`Level::from_ppm` above 1,000,000 is refused naming the value
+(`Refusal::LevelAboveMax { ppm }`); `Rsi::fold` runs the candle's own
+`Candle::check_evaluable` before anything moves and refuses with its reason
+(`Refusal::Corrupt`: inverted, out of range, an overflowing range, a negative
+volume, a nonpositive price), so every refusal leaves the state exactly as it
+was. The fold reads the close and nothing else: timestamps are not read, and
+ordering and holes are the caller's (PSRB-STRAT taints a hole candle). A reading
+after candle `t` depends on candles `0..=t` only; the current candle is in its
+own reading, `TradingView`'s convention, and a caller that wants the reading
+before it keeps the previous one, which is `Copy`.
+
+**Rejected.** Refusing a receding or repeated timestamp here: the RSI does not
+read time, and the strategy's hole rule is the place that does.
+
+**Why.** A refusal that moves the state is worse than none (lib.rs's own note on
+`Candle::check`), and a reading that read a later candle would be look-ahead
+(`CLAUDE.md` section 3 rule 7).
+
+**Proof.** `a_corrupt_candle_is_refused_and_changes_nothing`,
+`a_zero_period_is_refused_and_every_other_period_is_accepted`,
+`a_level_above_one_hundred_is_refused_at_the_edge`,
+`no_reading_depends_on_a_later_candle`,
+`a_time_gap_reads_as_contiguous_candles` in
+`crates/indicators/src/rsi_tests.rs` (PSRB-RSI-I05, -I06).
+
+### D-8584 — PSRB-RSI: C-PSRB-RSI-01 and -02, their sizes, ceiling and 2 µs budget; the bench helpers copied per part — 2026-11-03
+
+**Decision.** `C-PSRB-RSI-01` times one step, one `fold` with `reading()` and
+both comparisons, at period 14 after 2,000, 20,000 and 200,000 candles;
+`C-PSRB-RSI-02` the same step after 20,000 candles at periods 14, 140 and
+1,400. `rsi::measure_step` and `rsi::measure_period` take the timings, nine
+rounds of 20,000 samples per size, unsorted, one clock read either side of each
+step; `benches/ratio/psrb_rsi.rs` sorts them, prints each size's best round
+(p50, p99, max, n) and the median and worst rounds' p99, and judges the best
+round, the crate's minimum-over-trials rule: every size's p99 within the
+harness's `CEILING_PERMILLE` (3.0x) of the first size's and inside a 2 µs budget
+(PARTS.md's 300 ns target is an ESTIMATE). A zero p99 at any size fails. The row
+folds into `main`'s check under the PSRB-RSI slot and is not counted in `ROWS`.
+`StepCost`, `summarize` and `flat_within` are this part's own copy of the F&O
+form: a helper shared with PSRB-BOLL or PSRB-STV would make one part wait on
+another, so the duplication is accepted (PARTS.md 2.4).
+
+**Rejected.** Timing the whole fold of a history and dividing: it averages away
+the tail the p99 is for. Sorting inside the crate: gate 11 keeps every sort out
+of the production closure.
+
+**Why.** Constant cost per candle is the claim (`CLAUDE.md` section 3 rule 4),
+and the period is a searched value, so it must not enter the per-candle cost.
+
+**Proof.** `the_bench_measures_both_rows_at_tiny_sizes`,
+`a_cost_is_read_by_rank_and_judged_flat_or_not` in
+`crates/indicators/src/rsi_tests.rs`; the rows in
+`crates/indicators/benches/ratio.rs` (`C-PSRB-RSI-01`, `C-PSRB-RSI-02`).
+
 ### D-7272 — AUT-10 decision 2 (DB-B44): the staleness bound stays 14 days; a documented RBI gap is a gap row, carried and labelled (measured both ways) — 2026-10-22
 
 **Implemented by** R4-27 (the measurement, `pull::riskfree::replay` and
