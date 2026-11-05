@@ -83,8 +83,15 @@ fn a_bare_number_under_the_floor_is_told_of_percent_only_where_it_could_be_one()
             "{refused}"
         );
     }
-    let with_unit = disk_floor("95MB").expect_err("95MB is under the floor");
-    assert!(!with_unit.contains("percent"), "{with_unit}");
+    // WITH A UNIT NO AMOUNT IS UNDER THE FLOOR: the smallest unit, GB, is the
+    // floor itself, so the percent clause is asked only of a bare number. MB is
+    // no unit at all and is refused as one, never as a small floor.
+    assert_eq!(disk_floor("1GB"), Ok(Floor::Bytes(MIN_FLOOR_BYTES)));
+    let with_mb = disk_floor("95MB").expect_err("MB is no unit");
+    assert!(
+        with_mb.contains("is not a floor") && !with_mb.contains("percent"),
+        "{with_mb}"
+    );
 }
 
 /// **A SETTINGS DIRECTORY A SAVE CANNOT LIST REFUSES THE SAVE AS IO.** A save

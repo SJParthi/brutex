@@ -6667,7 +6667,7 @@ pub(crate) mod tests {
     }
 
     /// The directories flushed on this thread since the last call.
-    fn directory_flushes() -> Vec<PathBuf> {
+    pub(super) fn directory_flushes() -> Vec<PathBuf> {
         DIRECTORY_FLUSHES.with(|flushed| std::mem::take(&mut *flushed.borrow_mut()))
     }
 
