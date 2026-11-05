@@ -313,13 +313,14 @@ fn queries_reject_aliases_duplicates_overflow_and_mixed_exact_pages() {
         }
     ));
     let before = ID_BASE + 4;
-    assert!(matches!(
-        parse(&format!("before={before}&limit=2")).unwrap(),
-        Asked::Page {
-            before: Some(b),
-            limit: 2
-        } if b == before
-    ));
+    let Asked::Page {
+        before: Some(asked),
+        limit: 2,
+    } = parse(&format!("before={before}&limit=2")).unwrap()
+    else {
+        panic!("a page of two before {before}");
+    };
+    assert_eq!(asked, before);
     // An id at or below `ID_BASE` names no durable record: a caller error
     // (400), never the journal's 503 (Z1-slice13-F3, D-1762).
     for query in [
@@ -408,6 +409,44 @@ async fn successful_and_refused_handlers_leave_durable_separate_request_records(
     }
 }
 
+/// A handler that counts each poll and answers `status` at once. The tests
+/// that prove a handler was NEVER polled read its count, so the handler's
+/// body is this one `poll`, run wherever an audited handler is polled
+/// (BASE-COV-API-AS2: an `async` block a test never polls leaves its body
+/// uncovered by design).
+struct Counted<'a> {
+    called: &'a AtomicUsize,
+    status: StatusCode,
+}
+
+impl std::future::Future for Counted<'_> {
+    type Output = axum::response::Response;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.called.fetch_add(1, Ordering::Relaxed);
+        std::task::Poll::Ready(self.status.into_response())
+    }
+}
+
+/// A handler that says it was entered and never answers: the client's side
+/// of a request that is cancelled mid-handler.
+struct Parked(Arc<tokio::sync::Notify>);
+
+impl std::future::Future for Parked {
+    type Output = axum::response::Response;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.0.notify_one();
+        std::task::Poll::Pending
+    }
+}
+
 #[tokio::test]
 async fn failed_audit_start_never_polls_the_handler() {
     // `request_audited` journals through a detail slot, so this is kept apart
@@ -419,9 +458,9 @@ async fn failed_audit_start_never_polls_the_handler() {
     let response = request_audited(
         root.0.join("missing"),
         "POST /engine/command".to_owned(),
-        async {
-            called.fetch_add(1, Ordering::Relaxed);
-            StatusCode::ACCEPTED.into_response()
+        Counted {
+            called: &called,
+            status: StatusCode::ACCEPTED,
         },
     )
     .await;
@@ -442,15 +481,11 @@ async fn cancelled_request_records_cancellation_and_never_completed() {
     let _apart = crate::detail::apart_from_slot_owners().await;
     let root = Scratch::new();
     let entered = Arc::new(tokio::sync::Notify::new());
-    let notify = Arc::clone(&entered);
-    let path = root.0.clone();
-    let task = tokio::spawn(async move {
-        request_audited(path, "GET /trades.json".to_owned(), async move {
-            notify.notify_one();
-            std::future::pending::<axum::response::Response>().await
-        })
-        .await
-    });
+    let task = tokio::spawn(request_audited(
+        root.0.clone(),
+        "GET /trades.json".to_owned(),
+        Parked(Arc::clone(&entered)),
+    ));
     tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
         .await
         .unwrap();
@@ -472,15 +507,15 @@ async fn a_write_whose_client_goes_away_records_the_handlers_real_outcome() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (notify, gate) = (Arc::clone(&entered), Arc::clone(&release));
-    let path = root.0.clone();
-    let connection = tokio::spawn(async move {
-        super::request_audited_detached(path, "POST /backtest/run".to_owned(), async move {
+    let connection = tokio::spawn(super::request_audited_detached(
+        root.0.clone(),
+        "POST /backtest/run".to_owned(),
+        async move {
             notify.notify_one();
             gate.notified().await;
             (StatusCode::ACCEPTED, "launched").into_response()
-        })
-        .await
-    });
+        },
+    ));
     tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
         .await
         .unwrap();
@@ -513,10 +548,14 @@ async fn a_busy_journal_start_is_retryable_without_dispatching_the_handler() {
     let index = std::fs::File::open(root.0.join("audit/invocations-v1/index.bin")).unwrap();
     index.try_lock().unwrap();
     let called = AtomicUsize::new(0);
-    let response = request_audited(root.0.clone(), "GET /backtest.json".to_owned(), async {
-        called.fetch_add(1, Ordering::Relaxed);
-        StatusCode::OK.into_response()
-    })
+    let response = request_audited(
+        root.0.clone(),
+        "GET /backtest.json".to_owned(),
+        Counted {
+            called: &called,
+            status: StatusCode::OK,
+        },
+    )
     .await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(called.load(Ordering::Relaxed), 0);
@@ -860,4 +899,108 @@ fn the_backtest_page_is_not_a_registered_route_and_its_json_is() {
         !routes.iter().any(|route| route == "/backtest"),
         "`/backtest` belongs to the front end's fallback: {routes:?}"
     );
+}
+
+/// **A QUESTION THE AUDIT READER CANNOT TAKE IS A 400 BEFORE THE JOURNAL,
+/// AND A HANDLER THAT PANICS IS SAID AS RUN** (BASE-COV-API-AS2). Extremes:
+/// (1) an empty id is no integer; (2) a query of 97 bytes is refused by its
+/// length before any field is read; (3) one of exactly 96 bytes is read;
+/// (4) the same durable id named twice is a duplicate; (5) a durable id
+/// with a `before` is an exact invocation asking for a page; (6) one with a
+/// `limit` likewise; (7) the route answers each refusal 400 with its words;
+/// (8) a handler run through the journal is polled exactly once. Combined:
+/// (9) a duplicate AND an id in the namespace's floor: the first field read
+/// decides, the floor; (10) a durable id with both a `before` and a `limit`
+/// is the exact-and-page refusal, once. Out of the box: (11) a write route's
+/// handler that PANICS is answered as a handler that did not return, with
+/// `handler_completed` true: its work may have run.
+#[tokio::test]
+async fn an_unreadable_question_is_a_400_and_a_panicking_handler_is_said_as_run() {
+    let id = ID_BASE + 7;
+    for (query, said) in [
+        (
+            "invocation=".to_owned(),
+            "audit IDs and limits require canonical positive decimal integers",
+        ),
+        (
+            format!("limit=1&{}", "x".repeat(89)),
+            "audit query exceeds 96 bytes",
+        ),
+        (
+            format!("invocation={id}&invocation={id}"),
+            "duplicate audit query field",
+        ),
+        (
+            format!("invocation={id}&before={id}"),
+            "an exact invocation cannot also request a page",
+        ),
+        (
+            format!("invocation={id}&limit=2"),
+            "an exact invocation cannot also request a page",
+        ),
+        (
+            format!("invocation=5&invocation={id}"),
+            "audit IDs must lie in the durable invocation namespace",
+        ),
+        (
+            format!("invocation={id}&before={id}&limit=2"),
+            "an exact invocation cannot also request a page",
+        ),
+    ] {
+        assert_eq!(parse(&query).err().as_deref(), Some(said), "{query}");
+        let root = Scratch::new();
+        let site = Arc::new(crate::server::Site::load(&root.0.join("masters"), &root.0));
+        let (status, _, body) = audit_json(
+            axum::extract::State(site),
+            format!("/backtest/audit.json?{query}").parse().unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["refusal"], said, "{query}");
+    }
+    // (3): exactly 96 bytes is read.
+    let exact = format!("limit=2&{}", "y".repeat(88));
+    assert_eq!(exact.len(), 96);
+    assert_eq!(
+        parse(&exact).err().as_deref(),
+        Some("audit query requires key=value pairs"),
+        "read past its length check"
+    );
+    // (8): a handler polled once.
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    let called = AtomicUsize::new(0);
+    let response = request_audited(
+        root.0.clone(),
+        "GET /backtest.json".to_owned(),
+        Counted {
+            called: &called,
+            status: StatusCode::OK,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(called.load(Ordering::Relaxed), 1);
+    // (11): a handler that panics.
+    let response =
+        request_audited_detached(root.0.clone(), "POST /backtest/run".to_owned(), panics()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["handler_completed"], true, "{body}");
+    assert!(
+        body["refusal"]
+            .as_str()
+            .unwrap()
+            .starts_with("the audited handler did not return"),
+        "{body}"
+    );
+}
+
+/// A write route's handler that panics before it answers.
+async fn panics() -> axum::response::Response {
+    panic!("a handler that never returns its answer")
 }
