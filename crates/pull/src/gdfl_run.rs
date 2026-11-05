@@ -1897,11 +1897,12 @@ fn claim_verb(
         unstamped: false,
         request: "-".to_owned(),
     };
-    taken
-        .write_claim(&claim)
-        .map_err(|why| RunRefusal::ClaimUnwritten {
-            why: format!("{}: {why}", taken.claim_name()),
-        })?;
+    let written = taken.write_claim(&claim);
+    #[cfg(test)]
+    let written = seam::answer("claim.written", written);
+    written.map_err(|why| RunRefusal::ClaimUnwritten {
+        why: format!("{}: {why}", taken.claim_name()),
+    })?;
     drop(hold);
     let event = telemetry::Event::info(locks::TARGET, "run claimed")
         .with("run", run)
@@ -2787,6 +2788,8 @@ impl ProgressFile {
             .file
             .as_ref()
             .map_or(Ok(()), |file| file.write_all_at(&bytes, 0));
+        #[cfg(test)]
+        let written = seam::answer("progress.written", written);
         match written {
             Ok(()) => {
                 kept.writes = kept.writes.saturating_add(1);
@@ -2884,6 +2887,40 @@ impl Observer for ProgressFile {
         };
         kept.record.state = state.code();
         self.write(&mut kept);
+    }
+}
+
+/// The test seam of a host call no file, folder or name can make fail
+/// (D-7336, the planted fault of `ingest::census_store::seam`): a test plants
+/// a fault under a name, and the next pass of that name on this thread makes
+/// the call and answers the host's error instead, once, as a failing device's
+/// would be. Per thread, so tests running at once never meet each other's
+/// faults; and absent from every build but this crate's own tests.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static FAULTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Plants a host fault for the next pass of `name` on this thread.
+    pub(crate) fn fail(name: &'static str) {
+        FAULTS.with_borrow_mut(|held| held.push(name));
+    }
+
+    /// The host's answer at `name`, or the fault planted there, once.
+    pub(super) fn answer<T>(name: &'static str, host: std::io::Result<T>) -> std::io::Result<T> {
+        let planted = FAULTS.with_borrow_mut(|held| {
+            let found = held.iter().position(|at| *at == name)?;
+            Some(held.remove(found))
+        });
+        match planted {
+            Some(at) => Err(std::io::Error::other(format!(
+                "invented: the host fault planted at {at}"
+            ))),
+            None => host,
+        }
     }
 }
 
