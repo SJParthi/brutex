@@ -709,13 +709,13 @@ mod tests {
     ///
     /// Extremes: singles — the floor itself (no month before, no probe), the
     /// month after the floor, a look back cut by the floor two months in, the
-    /// floor held as the month before, eleven months above the floor with
-    /// nothing held, the last month a path can name with nothing held, its
-    /// look back's last month held (the bound itself), the month past the
-    /// bound held; combinations — the floor held two months back while the look
-    /// back is cut by it at once, the last month with the bound's own month
-    /// held at once; out of the box — a census holding only months after the
-    /// one asked about (never asked, never found).
+    /// floor held as the month before, 1970-12 with nothing held (eleven probes,
+    /// down to the floor), the last month a path can name with nothing held,
+    /// its look back's last month held (the bound itself); combinations — the
+    /// floor held two months back while the look back is cut by it at once, the
+    /// last month with only the month past its bound held at once; out of the
+    /// box — a census holding only months after the one asked about (never
+    /// asked, never found).
     #[test]
     fn the_look_back_stops_at_the_first_month_and_never_looks_forward() {
         let look = |(year, ordinal): (u16, u8), holds: &[(u16, u8)]| {

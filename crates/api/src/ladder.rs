@@ -934,8 +934,9 @@ mod tests {
                 needs: Timeframe::DAY_1,
                 missing: (OWED_NAMED + 5) * 12,
                 of: (OWED_NAMED + 5) * 12,
-                owed: names[..OWED_NAMED]
+                owed: names
                     .iter()
+                    .take(OWED_NAMED)
                     .map(|name| run(name, 1, 12, 12, OwedWhy::NothingHeld))
                     .collect(),
                 runs: OWED_NAMED + 5,

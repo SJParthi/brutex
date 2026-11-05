@@ -9468,7 +9468,7 @@ mod tests {
         let removed = std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex));
         let kind = removed.as_ref().map_err(std::io::Error::kind);
         assert!(
-            matches!(kind, Ok(_) | Err(std::io::ErrorKind::NotFound)),
+            matches!(kind, Ok(()) | Err(std::io::ErrorKind::NotFound)),
             "the month's time index: {removed:?}"
         );
         let path = month_file(root, series, on, FileKind::Bars);

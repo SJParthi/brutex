@@ -887,13 +887,12 @@ fn the_logs_read_are_named_in_their_order() {
 /// the route's sentences with, says what [`Tally::unseen`] says, whatever
 /// the counts.
 ///
-/// Extremes: singles — one missing, two missing, none missing, every failure
-/// seen, one missing of three, one missing where only other files' were seen,
-/// the most a `u32` counts missing, more seen than the close counts;
-/// combinations — more seen than counted with this instrument's and other
-/// files' both past the close at once, the `u32` bound missing with none seen
-/// at once; out of the box — every count at `u64::MAX` (the sums saturate,
-/// none missing).
+/// Extremes: singles — one missing, two missing, none counted, every one seen,
+/// one missing of three, only other files' seen, this instrument's past the
+/// close, the most a `u32` counts missing; combinations — this instrument's
+/// and other files' both past the close at once, the `u32` bound missing beside
+/// refusals that were seen at once; out of the box — every count at
+/// `u64::MAX` (the sums saturate, none missing).
 #[test]
 fn the_words_for_refusals_no_log_holds_are_the_routes_for_one_and_for_many() {
     let most = u64::from(u32::MAX);
@@ -904,8 +903,10 @@ fn the_words_for_refusals_no_log_holds_are_the_routes_for_one_and_for_many() {
         (3, 2, 1, 0),
         (3, 1, 1, 1),
         (5, 0, 4, 1),
+        (2, 3, 0, 0),
         (most, 0, 0, u32::MAX),
         (1, 5, 5, 0),
+        (most + 2, 1, 1, u32::MAX),
         (u64::MAX, u64::MAX, u64::MAX, 0),
     ] {
         assert_eq!(

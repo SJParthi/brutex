@@ -290,6 +290,7 @@ fn a_record_that_cannot_hold_a_note_keeps_what_it_holds() {
     let days = [on, on, on, on, on, on, day("2025-03-07"), on];
     let said = corporate_action_notes(&store, "SPLITCO", &days, &mut records);
     assert_eq!(said["served"], true, "{said:#}");
+    assert_eq!(records.len(), 7, "the day past the records writes nothing");
     // NO OBJECT, OR NO LIST TO WRITE INTO: as it was.
     assert_eq!(records[..3], before[..3]);
     // `notes` TEXT ALONE: the note goes beside it, the text kept.
@@ -904,14 +905,13 @@ fn a_walk_stops_where_the_file_stops() {
 /// HOLDS NO REQUEST BACK** (DB-A34, DB-N19).
 ///
 /// Extremes: singles — a journal with no index read by `/ingest`'s reader, a
-/// journal replaced by another file (a new inode), a journal cut back in
-/// place, the walk-at-start mark on a tail with nothing new, a journal walked
-/// at start after its replacement, one walked at start after it was cut back,
-/// a request after the walk at start (nothing new), a mark taken off a path no
-/// tail holds; combinations — a replacement holding the very same bytes (only
-/// the inode differs) at once, a cut back to the run record alone (its
-/// refusal gone with it) at once; out of the box — the mark taken off a path
-/// that was never a journal.
+/// journal cut back in place (the same inode), a cut back to the run record
+/// alone (its refusal gone with it), the walk-at-start mark on a tail with
+/// nothing new, the walk at start after a cut back, a request after the walk
+/// at start (nothing new); combinations — a new inode holding the very same
+/// bytes and length (only its identity tells it) read by a request at once,
+/// the same replacement walked at start at once; out of the box — the mark
+/// taken off a path that was never a journal.
 #[test]
 fn a_journal_replaced_or_cut_back_under_its_tail_is_walked_again() {
     let root = root_of("cover-pull-restart");
@@ -971,13 +971,12 @@ fn a_journal_replaced_or_cut_back_under_its_tail_is_walked_again() {
 /// place by another symbol's, by a run or by bytes that will not decode is a
 /// fault named by its source, never the symbol's refusal.
 ///
-/// Extremes: singles — an indexed refusal that names no day, the indexed
-/// record replaced by another symbol's, by a run, by bytes that will not
-/// decode, a run past the cover, damaged bytes past the cover, a refusal of
-/// the symbol past the cover, a journal of one run; combinations — damage at
-/// the indexed record and past the cover at once, a run and a refusal past
-/// the cover at once; out of the box — 256 bytes of one repeated byte
-/// standing as a record.
+/// Extremes: singles — a journal of one run, an indexed refusal that names no
+/// day, the indexed record replaced by another symbol's, the same replaced by
+/// a run, a run past the cover, damaged bytes past the cover, a refusal of the
+/// symbol past the cover; combinations — damage at the indexed record and past
+/// the cover at once, a run and a refusal past the cover at once; out of the
+/// box — 256 bytes of one repeated byte standing as the indexed record.
 #[test]
 fn through_the_index_a_wrongly_named_record_is_a_fault() {
     let root = root_of("cover-pull-index");
@@ -1079,13 +1078,18 @@ fn through_the_index_a_wrongly_named_record_is_a_fault() {
 ///
 /// Extremes: singles — the import journal a folder, the day ledger a folder,
 /// `audit` a file under the gap ledger, `audit` a file under the pull journal
-/// read by a request, at start, and by `/ingest`, the pull journal a folder at
-/// start, the same folder on a request; combinations — the import journal and
-/// the day ledger both folders on one GDFL page at once, the gap ledger and
-/// the pull journal both under a file on one Zerodha page at once; out of the
-/// box — a folder of 64 entries at the pull journal's path, sized like a
-/// journal of whole records.
+/// read by a request, the same at start, the same by `/ingest`'s reader, the
+/// day's import and quality null under refused sources, each refusal said in
+/// the notes; combinations — the import journal and the day ledger both
+/// folders on one GDFL page at once, the gap ledger and the pull journal both
+/// under a file on one Zerodha page at once; out of the box — a folder of 64
+/// entries at the pull journal's path, sized like a journal of whole records,
+/// walked at start and on a request.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "three stores, each read by every reader of its sources, top to bottom"
+)]
 fn a_folder_or_a_file_where_a_source_goes_is_named_never_read_as_empty() {
     // THE GDFL PAGE: the import journal and the day ledger are folders.
     let root = root_of("cover-folders-gdfl");
@@ -1201,12 +1205,12 @@ fn a_folder_or_a_file_where_a_source_goes_is_named_never_read_as_empty() {
 /// records, one past what a month of days can; February is text; a writer
 /// holds March. Damage is answered as damage beside the writer.
 ///
-/// Extremes: singles — a month of 65 records, a month whose bytes are no bar
-/// file, a month a writer holds, every day of the damaged months, every day
-/// of the held month, a page of no days, the unreadable day bar's word, the
-/// held day bar's word; combinations — damaged and held months on one page at
-/// once (no "ask again" over damage), 65 records all on one day at once; out
-/// of the box — a text file where the month's bars go.
+/// Extremes: singles — a month of 65 records, a month a writer holds, every
+/// day of the damaged months, every day of the held month, a page of no days,
+/// the unreadable day bar's word, the held day bar's word; combinations —
+/// damaged and held months on one page at once (no "ask again" over damage),
+/// 65 records all on one day at once; out of the box — a text file where the
+/// month's bars go.
 #[test]
 fn a_day_bar_month_that_will_not_read_is_said_on_each_of_its_days() {
     let root = root_of("cover-day-bars");
@@ -1275,15 +1279,15 @@ fn a_day_bar_month_that_will_not_read_is_said_on_each_of_its_days() {
 /// REFUSED; ONE IT CAN NAME AND DOES NOT HOLD IS ABSENT; A SERIES WHOSE FIRST
 /// HELD MONTH WILL NOT OPEN STARTS NOWHERE** (D-3315, D-3350).
 ///
-/// Extremes: singles — a symbol not in the store's case, an empty symbol, an
-/// option kind with no contract on GDFL (no retired-key probe), a repaired
-/// month whose revision's bars are gone, a first held month that is text, the
-/// same with the months back known empty, a first held month that reads (its
-/// first bar), a page whose months back hold one; combinations — a revision
-/// gone under a month whose original is still there at once, a text month
-/// ahead of the page with nothing held behind it at once; out of the box — a
-/// lowercase symbol, which the census key reader never makes, handed straight
-/// to the month probe.
+/// Extremes: singles — an empty symbol, an option kind with no contract on
+/// GDFL (no retired-key probe), a repaired month served from its revision, the
+/// same month once the revision's bars are gone, a first held month that is
+/// text, the same with the months back known empty, a first held month that
+/// reads (its first bar), a page whose months back hold one; combinations — a
+/// revision gone under a month whose original is still there at once, a text
+/// month ahead of the page with nothing held behind it at once; out of the box
+/// — a lowercase symbol, which the census key reader never makes, handed
+/// straight to the month probe.
 #[test]
 fn a_month_the_store_cannot_name_or_open_is_refused_and_starts_nothing() {
     let root = root_of("cover-months");
@@ -1494,6 +1498,10 @@ fn each_odd_day_is_said_for_what_it_is() {
 /// refusals no log read holds at once; out of the box — a degraded entry whose
 /// `says` is a number.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one day's every source in turn, each phrase beside the input that makes it"
+)]
 fn each_phrase_a_days_sources_owe_is_said() {
     let session = record_on("2024-01-02");
     let calendar = json!({});
@@ -1754,7 +1762,7 @@ fn the_envelope_names_every_source_that_would_not_read() {
     let said = PullUnread::Failed("an invented journal failure".to_owned()).note();
     assert_eq!(
         source_faults(None, None, &gaps, Some(&failed)),
-        [said.clone()]
+        std::slice::from_ref(&said)
     );
     assert_eq!(
         source_faults(Some(&journal), Some(&quality), &gaps, Some(&failed)),
