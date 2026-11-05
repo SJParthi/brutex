@@ -265,6 +265,7 @@ mod tests {
             "",
             "&kind=source&trade=0",
             "&kind=source&before=0",
+            "&kind=source&after=0",
             "&kind=candles",
             "&kind=candles&trade=0&before=0",
             "&kind=source&feed=fixture",

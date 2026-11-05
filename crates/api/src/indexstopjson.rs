@@ -331,3 +331,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "indexstopjson_cover_tests.rs"]
+mod cover_tests;
