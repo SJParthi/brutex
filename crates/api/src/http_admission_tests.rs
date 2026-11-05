@@ -657,12 +657,14 @@ const BUSY_CHILD: &str = "BRUTEX_HTTP_ADMISSION_BUSY_TEST_CHILD";
 /// waits, so at least two asks are refused before one is admitted. Run in a
 /// child: holding every slot here would refuse other tests' requests.
 ///
-/// Extremes: singles — a plain ask of a full pool (429 with no audit id), a
-/// journaled ask of a full pool (asked again until admitted), the first ask
-/// after the slots come back (the route's answer, journaled once); combinations
-/// — a refused plain ask and a waiting journaled ask over one held pool at
-/// once, a pool freed while an ask waits in its queue; out of the box — the
-/// pool held by the test itself rather than by other requests.
+/// Extremes: singles — a plain ask of a full pool with no fetch metadata and
+/// one with `same-origin` (each 429 with no audit id and no record), a
+/// journaled ask of a full pool (asked again until admitted), a journaled ask
+/// with `same-origin` and one with no fetch metadata, the asks after the slots
+/// come back (the route's answers, one record each, labelled with the route);
+/// combinations — two journaled asks waiting on one held pool at once, a pool
+/// freed while asks wait in its queue; out of the box — the pool held by the
+/// test itself rather than by other requests.
 #[test]
 fn a_journaled_read_asked_while_every_slot_is_held_waits_for_one() {
     if std::env::var_os(BUSY_CHILD).is_none() {
@@ -704,25 +706,41 @@ fn a_journaled_read_asked_while_every_slot_is_held_waits_for_one() {
                 let held = crate::detail::hold_every_slot()
                     .await
                     .expect("this child owns every slot");
-                let refused = ask(addr, "GET", "/backtest.json", &local, "").await;
-                assert!(status_line(&refused).contains("429"), "{refused}");
+                const SAME: &str = "Sec-Fetch-Site: same-origin\r\n";
+                for extra in ["", SAME] {
+                    let refused = ask(addr, "GET", "/backtest.json", &local, extra).await;
+                    assert!(status_line(&refused).contains("429"), "{refused}");
+                    assert!(
+                        !head_of(&refused).contains("x-brutex-request-audit"),
+                        "{refused}"
+                    );
+                }
                 assert!(
-                    !head_of(&refused).contains("x-brutex-request-audit"),
-                    "{refused}"
+                    !store.join("audit").exists(),
+                    "a refused ask opens no journal"
                 );
-                let waiting = tokio::spawn(async move {
-                    ask_journaled(addr, "GET", "/backtest.json", &local, "").await
-                });
+                let waiting: Vec<_> = ["", SAME]
+                    .into_iter()
+                    .map(|extra| {
+                        let local = local.clone();
+                        tokio::spawn(async move {
+                            ask_journaled(addr, "GET", "/backtest.json", &local, extra).await
+                        })
+                    })
+                    .collect();
                 tokio::time::sleep(std::time::Duration::from_millis(700)).await;
                 drop(held);
-                let answer = waiting.await.expect("the journaled ask returns");
-                assert!(!status_line(&answer).contains("429"), "{answer}");
-                assert!(
-                    head_of(&answer).contains("x-brutex-request-audit:"),
-                    "{answer}"
-                );
+                for asked in waiting {
+                    let answer = asked.await.expect("the journaled ask returns");
+                    assert!(!status_line(&answer).contains("429"), "{answer}");
+                    assert!(
+                        head_of(&answer).contains("x-brutex-request-audit:"),
+                        "{answer}"
+                    );
+                }
                 let rows = journal::page(store, None, 32).expect("a readable journal");
-                assert_eq!(rows.len(), 1, "one admitted read, one record");
+                assert_eq!(rows.len(), 2, "two admitted reads, one record each");
+                assert!(rows.iter().all(|row| row.label == "GET /backtest.json"));
             },
         )
         .await;
