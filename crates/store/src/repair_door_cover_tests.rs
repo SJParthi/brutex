@@ -333,3 +333,138 @@ fn a_revision_the_host_will_not_let_the_door_create_is_refused_by_the_host_body(
     }
     assert_eq!(served_ordinal(&root), 0);
 }
+
+/// **A REFUSED SOURCE RELEASE AFTER A DROP'S REVISION IS WRITTEN SAYS THE
+/// PUBLICATION MAY BE VISIBLE, AND IT IS** (the flock test seam: one unlock,
+/// the revision writer's, is let through first). The same request again
+/// finds the revision it was told may exist.
+#[test]
+fn a_refused_source_release_after_a_drop_revision_says_it_may_be_visible() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("drop-release");
+    let held = bars(0..5);
+    let source = original(&root, &held);
+    let first = Revision::new(1).unwrap();
+    let drop = [held[2].ts_micros];
+    crate::flock::tests::refuse_unlock(1, std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        publish_without(&root.0, month(), SYMBOL, first, source, &drop, REASON),
+        Err(RepairError::Io {
+            path: month().with_file(FileKind::Lock).to_path_buf(&root.0),
+            operation: "release shared lock",
+            kind: std::io::ErrorKind::PermissionDenied,
+            publication_may_be_visible: true,
+        })
+    );
+    assert_eq!(
+        publish_without(&root.0, month(), SYMBOL, first, source, &drop, REASON),
+        Ok(Published::Reused)
+    );
+}
+
+/// **A RESTATE BESIDE A DROP THAT OFFERS NONE OF ITS STAMPS HOLDS NOTHING
+/// BACK.** The quarantine names one stamp of the month; a restate that only
+/// adds a later bar takes every bar it offers, holds none back, and serves
+/// the dropped stamp still dropped.
+#[test]
+fn a_restate_beside_a_drop_that_offers_none_of_its_stamps_holds_nothing_back() {
+    let root = Root::new("none-held-back");
+    let held = bars(0..6);
+    original(&root, &held);
+    crate::quarantine::apply_month(
+        &root.0,
+        month(),
+        SYMBOL,
+        &[held[2].ts_micros],
+        crate::quarantine::Why {
+            cause: crate::quarantine::Cause::ForeignLevel,
+            who: "ls1",
+            reason: REASON,
+        },
+    )
+    .unwrap();
+    let added = bars(6..7);
+    match restate_month(&root.0, month(), SYMBOL, &added, RESTATE, REASON).unwrap() {
+        MonthRestate::Restated {
+            added: 1,
+            held_back,
+            ..
+        } => assert!(held_back.is_empty(), "{held_back:?}"),
+        other => panic!("the added bar is restated: {other:?}"),
+    }
+    let served = BarFile::open_existing(&root.0, month(), SYMBOL).unwrap();
+    let stamps: Vec<i64> = (0..served.header().n_valid)
+        .map(|index| served.read_record(index).unwrap().ts_micros)
+        .collect();
+    let mut expected: Vec<i64> = held.iter().map(|bar| bar.ts_micros).collect();
+    expected.remove(2);
+    expected.push(added[0].ts_micros);
+    assert_eq!(stamps, expected);
+}
+
+/// Runs `body` in a child of this test binary that runs `test` alone, so it
+/// meets the process as a fresh one has it (no telemetry sink installed).
+fn in_a_fresh_process(test: &str, body: impl FnOnce()) {
+    const CHILD: &str = "BRUTEX_LS1_FRESH_PROCESS_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        body();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let said = format!("child {test} failed or ran no test:\n{stdout}\n{stderr}");
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{said}"
+    );
+}
+
+/// **A RESTATE THAT RESTATED NOTHING WRITES NO `store.restate` LINE; ONE THAT
+/// RESTATED WRITES ONE.** In a fresh process with its own sink: the line
+/// names a restated month and nothing else (the event asked directly with a
+/// month that had nothing new; the door's own restate as the control).
+#[test]
+fn a_restate_that_restated_nothing_says_nothing() {
+    in_a_fresh_process(
+        "repair::door_cover_tests::a_restate_that_restated_nothing_says_nothing",
+        || {
+            let log = Root::new("restate-log");
+            let sink = telemetry::install(
+                &telemetry::Config::new(&log.0).with_min_level(telemetry::Level::Trace),
+            )
+            .expect("a fresh process has no sink");
+            let lines = || {
+                telemetry::tail(
+                    &log.0,
+                    sink.keep_files(),
+                    &telemetry::Query::last(64).from_target("store.restate"),
+                )
+                .records
+                .len()
+            };
+            note_restated(
+                month(),
+                REASON,
+                &MonthRestate::NothingNew {
+                    ordinal: 0,
+                    held_back: Vec::new(),
+                },
+            );
+            assert_eq!(lines(), 0, "nothing restated, nothing said");
+            let root = Root::new("restate-control");
+            original(&root, &bars(0..3));
+            assert!(matches!(
+                restate_month(&root.0, month(), SYMBOL, &bars(3..4), RESTATE, REASON),
+                Ok(MonthRestate::Restated { .. })
+            ));
+            assert_eq!(lines(), 1, "a restate says so once");
+        },
+    );
+}

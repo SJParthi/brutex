@@ -547,3 +547,95 @@ fn every_refused_read_of_an_offer_refuses_it_by_the_bars_name() {
         "the locate, the comparison and the walk read: {refused}"
     );
 }
+
+/// Runs `body` in a child of this test binary that runs `test` alone, with
+/// `dir` as its working directory, so a relative store root resolves inside
+/// a scratch folder of this test's own. The parent asserts the child ran
+/// exactly one test and passed; the environment, and with it a coverage
+/// run's profile path, is inherited.
+fn in_a_fresh_process_at(test: &str, dir: &Path, body: impl FnOnce()) {
+    const CHILD: &str = "BRUTEX_LS1_FRESH_PROCESS_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        body();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let said = format!("child {test} failed or ran no test:\n{stdout}\n{stderr}");
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{said}"
+    );
+}
+
+/// **A RELATIVE STORE ROOT CONFIRMS EVERY DIRECTORY UP TO AND INCLUDING THE
+/// ROOT ITSELF.** With the working directory as the root (`""`), the walk
+/// from the month's own directory runs out of parents at the root rather
+/// than stepping above it: the month's file is confirmed, and every
+/// directory between it and the root, the root included, is deferred once.
+#[test]
+fn a_relative_store_root_confirms_every_directory_up_to_the_root() {
+    let scratch = Root::new("relative-root");
+    in_a_fresh_process_at(
+        "file::index_cover_tests::a_relative_store_root_confirms_every_directory_up_to_the_root",
+        &scratch.0,
+        || {
+            let path = path(Timeframe::MINUTE_1, FileKind::Bars);
+            let relative = path.to_path_buf(Path::new(""));
+            assert!(relative.is_relative());
+            fs::create_dir_all(relative.parent().unwrap()).unwrap();
+            fs::write(&relative, b"a month's bytes").unwrap();
+            let batch = super::DurableBatch::new(super::BatchFlush::EveryFile);
+            assert_eq!(batch.confirm_month(Path::new(""), path), Ok(true));
+            let deferred = batch.deferred();
+            assert!(deferred.confirmed.contains(&relative));
+            let above: Vec<PathBuf> = relative
+                .ancestors()
+                .skip(1)
+                .map(Path::to_path_buf)
+                .collect();
+            assert_eq!(above.last().map(PathBuf::as_path), Some(Path::new("")));
+            for dir in &above {
+                assert!(deferred.directories.contains(dir), "{dir:?}");
+            }
+            assert_eq!(deferred.directories.len(), above.len());
+        },
+    );
+}
+
+/// **A LEVEL THAT TURNS UP BETWEEN THE WALK AND ITS CREATION IS TAKEN AS
+/// ANOTHER OPENER'S AND FLUSHED, AND THE LAST STEP STILL NAMES A LEAF THAT
+/// IS NO DIRECTORY** (the level step asked directly: the door refuses a link
+/// below the root before it). A dangling link at the leaf is "missing" to
+/// the walk and "already there" to its `create_dir`, as a level another
+/// opener made in between would be: its parent is flushed, and the final
+/// `create_dir_all` refuses the leaf by name.
+#[test]
+fn a_level_that_turns_up_before_its_creation_is_taken_as_made() {
+    let root = Root::new("raced-level");
+    let parent = root.0.join("vendor");
+    fs::create_dir_all(&parent).unwrap();
+    let leaf = parent.join("month");
+    std::os::unix::fs::symlink(root.0.join("nowhere"), &leaf).unwrap();
+    let _earlier = super::tests::directory_flushes();
+    let refused = super::create_below(&root.0, &leaf, None);
+    let flushed = super::tests::directory_flushes();
+    assert_eq!(flushed, vec![parent], "the level's parent, flushed once");
+    match refused {
+        Err(StoreError::Io {
+            path,
+            action: super::Action::CreateDir,
+            kind: std::io::ErrorKind::AlreadyExists,
+            ..
+        }) => assert_eq!(path, leaf),
+        other => panic!("the leaf is refused by the last step: {other:?}"),
+    }
+}
