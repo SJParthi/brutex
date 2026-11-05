@@ -599,3 +599,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "indexstopqualificationjson_saved_tests.rs"]
+mod saved_tests;
