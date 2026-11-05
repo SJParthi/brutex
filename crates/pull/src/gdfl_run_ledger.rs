@@ -354,7 +354,10 @@ impl LedgerHold {
         let whole = len / RECORD;
         let read = |at: u64| -> Result<Option<Entry>, RunsLedgerFault> {
             let mut buf = [0_u8; 128];
-            match file.read_exact_at(&mut buf, at) {
+            let read = file.read_exact_at(&mut buf, at);
+            #[cfg(test)]
+            let read = seam::answer("ledger.read", read);
+            match read {
                 Ok(()) => Ok(Entry::of(&buf)),
                 Err(why) if why.kind() == ErrorKind::UnexpectedEof => Ok(None),
                 Err(why) => Err(io(why)),
@@ -903,6 +906,10 @@ pub fn read_all(store: &Path) -> Result<Vec<Result<Entry, u64>>, String> {
 /// once, with the path the code is at, the way another writer cutting the ledger landing between the
 /// two calls would. Per thread, so tests running at once never meet each
 /// other's steps; and absent from every build but this crate's own tests.
+///
+/// A host call no file, folder or name can make fail takes a planted fault
+/// instead: the call is made, and its answer is the host's error, once, as a
+/// failing device's would be.
 #[cfg(test)]
 pub(crate) mod seam {
     use std::cell::RefCell;
@@ -912,6 +919,7 @@ pub(crate) mod seam {
 
     thread_local! {
         static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+        static FAULTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     }
 
     /// Plants `step` for the next pass of `name` on this thread.
@@ -927,6 +935,25 @@ pub(crate) mod seam {
         });
         if let Some(step) = step {
             step(path);
+        }
+    }
+
+    /// Plants a host fault for the next pass of `name` on this thread.
+    pub(crate) fn fail(name: &'static str) {
+        FAULTS.with_borrow_mut(|held| held.push(name));
+    }
+
+    /// The host's answer at `name`, or the fault planted there, once.
+    pub(super) fn answer<T>(name: &'static str, host: std::io::Result<T>) -> std::io::Result<T> {
+        let planted = FAULTS.with_borrow_mut(|held| {
+            let found = held.iter().position(|at| *at == name)?;
+            Some(held.remove(found))
+        });
+        match planted {
+            Some(at) => Err(std::io::Error::other(format!(
+                "invented: the host fault planted at {at}"
+            ))),
+            None => host,
         }
     }
 }

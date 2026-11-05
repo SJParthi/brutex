@@ -377,7 +377,10 @@ pub fn claim(
     let name = landing_lock(vendor);
     let file = locks::open_lock_file(store, &name)?;
     let lock = locks::take(file, store, &name, hold, locks::PROBE_RETRY)?;
-    let identity = lock.metadata().map(|held| (held.dev(), held.ino()));
+    let measured = lock.metadata();
+    #[cfg(test)]
+    let measured = seam::answer("claim.measured", measured);
+    let identity = measured.map(|held| (held.dev(), held.ino()));
     let seq = {
         let mut notes = NOTING.lock().unwrap_or_else(PoisonError::into_inner);
         let seq = notes.next;
@@ -741,6 +744,40 @@ fn stamps(rows: &[RawRow], encoding: TimestampEncoding) -> (i64, i64) {
         rows.first().map_or(0, seconds),
         rows.last().map_or(0, seconds),
     )
+}
+
+/// The test seam of a host call no file, folder or name can make fail
+/// (D-7336, the planted fault of `ingest::census_store::seam`): a test plants
+/// a fault under a name, and the next pass of that name on this thread makes
+/// the call and answers the host's error instead, once, as a failing device's
+/// would be. Per thread, so tests running at once never meet each other's
+/// faults; and absent from every build but this crate's own tests.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static FAULTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Plants a host fault for the next pass of `name` on this thread.
+    pub(crate) fn fail(name: &'static str) {
+        FAULTS.with_borrow_mut(|held| held.push(name));
+    }
+
+    /// The host's answer at `name`, or the fault planted there, once.
+    pub(super) fn answer<T>(name: &'static str, host: std::io::Result<T>) -> std::io::Result<T> {
+        let planted = FAULTS.with_borrow_mut(|held| {
+            let found = held.iter().position(|at| *at == name)?;
+            Some(held.remove(found))
+        });
+        match planted {
+            Some(at) => Err(std::io::Error::other(format!(
+                "invented: the host fault planted at {at}"
+            ))),
+            None => host,
+        }
+    }
 }
 
 #[cfg(test)]
