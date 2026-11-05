@@ -66,6 +66,8 @@ use indicators::{Candle, OI_NULL};
 // ---- part; each part inserts its bench module (the path attribute naming
 // ---- benches/ratio/psrb_<x>.rs and its mod line) directly under its slot.
 // slot bench-mod PSRB-RSI
+#[path = "ratio/psrb_rsi.rs"]
+mod psrb_rsi;
 
 // slot bench-mod PSRB-BOLL
 
@@ -779,6 +781,11 @@ fn main() {
     // module and ids: `.chain([psrb_<x>::row(floor, &["C-PSRB-<CODE>-01", ...])])`.
     // They run before the F&O rows, fold into the same check, and are not counted in ROWS.
     // slot bench-row PSRB-RSI
+    let verdicts: Vec<bool> = verdicts
+        .iter()
+        .copied()
+        .chain([psrb_rsi::row(floor, &["C-PSRB-RSI-01", "C-PSRB-RSI-02"])])
+        .collect();
 
     // slot bench-row PSRB-BOLL
 
