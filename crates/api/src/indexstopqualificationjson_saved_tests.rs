@@ -47,12 +47,17 @@ pub(crate) fn generated_nifty(root: &Path) {
             for window in session.windows.iter().take(usize::from(session.count)) {
                 for minute in window.from..=window.to {
                     let open = 2_000_000 + i64::from((minute + u16::from(day)) % 31) * 100;
+                    // Each minute reaches up and down by its own amount, from
+                    // 100 to 3,700 paisa, so the excursions an exit grid ranks
+                    // spread wide enough on both sides for a 3:1 target pair.
+                    let up = 100 + i64::from((minute * 7 + u16::from(day)) % 13) * 300;
+                    let down = 100 + i64::from((minute * 11 + u16::from(day)) % 13) * 300;
                     minutes.push(store::format::Bar {
                         ts_micros: stamp * 86_400_000_000 + i64::from(minute) * 60_000_000
                             - pull::session::IST_OFFSET_SECS * 1_000_000,
                         open,
-                        high: open + 1_000,
-                        low: open - 900,
+                        high: open + up,
+                        low: open - down,
                         close: open + if minute % 3 == 0 { -50 } else { 50 },
                         volume: 100,
                         open_interest: i64::MIN,
