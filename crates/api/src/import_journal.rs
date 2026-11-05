@@ -849,40 +849,109 @@ pub(crate) mod tests {
         end_lines_folded_beside(100_000);
     }
 
-    /// The timing's own path at three runs: every end line folds into its
+    /// The timing's own path at small sizes: every end line folds into its
     /// run and the percentiles of so short a list still name a sample, so the
-    /// hand-run target cannot rot unseen (BASE-COV-API, D-7344).
+    /// hand-run target cannot rot unseen (BASE-COV-API, D-7344). Extremes
+    /// (repair 3, D-8660): three runs; one, its one sample every rank; two;
+    /// 101, the fewest whose p99 is not the max; the largest run id
+    /// (`u64::MAX`); run id zero; every run ended twice, each second end a
+    /// line of its own; start lines that carry no field but their id's
+    /// start; and, at once, the largest id ended twice, and 101 runs from id
+    /// zero; out of the box, no run at all: nothing folded, the spread
+    /// printed as none.
     #[test]
     fn the_end_line_timing_runs_at_a_small_size() {
-        end_lines_folded_beside(3);
+        // (first id, runs, ends a run, start fields, the ranks timed)
+        for (first, runs, ends, start, ranks) in [
+            (1, 3, 1, " source=tickstore", Some([1, 2, 2])),
+            (1, 1, 1, " source=tickstore", Some([0, 0, 0])),
+            (1, 2, 1, " source=tickstore", Some([1, 1, 1])),
+            (1, 101, 1, " source=tickstore", Some([50, 99, 100])),
+            (u64::MAX, 1, 1, " source=tickstore", Some([0, 0, 0])),
+            (0, 1, 1, " source=tickstore", Some([0, 0, 0])),
+            (1, 3, 2, " source=tickstore", Some([3, 5, 5])),
+            (1, 2, 1, "", Some([1, 1, 1])),
+            (u64::MAX, 1, 2, " source=tickstore", Some([1, 1, 1])),
+            (0, 101, 1, " source=tickstore", Some([50, 99, 100])),
+            (1, 0, 1, " source=tickstore", None),
+        ] {
+            let (parsed, timed) = end_lines_folded(first, runs, ends, start);
+            let case = format!("from {first}, {runs} runs ended {ends} times");
+            assert_eq!(timed, ranks, "{case}");
+            assert_eq!(
+                u64::try_from(parsed.runs.len()),
+                Ok(runs * ends),
+                "{case}: a second end is a line of its own, never a field more"
+            );
+            let given = usize::from(!start.is_empty()) + 1;
+            for (at, run) in parsed.runs.iter().enumerate() {
+                let offset = u64::try_from(at).unwrap();
+                if offset < runs {
+                    assert_eq!(run.id, first + offset, "{case}");
+                    assert_eq!(run.line, offset + 1, "{case}: its own start line");
+                    assert_eq!(run.end_line, Some(runs + offset + 1), "{case}");
+                    assert_eq!(
+                        run.fields.len(),
+                        given + 3,
+                        "{case}: its start's fields, then its end's three"
+                    );
+                } else {
+                    assert_eq!(run.end_line, None, "{case}: an end listed as itself");
+                    assert_eq!(run.fields.len(), 3, "{case}: its own three fields");
+                }
+            }
+        }
     }
 
     /// Folds `runs` end lines into a reader that holds `runs` runs, each
     /// timed, and prints the spread.
     fn end_lines_folded_beside(runs: u64) {
+        let (parsed, _) = end_lines_folded(1, runs, 1, " source=tickstore");
+        assert_eq!(u64::try_from(parsed.runs.len()), Ok(runs));
+    }
+
+    /// Folds `ends` end lines a run into a reader that holds `runs` runs of
+    /// ids from `first`, each start line carrying `start` and its id, every
+    /// fold timed and the spread printed: the reader, and the ranks of the
+    /// p50, the p99 and the max among the sorted folds (`None` when nothing
+    /// was folded).
+    fn end_lines_folded(
+        first: u64,
+        runs: u64,
+        ends: u64,
+        start: &str,
+    ) -> (Parsed, Option<[usize; 3]>) {
         let mut parsed = Parsed::default();
         let mut number = 0_u64;
-        for id in 1..=runs {
+        let ids = move || (0..runs).map(move |at| first + at);
+        for id in ids() {
             number += 1;
-            parsed.line(number, &format!("run {id} source=tickstore started={id}"));
+            parsed.line(number, &format!("run {id}{start} started={id}"));
         }
         let mut took = Vec::new();
-        for id in 1..=runs {
-            number += 1;
-            let text = format!("run {id} ended={id} outcome=finished definition=2");
-            let began = std::time::Instant::now();
-            parsed.line(number, &text);
-            took.push(began.elapsed());
+        for _ in 0..ends {
+            for id in ids() {
+                number += 1;
+                let text = format!("run {id} ended={id} outcome=finished definition=2");
+                let began = std::time::Instant::now();
+                parsed.line(number, &text);
+                took.push(began.elapsed());
+            }
         }
-        assert_eq!(u64::try_from(parsed.runs.len()), Ok(runs));
         took.sort_unstable();
         let n = took.len();
+        let ranks = n.checked_sub(1).map(|last| [n / 2, n * 99 / 100, last]);
+        let shown = |rank: Option<usize>| {
+            rank.and_then(|at| took.get(at))
+                .map_or_else(|| "none".to_owned(), |one| format!("{one:?}"))
+        };
         println!(
-            "end line folded beside {runs} runs: n={n} p50={:?} p99={:?} max={:?}",
-            took[n / 2],
-            took[n * 99 / 100],
-            took[n - 1]
+            "end line folded beside {runs} runs: n={n} p50={} p99={} max={}",
+            shown(ranks.map(|[p50, _, _]| p50)),
+            shown(ranks.map(|[_, p99, _]| p99)),
+            shown(ranks.map(|[_, _, max]| max)),
         );
+        (parsed, ranks)
     }
 
     /// **A RUN'S END LINE IS NOT A SECOND RUN** (IA-2 repair 1; DB-A50): two
@@ -1092,45 +1161,92 @@ pub(crate) mod tests {
         end_line_fold_at_widths(2_000);
     }
 
-    /// The field-count timing's own path at two runs (D-7344).
+    /// The field-count timing's own path at small sizes (D-7344). Extremes
+    /// (BASE-COV-API repair 3, D-8660): two runs at 8, 64 and 512 fields, each
+    /// end field kept beside the start's as `end_<name>`; one run; no start
+    /// field at all, the end's `ended` alone; one field; 4,096 fields, eight
+    /// times the hand-run's widest; end values equal to the start's, none of
+    /// them repeated; and, at once, 4,096 fields whose end values equal the
+    /// start's, and one run with no field; out of the box, no run at all:
+    /// nothing folded, the spread printed as none.
     #[test]
     fn the_field_count_timing_runs_at_a_small_size() {
         end_line_fold_at_widths(2);
+        // (runs, width, the end's value, fields a run holds after its end)
+        for (runs, width, value, fields) in [
+            (2, 8, 'e', 17),
+            (2, 64, 'e', 129),
+            (2, 512, 'e', 1_025),
+            (1, 8, 'e', 17),
+            (2, 0, 'e', 1),
+            (2, 1, 'e', 3),
+            (2, 4_096, 'e', 8_193),
+            (2, 64, 's', 65),
+            (2, 4_096, 's', 4_097),
+            (1, 0, 'e', 1),
+            (0, 8, 'e', 0),
+        ] {
+            let parsed = end_line_fold_at(runs, width, value);
+            let case = format!("{runs} runs of {width} fields ended with {value}");
+            assert_eq!(u64::try_from(parsed.runs.len()), Ok(runs), "{case}");
+            for run in &parsed.runs {
+                assert_eq!(run.fields.len(), fields, "{case}");
+                assert_eq!(run.end_line, Some(runs + run.line), "{case}");
+                assert_eq!(
+                    run.fields.iter().any(|(name, _)| name.starts_with("end_")),
+                    value != 's' && width > 0,
+                    "{case}: only a differing value is kept beside the start's"
+                );
+            }
+        }
     }
 
     /// `runs` runs of 8, 64 and 512 start fields, each ended by a line of as
     /// many differing fields, every fold timed and printed.
     fn end_line_fold_at_widths(runs: u64) {
         for width in [8_usize, 64, 512] {
-            let mut parsed = Parsed::default();
-            let mut number = 0_u64;
-            let (mut start_fields, mut end_fields) = (String::new(), String::new());
-            for f in 0..width {
-                let _ = std::fmt::Write::write_fmt(&mut start_fields, format_args!(" f{f}=s"));
-                let _ = std::fmt::Write::write_fmt(&mut end_fields, format_args!(" f{f}=e"));
-            }
-            for id in 1..=runs {
-                number += 1;
-                parsed.line(number, &format!("run {id}{start_fields}"));
-            }
-            let mut took = Vec::new();
-            for id in 1..=runs {
-                number += 1;
-                let text = format!("run {id} ended={id}{end_fields}");
-                let began = std::time::Instant::now();
-                parsed.line(number, &text);
-                took.push(began.elapsed());
-            }
+            let parsed = end_line_fold_at(runs, width, 'e');
             assert_eq!(u64::try_from(parsed.runs.len()), Ok(runs));
-            took.sort_unstable();
-            let n = took.len();
-            println!(
-                "end fold at {width} fields: n={n} p50={:?} p99={:?} max={:?}",
-                took[n / 2],
-                took[n * 99 / 100],
-                took[n - 1]
-            );
         }
+    }
+
+    /// `runs` runs of `width` start fields valued `s`, each ended by a line
+    /// of as many fields valued `value`, every fold timed and printed: the
+    /// reader they leave.
+    fn end_line_fold_at(runs: u64, width: usize, value: char) -> Parsed {
+        let mut parsed = Parsed::default();
+        let mut number = 0_u64;
+        let (mut start_fields, mut end_fields) = (String::new(), String::new());
+        for f in 0..width {
+            let _ = std::fmt::Write::write_fmt(&mut start_fields, format_args!(" f{f}=s"));
+            let _ = std::fmt::Write::write_fmt(&mut end_fields, format_args!(" f{f}={value}"));
+        }
+        for id in 1..=runs {
+            number += 1;
+            parsed.line(number, &format!("run {id}{start_fields}"));
+        }
+        let mut took = Vec::new();
+        for id in 1..=runs {
+            number += 1;
+            let text = format!("run {id} ended={id}{end_fields}");
+            let began = std::time::Instant::now();
+            parsed.line(number, &text);
+            took.push(began.elapsed());
+        }
+        took.sort_unstable();
+        let n = took.len();
+        let shown = |at: usize| {
+            took.get(at)
+                .filter(|_| n > 0)
+                .map_or_else(|| "none".to_owned(), |one| format!("{one:?}"))
+        };
+        println!(
+            "end fold at {width} fields: n={n} p50={} p99={} max={}",
+            shown(n / 2),
+            shown(n * 99 / 100),
+            shown(n.saturating_sub(1))
+        );
+        parsed
     }
 
     /// **EVERY LINE SHAPE D-3317 FIXES, AND THE OLDER ONES, READ BY NAME.**

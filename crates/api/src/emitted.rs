@@ -1311,7 +1311,14 @@ fn cases() -> Vec<Case> {
                     );
                 })
             },
-            mine: Box::new(|record| record.field("detail").is_some()),
+            // THE DETAIL IS READ AS TEXT, not only found: a `detail` of null
+            // is not this record's (BCA-19's extremes, D-8660).
+            mine: Box::new(|record| {
+                record
+                    .field("detail")
+                    .and_then(telemetry::OwnedValue::as_str)
+                    .is_some()
+            }),
         });
     }
 
@@ -1566,31 +1573,7 @@ fn every_reachable_emit_site_puts_a_record_in_the_file() {
                 case.site, record.level,
             );
             assert_eq!(record.target, case.target, "{}", case.site);
-            // THE ROW'S MATCHER IS SPECIFIC (BASE-COV-API, D-7346): a matcher
-            // that still accepts the record with its fields gone, or with any
-            // one of them gone, reads no field, and would accept another
-            // test's record on the same target as this drive's. Every
-            // single-field removal is asked, none skipped, so each clause of
-            // the matcher meets a record that fails it.
-            let mut bare = record.clone();
-            bare.fields.clear();
-            assert!(
-                !(case.mine)(&bare),
-                "{}: the matcher accepts a record with no fields",
-                case.site
-            );
-            let refused = (0..record.fields.len())
-                .filter(|&at| {
-                    let mut less = record.clone();
-                    less.fields.remove(at);
-                    !(case.mine)(&less)
-                })
-                .count();
-            assert!(
-                refused > 0,
-                "{}: no field of the record decides the matcher",
-                case.site
-            );
+            the_matcher_meets_every_extreme(case.site, &*case.mine, record);
         }
     }
 
@@ -1598,6 +1581,117 @@ fn every_reachable_emit_site_puts_a_record_in_the_file() {
     assert!(
         !health.is_loud(),
         "nothing was dropped while proving the sites: {health:?}",
+    );
+}
+
+/// **THE ROW'S MATCHER IS SPECIFIC, AT EVERY EXTREME OF ITS RECORD**
+/// (BASE-COV-API, D-7346, BCA-19; the extremes by repair 3, D-8660). A
+/// matcher that still accepts the record with its fields gone, or with any one
+/// of them gone, reads no field, and would accept another test's record on the
+/// same target as this drive's; one that refuses the record reordered or
+/// repeated reads a position, not a name. Every single-field removal is asked,
+/// none skipped, so each clause of the matcher meets a record that fails it.
+/// Extremes: no field at all (refused); each single field removed (at least
+/// one removal refused); every value null, the keys kept (refused); every key
+/// renamed, the values kept (refused); the fields in reverse order (accepted);
+/// every field given twice (accepted); an unrelated field of 64 KiB added
+/// (accepted); that unrelated field alone (refused); and, at once, reversed,
+/// doubled and the unrelated field (accepted), and every key renamed with
+/// every value null (refused); out of the box, every key repeated with a null
+/// first, which the first of the two decides (refused), and with the null
+/// after (accepted).
+fn the_matcher_meets_every_extreme(
+    site: &str,
+    mine: &dyn Fn(&telemetry::Record) -> bool,
+    record: &telemetry::Record,
+) {
+    use telemetry::OwnedValue;
+    let with = |fields: Vec<(String, OwnedValue)>| {
+        let mut changed = record.clone();
+        changed.fields = fields;
+        mine(&changed)
+    };
+    let own = record.fields.clone();
+    let nulled: Vec<(String, OwnedValue)> = own
+        .iter()
+        .map(|(key, _)| (key.clone(), OwnedValue::Null))
+        .collect();
+    let renamed: Vec<(String, OwnedValue)> = own
+        .iter()
+        .map(|(key, value)| (format!("x-{key}"), value.clone()))
+        .collect();
+    let unrelated = (
+        "zz-unrelated".to_owned(),
+        OwnedValue::Str("u".repeat(64 * 1024)),
+    );
+    assert!(
+        !with(Vec::new()),
+        "{site}: the matcher accepts a record with no fields"
+    );
+    let refused = (0..own.len())
+        .filter(|&at| {
+            let mut less = own.clone();
+            less.remove(at);
+            !with(less)
+        })
+        .count();
+    assert!(
+        refused > 0,
+        "{site}: no field of the record decides the matcher"
+    );
+    assert!(
+        !with(nulled.clone()),
+        "{site}: the matcher accepts every value null"
+    );
+    assert!(
+        !with(renamed.clone()),
+        "{site}: the matcher accepts every key renamed"
+    );
+    assert!(
+        with(own.iter().rev().cloned().collect()),
+        "{site}: the matcher reads a position, not a name"
+    );
+    assert!(
+        with(own.iter().chain(&own).cloned().collect()),
+        "{site}: the matcher refuses every field given twice"
+    );
+    assert!(
+        with(own.iter().cloned().chain([unrelated.clone()]).collect()),
+        "{site}: an unrelated field turns the matcher"
+    );
+    assert!(
+        !with(vec![unrelated.clone()]),
+        "{site}: the matcher accepts an unrelated field alone"
+    );
+    // AT ONCE.
+    assert!(
+        with(
+            own.iter()
+                .chain(&own)
+                .rev()
+                .cloned()
+                .chain([unrelated])
+                .collect()
+        ),
+        "{site}: reversed, doubled and an unrelated field at once"
+    );
+    assert!(
+        !with(
+            renamed
+                .iter()
+                .map(|(key, _)| (key.clone(), OwnedValue::Null))
+                .collect()
+        ),
+        "{site}: every key renamed with every value null"
+    );
+    // OUT OF THE BOX: a key given twice is read at its first.
+    assert!(
+        !with(nulled.iter().chain(&own).cloned().collect()),
+        "{site}: a null first, the record's own value after"
+    );
+    assert!(
+        with(own.iter().chain(&nulled).cloned().collect()),
+        "{site}: the record's own value first, a null after"
     );
 }
 

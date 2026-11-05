@@ -1980,28 +1980,64 @@ mod tests {
         }
     }
 
-    /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
-    /// SLOT.** W1-api2-11, D-1443. Driven on a pool of the test's own, so no
-    /// route test sharing the real pools can see it.
     /// **A POOL MADE AT RUN TIME IS THE POOL A STATIC IS** (BASE-COV-API,
     /// D-7346): `Pool::new` is `const` so it backs every `static`, and a const
-    /// call runs in the compiler, never under a test; this one runs it here.
-    /// Extremes: no slot at all, one, and the core-sized bound of one.
+    /// call runs in the compiler, never under a test; this one runs it here,
+    /// then takes a slot of each pool and gives it back (BASE-COV-API repair
+    /// 3, D-8660). Extremes: no slot at all; one; two; the largest fixed
+    /// bound (`usize::MAX`), taken as written; a core-sized ceiling of zero,
+    /// which still floors at one slot; a ceiling of one; a ceiling exactly the
+    /// cores; a ceiling far past them (`usize::MAX`), cut to the cores; and,
+    /// at once, an empty name with no slot at all (nothing admitted, nothing
+    /// taken), and the largest fixed bound under a name of 4,096 bytes (one
+    /// slot taken and returned); out of the box, a name of control and
+    /// non-ASCII characters, kept byte for byte, its slot count decided once
+    /// however often it is asked.
     #[test]
     fn a_pool_made_at_run_time_is_the_pool_a_static_is() {
-        for (size, slots) in [
-            (Size::Fixed(0), 0),
-            (Size::Fixed(1), 1),
-            (Size::Cores { cap: 1 }, 1),
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let long: &'static str = Box::leak("p".repeat(4_096).into_boxed_str());
+        let odd = "pool\u{0}\t\u{7f}é池";
+        for (name, size, slots) in [
+            ("run-time", Size::Fixed(0), 0),
+            ("run-time", Size::Fixed(1), 1),
+            ("run-time", Size::Fixed(2), 2),
+            ("run-time", Size::Fixed(usize::MAX), usize::MAX),
+            ("run-time", Size::Cores { cap: 0 }, 1),
+            ("run-time", Size::Cores { cap: 1 }, 1),
+            ("run-time", Size::Cores { cap: cores }, cores),
+            ("run-time", Size::Cores { cap: usize::MAX }, cores),
+            ("", Size::Fixed(0), 0),
+            (long, Size::Fixed(usize::MAX), usize::MAX),
+            (odd, Size::Cores { cap: 0 }, 1),
         ] {
-            let pool = Pool::new("run-time", size);
-            assert_eq!(pool.name(), "run-time");
-            assert_eq!(pool.max(), slots);
-            assert_eq!(pool.active.load(Ordering::Acquire), 0);
-            assert_eq!(pool.waiting.load(Ordering::Acquire), 0);
+            // A `'static` pool, as every real one is: a slot borrows its pool.
+            let pool: &'static Pool = Box::leak(Box::new(Pool::new(name, size)));
+            let case = format!("{} bytes of name, {size:?}", name.len());
+            assert_eq!(pool.name(), name, "{case}");
+            assert_eq!(pool.max(), slots, "{case}");
+            assert_eq!(pool.max(), slots, "{case}: asked again, the same count");
+            assert_eq!(pool.active.load(Ordering::Acquire), 0, "{case}");
+            assert_eq!(pool.waiting.load(Ordering::Acquire), 0, "{case}");
+            let taken = pool.try_take();
+            assert_eq!(taken.is_some(), slots > 0, "{case}");
+            assert_eq!(
+                pool.active.load(Ordering::Acquire),
+                usize::from(slots > 0),
+                "{case}: a refusal takes nothing"
+            );
+            drop(taken);
+            assert_eq!(
+                pool.active.load(Ordering::Acquire),
+                0,
+                "{case}: every slot returned"
+            );
         }
     }
 
+    /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
+    /// SLOT.** W1-api2-11, D-1443. Driven on a pool of the test's own, so no
+    /// route test sharing the real pools can see it.
     #[test]
     fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
         static POOL: Pool = Pool::new("test", Size::Fixed(2));

@@ -21,11 +21,15 @@ use super::*;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-/// Nearest-rank percentile of sorted microseconds.
-fn rank(sorted: &[u128], p: usize) -> u128 {
-    let n = sorted.len();
-    let at = (n * p).div_ceil(100).max(1) - 1;
-    sorted[at.min(n - 1)]
+/// Nearest-rank percentile of sorted microseconds; `None` for no sample.
+fn rank(sorted: &[u128], p: usize) -> Option<u128> {
+    let at = (sorted.len() * p).div_ceil(100).max(1) - 1;
+    sorted.get(at).copied()
+}
+
+/// A rank as the printed line shows it: the microseconds, or `none`.
+fn shown(rank: Option<u128>) -> String {
+    rank.map_or_else(|| "none".to_owned(), |micros| micros.to_string())
 }
 
 #[test]
@@ -33,30 +37,97 @@ fn rank(sorted: &[u128], p: usize) -> u128 {
 fn measure_append_latency_under_contention() {
     let root = std::env::var("BRUTEX_AG06_MEASURE_ROOT")
         .expect("BRUTEX_AG06_MEASURE_ROOT names a store root holding a CLONE of the journal");
-    let _refused = latency_over(Path::new(&root), 200);
+    let _measured = latency_over(Path::new(&root), 200);
 }
 
-/// The measurement's own path over a fresh journal, eight samples an
-/// operation: nothing it asks is refused, and all three writer counts run
-/// (BASE-COV-API, D-7344).
+/// The measurement's own path at small sizes (BASE-COV-API, D-7344): every
+/// operation it asks is counted and over a journal it can write none is
+/// refused. Extremes (repair 3, D-8660): eight samples, the fewest that give
+/// each of eight writers one; nine, which two and eight writers cannot share
+/// evenly; sixteen; seven, which leaves the eight writers none, an empty
+/// spread printed as none; one, which only the lone writer runs; a journal
+/// that already holds what an earlier measurement wrote; a root whose audit
+/// folder cannot be made (a file stands there), every operation refused and
+/// counted; and, at once, one sample over that root, and seven over a journal
+/// that already holds records; out of the box, no sample at all: nothing
+/// asked, nothing refused, nothing written.
 #[test]
 fn the_lock_wait_measurement_runs_at_a_small_size() {
     let root = crate::scratch::path("ag06-measure-small");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch root");
-    assert_eq!(latency_over(&root, 8), 0);
+    let mut written = 0;
+    // (samples, operations asked): 3 a sample, each writer count running
+    // `samples / writers` samples on each of its writers. FOUR RECORDS A
+    // SAMPLE: the opening, the member failure, and the close, which writes the
+    // opening record again before it because the member stands between them.
+    for (samples, asked) in [(8, 72), (9, 75), (16, 144), (7, 39), (1, 3)] {
+        let measured = latency_over(&root, samples);
+        assert_eq!(measured.asked, asked, "{samples} samples");
+        assert_eq!(measured.refused, 0, "{samples} samples");
+        assert_eq!(
+            measured.before, written,
+            "{samples}: what was written before"
+        );
+        assert_eq!(
+            measured.after,
+            written + 4 * u64::try_from(asked / 3).unwrap(),
+            "{samples}: four records a sample"
+        );
+        written = measured.after;
+    }
+    let blocked = crate::scratch::path("ag06-measure-blocked");
+    let _ = std::fs::remove_dir_all(&blocked);
+    std::fs::write(&blocked, b"a file where the root's folders go").expect("a blocking file");
+    for (samples, asked) in [(8, 72), (1, 3)] {
+        let measured = latency_over(&blocked, samples);
+        assert_eq!(
+            (measured.asked, measured.refused),
+            (asked, asked),
+            "{samples} samples over a root nothing can be written under"
+        );
+        assert_eq!((measured.before, measured.after), (0, 0));
+    }
+    let nothing = latency_over(&root, 0);
+    assert_eq!(
+        (
+            nothing.asked,
+            nothing.refused,
+            nothing.before,
+            nothing.after
+        ),
+        (0, 0, written, written),
+        "no sample asks nothing and writes nothing"
+    );
+    assert_eq!(shown(rank(&[], 99)), "none");
     let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&blocked);
+}
+
+/// What one measurement asked and found.
+struct Measured {
+    /// Operations asked, over every writer count.
+    asked: usize,
+    /// Of them, refused.
+    refused: usize,
+    /// The journal's records before the first operation.
+    before: u64,
+    /// And after the last.
+    after: u64,
 }
 
 /// `samples` of each operation with 1, 2 and 8 writers at once over the
-/// journal under `root`, printed; how many operations were refused.
-fn latency_over(root: &Path, samples: usize) -> usize {
+/// journal under `root`, printed; how many operations were asked and refused,
+/// and the journal's records before and after.
+fn latency_over(root: &Path, samples: usize) -> Measured {
     let journal = Arc::new(Journal::at(root));
     let day = pull::session::Day::new(2025, 7, 1).expect("a date");
     let window = Window::new(day, day).expect("forwards");
     let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
-    println!("journal records before: {}", journal.look().records());
+    let before = journal.look().records();
+    println!("journal records before: {before}");
     let mut all_refused = 0_usize;
+    let mut all_asked = 0_usize;
     for writers in [1_usize, 2, 8] {
         let per = samples / writers;
         let barrier = Arc::new(Barrier::new(writers));
@@ -106,15 +177,22 @@ fn latency_over(root: &Path, samples: usize) -> usize {
             }
             micros.sort_unstable();
             all_refused += refused;
+            all_asked += micros.len();
             println!(
                 "AG06 writers={writers} op={name} n={} refused={refused} p50_us={} p99_us={} max_us={}",
                 micros.len(),
-                rank(&micros, 50),
-                rank(&micros, 99),
-                micros.last().copied().unwrap_or(0),
+                shown(rank(&micros, 50)),
+                shown(rank(&micros, 99)),
+                shown(micros.last().copied()),
             );
         }
     }
-    println!("journal records after: {}", journal.look().records());
-    all_refused
+    let after = journal.look().records();
+    println!("journal records after: {after}");
+    Measured {
+        asked: all_asked,
+        refused: all_refused,
+        before,
+        after,
+    }
 }

@@ -1439,21 +1439,22 @@ mod tests {
         [census.clone()]
     }
 
-    /// **A QUARANTINED MONTH'S ROW NAMES ITS QUARANTINE; EVERY OTHER ROW OF THE
-    /// FEED SAYS IT HAS NONE; A FEED WITH NO QUARANTINE WRITES NO KEY**
-    /// (BASE-COV-API, D-7346). Over a scratch store whose ledger quarantines
-    /// one month of an invented share whole: that month's row carries the
-    /// ledger's scope, cause and bars, the month beside it `null`. Extremes:
-    /// the quarantined month listed after the clean one; no summary at all; a
-    /// summary of a feed whose ledger holds nothing (empty, so no key).
-    #[test]
-    fn a_quarantined_months_row_names_it_and_every_other_row_says_none() {
-        use store::quarantine::{Cause, Record, Scope, Summary};
-        let root = crate::scratch::path("store-route-quarantine");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch store");
-        let share = series(Segment::Cash, "QSTORE");
-        let (quarantined, clean) = (month(2026, 6), month(2026, 7));
+    /// One act of the scratch ledger [`a_quarantined_months_row_names_it_and_every_other_row_says_none`]
+    /// reads: `QSTORE`'s minute month `at`, as `act` says.
+    fn quarantine_act(
+        root: &std::path::Path,
+        at: store::path::YearMonth,
+        act: (
+            store::quarantine::Scope,
+            store::quarantine::Cause,
+            &[i64],
+            u64,
+            u32,
+        ),
+        who: &str,
+        reason: &str,
+    ) {
+        let (scope, cause, stamps, bars, revision) = act;
         let path = store::path::StorePath::new(store::path::PathParts {
             vendor: Vendor::Groww,
             exchange: "NSE",
@@ -1461,25 +1462,74 @@ mod tests {
             symbol: "QSTORE",
             contract: None,
             timeframe: Timeframe::MINUTE_1,
-            month: quarantined,
+            month: at,
             file: store::path::FileKind::Bars,
         })
         .expect("a path");
         store::quarantine::record(
-            &root,
-            &Record {
+            root,
+            &store::quarantine::Record {
                 path,
-                scope: Scope::WholeMonth,
-                cause: Cause::BeforeListing,
-                stamps: &[],
-                bars: 3,
-                revision: 0,
+                scope,
+                cause,
+                stamps,
+                bars,
+                revision,
                 source_digest: [7; 32],
-                who: "test",
-                reason: "invented: before listing",
+                who,
+                reason,
             },
         )
         .expect("recorded");
+    }
+
+    /// The rows of one `/store.json` body, parsed.
+    fn store_rows(body: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(body)
+            .expect("JSON rows")
+            .as_array()
+            .expect("an array")
+            .clone()
+    }
+
+    /// **A QUARANTINED MONTH'S ROW NAMES ITS QUARANTINE; EVERY OTHER ROW OF THE
+    /// FEED SAYS IT HAS NONE; A FEED WITH NO QUARANTINE WRITES NO KEY**
+    /// (BASE-COV-API, D-7346). Over a scratch store whose ledger quarantines
+    /// one month of an invented share whole: that month's row carries the
+    /// ledger's scope, cause and bars, the month beside it `null`. Extremes
+    /// (eight more by BASE-COV-API repair 3, D-8660): the quarantined month
+    /// listed after the clean one; no summary at all; a summary of a feed
+    /// whose ledger holds nothing (empty, so no key); the quarantined month
+    /// listed first; the same month of the share at the day rung, which the
+    /// minute ledger does not name; a listed month the census does not hold,
+    /// which makes no row; a feed with no census, which answers no row
+    /// whatever its summary says; every held month quarantined, each row with
+    /// its own cause; the largest bar count a ledger line can carry
+    /// (`u64::MAX`); a month dropped from a revision, not whole; and, at once,
+    /// the quarantined month listed first with its day rung between it and the
+    /// clean month, and every month quarantined beside a listed month the
+    /// census does not hold; out of the box, an act whose reason is the
+    /// longest a ledger line takes and whose writer's name is not ASCII, of
+    /// which the wire carries scope, cause and bars and never the words.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one ledger, one census and every extreme read against the rows beside it"
+    )]
+    fn a_quarantined_months_row_names_it_and_every_other_row_says_none() {
+        use store::quarantine::{Cause, Scope, Summary};
+        let root = crate::scratch::path("store-route-quarantine");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch store");
+        let share = series(Segment::Cash, "QSTORE");
+        let (quarantined, clean) = (month(2026, 6), month(2026, 7));
+        quarantine_act(
+            &root,
+            quarantined,
+            (Scope::WholeMonth, Cause::BeforeListing, &[], 3, 0),
+            "test",
+            "invented: before listing",
+        );
         let summary = Summary::load(&root, Vendor::Groww).expect("the summary");
         assert!(!summary.is_empty(), "the premise: one month is quarantined");
         let census = census_of(&[
@@ -1519,6 +1569,129 @@ mod tests {
                 Some(&empty)
             ),
             plain
+        );
+
+        // THE QUARANTINED MONTH FIRST; ITS DAY RUNG; A MONTH NOT HELD; NO
+        // CENSUS; AND THE FIRST TWO AT ONCE.
+        let share_day = series_at(Segment::Cash, "QSTORE", Timeframe::DAY_1);
+        let (unheld, august, september) = (month(2026, 5), month(2026, 8), month(2026, 9));
+        let wide = census_of(&[
+            (share, quarantined, 3, priced(10_000, 10_100)),
+            (share, clean, 5, priced(10_100, 10_200)),
+            (share_day, quarantined, 1, priced(10_000, 10_100)),
+            (share, august, 7, priced(10_200, 10_300)),
+            (share, september, 9, priced(10_300, 10_400)),
+        ]);
+        let with = |summary: &Summary, listed: &[(census::Series, store::path::YearMonth)]| {
+            store_body_with(&census_slice(&wide), listed, Vendor::Groww, Some(summary))
+        };
+        let first = store_rows(&with(&summary, &[(share, quarantined), (share, clean)]));
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert_eq!(first[0]["quarantine"]["bars"], 3, "{first:?}");
+        assert!(first[1]["quarantine"].is_null(), "{first:?}");
+        let day = store_rows(&with(&summary, &[(share_day, quarantined)]));
+        assert_eq!(day.len(), 1, "{day:?}");
+        assert_eq!(day[0]["timeframe"], "1day", "{day:?}");
+        assert!(
+            day[0]["quarantine"].is_null(),
+            "the minute ledger names no day row: {day:?}"
+        );
+        assert_eq!(with(&summary, &[(share, unheld)]), "[]", "no row is made");
+        assert_eq!(
+            store_body_with(&[], &entries, Vendor::Groww, Some(&summary)),
+            "[]",
+            "a feed with no census lists nothing, whatever its summary says"
+        );
+        let at_once = store_rows(&with(
+            &summary,
+            &[
+                (share, quarantined),
+                (share_day, quarantined),
+                (share, clean),
+            ],
+        ));
+        assert_eq!(at_once.len(), 3, "{at_once:?}");
+        assert_eq!(
+            at_once[0]["quarantine"]["cause"],
+            Cause::BeforeListing.code()
+        );
+        assert!(at_once[1]["quarantine"].is_null(), "{at_once:?}");
+        assert!(at_once[2]["quarantine"].is_null(), "{at_once:?}");
+
+        // EVERY HELD MONTH QUARANTINED: July by an act whose reason is the
+        // longest a line takes and whose writer is not ASCII (out of the box);
+        // August with the largest bar count; September dropped, not whole.
+        let longest = "r".repeat(store::quarantine::MAX_REASON);
+        quarantine_act(
+            &root,
+            clean,
+            (Scope::WholeMonth, Cause::ZeroPrice, &[], 5, 0),
+            "tést-作者",
+            &longest,
+        );
+        quarantine_act(
+            &root,
+            august,
+            (Scope::WholeMonth, Cause::ForeignLevel, &[], u64::MAX, 0),
+            "test",
+            "invented: the largest count",
+        );
+        quarantine_act(
+            &root,
+            september,
+            (Scope::Dropped, Cause::ZeroPrice, &[60, 120], 2, 4),
+            "test",
+            "invented: two bars dropped",
+        );
+        let every = Summary::load(&root, Vendor::Groww).expect("the summary of four acts");
+        let listed = [
+            (share, clean),
+            (share, unheld),
+            (share, quarantined),
+            (share, august),
+            (share, september),
+        ];
+        let body = with(&every, &listed);
+        let rows = store_rows(&body);
+        assert_eq!(rows.len(), 4, "the month not held makes no row: {body}");
+        let (july, june, aug, sep) = (
+            &rows[0]["quarantine"],
+            &rows[1]["quarantine"],
+            &rows[2]["quarantine"],
+            &rows[3]["quarantine"],
+        );
+        assert_eq!(july["cause"], Cause::ZeroPrice.code(), "{body}");
+        assert_eq!(july["bars"], 5, "{body}");
+        assert_eq!(june["cause"], Cause::BeforeListing.code(), "{body}");
+        assert_eq!(june["bars"], 3, "{body}");
+        assert_eq!(aug["bars"].as_u64(), Some(u64::MAX), "{body}");
+        assert_eq!(aug["cause"], Cause::ForeignLevel.code(), "{body}");
+        assert_eq!(sep["scope"], Scope::Dropped.code(), "{body}");
+        assert_eq!(sep["revision"], 4, "{body}");
+        assert_eq!(sep["bars"], 2, "{body}");
+        let keys: Vec<&str> = july
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "bars",
+                "cause",
+                "causes",
+                "ledger",
+                "ledger_at",
+                "revision",
+                "scope",
+                "written_at_micros"
+            ],
+            "{body}"
+        );
+        assert!(
+            !body.contains(&longest) && !body.contains("tést-作者"),
+            "the wire never carries the act's words: {body}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

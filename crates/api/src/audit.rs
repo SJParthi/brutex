@@ -5366,40 +5366,121 @@ mod tests {
         appends_timed("audit-append-timing", 400, 250_000);
     }
 
-    /// The timing's own path at three appends, its ceiling lifted: a timing
-    /// on a loaded test run is no evidence, and whether every append landed
-    /// whole is (BASE-COV-API, D-7344).
+    /// The timing's own path at small sizes, its ceiling lifted: a timing on
+    /// a loaded test run is no evidence, and whether every append landed
+    /// whole, each where it was written, is (BASE-COV-API, D-7344). Extremes
+    /// (repair 3, D-8660): one append, its one sample its p50, p99 and max;
+    /// two, whose p50 and p99 are the smaller and max the larger; three; four,
+    /// the fewest whose p50, p99 and max are three ranks; a file that already
+    /// holds five entries, kept as they were and the appends after them; the
+    /// largest ordinal and the latest stamp, with a vendor; ordinal zero and
+    /// the earliest stamp, with none; a folder not made yet, made by the first
+    /// append; and, at once, one append of the largest ordinal after five
+    /// entries, and four appends of ordinal zero at the earliest stamp into a
+    /// folder not made yet; out of the box, no append at all: nothing is
+    /// timed and no file is made.
     #[test]
     fn the_append_timing_runs_at_a_small_size() {
-        appends_timed("audit-append-timing-small", 3, u128::MAX);
+        let plain = run_entry(1, 2_000, None);
+        let largest = run_entry(u64::MAX, i64::MAX, Some(brutex_core::vendor::Vendor::Gdfl));
+        let zero = run_entry(0, i64::MIN, None);
+        for (tag, n, before, entry, ranks) in [
+            ("audit-append-timing-small", 3, 0, plain, Some([1, 1, 2])),
+            ("audit-append-timing-one", 1, 0, plain, Some([0, 0, 0])),
+            ("audit-append-timing-two", 2, 0, plain, Some([0, 0, 1])),
+            ("audit-append-timing-four", 4, 0, plain, Some([1, 2, 3])),
+            ("audit-append-timing-after", 3, 5, plain, Some([1, 1, 2])),
+            (
+                "audit-append-timing-largest",
+                2,
+                0,
+                largest,
+                Some([0, 0, 1]),
+            ),
+            ("audit-append-timing-zero", 2, 0, zero, Some([0, 0, 1])),
+            (
+                "audit-append-timing-at-once",
+                1,
+                5,
+                largest,
+                Some([0, 0, 0]),
+            ),
+            ("audit-append-timing-at-once-0", 4, 0, zero, Some([1, 2, 3])),
+            ("audit-append-timing-none", 0, 0, plain, None),
+        ] {
+            let spread = appends_timed_over(tag, n, before, &entry, u128::MAX);
+            assert_eq!(spread.map(|(at, _)| at), ranks, "{tag}");
+            if let Some((_, [p50, p99, max])) = spread {
+                assert!(p50 <= p99 && p99 <= max, "{tag}: {p50} {p99} {max}");
+            }
+            let folder = crate::scratch::path(tag).join("timing");
+            assert_eq!(folder.is_dir(), n + before > 0, "{tag}: made by an append");
+        }
+        let written = crate::scratch::path("audit-append-timing-largest")
+            .join("timing")
+            .join("runs");
+        let read = std::fs::read(written).unwrap();
+        let (ordinal, code, rule) = read_run_entry(read.get(..RUN_ENTRY).unwrap()).unwrap();
+        assert_eq!(
+            (ordinal, rule),
+            (u64::MAX, ATTRIBUTION_RULE),
+            "the largest ordinal reads back as itself"
+        );
+        assert_eq!(
+            vendor_of_code(code),
+            Ok(Some(brutex_core::vendor::Vendor::Gdfl)),
+            "and its vendor as written"
+        );
     }
 
     /// `n` one-entry appends, each opened, measured, written and synced;
     /// the file holds `n` whole entries and the p99 is under `ceiling_us`.
     fn appends_timed(tag: &str, n: usize, ceiling_us: u128) {
+        let _spread = appends_timed_over(tag, n, 0, &run_entry(1, 2_000, None), ceiling_us);
+    }
+
+    /// `n` appends of `entry`, each opened, measured, written and synced,
+    /// into an index file under a new folder that first takes `before` other
+    /// entries untimed. The file holds every entry whole, each where it was
+    /// written, and the p99 is under `ceiling_us`. The ranks of the p50, the
+    /// p99 and the max among the sorted samples, and their values; `None`
+    /// when nothing was timed.
+    fn appends_timed_over(
+        tag: &str,
+        n: usize,
+        before: usize,
+        entry: &[u8; RUN_ENTRY],
+        ceiling_us: u128,
+    ) -> Option<([usize; 3], [u128; 3])> {
         let root = scratch(tag);
         let path = root.join("timing").join("runs");
-        let entry = run_entry(1, 2_000, None);
+        let earlier = run_entry(7, 1_000, Some(brutex_core::vendor::Vendor::Dhan));
+        for _ in 0..before {
+            append_synced(&path, &earlier).unwrap();
+        }
         let mut micros: Vec<u128> = Vec::with_capacity(n);
         for _ in 0..n {
             let started = std::time::Instant::now();
-            append_synced(&path, &entry).unwrap();
+            append_synced(&path, entry).unwrap();
             micros.push(started.elapsed().as_micros());
         }
+        let held = std::fs::read(&path).unwrap_or_default();
         assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            u64::try_from(n).unwrap() * 32,
+            held.len(),
+            (before + n) * RUN_ENTRY,
             "every append landed whole"
         );
+        for (at, written) in held.chunks_exact(RUN_ENTRY).enumerate() {
+            let expected: &[u8] = if at < before { &earlier } else { entry };
+            assert_eq!(written, expected, "entry {at} is the one written there");
+        }
+        let last = n.checked_sub(1)?;
         micros.sort_unstable();
-        let at = |q: usize| micros.get((n - 1) * q / 100).copied().unwrap_or(u128::MAX);
-        let max = micros.last().copied().unwrap_or(u128::MAX);
-        eprintln!(
-            "append_synced n={n} p50={}us p99={}us max={max}us",
-            at(50),
-            at(99)
-        );
-        assert!(at(99) <= ceiling_us, "p99 {}us", at(99));
+        let ranks = [last * 50 / 100, last * 99 / 100, last];
+        let [p50, p99, max] = ranks.map(|rank| micros.get(rank).copied().unwrap_or(u128::MAX));
+        eprintln!("append_synced n={n} p50={p50}us p99={p99}us max={max}us");
+        assert!(p99 <= ceiling_us, "p99 {p99}us");
+        Some((ranks, [p50, p99, max]))
     }
 
     /// **AN INDEX ENTRY IS ITS OWN, BY MARK AND CHECKSUM**: a run entry and an

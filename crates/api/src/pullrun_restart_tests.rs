@@ -1416,19 +1416,54 @@ fn restart_cost_with_64_open_runs() {
     costs_with_64_open_runs(8_001, 200);
 }
 
-/// The timing's own path over a 65-record journal, twice each (BASE-COV-API,
-/// D-7344): it still finds the 64 runs open and prints every line.
+/// The timing's own path at small sizes, every answer checked (BASE-COV-API,
+/// D-7344). Extremes (repair 3, D-8660): 64 runs open in 65 records, two
+/// timed calls each; 64 open with no failure behind them; one run open in one
+/// record; one run open behind 999 failures, past the 800 records the scan
+/// reads whole and found through the index; two runs open; 65 runs open,
+/// counted 65 and named 64; one timed call, every rank its one sample; three;
+/// and, at once, one run open in one record timed once, and 65 runs open
+/// behind 999 failures timed three times, of which the index finds the
+/// newest 64 and no more; out of the box, no timed call at all: the answers
+/// are still checked and each spread is printed as none.
 #[test]
 fn the_open_runs_timing_runs_at_a_small_size() {
-    costs_with_64_open_runs(65, 2);
+    // (runs opened, records, timed calls, runs the scan finds open)
+    for (open, size, rounds, found) in [
+        (64, 65, 2, 64),
+        (64, 64, 2, 64),
+        (1, 1, 2, 1),
+        (1, 1_000, 2, 1),
+        (2, 2, 2, 2),
+        (65, 65, 2, 65),
+        (64, 65, 1, 64),
+        (64, 65, 3, 64),
+        (1, 1, 1, 1),
+        (65, 1_064, 3, 64),
+        (64, 65, 0, 64),
+    ] {
+        assert_eq!(
+            costs_with_open_runs(open, size, rounds, found),
+            [rounds; 3],
+            "{open} runs open in {size} records: each spread holds every timed call"
+        );
+    }
 }
 
 /// `restart_scan` over `size` records, 64 of them opening records, then
 /// `status_json` carrying the answer, and one run open: `rounds` timed
 /// calls each.
 fn costs_with_64_open_runs(size: u64, rounds: usize) {
+    let _timed = costs_with_open_runs(64, size, rounds, 64);
+}
+
+/// `restart_scan` over `size` records, the oldest `open` of them opening
+/// records the rest failures, which finds `found` runs open; then
+/// `status_json` carrying the answer; then one run open in `size` records:
+/// `rounds` timed calls each, and how many each spread printed.
+fn costs_with_open_runs(open: u64, size: u64, rounds: usize, found: u64) -> [usize; 3] {
     let spread = cost_spread;
-    let mut records = (0..64_u64)
+    let mut records = (0..open)
         .map(|run| {
             opened(
                 100 + run,
@@ -1440,20 +1475,27 @@ fn costs_with_64_open_runs(size: u64, rounds: usize) {
             )
         })
         .collect::<Vec<_>>();
-    records.extend((0..size - 64).map(|offset| failure(1_000 + offset)));
-    let journal = journal_of(&format!("cost-64-{size}"), &records);
+    records.extend((0..size - open).map(|offset| failure(1_000 + offset)));
+    let journal = journal_of(&format!("cost-{open}-{size}"), &records);
     let answer = restart_scan(&journal);
     let run = answer.interrupted().expect("open");
-    assert_eq!((run.open_count, run.also_open.len()), (64, 63));
+    assert_eq!(
+        (run.open_count, run.also_open.len()),
+        (
+            found,
+            usize::try_from(found - 1).unwrap().min(OPEN_NAMED - 1)
+        ),
+        "{open} opened in {size} records"
+    );
     let time = cost_timed;
-    spread(
-        "restart_scan (8,001 records, 64 runs open)",
+    let scanned = spread(
+        &format!("restart_scan ({size} records, {open} runs open)"),
         time(rounds, &mut || {
             assert!(restart_scan(&journal).interrupted().is_some());
         }),
     );
-    spread(
-        "status_json (64 runs open)",
+    let documented = spread(
+        &format!("status_json ({found} runs open)"),
         time(rounds, &mut || {
             let _ = std::hint::black_box(status_json(
                 &Progress::default(),
@@ -1463,30 +1505,36 @@ fn costs_with_64_open_runs(size: u64, rounds: usize) {
         }),
     );
     let one = journal_of(
-        &format!("cost-1-{size}"),
+        &format!("cost-1-{open}-{size}"),
         &core::iter::once(opened(100, Scope::Spot, "ag01-cost-one", FROM, TO, 1))
             .chain((0..size - 1).map(|offset| failure(1_000 + offset)))
             .collect::<Vec<_>>(),
     );
-    spread(
-        "restart_scan (8,001 records, 1 run open)",
+    let alone = spread(
+        &format!("restart_scan ({size} records, 1 run open)"),
         time(rounds, &mut || {
             assert!(restart_scan(&one).interrupted().is_some());
         }),
     );
+    [scanned, documented, alone]
 }
 
-/// p50, p99 and max of `nanos`, printed as microseconds with `what` and n.
-fn cost_spread(what: &str, mut nanos: Vec<u128>) {
+/// p50, p99 and max of `nanos`, printed as microseconds with `what` and n
+/// (`none` for no sample); n.
+fn cost_spread(what: &str, mut nanos: Vec<u128>) -> usize {
     nanos.sort_unstable();
-    let pick = |q: usize| nanos[(nanos.len() * q / 100).min(nanos.len() - 1)];
+    let n = nanos.len();
+    let shown = |nanos: Option<&u128>| {
+        nanos.map_or_else(|| "none".to_owned(), |one| format!("{}us", one / 1_000))
+    };
+    let pick = |q: usize| shown(nanos.get((n * q / 100).min(n.saturating_sub(1))));
     println!(
-        "{what}: n={} p50={}us p99={}us max={}us",
-        nanos.len(),
-        pick(50) / 1_000,
-        pick(99) / 1_000,
-        nanos[nanos.len() - 1] / 1_000
+        "{what}: n={n} p50={} p99={} max={}",
+        pick(50),
+        pick(99),
+        shown(nanos.last())
     );
+    n
 }
 
 /// The wall time of `rounds` sequential runs of `work`, in nanoseconds each.
@@ -1514,19 +1562,50 @@ fn restart_cost_of_the_walks_worst_case() {
     costs_of_the_walks_worst_case(200);
 }
 
-/// The worst case's own path, every answer still checked, each timed call
-/// made twice (BASE-COV-API, D-7344).
+/// The worst case's own path, every answer still checked (BASE-COV-API,
+/// D-7344). Extremes (repair 3, D-8660): 432 walks, each timed call made
+/// twice; two walks, the fewest one close can leave one of surely open;
+/// three; 64; 65, one past the 64 guessed ordinals a document names, the
+/// count still exact; 100; one timed call, every rank its one sample; three;
+/// and, at once, two walks timed once, and 432 walks timed three times; out
+/// of the box, no timed call at all: every answer is still checked and each
+/// spread is printed as none.
 #[test]
 fn the_walks_worst_case_timing_runs_at_a_small_size() {
-    costs_of_the_walks_worst_case(2);
+    for (walks, rounds) in [
+        (432, 2),
+        (2, 2),
+        (3, 2),
+        (64, 2),
+        (65, 2),
+        (100, 2),
+        (432, 1),
+        (65, 3),
+        (2, 1),
+        (432, 3),
+        (2, 0),
+    ] {
+        assert_eq!(
+            costs_of_walks(walks, rounds),
+            [rounds; 3],
+            "{walks} walks: each spread holds every timed call"
+        );
+    }
 }
 
 /// 432 walks closed 432 times, and 432 walks closed once: `rounds` timed
 /// calls of each answer.
 fn costs_of_the_walks_worst_case(rounds: usize) {
+    let _timed = costs_of_walks(432, rounds);
+}
+
+/// `count` walks closed `count` times, and `count` walks closed once (at
+/// least two, so one close leaves one surely open): `rounds` timed calls of
+/// each answer, and how many each spread printed.
+fn costs_of_walks(count: u64, rounds: usize) -> [usize; 3] {
     let (spread, time) = (cost_spread, cost_timed);
     let walks = |closes: u64| {
-        let mut records = (0..432_u64)
+        let mut records = (0..count)
             .map(|walk| opened(100 + walk, Scope::Fno, "ag01-cost-NIFTY", FROM, TO, walk))
             .collect::<Vec<_>>();
         records.extend((0..closes).map(|close| {
@@ -1541,27 +1620,41 @@ fn costs_of_the_walks_worst_case(rounds: usize) {
         }));
         records
     };
-    let paired = journal_of(&format!("cost-guess-432-{rounds}"), &walks(432));
-    assert_eq!(restart_scan(&paired), Restart::Clean);
-    spread(
-        "restart_scan (864 run records of one F&O key, 432 closes, every close a guess)",
+    let paired = journal_of(&format!("cost-guess-{count}-{rounds}"), &walks(count));
+    assert_eq!(
+        restart_scan(&paired),
+        Restart::Clean,
+        "{count} walks paired"
+    );
+    let clean = spread(
+        &format!(
+            "restart_scan ({} run records of one F&O key, {count} closes, every close a guess)",
+            2 * count
+        ),
         time(rounds, &mut || {
             assert_eq!(restart_scan(&paired).word(), "clean");
         }),
     );
-    // A GUESSED ANSWER AT ITS LARGEST: 432 walks open and ONE close of the
-    // key, so 431 are surely open, which is a count; the document carries
-    // the reading, 64 guessed ordinals and the count's 432.
-    let guessed = journal_of(&format!("cost-guess-1-{rounds}"), &walks(1));
+    // A GUESSED ANSWER AT ITS LARGEST: every walk open and ONE close of the
+    // key, so all but one are surely open, which is a count; the document
+    // carries the reading, at most 64 guessed ordinals and the count.
+    let guessed = journal_of(&format!("cost-guess-1-{count}-{rounds}"), &walks(1));
     let answer = restart_scan(&guessed);
-    assert_eq!(guessed_of(&answer).at_least_open(), 431);
-    spread(
-        "restart_scan (433 run records of one F&O key, one close: a guessed answer)",
+    assert_eq!(
+        guessed_of(&answer).at_least_open(),
+        count - 1,
+        "{count} walks, one close"
+    );
+    let not_known = spread(
+        &format!(
+            "restart_scan ({} run records of one F&O key, one close: a guessed answer)",
+            count + 1
+        ),
         time(rounds, &mut || {
             assert_eq!(restart_scan(&guessed).word(), "not_known");
         }),
     );
-    spread(
+    let documented = spread(
         "status_json (that guessed answer)",
         time(rounds, &mut || {
             let _ = std::hint::black_box(status_json(
@@ -1576,4 +1669,5 @@ fn costs_of_the_walks_worst_case(rounds: usize) {
         answer.words().len(),
         status_json(&Progress::default(), Some(20_738), Some(&answer)).len()
     );
+    [clean, not_known, documented]
 }

@@ -1646,8 +1646,16 @@ fn spot_on(
 /// exchanges, until one is named; named, each answers its own rows and its
 /// own close. Extremes: two months of one exchange beside one of the other;
 /// the segment listed whole, two underlyings in it; no underlying at all for
-/// the rows; an underlying no exchange holds; and, at once, both exchanges
-/// and a rows encoding; out of the box, the exchange named in lower case.
+/// the rows; an underlying no exchange holds; and (BASE-COV-API repair 3,
+/// D-8660) the underlying in lower case, still the one underlying and still
+/// refused unnamed; an exchange this store does not name; an empty exchange,
+/// read as none; an underlying held on one exchange only, answered unasked
+/// for that one; the same underlying named with the other exchange, which
+/// answers nothing and never the one it holds; an underlying past the
+/// symbol's 24 bytes; and, at once, both exchanges and a rows encoding; the
+/// underlying in lower case with its exchange named and a rows encoding;
+/// and the one-exchange underlying named with the other exchange and a rows
+/// encoding; out of the box, the exchange named in lower case.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1778,4 +1786,84 @@ fn an_underlying_held_on_two_exchanges_is_refused_until_one_is_named() {
             "{query}"
         );
     }
+
+    // THE UNDERLYING IN LOWER CASE is the one underlying, refused unnamed;
+    // AN EMPTY EXCHANGE is none, refused the same way.
+    for query in [
+        "feed=gdfl&segment=CASH&underlying=twohome",
+        "feed=gdfl&segment=CASH&underlying=TWOHOME&exchange=",
+    ] {
+        let (code, body) = render_answer(&index, &asked_for(query), "held", None).expect_err(query);
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert_eq!(
+            json(&body)["error"],
+            "ambiguous_underlying",
+            "{query}: {body}"
+        );
+    }
+    // AN EXCHANGE THIS STORE DOES NOT NAME, AND AN UNDERLYING PAST 24 BYTES:
+    // each refused by the name of its own field.
+    for (query, field) in [
+        (format!("{unasked}&exchange=MCX"), "exchange"),
+        (
+            format!("feed=gdfl&segment=CASH&underlying={}", "T".repeat(25)),
+            "underlying",
+        ),
+    ] {
+        let (code, body) = asked(&query).expect_err(&query);
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert!(body.contains(field), "{query}: {body}");
+    }
+    // AT ONCE: lower case, the exchange named and the rows encoding.
+    let (got, keys, _) = rows_keys(
+        &index,
+        &asked_for("feed=gdfl&segment=CASH&underlying=twohome&exchange=NSE&rows=census-tuples-v1"),
+    )
+    .expect("named rows in lower case");
+    assert_eq!((got, keys.len()), (Some(Exchange::Nse), 2));
+
+    // ONE EXCHANGE ONLY: answered unasked for it; named with the other, it
+    // answers nothing (alone, and at once with the rows encoding), never the
+    // exchange it holds.
+    let one = built(
+        Segment::Cash,
+        &slot_of(&[held(
+            spot_on(
+                Exchange::Nse,
+                Segment::Cash,
+                "ONEHOME",
+                Timeframe::MINUTE_1,
+                march,
+            ),
+            4,
+            0,
+            60,
+            4_400,
+        )]),
+    );
+    let answer = json(
+        &render_answer(
+            &one,
+            &asked_for("feed=gdfl&segment=CASH&underlying=ONEHOME"),
+            "held",
+            None,
+        )
+        .expect("one exchange answers unasked"),
+    );
+    assert_eq!(answer["underlyings"][0]["exchange"], "NSE", "{answer}");
+    assert_eq!(answer["underlyings"][0]["last_close"], 4_400, "{answer}");
+    let other = "feed=gdfl&segment=CASH&underlying=ONEHOME&exchange=BSE";
+    let answer =
+        json(&render_answer(&one, &asked_for(other), "held", None).expect("the other exchange"));
+    assert_eq!(
+        answer["underlyings"].as_array().map(Vec::len),
+        Some(0),
+        "{answer}"
+    );
+    let (got, keys, sums) = rows_keys(&one, &asked_for(&format!("{other}&rows=census-tuples-v1")))
+        .expect("the other exchange's rows");
+    assert!(
+        got.is_none() && keys.is_empty() && sums.is_empty(),
+        "{got:?} {keys:?}"
+    );
 }
