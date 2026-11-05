@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 /// A fresh, empty fixture directory. Never deletes: a name already taken (a
 /// dead process with the same id) moves on to the next suffix.
 fn fresh(name: &str) -> std::path::PathBuf {
-    for n in 0_u32.. {
-        let dir = crate::scratch::path(&format!("{name}-{n}"));
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir).expect("private CLI log fixture");
-            return dir;
-        }
-    }
-    unreachable!("u32 suffixes are not exhausted by one test")
+    // THE FIRST FREE SUFFIX, found with no arm left that a free first name
+    // never takes (BASE-COV-API-AS3).
+    let dir = (0_u32..)
+        .map(|n| crate::scratch::path(&format!("{name}-{n}")))
+        .find(|dir| !dir.exists())
+        .expect("u32 suffixes are not exhausted by one test");
+    std::fs::create_dir_all(&dir).expect("private CLI log fixture");
+    dir
 }
 
 fn sink(dir: &std::path::Path) -> telemetry::Sink {

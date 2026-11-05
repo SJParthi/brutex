@@ -7106,17 +7106,16 @@ mod tests {
         // so the assertion is on the ORDERING RELATION rather than on an exact
         // sequence -- a tie broken by `seq` is still deterministic, and pinning
         // a permutation that depends on clock granularity is a flaky test.
-        // `windows(2)` yields pairs and the lint denies indexing even where the
-        // length is guaranteed, so the pair is destructured rather than indexed
-        // -- which is also the spelling that cannot go wrong if the width ever
-        // changes.
-        for pair in tail.records.windows(2) {
-            if let [newer, older] = pair {
-                assert!(
-                    newer.at_unix_millis >= older.at_unix_millis,
-                    "out of order: {messages:?}"
-                );
-            }
+        // Each record is paired with the next by a zip, not by `windows(2)`
+        // and a destructuring whose other arm no pair could ever take: the lint
+        // denies indexing, and a pattern that cannot fail leaves no arm behind
+        // (BASE-COV-API-AS3).
+        let older = tail.records.iter().skip(1);
+        for (newer, older) in tail.records.iter().zip(older) {
+            assert!(
+                newer.at_unix_millis >= older.at_unix_millis,
+                "out of order: {messages:?}"
+            );
         }
     }
 
@@ -8639,8 +8638,7 @@ mod tests {
         assert!(
             asked("ring=yes")
                 .ignored
-                .iter()
-                .any(|(param, word)| *param == "ring" && word == "yes")
+                .contains(&("ring", "yes".to_owned()))
         );
     }
 
@@ -8662,9 +8660,14 @@ mod tests {
             keyed_page.contains("value=\"2022-03-07\""),
             "the form keeps the day"
         );
+        // EITHER SPELLING OF THE LINK, each looked for (no short circuit
+        // leaves the other unasked; BASE-COV-API-AS3).
+        let links = [
+            "/logs.json?limit=50&amp;feed=gdfl&amp;day=2022-03-07",
+            "/logs.json?limit=50&feed=gdfl&day=2022-03-07",
+        ];
         assert!(
-            keyed_page.contains("/logs.json?limit=50&amp;feed=gdfl&amp;day=2022-03-07")
-                || keyed_page.contains("/logs.json?limit=50&feed=gdfl&day=2022-03-07"),
+            links.iter().any(|link| keyed_page.contains(link)),
             "the JSON link carries the keys: {keyed_page}"
         );
         assert!(keyed_page.contains("durable audit index"), "{keyed_page}");
@@ -9350,11 +9353,13 @@ mod tests {
         let current = telemetry::current_path(&dir);
         std::fs::write(&current, line).expect("a ring");
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-        if std::fs::read(&current).is_ok() {
-            let _restored =
-                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
-            panic!("mode 000 does not stop this process from reading: run as a user it binds");
-        }
+        // THE PREMISE, ASSERTED: a check that cannot fail on the hosts this
+        // runs on leaves no arm behind (BASE-COV-API-AS3); the next run's
+        // removal of the directory clears the file whatever its mode.
+        assert!(
+            std::fs::read(&current).is_err(),
+            "mode 000 does not stop this process from reading: run as a user it binds"
+        );
         let first = refusals_whole(&dir);
         let second = refusals_whole(&dir);
         let third = refusals_whole(&dir);
@@ -9761,30 +9766,45 @@ mod r3_24_tests {
             super::PROBE_FIRST_BYTES,
             "one first read"
         );
-        let placed = |at: u64| match super::line_after(&path, at, end).expect("readable") {
-            super::Probe::Line(got) => Some((got.start, got.len, got.record.seq)),
-            super::Probe::Nothing => None,
-            super::Probe::Damaged(why) => panic!("no damage in this file: {why}"),
-        };
+        // EVERY OUTCOME IS A VALUE, damage an `Err` the assertions name, and
+        // a file of damage is probed too, so no arm is left unasked
+        // (BASE-COV-API-AS3).
+        let placed_in =
+            |path: &std::path::Path, at: u64, end: u64| match super::line_after(path, at, end)
+                .expect("readable")
+            {
+                super::Probe::Line(got) => Ok(Some((got.start, got.len, got.record.seq))),
+                super::Probe::Nothing => Ok(None),
+                super::Probe::Damaged(why) => Err(why),
+            };
+        let placed = |at: u64| placed_in(&path, at, end);
         let first = short.len() as u64;
         let third = first + long.len() as u64;
-        assert_eq!(placed(0), Some((0, first, 1)), "a cut at 0");
+        assert_eq!(placed(0), Ok(Some((0, first, 1))), "a cut at 0");
         assert_eq!(
             placed(1),
-            Some((first, long.len() as u64, 2)),
+            Ok(Some((first, long.len() as u64, 2))),
             "the long line, whole"
         );
         assert_eq!(
             placed(first),
-            Some((first, long.len() as u64, 2)),
+            Ok(Some((first, long.len() as u64, 2))),
             "on its first byte"
         );
         assert_eq!(
             placed(first + 100),
-            Some((third, line(3, 10).len() as u64, 3)),
+            Ok(Some((third, line(3, 10).len() as u64, 3))),
             "inside it"
         );
-        assert_eq!(placed(third + 1), None, "past the last line's start");
+        assert_eq!(placed(third + 1), Ok(None), "past the last line's start");
+        // MORE UNDECODABLE LINES IN A ROW THAN A PROBE STEPS PAST: damage,
+        // named, never a line placed and never "no line here".
+        let damaged = dir.join("damaged.ndjson");
+        let steps = usize::try_from(super::MAX_UNDECODABLE_STEPS).unwrap();
+        let torn = format!("{}{}", "x\n".repeat(steps + 2), line(4, 10));
+        std::fs::write(&damaged, &torn).expect("a damaged file");
+        let named = placed_in(&damaged, 0, torn.len() as u64).expect_err("damage");
+        assert!(named.contains("undecodable lines"), "{named}");
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -9808,12 +9828,14 @@ mod r3_24_tests {
         std::fs::write(&path, &text).expect("a file");
         let len = text.len() as u64;
         let first = whole.len() as u64;
-        let kind = |at: u64, end: u64| match super::line_after(&path, at, end) {
-            Ok(super::Probe::Line(got)) => format!("line {}", got.record.seq),
-            Ok(super::Probe::Nothing) => "nothing".to_owned(),
-            Ok(super::Probe::Damaged(why)) => format!("damaged: {why}"),
-            Err(why) => format!("refused: {why}"),
-        };
+        let kind_in =
+            |path: &std::path::Path, at: u64, end: u64| match super::line_after(path, at, end) {
+                Ok(super::Probe::Line(got)) => format!("line {}", got.record.seq),
+                Ok(super::Probe::Nothing) => "nothing".to_owned(),
+                Ok(super::Probe::Damaged(why)) => format!("damaged: {why}"),
+                Err(why) => format!("refused: {why}"),
+            };
+        let kind = |at: u64, end: u64| kind_in(&path, at, end);
         for end in [len, len + 1000, len + 10 * super::PROBE_FIRST_BYTES] {
             assert_eq!(kind(0, end), "line 1", "end {end}");
             assert_eq!(
@@ -9824,6 +9846,17 @@ mod r3_24_tests {
             assert_eq!(kind(first, end), "nothing", "on the torn tail, end {end}");
             assert_eq!(kind(len, end), "nothing", "at the file's end, end {end}");
         }
+        // THE OTHER TWO ANSWERS, EACH ASKED (BASE-COV-API-AS3): a file that
+        // is not there is refused, never "nothing"; a run of undecodable
+        // lines past the bound is damage, named.
+        let gone = kind_in(&dir.join("not-there"), 0, len);
+        assert!(gone.starts_with("refused: "), "{gone}");
+        let steps = usize::try_from(super::MAX_UNDECODABLE_STEPS).unwrap();
+        let torn = format!("{}{whole}", "x\n".repeat(steps + 2));
+        let damaged = dir.join("damaged.ndjson");
+        std::fs::write(&damaged, &torn).expect("a damaged file");
+        let named = kind_in(&damaged, 0, torn.len() as u64);
+        assert!(named.starts_with("damaged: "), "{named}");
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
@@ -10850,7 +10883,8 @@ mod r3_24_follow_tests {
         assert!(
             unread
                 .iter()
-                .any(|why| why.contains("logs/cli") && why.contains("not read yet")),
+                .filter(|why| why.contains("logs/cli"))
+                .any(|why| why.contains("not read yet")),
             "{unread:?}"
         );
         let started = std::time::Instant::now();
@@ -11093,7 +11127,7 @@ mod r3_24_edge_tests {
     /// of `gens`, oldest first, the last the file being appended to; each line
     /// stamped with its time; each generation with its span file (the current
     /// one open-ended) and its `day` posting (2020-01-02). `seq` runs from 1.
-    fn hand_stream(dir: &std::path::Path, gens: &[&[i64]]) {
+    pub(super) fn hand_stream(dir: &std::path::Path, gens: &[&[i64]]) {
         let current = u64::try_from(gens.len() - 1).unwrap();
         std::fs::create_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
         std::fs::write(telemetry::audit_serial_path(dir), current.to_le_bytes()).expect("serial");
@@ -11433,7 +11467,7 @@ mod r3_24_edge_tests {
     /// within [`SEARCH_DEADLINE`]: a search that spins (a loop whose bound a
     /// change turned endless) fails the test by name instead of hanging the
     /// suite, so a mutation run counts it caught, never timed out.
-    fn ask_ts(dir: &std::path::Path, query: &str) -> (serde_json::Value, Vec<i64>) {
+    pub(super) fn ask_ts(dir: &std::path::Path, query: &str) -> (serde_json::Value, Vec<i64>) {
         let (dir, query) = (dir.to_path_buf(), query.to_owned());
         let (answered, answer) = std::sync::mpsc::channel();
         let _search = std::thread::spawn(move || {
@@ -11454,7 +11488,7 @@ mod r3_24_edge_tests {
     }
 
     /// The lines an answer read.
-    fn reads(got: &serde_json::Value) -> u64 {
+    pub(super) fn reads(got: &serde_json::Value) -> u64 {
         got["keyed"]["index"]["reads"].as_u64().expect("reads")
     }
 
@@ -11791,12 +11825,13 @@ mod r3_24_edge_tests {
         std::fs::create_dir(&file).expect("a directory in its place");
         let unread = super::audited_import_refusals(&root, "options", "2020-01-02");
         assert!(unread.records.is_empty());
+        let named = file.display().to_string();
         assert!(
             unread
                 .unread
                 .iter()
-                .any(|why| why.starts_with("logs/cli audit stream:")
-                    && why.contains(&file.display().to_string())),
+                .filter(|why| why.starts_with("logs/cli audit stream:"))
+                .any(|why| why.contains(&named)),
             "{:?}",
             unread.unread
         );
@@ -11989,7 +12024,10 @@ mod r3_24_torn_tests {
         take: usize,
     ) -> Option<(Vec<u64>, Vec<String>)> {
         let (mut seqs, mut damage, mut before) = (Vec::new(), Vec::new(), None);
-        for _ in 0..500 {
+        // AT MOST 500 PAGES, and `None` once they are spent: `find_map` says
+        // so with no line of its own that no page ever reaches
+        // (BASE-COV-API-AS3).
+        (0..500).find_map(|_| {
             let held = stream.to_path_buf();
             let got =
                 super::r3_24_edge_tests::in_time(move || span_page(&held, span, take, before))
@@ -11997,7 +12035,7 @@ mod r3_24_torn_tests {
             seqs.extend(got.page.pointers.iter().map(|(_, pointer)| pointer.seq));
             damage.extend(got.damage);
             if !got.more {
-                return Some((seqs, damage));
+                return Some((std::mem::take(&mut seqs), std::mem::take(&mut damage)));
             }
             // A SPAN PAGE THAT SAYS MORE names where it goes on from, and it
             // is older than every pointer it handed out.
@@ -12010,8 +12048,8 @@ mod r3_24_torn_tests {
                 "{resume:?}"
             );
             before = Some(resume);
-        }
-        None
+            None
+        })
     }
 
     /// **DAMAGE THE SEARCH CANNOT STEP PAST IS SEARCHED AROUND AND NAMED,
@@ -12553,3 +12591,9 @@ mod r3_24_torn_tests {
 #[cfg(test)]
 #[path = "logs_units_tests.rs"]
 mod units_tests;
+
+/// What no other test of this file reached, each row driven by its own input
+/// (BASE-COV-API-AS3).
+#[cfg(test)]
+#[path = "logs_cover_tests.rs"]
+mod cover_tests;

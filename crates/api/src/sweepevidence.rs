@@ -713,4 +713,231 @@ pub(crate) mod tests {
         assert!(out.contains(&format!(r#""t_bits":"{}""#, f64::INFINITY.to_bits())));
         assert!(out.contains(r#""losses":"1""#));
     }
+
+    /// The saved attempt's `kind` file (`levels` or `ranked`) under `dir`.
+    fn detail_file(
+        dir: &std::path::Path,
+        id: [u8; 32],
+        attempt: u64,
+        kind: &str,
+    ) -> std::path::PathBuf {
+        dir.join("results")
+            .join("sweep-evidence-v1")
+            .join(crate::server::hex32(id))
+            .join(format!("{attempt}-{kind}.bin"))
+    }
+
+    /// Breaks the seal of row `row` of a detail file of stride `stride`: one
+    /// payload byte flipped, the length and the header left whole.
+    fn break_seal(path: &std::path::Path, stride: usize, row: usize) {
+        let mut bytes = std::fs::read(path).expect("a detail file");
+        let byte = bytes
+            .get_mut(16 + stride * row + 40)
+            .expect("the row is in the file");
+        *byte ^= 0xff;
+        std::fs::write(path, bytes).expect("the broken row, written back");
+    }
+
+    /// The token of `id`'s newest saved attempt.
+    fn token(dir: &std::path::Path, id: [u8; 32]) -> u64 {
+        sweep_evidence::read(dir, id, crate::detail::MAX_SCAN_BYTES)
+            .expect("read")
+            .expect("present")
+            .attempt
+    }
+
+    /// One finished attempt of `id`: `levels` depth rows and, when given, a
+    /// published ranking of `ranked` rows.
+    fn saved(dir: &std::path::Path, id: [u8; 32], levels: u64, ranked_rows: Option<u64>) {
+        let attempt =
+            sweep_evidence::begin(dir, id, sweep_evidence::Operation::Audit).expect("start");
+        for k in 1..=levels {
+            attempt.level(level(k)).expect("a level");
+        }
+        if let Some(rows) = ranked_rows {
+            let ranking: Vec<_> = (1..=rows).map(ranked).collect();
+            attempt.ranked(&ranking).expect("the ranking");
+        }
+        attempt
+            .finish(sweep_evidence::Completion::Completed)
+            .expect("durable finish");
+    }
+
+    /// **A SAVED ATTEMPT THAT IS GONE, EMPTY OR DAMAGED IS ANSWERED AS SUCH,
+    /// NEVER WITH ROWS IT DOES NOT HOLD** (BASE-COV-API-AS3).
+    ///
+    /// A page pinned to an attempt over an identity that holds none, and a
+    /// later page with no attempt (which only a direct call can ask, the
+    /// parser refusing it), are each refused as gone, and nothing is created.
+    /// A kind with no row is an empty, complete page. A row whose seal is
+    /// broken refuses the page that reads it, and only that page: the other
+    /// kind, and a page of the same kind short of the broken row, are served.
+    /// A detail file holding another format's bytes refuses every page.
+    ///
+    /// Extremes: singles — a pinned attempt over an identity holding none; a
+    /// later page asked with no attempt; an empty published ranking; an
+    /// attempt with no depth row; a depth row with a broken seal; a ranked
+    /// row with a broken seal; combinations — a broken depth row beside a
+    /// whole ranking asked as ranked (served, the depth file never read); the
+    /// broken ranked row reached by a later pinned page of limit one while the
+    /// page short of it is served; out of the box — the ranked file holding
+    /// the depth file's bytes (another format), refused by name.
+    #[test]
+    fn a_saved_attempt_gone_empty_or_damaged_is_answered_as_such() {
+        use axum::http::StatusCode;
+        let dir = crate::scratch::path("sweep-evidence-http-gone-empty-damaged");
+        let _ = std::fs::remove_dir_all(&dir);
+        let ask = |id: [u8; 32], rest: &str| {
+            let query = format!("identity={}{rest}", crate::server::hex32(id));
+            respond(Ok(dir.clone()), &Asked::parse(&query).expect("a query"))
+        };
+        // GONE: pinned by a token, and a later page that only a direct call
+        // can ask without one.
+        let gone = [0xd1_u8; 32];
+        let (status, _, body) = ask(gone, "&attempt=5");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("no longer available"), "{body}");
+        let later = Asked {
+            identity: gone,
+            page: crate::detail::Page {
+                number: 1,
+                limit: 256,
+            },
+            ranked: true,
+            attempt: None,
+        };
+        let (status, _, body) = respond(Ok(dir.clone()), &later);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("no replacement page was served"), "{body}");
+        assert!(!dir.exists(), "a refusal over nothing creates nothing");
+        // EMPTY: a published empty ranking, and an attempt with no level.
+        let (unranked, levelless) = ([0xd2_u8; 32], [0xd3_u8; 32]);
+        saved(&dir, unranked, 2, Some(0));
+        saved(&dir, levelless, 0, Some(1));
+        for (id, kind) in [(unranked, "ranked"), (levelless, "depth")] {
+            let (status, _, body) = ask(id, &format!("&kind={kind}"));
+            assert_eq!(status, StatusCode::OK, "{kind}: {body}");
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            assert_eq!(
+                parsed
+                    .get("rows")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len),
+                Some(0),
+                "{kind}: {body}"
+            );
+            assert!(body.contains(r#""total_count":"0""#), "{kind}: {body}");
+            assert!(body.contains(r#""next_page":null"#), "{kind}: {body}");
+        }
+        // DAMAGED: a depth row's seal, then a ranked row's.
+        let damaged = [0xd4_u8; 32];
+        saved(&dir, damaged, 2, Some(3));
+        let attempt = token(&dir, damaged);
+        break_seal(&detail_file(&dir, damaged, attempt, "levels"), 128, 0);
+        let (status, _, body) = ask(damaged, "&kind=depth");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("fails its seal"), "{body}");
+        assert!(!body.contains(r#""rows":[{"#), "{body}");
+        let (status, _, body) = ask(damaged, "&kind=ranked");
+        assert_eq!(status, StatusCode::OK, "the ranking is whole: {body}");
+        assert_eq!(ranks(&body), vec![1, 2, 3]);
+        break_seal(&detail_file(&dir, damaged, attempt, "ranked"), 200, 2);
+        let (status, _, body) = ask(damaged, "&kind=ranked&limit=2");
+        assert_eq!(status, StatusCode::OK, "short of the broken row: {body}");
+        assert_eq!(ranks(&body), vec![1, 2]);
+        let (status, _, body) = ask(
+            damaged,
+            &format!("&kind=ranked&limit=1&page=2&attempt={attempt}"),
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("fails its seal"), "{body}");
+        assert!(!body.contains(r#""rows":[{"#), "{body}");
+        // ANOTHER FORMAT'S BYTES where the ranking should be.
+        let foreign = [0xd5_u8; 32];
+        saved(&dir, foreign, 2, Some(1));
+        let attempt = token(&dir, foreign);
+        std::fs::copy(
+            detail_file(&dir, foreign, attempt, "levels"),
+            detail_file(&dir, foreign, attempt, "ranked"),
+        )
+        .expect("the depth bytes over the ranking");
+        for kind in ["depth", "ranked"] {
+            let (status, _, body) = ask(foreign, &format!("&kind={kind}"));
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{kind}: {body}");
+            assert!(body.contains("evidence file"), "{kind}: {body}");
+            assert!(!body.contains(r#""rows":[{"#), "{kind}: {body}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **AN ATTEMPT REPLACED BETWEEN A PAGE'S TWO READS OF IT IS REFUSED,
+    /// NEVER SERVED AS A MIX OF TWO** (BASE-COV-API-AS3).
+    ///
+    /// A page reads the attempt, then the results ledger (for the run's
+    /// instrument), then its rows, then the attempt again. Here the ledger is
+    /// held under an exclusive lock, so the page waits between its two reads;
+    /// a newer attempt of the same identity is begun and finished in that
+    /// wait and the lock released, and the page refuses rather than serve
+    /// rows of one attempt under the other. A page that began only after the
+    /// newer attempt is served that attempt whole, so the wait is lengthened
+    /// until the refusal is seen. Read again with nothing held, the newest
+    /// attempt is served whole.
+    ///
+    /// Extremes: singles — the ledger held exclusively while a page waits on
+    /// it; a newer attempt begun and finished inside that wait; combinations —
+    /// the replacement landing after the first read and before the second,
+    /// each earlier answer still whole (never a mix); out of the box — the
+    /// results ledger, a file this page only reads, locked by another holder.
+    #[test]
+    fn an_attempt_replaced_between_its_two_reads_is_refused_never_mixed() {
+        use axum::http::StatusCode;
+        let dir = crate::scratch::path("sweep-evidence-http-replaced-mid-read");
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = [0xd6_u8; 32];
+        saved(&dir, id, 3, None);
+        ledger_row(&dir, [0xd7_u8; 32], "NIFTY");
+        let query = format!("identity={}&kind=depth", crate::server::hex32(id));
+        // EACH TRY WAITS LONGER: a page that began only after the newer
+        // attempt is served it whole, and kept in `whole`.
+        let mut whole = Vec::new();
+        let (status, body) = [25_u64, 100, 400, 1_600, 6_400]
+            .into_iter()
+            .find_map(|wait_ms| {
+                let ledger =
+                    std::fs::File::open(cli::results::Results::path(&dir)).expect("the ledger");
+                ledger.lock().expect("the ledger, held exclusively");
+                let page = {
+                    let (dir, asked) = (dir.clone(), Asked::parse(&query).expect("page zero"));
+                    std::thread::spawn(move || respond(Ok(dir), &asked))
+                };
+                std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                saved(&dir, id, 1, None);
+                ledger.unlock().expect("the ledger, released");
+                let (status, _, body) = page.join().expect("the page");
+                let replaced = body.contains("changed during the bounded read");
+                whole.extend((!replaced).then_some((status, body.clone())));
+                replaced.then_some((status, body))
+            })
+            .expect("a page waiting on the ledger saw its attempt replaced");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.contains(
+                "saved evidence changed during the bounded read; no mixed snapshot was exposed"
+            ),
+            "{body}"
+        );
+        assert!(!body.contains(r#""rows":[{"#), "{body}");
+        assert!(
+            whole.iter().all(|(status, _)| *status == StatusCode::OK),
+            "{whole:?}"
+        );
+        assert!(
+            whole.iter().all(|(_, body)| body.contains("reconciles")),
+            "{whole:?}"
+        );
+        let (status, _, body) = respond(Ok(dir.clone()), &Asked::parse(&query).expect("again"));
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.matches(r#""reconciles":true"#).count(), 1, "{body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

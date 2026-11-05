@@ -245,10 +245,13 @@ fn a_log_directory_that_is_a_file_is_unreadable_and_a_month_is_a_real_one() {
     std::fs::create_dir_all(&root).expect("a scratch root");
     let file = root.join("not-a-dir");
     std::fs::write(&file, b"a file").expect("a file");
-    match DirState::of(&file) {
-        DirState::Unreadable(why) => assert!(why.contains("not a directory"), "{why}"),
-        other => panic!("a file is no log directory: {}", other.word()),
-    }
+    // A LET-ELSE, so no arm is left that no file takes (BASE-COV-API-AS3).
+    let state = DirState::of(&file);
+    let word = state.word();
+    let DirState::Unreadable(why) = state else {
+        panic!("a file is no log directory: {word}");
+    };
+    assert!(why.contains("not a directory"), "{why}");
     assert_eq!(DirState::of(&root.join("not-there")).word(), "absent");
     assert_eq!(DirState::of(&root).word(), "read");
     for (text, month) in [

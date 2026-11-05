@@ -4585,18 +4585,19 @@ mod tests {
                 let mut progress =
                     Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, id);
                 let _told = started.send(());
-                let mut month = 0_u32;
-                let text = loop {
-                    month += 1;
-                    if let Err(why) = cli::cancel::check(|| format!("generated month {month}")) {
-                        break format!("refused: {why}");
-                    }
-                    if month > 3_000 {
-                        break "a complete report the stop never reached".to_owned();
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                };
-                settle(&mut progress, text, now_micros());
+                // A MONTH AT A TIME THROUGH THE REAL BOUNDARY, at most 3,000
+                // of them: a stop that never reached one fails this task, so
+                // its slot is never a report. Searched rather than looped, so
+                // no arm is left that the timing of the stop decides
+                // (BASE-COV-API-AS3).
+                let why = (1..=3_000_u32)
+                    .find_map(|month| {
+                        let stopped = cli::cancel::check(|| format!("generated month {month}"));
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        stopped.err()
+                    })
+                    .expect("the stop reached a generated month");
+                settle(&mut progress, format!("refused: {why}"), now_micros());
                 progress
             });
             guard.finish(done);
@@ -4664,24 +4665,22 @@ mod tests {
     /// a finished slot exactly as it was, and a busy slot never runs `prepare`.
     #[test]
     fn admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         let site = finisher_site("admission-unlocked");
         let running =
             |attempt| Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 1, attempt);
         let busy = || super::refused(&Refusal::Busy("busy".to_owned()));
         let (parked, parked_rx) = std::sync::mpsc::channel();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
-        let second_prepared = AtomicBool::new(false);
-        let first_busy = AtomicBool::new(false);
-        let (site_ref, first_busy_ref) = (&site, &first_busy);
+        // A CALL THAT MUST NOT HAPPEN PANICS, failing this test: the first
+        // admission's busy answer, and the second admission's `prepare`
+        // (Busy never prepares, nor does one waiting for the first). No flag
+        // is left whose other side no run sets (BASE-COV-API-AS3).
+        let site_ref = &site;
         std::thread::scope(|scope| {
             let first = scope.spawn(move || {
                 super::admit(
                     site_ref,
-                    || {
-                        first_busy_ref.store(true, Ordering::SeqCst);
-                        busy()
-                    },
+                    || panic!("the first admission found the slot busy"),
                     || {
                         parked.send(()).expect("the test is listening");
                         release_rx.recv().expect("the test releases");
@@ -4698,9 +4697,8 @@ mod tests {
                 "a poll during admission I/O must take the slot at once and see no run yet"
             );
             let second = scope.spawn(|| {
-                super::admit(&site, busy, || {
-                    second_prepared.store(true, Ordering::SeqCst);
-                    Ok((running(2), "second"))
+                super::admit::<&str>(&site, busy, || {
+                    panic!("a second admission prepared while the first was in flight")
                 })
             });
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -4708,20 +4706,14 @@ mod tests {
                 !second.is_finished(),
                 "a second admission waits for the first"
             );
-            assert!(!second_prepared.load(Ordering::SeqCst));
             release.send(()).expect("the first admission is waiting");
             assert_eq!(first.join().expect("first").ok(), Some("first"));
             let (status, _, body) = second
                 .join()
-                .expect("second")
+                .expect("second: Busy never prepares")
                 .expect_err("the first run is in flight");
             assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
         });
-        assert!(!first_busy.load(Ordering::SeqCst));
-        assert!(
-            !second_prepared.load(Ordering::SeqCst),
-            "Busy never prepares"
-        );
         let installed = site.sweep.lock().expect("slot").clone().expect("installed");
         assert!(installed.in_flight() && installed.attempt == 1);
 
@@ -5184,11 +5176,11 @@ mod tests {
             "no field outside KNOBS may set anything: {:?}",
             asked.knobs
         );
+        // ONE LOOKUP, no operand left that only a failure takes
+        // (BASE-COV-API-AS3).
+        let own = ["BRUTEX_STORE", "BRUTEX_LOG_DIR"];
         for (_, name) in KNOBS {
-            assert!(
-                name != "BRUTEX_STORE" && name != "BRUTEX_LOG_DIR",
-                "{name} names the process's own files and must never be settable"
-            );
+            assert!(!own.contains(&name), "{name} names the process's own files");
         }
     }
 
@@ -5264,16 +5256,11 @@ mod tests {
             axum::http::StatusCode::BAD_REQUEST,
             "{context}"
         );
-        assert!(
-            why.why().starts_with("`screen_budget_ms` is refused"),
-            "{context}: {}",
-            why.why()
-        );
-        assert!(
-            why.why().contains(super::BUDGET_NOT_RECORDABLE),
-            "{context}: the reason is the file's one wording: {}",
-            why.why()
-        );
+        // EACH CHECK ON ONE LINE, its words read once (BASE-COV-API-AS3).
+        let (said, wording) = (why.why(), super::BUDGET_NOT_RECORDABLE);
+        let refused = "`screen_budget_ms` is refused";
+        assert!(said.starts_with(refused), "{context}: {said}");
+        assert!(said.contains(wording), "{context}: one wording: {said}");
     }
 
     /// THE BUDGET'S REASON IS WORDED ONCE in this file's production code, and
@@ -5770,11 +5757,12 @@ mod tests {
                 "{words} was refused a budget its run never prices: {body}"
             );
             if words.contains("audit-audited-range") {
-                assert!(
-                    body.contains("strict_runtime_settings_invalid")
-                        && body.contains("BRUTEX_SCREEN_BUDGET_MS"),
-                    "the strict word names the budget through its own admission: {body}"
-                );
+                // TWO CHECKS, no operand left that only a failure takes
+                // (BASE-COV-API-AS3).
+                let own = "the strict word names the budget through its own admission";
+                let code = "strict_runtime_settings_invalid";
+                assert!(body.contains(code), "{own}: {body}");
+                assert!(body.contains("BRUTEX_SCREEN_BUDGET_MS"), "{own}: {body}");
             } else {
                 assert_eq!(status, axum::http::StatusCode::CONFLICT, "{words}: {body}");
             }
@@ -5863,14 +5851,19 @@ mod tests {
         assert_eq!(row.label, "POST /backtest/run");
         assert_eq!(row.phase, cli::operation_audit::Phase::Failed);
         assert_eq!(row.response_status, 503);
+        // NOTHING OUTSIDE THE JOURNAL CHANGED: what lies outside `audit/`
+        // after the request is what lay there before, compared whole, so no
+        // operand is left that only a failure takes (BASE-COV-API-AS3).
         let journal = store.join("audit");
-        for (path, _) in listing(store) {
-            assert!(
-                path.starts_with(&journal) || before.iter().any(|(was, _)| *was == path),
-                "{} appeared outside the request journal",
-                path.display()
-            );
-        }
+        let outside = |listed: Vec<(std::path::PathBuf, u64)>| -> Vec<std::path::PathBuf> {
+            listed
+                .into_iter()
+                .map(|(path, _)| path)
+                .filter(|path| !path.starts_with(&journal))
+                .collect()
+        };
+        let (after, was) = (outside(listing(store)), outside(before));
+        assert_eq!(after, was, "new outside the journal");
     }
 
     /// The command words whose run prices a screen, and only those, carry the
@@ -6196,11 +6189,9 @@ mod tests {
                 "from_month":1,"to_year":2026,"to_month":1,"rungs":["1min""#,
         ] {
             let why = asked_from(raw).expect_err("the strict JSON boundary must refuse");
-            assert!(
-                why.why().contains("complete JSON object"),
-                "the refusal names the structural boundary: {}",
-                why.why()
-            );
+            // ONE LINE, its words read once (BASE-COV-API-AS3).
+            let (said, boundary) = (why.why(), "complete JSON object");
+            assert!(said.contains(boundary), "the structural boundary: {said}");
         }
 
         let trailing = format!("{valid} trailing");
@@ -6222,11 +6213,9 @@ mod tests {
                 "from_month":1,"to_year":2026,"to_month":1,"top":10,"top":25}"#,
         ] {
             let why = asked_from(raw).expect_err("a known key cannot decide twice");
-            assert!(
-                why.why().contains("duplicate field"),
-                "serde must name the ambiguity: {}",
-                why.why()
-            );
+            // ONE LINE, its words read once (BASE-COV-API-AS3).
+            let (said, ambiguity) = (why.why(), "duplicate field");
+            assert!(said.contains(ambiguity), "serde names it: {said}");
         }
     }
 
@@ -7894,3 +7883,9 @@ mod tests {
 #[cfg(test)]
 #[path = "sweeprun_accepted_tests.rs"]
 mod accepted_tests;
+
+/// What no other test of this file reached, each row driven by its own input
+/// (BASE-COV-API-AS3).
+#[cfg(test)]
+#[path = "sweeprun_cover_tests.rs"]
+mod cover_tests;

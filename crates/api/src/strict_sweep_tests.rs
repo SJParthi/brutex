@@ -345,14 +345,16 @@ fn missing_strict_configuration_is_structured_503_before_attempt_or_slot() {
         "api.sweep",
         "an engine command was refused before it started",
     );
+    // ONE FILTER PER PROPERTY, so no operand is left whose other side no
+    // event takes (BASE-COV-API-AS3); the event must still hold all five.
     assert!(
         events
             .iter()
-            .any(|event| event.level == telemetry::Level::Warn
-                && crate::emitted::says(event, "why", "BRUTEX_CHECKSUM_RECEIPTS")
-                && crate::emitted::says(event, "why", "BRUTEX_CHECKSUM_MAX_BYTES")
-                && crate::emitted::says(event, "why", "BRUTEX_CHECKSUM_MAX_RECORDS")
-                && event.field("attempt").is_none())
+            .filter(|event| event.level == telemetry::Level::Warn)
+            .filter(|event| crate::emitted::says(event, "why", "BRUTEX_CHECKSUM_RECEIPTS"))
+            .filter(|event| crate::emitted::says(event, "why", "BRUTEX_CHECKSUM_MAX_BYTES"))
+            .filter(|event| crate::emitted::says(event, "why", "BRUTEX_CHECKSUM_MAX_RECORDS"))
+            .any(|event| event.field("attempt").is_none())
     );
 }
 
@@ -375,14 +377,13 @@ fn invalid_limits_are_refused_and_commit_gate_precedes_configuration() {
             "BRUTEX_CHECKSUM_MAX_RECORDS"
         ]))
     );
-    let called = Cell::new(false);
+    // THE CONFIGURATION IS NEVER READ: a read of it fails this test
+    // (BASE-COV-API-AS3).
     let (status, _, body) = command_with_configuration(&site, BODY, None, || {
-        called.set(true);
-        Ok(config())
+        panic!("the commit gate refuses before the configuration is read")
     });
     assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.contains("BRUTEX_COMMIT"));
-    assert!(!called.get());
     assert!(site.sweep.lock().expect("slot").is_none());
 }
 
@@ -458,14 +459,12 @@ fn strict_worker_retains_real_identity_gate_or_refuses_missing_source_without_pa
     assert!(!output.in_flight());
     assert!(output.report.is_none());
     let why = output.refusal.expect("real build gate or missing input");
-    if cli::commit_stamp().is_none() {
-        assert!(why.contains("verified clean build identity"), "{why}");
-    } else {
-        assert!(
-            why.contains("No such file") || why.contains("missing") || why.contains("absent"),
-            "{why}"
-        );
-    }
+    // THE WORDS THIS BUILD OWES, chosen with no arm the other build never
+    // takes and each word looked for (BASE-COV-API-AS3).
+    let unstamped: &[&str] = &["verified clean build identity"];
+    let stamped: &[&str] = &["No such file", "missing", "absent"];
+    let words = cli::commit_stamp().map_or(unstamped, |_| stamped);
+    assert!(words.iter().any(|word| why.contains(word)), "{why}");
     assert!(!site.store_root.join("results/runs.bin").exists());
 }
 
@@ -485,14 +484,12 @@ fn strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_sta
         ("min_rr_bp", "9223372036854775808"),
     ] {
         let body = format!("{},\"{name}\":\"{value}\"}}", BODY.trim_end_matches('}'));
-        let configured = Cell::new(false);
+        // A READ OF THE CONFIGURATION FAILS THIS TEST (BASE-COV-API-AS3).
         let (status, _, response) = command_with_configuration(&site, &body, Some(STAMP), || {
-            configured.set(true);
-            Ok(config())
+            panic!("{name}={value} is refused before the configuration is read")
         });
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{response}");
         assert!(response.contains(name), "{response}");
-        assert!(!configured.get());
         assert!(site.sweep.lock().expect("slot").is_none());
         assert!(!site.store_root.join("results").exists());
     }
@@ -532,10 +529,9 @@ fn strict_invalid_server_environment_refuses_before_configuration_slot_or_start(
         return;
     }
     let site = site("invalid-server-setting");
-    let configured = Cell::new(false);
+    // A READ OF THE CONFIGURATION FAILS THIS TEST (BASE-COV-API-AS3).
     let (status, _, body) = command_with_configuration(&site, BODY, Some(STAMP), || {
-        configured.set(true);
-        Ok(config())
+        panic!("an invalid server setting is refused before the configuration is read")
     });
     assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
     let response: serde_json::Value = serde_json::from_str(&body).expect("structured refusal");
@@ -549,7 +545,6 @@ fn strict_invalid_server_environment_refuses_before_configuration_slot_or_start(
         Some(&serde_json::json!(["BRUTEX_MAX_STOP_POINTS"]))
     );
     assert!(!body.contains("not-an-integer"));
-    assert!(!configured.get());
     assert!(site.sweep.lock().expect("slot").is_none());
     assert!(!site.store_root.join("results").exists());
 }
