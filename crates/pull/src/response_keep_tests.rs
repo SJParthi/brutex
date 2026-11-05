@@ -3376,3 +3376,22 @@ fn a_waiter_whose_flock_the_host_refuses_refuses_its_caller_by_name() {
         "nothing holds it"
     );
 }
+
+/// PS2 (D-7336): A STEP PLANTED FOR A PATH is taken only by a pass of its own
+/// name with that path, once: a pass of the same name with another path, and
+/// one of another name with this path, pass it over.
+#[test]
+fn a_step_planted_for_a_path_waits_for_its_own_name_and_path() {
+    let ran = std::sync::Arc::new(AtomicU32::new(0));
+    let counted = std::sync::Arc::clone(&ran);
+    let mine = Path::new("/invented/ps2/mine.lock");
+    seam::plant_for("ps2.step", mine, move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+    });
+    seam::at_path("ps2.step", Path::new("/invented/ps2/other.lock"));
+    seam::at_path("ps2.other", mine);
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "passed over");
+    seam::at_path("ps2.step", mine);
+    seam::at_path("ps2.step", mine);
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "its own pass takes it, once");
+}
