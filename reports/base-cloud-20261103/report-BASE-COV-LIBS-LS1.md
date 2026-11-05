@@ -1,4 +1,16 @@
-STATUS: BLOCKED QUESTION
+STATUS: IN PROGRESS
+
+# BASE-COV-LIBS-LS1 (crate `store`): third continuation of 5 Nov 2026 (in progress)
+
+TOKEN `BASE-COV-LIBS-LS1-20261105-4` (a new account; the tokens `-20261103-1`, `-20261105-2` and
+`-20261105-3` are retired). Branch `cloud/cov-libs-ls1-20261103`, continued from its tip
+`eb84ea6ee280` with the main session's answer (A) to the question below. `fu-LS1.txt.md` now records
+`safe_open.rs:104:19 False` and `:107` as (U) on aarch64-apple-darwin with the proof. The one final
+gate run at the unchanged code tip `24bd3a62` is running; the final report and fix json follow.
+
+---
+
+## Second continuation of 5 Nov 2026 (token `-3`), kept as it was written; its line 1 was `STATUS: BLOCKED QUESTION`
 
 # BASE-COV-LIBS-LS1 (crate `store`): second continuation of 5 Nov 2026
 
