@@ -1786,8 +1786,10 @@ mod tests {
             oldest.starts_with("20") && oldest.contains('-'),
             "a resolved day, not a stored one: {oldest}"
         );
-        assert!(
-            !body.contains(r#""oldest":"2021-08-11""#) || oldest != "2021-08-11",
+        // `oldest` is read out of the body, so the body holds that literal
+        // exactly when `oldest` is it: the one check is that it is not.
+        assert_ne!(
+            oldest, "2021-08-11",
             "nothing here pins a rolling floor to a literal"
         );
 
@@ -3056,10 +3058,6 @@ mod tests {
     /// census built in memory with no file (walked at every ask, never
     /// remembered).
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one table of every census edge the held span meets, read in one place"
-    )]
     fn the_held_span_answers_at_every_edge_of_its_census() {
         let gdfl = brutex_core::vendor::Vendor::Gdfl;
         // SINGLES AND COMBINATIONS through the bench's own path.
@@ -3228,5 +3226,395 @@ mod tests {
             appends_p99[2] <= appends_p99[0].max(1_000).saturating_mul(ratio),
             "{appends_p99:?}"
         );
+    }
+
+    /// The IST epoch day of a civil day.
+    fn epoch_of(year: u16, month: u8, day: u8) -> i64 {
+        i64::from(
+            Day::new(year, month, day)
+                .expect("a civil day")
+                .days_from_epoch(),
+        )
+    }
+
+    /// A store root named `name` whose GDFL import journal holds `lines`.
+    fn journaled(name: &str, lines: &[&str]) -> std::path::PathBuf {
+        let root = store_root(name);
+        let journal = pull::gdfl_import::journal_path(&root);
+        std::fs::create_dir_all(journal.parent().expect("imports/")).expect("mkdir");
+        let mut text = lines.join("\n");
+        text.push('\n');
+        std::fs::write(&journal, text).expect("the journal");
+        root
+    }
+
+    /// The fields of a `done` line.
+    const DONE: &str = "files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0";
+
+    /// **THE IMPORT REACH READS EVERY SHAPE ITS JOURNAL LINES TAKE** (D-8665).
+    /// `imported_to`, the end `/gaps.json` names for an archive month, over
+    /// journals built for each shape a line can take. The reach of a kind is
+    /// its furthest CLOSED day, a refusal included; the open days named are
+    /// only the asked days of the kind's whole tree begun and never closed
+    /// and never closed before; a closed day after today is passed over for
+    /// the furthest one of the same kind at or before it.
+    ///
+    /// Extremes: singles — a segment that is no segment (`BOGUS`), a segment
+    /// in the wrong case (`index`), the newest closed day a refusal (it is
+    /// the reach, and the reach walk meets it before any written day), every
+    /// kind closed (the walk stops at the row that settles all three), an
+    /// open stocks day, an open filtered day, an open re-run of a day that
+    /// wrote; combinations — every open-day shape in one month at once (only
+    /// the plain open indices day is named), a future close with a closed day
+    /// of another kind between it and today at once (passed over, the
+    /// indices day before both answers); out of the box — days before 1970
+    /// asked (no civil day, so nothing is scanned and nothing named open).
+    #[test]
+    fn the_import_reach_reads_every_shape_its_journal_lines_take() {
+        let gdfl = brutex_core::vendor::Vendor::Gdfl;
+        let september = (epoch_of(2026, 9, 1), epoch_of(2026, 9, 30));
+        let shapes = journaled(
+            "feeds-reach-shapes",
+            &[
+                &format!("begin stocks 2026-09-08 *\ndone stocks 2026-09-08 * {DONE}"),
+                &format!("begin options 2026-09-09 *\ndone options 2026-09-09 * {DONE}"),
+                &format!("begin indices 2026-09-10 *\ndone indices 2026-09-10 * {DONE}"),
+                "begin indices 2026-09-11 *",
+                "begin stocks 2026-09-12 *",
+                "begin indices 2026-09-13 NIFTY",
+                &format!("begin indices 2026-09-14 *\ndone indices 2026-09-14 * {DONE}"),
+                "begin indices 2026-09-14 *",
+                "begin indices 2026-09-15 *\nrefused indices 2026-09-15 * reason=no%20files",
+            ],
+        );
+        let index = imported_to(&shapes, gdfl, "INDEX", september);
+        assert_eq!(index.to, Some(epoch_of(2026, 9, 15)), "{index:?}");
+        assert!(
+            index.from.starts_with(
+                "the GDFL import journal: the furthest day whose indices import closed"
+            ),
+            "{index:?}"
+        );
+        assert_eq!(index.open, [epoch_of(2026, 9, 11)], "{index:?}");
+        assert_eq!(index.journal_error, None);
+        let cash = imported_to(&shapes, gdfl, "CASH", september);
+        assert_eq!(cash.to, Some(epoch_of(2026, 9, 8)), "{cash:?}");
+        let fno = imported_to(&shapes, gdfl, "FNO", september);
+        assert_eq!(fno.to, Some(epoch_of(2026, 9, 9)), "{fno:?}");
+        let snapshot = crate::server::import_journal::snapshot(&shapes).expect("reads");
+        let reach = journal_reach(&shapes, &snapshot);
+        assert_eq!(
+            reach
+                .written
+                .map(|(first, last)| (first.to_string(), last.to_string())),
+            Some(("2026-09-08".to_owned(), "2026-09-10".to_owned())),
+            "a refusal writes nothing, and a day begun again is open until it closes: the \
+             written span ends on the last day still written"
+        );
+        // OUT OF THE BOX: days before 1970 have no civil day to scan.
+        let before = imported_to(&shapes, gdfl, "INDEX", (-40, -10));
+        assert_eq!(before.to, Some(epoch_of(2026, 9, 15)));
+        assert!(before.open.is_empty(), "{before:?}");
+        for word in ["BOGUS", "index"] {
+            let refused = imported_to(&shapes, gdfl, word, september);
+            assert_eq!(refused.to, None);
+            assert_eq!(refused.from, format!("{word:?} is not a segment"));
+        }
+        // COMBINED: a close after today, a stocks close between it and today.
+        let future = journaled(
+            "feeds-reach-future",
+            &[
+                &format!("begin indices 2026-09-20 *\ndone indices 2026-09-20 * {DONE}"),
+                &format!("begin stocks 2026-09-24 *\ndone stocks 2026-09-24 * {DONE}"),
+                &format!("begin indices 2099-01-01 *\ndone indices 2099-01-01 * {DONE}"),
+            ],
+        );
+        let bounded = imported_to(&future, gdfl, "INDEX", september);
+        assert_eq!(bounded.to, Some(epoch_of(2026, 9, 20)), "{bounded:?}");
+        assert!(bounded.from.contains("passed over"), "{bounded:?}");
+    }
+
+    /// **THE ARCHIVE'S EVIDENCE AND THE STORE'S ROWS NAME EVERY SHAPE THEY
+    /// MEET** (D-8665). The journal's evidence when it names no written day,
+    /// when it cannot be read and when an open day lies between today and a
+    /// day after it; a span after today unmade by `not_after_today`; the held
+    /// span of a pulled feed labelled `not pulled`; a degraded census's note
+    /// on its store row; a fold of a key the part does not hold; and two
+    /// parts holding one segment, widened into one span.
+    ///
+    /// Extremes: singles — a journal of open days only, a journal that is
+    /// a folder's worth of file (unreadable), a span ending tomorrow, a span
+    /// ending today (kept), no clock (kept), a pulled feed's held span, a
+    /// degraded census; combinations — an open day between a written day and
+    /// a written day after today at once (the walk passes both and lands on
+    /// the written day before them), two parts of one segment with
+    /// overlapping spans at once (one span, the widest); out of the box — a
+    /// key folded in that the part does not hold (nothing changes).
+    #[test]
+    fn the_archive_evidence_and_the_store_rows_name_every_shape_they_meet() {
+        let today = epoch_of(2026, 10, 15);
+        let open_only = journaled("feeds-evidence-open-only", &["begin indices 2026-09-28 *"]);
+        let evidence = journal_evidence(&open_only, Some(today));
+        assert_eq!(
+            evidence.span,
+            Err("the journal names no day an import wrote bars on".to_owned())
+        );
+        let unreadable = store_root("feeds-evidence-unreadable");
+        std::fs::write(
+            unreadable.join("imports"),
+            b"a file where the folder belongs",
+        )
+        .expect("a file");
+        let evidence = journal_evidence(&unreadable, Some(today));
+        assert!(
+            evidence
+                .span
+                .as_ref()
+                .is_err_and(|why| why.starts_with("the GDFL import journal cannot be read: ")),
+            "{:?}",
+            evidence.span
+        );
+        let between = journaled(
+            "feeds-evidence-between",
+            &[
+                &format!("begin indices 2026-09-23 *\ndone indices 2026-09-23 * {DONE}"),
+                "begin indices 2026-09-24 *",
+                &format!("begin indices 2099-01-01 *\ndone indices 2099-01-01 * {DONE}"),
+            ],
+        );
+        let evidence = journal_evidence(&between, Some(today));
+        let day = epoch_of(2026, 9, 23);
+        assert_eq!(
+            evidence.span,
+            Ok(DaySpan {
+                first: day,
+                last: day
+            })
+        );
+        assert!(
+            evidence.source.contains("passed over"),
+            "{}",
+            evidence.source
+        );
+        let span = |last: i64| Evidence {
+            by: "census",
+            span: Ok(DaySpan { first: day, last }),
+            source: "invented".to_owned(),
+        };
+        let unmade = not_after_today(span(today + 1), Some(today));
+        assert_eq!(
+            unmade.span,
+            Err(format!(
+                "names 2026-10-16 as its last day, after today 2026-10-15 (IST): a day that \
+                 has not happened shows no delivery, so this evidence sets neither end of the \
+                 archive"
+            ))
+        );
+        assert_eq!(
+            not_after_today(span(today), Some(today)).span,
+            Ok(DaySpan {
+                first: day,
+                last: today
+            })
+        );
+        assert_eq!(
+            not_after_today(span(today + 1), None).span,
+            Ok(DaySpan {
+                first: day,
+                last: today + 1
+            })
+        );
+        // A PULLED FEED'S HELD SPAN, from a census built in memory.
+        let gdfl = brutex_core::vendor::Vendor::Gdfl;
+        let mut one = pull::manifest::Manifest::open(gdfl, &[], &[]).expect("genesis");
+        let mut two = pull::manifest::Manifest::open(gdfl, &[], &[]).expect("genesis");
+        for n in 0..3 {
+            one.record(option_month(n)).expect("records");
+            two.record(option_month(n + 10)).expect("records");
+        }
+        let held = |manifest: census::Manifests| census::VendorCensus {
+            vendor: gdfl,
+            path: std::path::PathBuf::new(),
+            state: census::Census::Held { manifest },
+        };
+        let pulled: serde_json::Value = serde_json::from_str(&held_json(
+            Some(&held(census::Manifests::single(one.clone()))),
+            pull::vendor::SourceKind::Rest,
+        ))
+        .expect("held JSON");
+        assert_eq!(pulled["label_outside"], NOT_PULLED, "{pulled}");
+        assert_eq!(pulled["to"], "2020-09-03", "{pulled}");
+        // TWO PARTS OF ONE SEGMENT, one span: 1-3 September and 11-13.
+        let (_, spans) = held_spans(Some(&held(census::Manifests::partitions(vec![
+            one.clone(),
+            two,
+        ]))))
+        .expect("a span");
+        assert_eq!(
+            spans[2].map(|s| (day_text(s.first), day_text(s.last))),
+            Some(("2020-09-01".to_owned(), "2020-09-13".to_owned()))
+        );
+        // OUT OF THE BOX: a key the part does not hold folds nothing in.
+        let part = census::Part::in_memory(one);
+        let mut walked = PartSpan::walk(&part);
+        let before = walked.segments;
+        walked.fold(&part, &option_month(99).key);
+        assert_eq!(walked.segments, before);
+        // A DEGRADED CENSUS'S STORE ROW CARRIES ITS NOTE.
+        let root = store_root("feeds-store-degraded");
+        let mut damaged = pull::manifest::ManifestHeader::genesis(gdfl).image();
+        damaged[16] ^= 0xFF;
+        let good = pull::manifest::ManifestHeader {
+            generation: 1,
+            ..pull::manifest::ManifestHeader::genesis(gdfl)
+        }
+        .image();
+        let mut bytes = vec![0u8; 32_768];
+        bytes[..64].copy_from_slice(&damaged);
+        bytes[16_384..16_448].copy_from_slice(&good);
+        let path = pull::manifest::manifest_path(&root, gdfl);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, &bytes).expect("written");
+        let degraded = census::read_vendor(&root, gdfl);
+        let row: serde_json::Value =
+            serde_json::from_str(&store_json(Some(&degraded))).expect("store JSON");
+        assert_eq!(row["state"], "held", "{row}");
+        assert!(
+            row["note"].as_str().is_some_and(|note| !note.is_empty()),
+            "{row}"
+        );
+        assert_eq!(row["note"], degraded.degraded().expect("degraded").as_str());
+    }
+
+    /// **THE WINDOW UNDER DEGRADED SETTINGS IS SERVED ONLY WHEN BOTH ENDS
+    /// COME FROM A GENERATION THAT READ** (D-8665). A hole below the newest
+    /// generation degrades the settings; a window both of whose ends that
+    /// generation sets is served with the fault beside it, one end set and
+    /// the other the built-in default is refused, as the default would hide
+    /// a saved value.
+    ///
+    /// Extremes: singles — both ends from the generation, one end from the
+    /// default; combinations — a hole and both ends set at once (served,
+    /// `degraded` named), a hole and one end set at once (refused); out of
+    /// the box — the same generation with no hole (served, `degraded` null).
+    #[test]
+    fn the_window_under_degraded_settings_is_served_only_from_a_generation() {
+        use crate::server::settings_route::{Snapshot, change, snapshot};
+        let hole = "1 generation number(s) missing (2)";
+        let both = store_root("feeds-window-hole-both");
+        let (status, body) = change(
+            &both,
+            r#"{"expected":0,"changed_by":"test","reason":"both ends","set":{"window.from":"2019-01-01","window.to":"2026-10-31"}}"#,
+        );
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let clean = snapshot(&both);
+        let served: serde_json::Value =
+            serde_json::from_str(&window_json(pull::vendor::Feed::Zerodha, &clean))
+                .expect("window JSON");
+        assert_eq!(served["degraded"], serde_json::Value::Null, "{served}");
+        let holed = Snapshot {
+            holes: Some(hole.to_owned()),
+            ..clean
+        };
+        let served: serde_json::Value =
+            serde_json::from_str(&window_json(pull::vendor::Feed::Zerodha, &holed))
+                .expect("window JSON");
+        assert_eq!(served["from"], "2019-01-01", "{served}");
+        assert_eq!(served["to"], "2026-10-31", "{served}");
+        assert_eq!(served["degraded"], hole, "{served}");
+        let one = store_root("feeds-window-hole-one");
+        let (status, body) = change(
+            &one,
+            r#"{"expected":0,"changed_by":"test","reason":"one end","set":{"window.from":"2019-01-01"}}"#,
+        );
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let holed = Snapshot {
+            holes: Some(hole.to_owned()),
+            ..snapshot(&one)
+        };
+        let refused: serde_json::Value =
+            serde_json::from_str(&window_json(pull::vendor::Feed::Zerodha, &holed))
+                .expect("window JSON");
+        assert!(refused["from"].is_null(), "{refused}");
+        assert!(
+            refused["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("cannot be read") && why.contains(hole)),
+            "{refused}"
+        );
+    }
+
+    /// **THE DESCRIPTOR FACTS THAT LEAVE FIVE BRANCHES OF THIS FILE WITHOUT
+    /// AN INPUT HOLD, FEED BY FEED** (D-8665). `readiness`, the history rows,
+    /// the F&O word, the derived rungs and the day basis read compile-time
+    /// descriptors, not a request: these facts are why one side of each of
+    /// those branches has no input that reaches it today, and the day one
+    /// stops holding this test says which branch then needs its own test.
+    ///
+    /// Extremes: singles — every feed has a store prefix, no feed records a
+    /// history row for a rung it does not serve, every HTTP feed names how it
+    /// addresses F&O, no measured day basis is a fold, every known rung above
+    /// a minute is whole minutes; combinations — every feed against every
+    /// rung of the ladder at once, every known rung against the minute and
+    /// the day at once; out of the box — the archive feeds, which have no
+    /// HTTP transport, are the feeds the F&O fact does not bind.
+    #[test]
+    fn the_descriptor_facts_behind_five_branches_hold_feed_by_feed() {
+        let (mut http, mut archives) = (0, 0);
+        for feed in pull::vendor::Feed::ALL {
+            assert!(
+                feed.store_vendor().is_some(),
+                "{} has no store prefix",
+                feed.display()
+            );
+            for rung in pull::vendor::Granularity::ALL {
+                assert!(
+                    feed.serves(rung) || feed.descriptor().history_row(rung).is_none(),
+                    "{} records a history row for {}, which it does not serve",
+                    feed.display(),
+                    rung.dir()
+                );
+            }
+            match feed.descriptor().transport {
+                pull::vendor::Transport::Http(spec) => {
+                    http += 1;
+                    assert!(
+                        spec.fno.by_name().is_some()
+                            || spec.fno.by_offset().is_some()
+                            || spec.fno.by_token().is_some(),
+                        "{} names no F&O shape",
+                        feed.display()
+                    );
+                }
+                pull::vendor::Transport::LocalArchive(_) => {
+                    archives += 1;
+                    assert_eq!(
+                        feed.source_kind(),
+                        pull::vendor::SourceKind::Folder,
+                        "{} is an archive read from a folder",
+                        feed.display()
+                    );
+                }
+            }
+            if let pull::vendor::Basis::Measured { day: Some(day), .. } = feed.descriptor().basis {
+                assert!(
+                    !day.is_fold,
+                    "{} measures its day as a fold",
+                    feed.display()
+                );
+            }
+        }
+        assert!(archives >= 1, "GDFL at least is an archive");
+        assert_eq!(http + archives, pull::vendor::Feed::ALL.len());
+        let minute = store::path::Timeframe::MINUTE_1.secs();
+        for target in store::path::Timeframe::KNOWN {
+            if target.secs() > minute {
+                assert!(
+                    target.secs().is_multiple_of(minute),
+                    "{} is not whole minutes",
+                    target.as_str()
+                );
+            }
+        }
     }
 }

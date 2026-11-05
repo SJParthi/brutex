@@ -230,6 +230,11 @@ fn a_banner_line_on_a_closed_stream_is_dropped_loudly_and_never_panics() {
         format_args!("  store: {}", "/s")
     ));
     let said = String::from_utf8(err).expect("utf-8");
+    // THE FIXTURE IS A CLOSED PIPE ON EVERY CALL, a flush included.
+    assert_eq!(
+        std::io::Write::flush(&mut Closed).map_err(|why| why.kind()),
+        Err(std::io::ErrorKind::BrokenPipe)
+    );
     assert!(said.starts_with("stdout is not writable ("), "{said}");
     assert!(
         said.ends_with("a banner line was not shown:   store: /s\n"),
@@ -323,19 +328,54 @@ fn production_code_in_server_rs_prints_through_the_panic_free_writers() {
     let offenders: Vec<&str> = production
         .into_iter()
         .filter(|line| !line.trim_start().starts_with("//"))
-        .filter(|line| {
-            ["println!(", "print!(", "eprintln!(", "eprint!("]
-                .into_iter()
-                .any(|banned| {
-                    line.match_indices(banned).any(|(at, _)| {
-                        // `eprintln!(` contains `println!(`; judge the whole word.
-                        !line
-                            .get(..at)
-                            .and_then(|head| head.chars().last())
-                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-                    })
-                })
-        })
+        .filter(|line| prints(line))
         .collect();
     assert!(offenders.is_empty(), "{offenders:#?}");
+}
+
+/// Whether `line` calls one of the four print macros as a whole word.
+/// `eprintln!(` contains `println!(`, so a macro name is judged by the byte
+/// before it: a letter, a digit or `_` makes it part of another name.
+fn prints(line: &str) -> bool {
+    ["println!(", "print!(", "eprintln!(", "eprint!("]
+        .into_iter()
+        .any(|banned| {
+            line.match_indices(banned).any(|(at, _)| {
+                !line
+                    .get(..at)
+                    .and_then(|head| head.chars().last())
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        })
+}
+
+/// **THE PRINT SCAN JUDGES A MACRO NAME AS A WHOLE WORD** (D-8665). The
+/// scan above finds no print in production code, so its word rule is shown
+/// here on lines that hold each shape it must tell apart.
+///
+/// Extremes: singles — a bare `println!(` at the start of a line, an
+/// indented `eprint!(`, `eprintln!(` (which holds `println!(`), a name with
+/// `_` before the macro, a name with a letter before it, a name with a digit
+/// before it, a line with no macro; combinations — a part of another name
+/// and a whole call on one line at once (found), two names that are only
+/// parts at once (not found); out of the box — the macro name with no
+/// opening parenthesis (a path, not a call: not found), and a line of
+/// multi-byte characters before the call (judged by its last character).
+#[test]
+fn the_print_scan_judges_a_macro_name_as_a_whole_word() {
+    for (line, found) in [
+        ("println!(\"x\");", true),
+        ("        eprint!(\"x\");", true),
+        ("    eprintln!(\"{x}\");", true),
+        ("    my_println!(\"x\");", false),
+        ("    xprintln!(\"x\");", false),
+        ("    x2print!(\"x\");", false),
+        ("    let x = say_line(out, err, args);", false),
+        ("    my_println!(a); println!(b);", true),
+        ("    my_eprint!(a); x_println!(b);", false),
+        ("    use std::println;", false),
+        ("    let héé = 1; println!(\"{héé}\");", true),
+    ] {
+        assert_eq!(prints(line), found, "{line}");
+    }
 }

@@ -2975,10 +2975,6 @@ mod cloud_mutant_tests {
     /// hold: the probe is asked only of held months, so the missing month is
     /// outside the life and never a fault.
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one table of every way a month is served or named, read in one place"
-    )]
     fn a_plan_serves_every_month_it_can_and_names_every_one_it_cannot() {
         use store::quarantine::Scope;
         let window = [month(5), month(6), month(7)];
