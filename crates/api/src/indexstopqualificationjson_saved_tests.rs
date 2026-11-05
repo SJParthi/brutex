@@ -128,12 +128,14 @@ fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
 }
 
 /// The launch request: NIFTY at one minute, May 2025 for training and June
-/// for the later days, over two live bits.
+/// for the later days, over the bullish and bearish bar bits (30, 31), which
+/// the generated minutes, closing 50 paisa above or below their open, keep
+/// firing.
 fn launch_body(digest: &str) -> String {
     serde_json::json!({"command":crate::indexstoplaunch::COMMAND,"feed":"zerodha","index":"NSE-NIFTY",
         "timeframes":["1min"],"from_year":2025,"from_month":5,"to_year":2025,"to_month":5,
         "later_from_year":2025,"later_from_month":6,"later_to_year":2025,"later_to_month":6,
-        "bits":"52,53","max_loss_points":"5","batch_programs":"2","node_allowance":"128",
+        "bits":"30,31","max_loss_points":"5","batch_programs":"2","node_allowance":"128",
         "batch_allowance":"1","expected_policy_digest":digest})
     .to_string()
 }

@@ -43,6 +43,8 @@ fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
         ("BRUTEX_BOOLEAN_BATCH_PROGRAMS", "2"),
         ("BRUTEX_BOOLEAN_NODE_ALLOWANCE", "128"),
         ("BRUTEX_BOOLEAN_BATCH_ALLOWANCE", "1"),
+        // The search recurses deeper than a 2 MiB test thread at opt-level 0.
+        ("RUST_MIN_STACK", "268435456"),
     ]
     .into_iter()
     .map(|(name, value)| (name, value.into()))
@@ -55,12 +57,14 @@ fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
 }
 
 /// The launch request: NIFTY at one minute, May 2025 for training and June
-/// for the later days, over two live bits.
+/// for the later days, over the bullish and bearish bar bits (30, 31), which
+/// the generated minutes, closing 50 paisa above or below their open, keep
+/// firing.
 fn launch_body(digest: &str) -> String {
     serde_json::json!({"command":crate::booleanlaunch::COMMAND,"feed":"zerodha","symbols":["NIFTY"],
         "timeframes":["1min"],"from_year":2025,"from_month":5,"to_year":2025,"to_month":5,
         "later_from_year":2025,"later_from_month":6,"later_to_year":2025,"later_to_month":6,
-        "bits":"52,53","horizon_bars":"5","max_points":"5","batch_programs":"2",
+        "bits":"30,31","horizon_bars":"5","max_points":"5","batch_programs":"2",
         "node_allowance":"128","batch_allowance":"1","expected_policy_digest":digest})
     .to_string()
 }
