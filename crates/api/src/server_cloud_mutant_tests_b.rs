@@ -26,10 +26,9 @@ fn ym(year: u16, month: u8) -> store::path::YearMonth {
 
 /// The value of the first fact labelled `label`.
 fn fact<'a>(facts: &'a [(&'static str, String)], label: &str) -> &'a str {
-    facts.iter().find(|(name, _)| *name == label).map_or_else(
-        || panic!("no {label:?} fact in {facts:?}"),
-        |(_, value)| value.as_str(),
-    )
+    let found = facts.iter().find(|(name, _)| *name == label);
+    assert!(found.is_some(), "no {label:?} fact in {facts:?}");
+    found.map_or("", |(_, value)| value.as_str())
 }
 
 // ------------------------------------------------------------- fno_facts
@@ -162,7 +161,7 @@ impl Drop for Root {
 struct Loopback {
     base: &'static str,
     seen: Arc<Mutex<Vec<String>>>,
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
 impl Loopback {
@@ -185,11 +184,9 @@ impl Loopback {
                 )
             }
         });
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("the loopback serves");
-        });
+        // THE SERVE FUTURE ITSELF IS THE TASK: it runs until `Drop` aborts it,
+        // so a block awaiting it would hold a line that never runs.
+        let task = tokio::spawn(axum::serve(listener, app).into_future());
         Self {
             base: Box::leak(format!("http://{address}").into_boxed_str()),
             seen,
@@ -1982,6 +1979,30 @@ fn visible(body: &str) -> &str {
         .unwrap_or(body)
 }
 
+/// **THE VISIBLE PART OF A RECEIPT STARTS AT ITS FIRST CONTENT SECTION**
+/// (D-8665). The helper every receipt assertion message reads, shown on the
+/// shapes a rendered page can take, so a failing message is never cut wrong.
+///
+/// Extremes: singles — a page with a stylesheet before its section, a page
+/// that is only its section, a page with no section (whole); combinations
+/// — two sections at once (from the first); out of the box — an empty page.
+#[test]
+fn the_visible_part_of_a_receipt_starts_at_its_first_content_section() {
+    let section = "<section class=\"wrap\">kept</section>";
+    for (page, seen) in [
+        (format!("<style>x</style>{section}"), section.to_owned()),
+        (section.to_owned(), section.to_owned()),
+        ("no section".to_owned(), "no section".to_owned()),
+        (
+            format!("<p>{section}{section}"),
+            format!("{section}{section}"),
+        ),
+        (String::new(), String::new()),
+    ] {
+        assert_eq!(visible(&page), seen, "{page}");
+    }
+}
+
 // ------------------------------------------------- rolling walk internals
 
 /// `note_run_failure` counts every failure and keeps the first
@@ -2180,37 +2201,87 @@ fn the_rolling_progress_events_carry_their_counts() {
     say_group_starting(&asked, "MONTH", "1", 918_274, 3, 4);
     say_walk_finished(&asked, 918_275, 5, 6, 918_273);
 
-    let started = crate::emitted::landed(from, "pull.roll", "walk starting");
+    // EACH RECORD IS FOUND BY A FIELD ONLY THIS TEST WRITES (other tests emit
+    // into the same sink in parallel), and then every field is its own assert.
+    let started: Vec<_> = crate::emitted::landed(from, "pull.roll", "walk starting")
+        .into_iter()
+        .filter(|record| crate::emitted::says(record, "endpoint", "cloudb-endpoint"))
+        .collect();
+    assert_eq!(started.len(), 1, "{started:?}");
+    let record = &started[0];
     assert!(
-        started.iter().any(|record| {
-            crate::emitted::says(record, "endpoint", "cloudb-endpoint")
-                && crate::emitted::says(record, "underlying", "NIFTY")
-                && crate::emitted::counts(record, "chunks", 7)
-                && crate::emitted::counts(record, "offsets", 21)
-                && crate::emitted::counts(record, "cadences", 2)
-                && crate::emitted::counts(record, "planned_requests", 918_273)
-        }),
-        "{started:?}"
+        crate::emitted::says(record, "underlying", "NIFTY"),
+        "{record:?}"
     );
-    let group = crate::emitted::landed(from, "pull.roll", "group starting");
+    assert!(crate::emitted::counts(record, "chunks", 7), "{record:?}");
+    assert!(crate::emitted::counts(record, "offsets", 21), "{record:?}");
+    assert!(crate::emitted::counts(record, "cadences", 2), "{record:?}");
     assert!(
-        group.iter().any(|record| {
-            crate::emitted::says(record, "expiry_flag", "MONTH")
-                && crate::emitted::counts(record, "stored_so_far", 918_274)
-                && crate::emitted::counts(record, "failed_so_far", 3)
-                && crate::emitted::counts(record, "declined_so_far", 4)
-        }),
-        "{group:?}"
+        crate::emitted::counts(record, "planned_requests", 918_273),
+        "{record:?}"
     );
-    let finished = crate::emitted::landed(from, "pull.roll", "walk finished");
+    let group: Vec<_> = crate::emitted::landed(from, "pull.roll", "group starting")
+        .into_iter()
+        .filter(|record| crate::emitted::counts(record, "stored_so_far", 918_274))
+        .collect();
+    assert_eq!(group.len(), 1, "{group:?}");
+    let record = &group[0];
     assert!(
-        finished.iter().any(|record| {
-            crate::emitted::counts(record, "stored", 918_275)
-                && crate::emitted::counts(record, "failed", 5)
-                && crate::emitted::counts(record, "declined", 6)
-                && crate::emitted::counts(record, "planned_requests", 918_273)
-        }),
-        "{finished:?}"
+        crate::emitted::says(record, "expiry_flag", "MONTH"),
+        "{record:?}"
+    );
+    assert!(
+        crate::emitted::counts(record, "failed_so_far", 3),
+        "{record:?}"
+    );
+    assert!(
+        crate::emitted::counts(record, "declined_so_far", 4),
+        "{record:?}"
+    );
+    let finished: Vec<_> = crate::emitted::landed(from, "pull.roll", "walk finished")
+        .into_iter()
+        .filter(|record| crate::emitted::counts(record, "stored", 918_275))
+        .collect();
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    let record = &finished[0];
+    assert!(crate::emitted::counts(record, "failed", 5), "{record:?}");
+    assert!(crate::emitted::counts(record, "declined", 6), "{record:?}");
+    assert!(
+        crate::emitted::counts(record, "planned_requests", 918_273),
+        "{record:?}"
+    );
+}
+
+/// **A SCRIPT WITH NO ANSWER LEFT REFUSES AS A TRANSPORT FAILURE** (D-8665).
+/// The scripted discovery every walk test above reads answers a request past
+/// its last scripted answer as a vendor that answered nothing, so a walk that
+/// asks once too often is refused by name and never handed a made-up page;
+/// and the request is logged all the same.
+///
+/// Extremes: singles — an empty script asked once, a script of one answer
+/// asked twice (its second ask); combinations — the answer and the refusal
+/// from one script in order at once; out of the box — the URL of an ask
+/// past the end is still logged, so a test reading `asked` sees the extra
+/// ask.
+#[tokio::test]
+async fn a_script_with_no_answer_left_refuses_as_a_transport_failure() {
+    use pull::chain::Discovery as _;
+    let empty = Scripted::new(Vec::new());
+    let refused = empty.get("https://vendor.invalid/one").await;
+    let why = refused.expect_err("an empty script answers nothing");
+    assert_eq!(
+        (why.status, why.to_string()),
+        (None, "script exhausted".to_owned())
+    );
+    let once = Scripted::new(vec![Ok("[]".to_owned())]);
+    assert_eq!(
+        once.get("https://vendor.invalid/a").await.ok().as_deref(),
+        Some("[]")
+    );
+    assert!(once.get("https://vendor.invalid/b").await.is_err());
+    assert_eq!(
+        once.asked(),
+        ["https://vendor.invalid/a", "https://vendor.invalid/b"]
     );
 }
 

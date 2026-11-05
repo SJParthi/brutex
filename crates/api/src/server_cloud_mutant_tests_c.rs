@@ -116,7 +116,7 @@ impl Drop for Fixture {
 struct FakeVendor {
     base: &'static str,
     seen: Arc<Mutex<Vec<String>>>,
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
 type Answer = dyn Fn(usize, &str) -> (u16, String) + Send + Sync;
@@ -148,9 +148,9 @@ impl FakeVendor {
                 )
             }
         });
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("the fake serves");
-        });
+        // THE SERVE FUTURE ITSELF IS THE TASK: it runs until `Drop` aborts it,
+        // so a block awaiting it would hold a line that never runs.
+        let task = tokio::spawn(axum::serve(listener, app).into_future());
         Self {
             base: Box::leak(format!("http://{address}").into_boxed_str()),
             seen,
@@ -166,6 +166,18 @@ impl FakeVendor {
 impl Drop for FakeVendor {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// Waits until `done` holds, asking every 250 ms; past `deadline` the test
+/// fails by name.
+async fn eventually(deadline: std::time::Instant, mut done: impl FnMut() -> bool) {
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the awaited condition never held"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
@@ -488,10 +500,11 @@ async fn a_death_after_the_first_chunk_is_lifted_and_halts_the_run() {
 
 /// A Dhan spec, for windows built by hand.
 fn dhan_spec() -> pull::vendor::HttpSpec {
-    match pull::vendor::Feed::Dhan.descriptor().transport {
-        pull::vendor::Transport::Http(spec) => spec,
-        pull::vendor::Transport::LocalArchive(_) => panic!("Dhan is HTTP"),
-    }
+    let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Dhan.descriptor().transport
+    else {
+        panic!("Dhan is HTTP");
+    };
+    spec
 }
 
 /// A hand-built window of `instrument`, with no bodies.
@@ -858,9 +871,8 @@ async fn a_hand_stop_mid_run_stops_at_the_next_instrument() {
     let cell: Arc<std::sync::OnceLock<Loaded>> = Arc::new(std::sync::OnceLock::new());
     let pressed = Arc::clone(&cell);
     let vendor = FakeVendor::answering(move |_, _| {
-        if let Some(site) = pressed.get() {
-            let _epoch = site.autopilot.stop_hand();
-        }
+        let site = pressed.get().expect("the site is set before the run asks");
+        let _epoch = site.autopilot.stop_hand();
         (200, dhan_bar(AUG_03))
     })
     .await;
@@ -901,9 +913,8 @@ async fn a_pause_mid_run_stops_an_autopilot_run_at_the_next_instrument() {
     let cell: Arc<std::sync::OnceLock<Loaded>> = Arc::new(std::sync::OnceLock::new());
     let pressed = Arc::clone(&cell);
     let vendor = FakeVendor::answering(move |_, _| {
-        if let Some(site) = pressed.get() {
-            site.autopilot.pause();
-        }
+        let site = pressed.get().expect("the site is set before the run asks");
+        site.autopilot.pause();
         (200, dhan_bar(AUG_03))
     })
     .await;
@@ -1713,20 +1724,39 @@ fn a_damaged_census_cannot_show_nothing_is_held() {
     };
     let why = manifest.degraded_reason().expect("the premise: degraded");
     let month = store::path::YearMonth::new(2026, 7).expect("a month");
-    let held = store_holds_nothing_in(&census, &[month], |month| pull::manifest::EntryKey {
+    let nifty_days = |month| pull::manifest::EntryKey {
         contract: None,
         exchange: brutex_core::instrument::Exchange::Nse,
         segment: brutex_core::instrument::Segment::Index,
         symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
         timeframe: store::path::Timeframe::DAY_1,
         month,
-    });
+    };
+    let held = store_holds_nothing_in(&census, &[month], nifty_days);
     assert_eq!(
         held,
         Err(format!(
             "the store's census was recovered from damage ({why}), so a month it lost could \
              hold an earlier bar"
         ))
+    );
+    // THE CONTRAST: the same question of a clean census reads the month's
+    // key, finds it absent and shows that nothing is held.
+    let clean = Fixture::new("damaged-census-contrast");
+    let path = pull::manifest::manifest_path(&clean.root, Vendor::Dhan);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+    std::fs::write(
+        &path,
+        pull::manifest::Manifest::open(Vendor::Dhan, &[], &[])
+            .expect("genesis")
+            .image(),
+    )
+    .expect("a clean manifest");
+    let census = census::read_vendor(&clean.root, Vendor::Dhan);
+    assert_eq!(census.degraded(), None, "the premise: clean");
+    assert_eq!(
+        store_holds_nothing_in(&census, &[month], nifty_days),
+        Ok(())
     );
 }
 
@@ -1882,15 +1912,14 @@ async fn a_budget_lost_between_chunks_keeps_the_prefix() {
     let cell: Arc<std::sync::OnceLock<Loaded>> = Arc::new(std::sync::OnceLock::new());
     let held = Arc::clone(&cell);
     let vendor = FakeVendor::answering(move |_, _| {
-        if let Some(site) = held.get() {
-            std::thread::scope(|scope| {
-                let poisoner = scope.spawn(|| {
-                    let _budgets = site.budgets.lock().expect("not yet poisoned");
-                    panic!("poison the budget lock mid-window");
-                });
-                assert!(poisoner.join().is_err());
+        let site = held.get().expect("the site is set before the run asks");
+        std::thread::scope(|scope| {
+            let poisoner = scope.spawn(|| {
+                let _budgets = site.budgets.lock().expect("not yet poisoned");
+                panic!("poison the budget lock mid-window");
             });
-        }
+            assert!(poisoner.join().is_err());
+        });
         (200, dhan_bar(JUL_01))
     })
     .await;
@@ -2434,25 +2463,20 @@ async fn an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_r
     assert_eq!(site.broker, Broker::Live);
     site.autopilot.resume();
     let flying = tokio::spawn(crate::autopilot::fly(Loaded::clone(&site)));
+    // THE RECORD LANDS BEFORE THE STATUS COUNTS THE TICK, so both are waited
+    // for, one after the other: each only ever becomes true.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
-    let records = loop {
-        let records = journal_records(&fx.root);
-        // THE RECORD LANDS BEFORE THE STATUS COUNTS THE TICK, so both are
-        // waited for.
-        if records
+    eventually(deadline, || {
+        journal_records(&fx.root)
             .iter()
             .any(|record| record.outcome == audit::Outcome::NotStarted)
-            && !site.autopilot.json().contains(r#""ticks":0,"#)
-        {
-            break records;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no tick was journalled: {}",
-            site.autopilot.json()
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    };
+    })
+    .await;
+    eventually(deadline, || {
+        !site.autopilot.json().contains(r#""ticks":0,"#)
+    })
+    .await;
+    let records = journal_records(&fx.root);
     site.autopilot.pause();
     flying.abort();
     let _aborted = flying.await;
@@ -2846,11 +2870,8 @@ async fn the_first_attempt_is_not_charged_here_and_a_retry_is() {
     assert_eq!(vendor.seen().len(), 1);
 
     let busy = FakeVendor::answering(|nth, _| {
-        if nth == 0 {
-            (503, "busy".to_owned())
-        } else {
-            (200, dhan_bar(AUG_03))
-        }
+        assert_eq!(nth, 0, "the retry is never sent");
+        (503, "busy".to_owned())
     })
     .await;
     let (source, _) = loopback_source(&busy);
@@ -2886,16 +2907,13 @@ async fn a_named_throttle_with_no_readable_budget_is_recorded_nowhere() {
     };
     let named = || {
         FakeVendor::answering(|nth, _| {
-            if nth == 0 {
-                (
-                    400,
-                    "{\"errorType\":\"Data_API_Error\",\"errorCode\":\"DH-904\",\
-                     \"errorMessage\":\"Too many requests\"}"
-                        .to_owned(),
-                )
-            } else {
-                (200, dhan_bar(AUG_03))
-            }
+            assert_eq!(nth, 0, "the retry is never sent");
+            (
+                400,
+                "{\"errorType\":\"Data_API_Error\",\"errorCode\":\"DH-904\",\
+                 \"errorMessage\":\"Too many requests\"}"
+                    .to_owned(),
+            )
         })
     };
 

@@ -155,11 +155,10 @@ fn a_contract_key_is_not_a_spot_instrument() {
 
 /// One NSE cash minute window of `instrument`, as `broker_window` lands it.
 fn landed_cash(instrument: &str) -> BrokerWindow {
-    let spec = match pull::vendor::Feed::Dhan.descriptor().transport {
-        pull::vendor::Transport::Http(spec) => Some(spec),
-        pull::vendor::Transport::LocalArchive(_) => None,
-    }
-    .expect("Dhan is an HTTP feed");
+    let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Dhan.descriptor().transport
+    else {
+        panic!("Dhan is an HTTP feed");
+    };
     let day = auction_era_open_day();
     BrokerWindow {
         listing: pull::vendor::Listing::Equity,

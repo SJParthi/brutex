@@ -143,10 +143,7 @@ async fn every_refusal_says_when_and_every_answer_names_its_build() {
     assert!(!fine.headers().contains_key(axum::http::header::RETRY_AFTER));
     assert_eq!(fine.headers()[&BUILD_HEADER], build_label());
     let label = build_label();
-    assert!(
-        label == "unstamped" || (label.len() == 40 && label.bytes().all(|b| b.is_ascii_hexdigit())),
-        "{label}"
-    );
+    assert!(is_build_label(label), "{label}");
     assert_eq!(cli::commit_stamp().unwrap_or("unstamped"), label);
 
     // `/health` keeps `ok`/`DEGRADED` on its first line and names the build last.
@@ -186,10 +183,7 @@ fn a_legacy_file_written_after_migration_is_named_on_the_census() {
     let reason = headers["x-brutex-census-reason"].to_str().expect("text");
     assert!(reason.starts_with("legacy drift:"), "{reason}");
     let state = headers[CENSUS_STATE_HEADER].to_str().expect("text");
-    assert!(
-        state == "behind" || state == "unreadable",
-        "a drifted census is never `held`: {state}"
-    );
+    assert_eq!(state, "behind", "a drifted census is never `held`");
     assert!(headers.contains_key("x-brutex-census-format"));
 
     fs::write(&legacy, vec![0_u8; 1_000]).expect("as migrated");
@@ -224,12 +218,16 @@ fn a_census_this_build_cannot_read_whole_is_unreadable_and_says_why() {
         .filter_map(|value| value.to_str().ok())
         .filter(|value| value.contains("census-v5"))
         .collect();
+    let named = said
+        .iter()
+        .find(|value| value.contains("manifest/REQUIRES"));
     assert!(
-        said.iter().any(|value| value.contains("manifest/REQUIRES")
-            && value.contains("line 3")
-            && value.contains("this build does not have")),
+        named.is_some(),
         "the refusal is named on the answer: {headers:?}"
     );
+    let named = named.copied().unwrap_or_default();
+    assert!(named.contains("line 3"), "{named}");
+    assert!(named.contains("this build does not have"), "{named}");
     let other: axum::http::Uri = "/store.json?feed=zerodha".parse().expect("uri");
     let (_status, headers, _) = store_response(&site, &HeaderMap::new(), &other, &Method::HEAD);
     assert_ne!(
@@ -285,10 +283,46 @@ where
     let _ = served.await;
 }
 
+/// Whether `label` is a build label: `unstamped`, or a 40-hex commit.
+fn is_build_label(label: &str) -> bool {
+    label == "unstamped" || (label.len() == 40 && label.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// **A BUILD LABEL IS `unstamped` OR A WHOLE COMMIT, NOTHING ELSE**
+/// (D-8665). The shape the build header test above checks, shown on every
+/// shape a label could take, so the check holds whichever build runs it.
+///
+/// Extremes: singles — `unstamped`, a 40-hex commit, 39 hex digits, 41,
+/// one byte off the hex alphabet, an empty label; combinations — upper-case
+/// hex of the right length at once (a commit), the right length with a
+/// space at once (refused); out of the box — `Unstamped` in another case.
+#[test]
+fn a_build_label_is_unstamped_or_a_whole_commit() {
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    for (label, is) in [
+        ("unstamped", true),
+        (commit, true),
+        (&commit[..39], false),
+        (&format!("{commit}8")[..], false),
+        ("0123456789abcdef0123456789abcdef0123456g", false),
+        ("", false),
+        ("0123456789ABCDEF0123456789ABCDEF01234567", true),
+        ("0123456789abcdef0123456789abcdef 1234567", false),
+        ("Unstamped", false),
+    ] {
+        assert_eq!(is_build_label(label), is, "{label:?}");
+    }
+}
+
 /// One HTTP/1.1 exchange's status line.
 async fn status_of(addr: SocketAddr, method: &str) -> String {
+    status_with(addr, method, "").await
+}
+
+/// [`status_of`] with `extra` header lines (each ending `\r\n`) after `Host`.
+async fn status_with(addr: SocketAddr, method: &str, extra: &str) -> String {
     let request = format!(
-        "{method} /w HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "{method} /w HTTP/1.1\r\nHost: {addr}\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n"
     );
     tokio::task::spawn_blocking(move || {
         use std::io::{Read as _, Write as _};
@@ -401,16 +435,22 @@ async fn the_production_layers_refuse_a_write_to_a_read_only_or_unstamped_server
                         ),
                     }
                 }
+                // WITH NO GATE A WRITE THAT CARRIES ITS OWN ORIGIN REACHES THE
+                // HANDLER: the gates are what refused above, not the route.
+                if said.is_none() {
+                    let own =
+                        status_with(addr, "POST", &format!("Origin: http://{addr}\r\n")).await;
+                    assert!(own.starts_with("HTTP/1.1 200"), "{own}");
+                    assert!(own.ends_with("wrote"), "{own}");
+                }
             },
         )
         .await;
-        if said.is_some() {
-            assert_eq!(
-                reached.load(std::sync::atomic::Ordering::SeqCst),
-                0,
-                "{gate:?}: no write reached the handler"
-            );
-        }
+        assert_eq!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(said.is_none()),
+            "{gate:?}: only the same-origin write with no gate reached the handler"
+        );
         assert_eq!(gate.refuses_writes(), said.is_some());
     }
     // The unstamped arm, by itself: a stamp or the allowance lifts it, and a
