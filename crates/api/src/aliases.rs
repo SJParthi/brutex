@@ -493,6 +493,59 @@ mod tests {
         assert!(spaced["why"].as_str().is_some());
     }
 
+    /// **A NAME TWO CHANGES OLD WALKS BOTH, IN ORDER, AND EVERY OTHER NAME
+    /// SAYS WHAT IT IS** (BASE-COV-API repair 3, D-8661). Extremes: `LTI`,
+    /// two changes forward (to `LTIM`, then `LTM`), each once and in order;
+    /// `LTIM`, one change each way; `LTM`, two back and none forward;
+    /// `ZOMATO`, one forward; `ETERNAL`, one back; an index name, which no
+    /// change touches; an empty name; a name of spaces alone; and, at once,
+    /// the two-hop name in mixed case (`lTi`) beside its newest name (both
+    /// answers name one key), and an empty name asked twice (nothing carried
+    /// between asks); out of the box, a name one character past the widest a
+    /// request may carry, answered as no key at all.
+    #[test]
+    fn a_name_two_changes_old_walks_both_in_order() {
+        let two_hops = parsed(&resolve("lTi"));
+        assert_eq!(two_hops["matched"], "symbol_change");
+        assert_eq!(two_hops["key"], "NSE-CASH-LTM");
+        let hops: Vec<(Option<&str>, Option<&str>)> = two_hops["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .map(|hop| (hop["old"].as_str(), hop["new"].as_str()))
+            .collect();
+        assert_eq!(
+            hops,
+            [(Some("LTI"), Some("LTIM")), (Some("LTIM"), Some("LTM"))]
+        );
+        assert_eq!(two_hops["formerly"], serde_json::json!([]));
+        let newest = parsed(&resolve("LTM"));
+        assert_eq!(newest["key"], two_hops["key"], "one key for both");
+        assert_eq!(newest["changes"], serde_json::json!([]));
+        let between = parsed(&resolve("LTIM"));
+        assert_eq!(
+            (
+                between["changes"].as_array().map(Vec::len),
+                between["formerly"].as_array().map(Vec::len)
+            ),
+            (Some(1), Some(1))
+        );
+        assert_eq!(parsed(&resolve("ZOMATO"))["changes"][0]["old"], "ZOMATO");
+        assert_eq!(parsed(&resolve("ETERNAL"))["formerly"][0]["old"], "ZOMATO");
+        let index = parsed(&resolve("FINNIFTY"));
+        assert_eq!(index["matched"], "index");
+        assert_eq!(index["changes"], serde_json::json!([]));
+        for blank in ["", "", "   "] {
+            let said = parsed(&resolve(blank));
+            assert_eq!(said["matched"], "none", "{blank:?}");
+            assert_eq!(said["key"], Value::Null, "{blank:?}");
+        }
+        let wide = "Z".repeat(MAX_SYMBOL_BYTES + 1);
+        let said = parsed(&resolve(&wide));
+        assert_eq!(said["key"], Value::Null);
+        assert_eq!(said["matched"], "none");
+    }
+
     #[test]
     fn an_unverified_status_says_what_is_missing() {
         let mut out = String::new();

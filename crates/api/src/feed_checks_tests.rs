@@ -1420,3 +1420,476 @@ fn a_year_not_in_the_writers_order_is_refused_by_name() {
         );
     }
 }
+
+// ═══ BASE-COV-API repair 3 (shard AS1, D-8661): rows no test reached ═══
+
+/// **EVERY QUERY A CHECK ROUTE CANNOT ANSWER IS REFUSED BY ITS OWN RULE**
+/// (BASE-COV-API repair 3, D-8661). Extremes: an empty symbol; a symbol of 65
+/// characters, one past a share key's 64; a symbol holding a comma, and one
+/// holding a slash; a line, then a version, asked of no month; a source line
+/// asked with a symbol, and with an offset alone; a tick month asked a line,
+/// then a version; a share no tick month holds, and a share the year holds in
+/// another month only; a year beside a month of that year; a line, then a
+/// version, with neither year nor month; a year's source line asked with a
+/// limit alone, then an offset alone; and, at once, a 64-character symbol of
+/// a month that holds it not (the key is read, the share is absent), and a
+/// line, a version and an offset with no year or month (the year's rule
+/// speaks first, not the source row's); out of the box, a symbol that is one
+/// control character and nothing else.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every query rule of both check routes, each beside the others it is read against"
+)]
+fn every_query_a_check_route_cannot_answer_is_refused_by_its_own_rule() {
+    let root = Root::new("query-rules");
+    write_feed(&root, "2025-03", 1, &month_days());
+    write_tick(&root, 2024, 1, &year_days());
+    // The share key's rule.
+    let not_a_key = |query: &str, shown: &str| {
+        let why = asked(feed(&root, query));
+        assert!(
+            why.contains(&format!("symbol={shown} cannot be a stored share key")),
+            "{query}: {why}"
+        );
+    };
+    not_a_key("month=2025-03&symbol=&limit=1&offset=0", "\"\"");
+    let long = "Z".repeat(65);
+    not_a_key(
+        &format!("month=2025-03&symbol={long}&limit=1&offset=0"),
+        &format!("{:?}", "Z".repeat(32)),
+    );
+    not_a_key("month=2025-03&symbol=Q%2CQ&limit=1&offset=0", "\"Q,Q\"");
+    not_a_key("month=2025-03&symbol=Q%2FQ&limit=1&offset=0", "\"Q/Q\"");
+    let control = asked(tick_answer(&root.0, "symbol=%01&limit=1&offset=0"));
+    assert!(
+        control.contains(r#"symbol="\u{1}" cannot be a stored share key"#),
+        "{control}"
+    );
+    // At once: the longest key a share may have, of a month without it.
+    let widest = "Z".repeat(64);
+    let why = absent(feed(
+        &root,
+        &format!("month=2025-03&symbol={widest}&limit=1&offset=0"),
+    ));
+    assert_eq!(why, format!("2025-03 version 1 holds no row of `{widest}`"));
+    // A part of one month, asked of no month.
+    for query in ["line=5&limit=1&offset=0", "version=1&limit=1&offset=0"] {
+        let why = asked(feed(&root, query));
+        assert!(why.contains("ask with month=YYYY-MM"), "{query}: {why}");
+    }
+    // A source row is asked alone.
+    for query in [
+        "month=2025-03&version=1&line=5&symbol=Q%26Q",
+        "month=2025-03&version=1&line=5&offset=0",
+    ] {
+        let why = asked(feed(&root, query));
+        assert_eq!(
+            why, "a source row is asked by month, version and line alone",
+            "{query}"
+        );
+    }
+    // The tick route's month part.
+    for query in ["month=2024-02&line=4", "month=2024-02&version=1"] {
+        let why = asked(tick_answer(&root.0, query));
+        assert_eq!(
+            why, "a source row is asked by year, version and line",
+            "{query}"
+        );
+    }
+    for (query, share, month) in [
+        (
+            "month=2024-02&symbol=ZZNONE&limit=1&offset=0",
+            "ZZNONE",
+            "2024-02",
+        ),
+        (
+            "month=2024-03&symbol=ZZSYN&limit=1&offset=0",
+            "ZZSYN",
+            "2024-03",
+        ),
+    ] {
+        let why = absent(tick_answer(&root.0, query));
+        assert_eq!(
+            why,
+            format!("2024 version 1 holds no row of `{share}` in {month}"),
+            "{query}"
+        );
+    }
+    let same_year = tick_answer(&root.0, "year=2024&month=2024-02&limit=2&offset=0").unwrap();
+    assert_eq!(same_year["month"]["month"], "2024-02");
+    assert_eq!(same_year["month"]["shares"], 2);
+    let mut shares: Vec<&str> = same_year["stocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stock| stock["symbol"].as_str().unwrap())
+        .collect();
+    shares.sort_unstable();
+    assert_eq!(shares, ["Q&Q", "ZZSYN"]);
+    // A line or a version with neither year nor month; and, at once, both
+    // with an offset: the year's rule is the one said.
+    for query in [
+        "line=4&limit=1&offset=0",
+        "version=1&limit=1&offset=0",
+        "line=4&version=1&offset=0",
+    ] {
+        let why = asked(tick_answer(&root.0, query));
+        assert_eq!(
+            why, "a source row is asked by year, version and line",
+            "{query}"
+        );
+    }
+    for query in [
+        "year=2024&version=1&line=4&limit=1",
+        "year=2024&version=1&line=4&offset=0",
+    ] {
+        let why = asked(tick_answer(&root.0, query));
+        assert_eq!(
+            why, "a source row is asked by year, version and line alone",
+            "{query}"
+        );
+    }
+}
+
+/// **EVERY DAY AND YEAR THE CALENDAR HOLDS IS SAID AS IT IS, AND A REFUSED
+/// VERSION IS A SERVER FAILURE** (BASE-COV-API repair 3, D-8661). Extremes: the
+/// two market-wide halts of 2020, listed with evidence that is suspected; the
+/// systems outage of 2021, whose evidence is sourced; a year before the record
+/// read whole (its holidays owed, its counts refused by name); the first year
+/// past the record, read the same way; a tick row on a Saturday of a
+/// disaster-recovery drill and one on a plain Saturday, each said by its
+/// reason; a tick row on a weekday, said to take trades; a version rewritten
+/// under its name, served by the handler as a 500 that names its route; and,
+/// at once, the halts asked one page past their end (the window's rule, not
+/// the day's), and both Saturdays and a weekday in one page; out of the box,
+/// year 9999, the last a year field may spell, read whole.
+#[tokio::test]
+async fn every_day_and_year_the_calendar_holds_is_said_and_a_refused_version_is_a_500() {
+    // The halts.
+    let halts = calendar_answer("year=2020&reason=MarketHalt&limit=2&offset=0").unwrap();
+    let days = halts["days"].as_array().unwrap();
+    assert_eq!(days.len(), 2);
+    assert_eq!(days[0]["day"], "2020-03-13");
+    assert_eq!(days[1]["day"], "2020-03-23");
+    for day in days {
+        assert_eq!(day["halt"]["suspected"], true, "{day}");
+        assert!(
+            day["halt"]["evidence"]
+                .as_str()
+                .unwrap()
+                .starts_with("MEASURED from the GDFL day files"),
+            "{day}"
+        );
+    }
+    let outage = calendar_answer("year=2021&reason=SystemsOutage&limit=1&offset=0").unwrap();
+    assert_eq!(outage["days"][0]["day"], "2021-02-24");
+    assert_eq!(outage["days"][0]["halt"]["suspected"], false);
+    assert!(
+        outage["days"][0]["halt"]["evidence"]
+            .as_str()
+            .unwrap()
+            .starts_with("SEBI Settlement Order")
+    );
+    let past = asked(calendar_answer(
+        "year=2020&reason=MarketHalt&limit=1&offset=2",
+    ));
+    assert!(past.contains("offset=2 is past the end"), "{past}");
+    // The proof the year route's refused-year and unspellable-year arms are
+    // (U) in this build (fu-AS1): every year of the record is a civil year
+    // wholly inside it, so its exclusions are counted, never refused.
+    let (first, last) = record_years();
+    assert!(first > 0, "the record's first day is a civil day");
+    for year in first..=last {
+        assert!(calendar::year_exclusions(year).is_ok(), "{year}");
+    }
+    // Years outside the record, read whole: their holidays are owed and their
+    // counts refused, each by the calendar's own sentence.
+    for year in [first - 1, last + 1, 9999] {
+        let read = calendar_year_json(year);
+        assert_eq!(read["year"], year);
+        assert_eq!(read["holidays"]["record"], "owed", "{year}");
+        assert_eq!(
+            read["refused"],
+            calendar::year_exclusions(year).unwrap_err().to_string(),
+            "{year}"
+        );
+        assert!(read.get("tradable").is_none(), "{year}: {read}");
+    }
+    // A Saturday row is said not to take trades; the weekday beside it does.
+    let root = Root::new("calendar-rows");
+    let mut days = year_days();
+    days.push(tick_day("Q&Q", "2024-03-02", "landing"));
+    days.push(tick_day("Q&Q", "2024-03-09", "landing"));
+    write_tick(&root, 2024, 1, &days);
+    let march = tick_answer(&root.0, "month=2024-03&symbol=Q%26Q&limit=3&offset=0").unwrap();
+    let said: Vec<(&str, &Value)> = march["days"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|day| (day["day"].as_str().unwrap(), &day["tradable"]))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            ("2024-03-01", &Value::Null),
+            ("2024-03-02", &json!("DisasterRecoveryDrill")),
+            ("2024-03-09", &json!("Weekend")),
+        ]
+    );
+    // A version rewritten under its name: the handler's 500, with its route.
+    let path = write_feed(&root, "2025-03", 1, &month_days());
+    let masters = root.0.join("masters");
+    fs::create_dir_all(&masters).unwrap();
+    let site = Loaded::new(crate::server::Site::load(&masters, &root.0));
+    let ask = |query: &str| {
+        let uri: axum::http::Uri = format!("/feed-checks.json?{query}").parse().unwrap();
+        feed_checks_json(axum::extract::State(Loaded::clone(&site)), uri)
+    };
+    let (code, _, _) = ask("month=2025-03&version=1&line=5").await;
+    assert_eq!(code.as_u16(), 200);
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("127777", "127778");
+    fs::write(&path, text).unwrap();
+    let (code, headers, body) = ask("month=2025-03&version=1&line=5").await;
+    assert_eq!(code.as_u16(), 500, "{body}");
+    assert_eq!(headers[0].1, "application/json; charset=utf-8");
+    let said: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(said["route"], "/feed-checks.json");
+    assert!(
+        said["error"]
+            .as_str()
+            .unwrap()
+            .contains("not the line this server read"),
+        "{said}"
+    );
+}
+
+/// Names the environment child's scratch folder.
+const ENV_CHILD: &str = "BRUTEX_TEST_FEED_CHECKS_ENV_CHILD";
+/// Names which environment the child was given: `named`, `empty` or `missing`.
+const ENV_MODE: &str = "BRUTEX_TEST_FEED_CHECKS_ENV_MODE";
+
+/// The child's half of
+/// [`a_check_folder_the_environment_names_is_the_folder_read_and_said`]: the
+/// reads its `mode` names, over a store root that holds no audit folder.
+fn environment_reads(root: &Path, mode: &str) {
+    let nowhere = root.join("no-store-here");
+    let feed_dir = root.join("audit/feed-reconcile");
+    match mode {
+        "named" => {
+            let feed = feed_answer(&nowhere, "month=2025-03&limit=1&offset=0").unwrap();
+            assert_eq!(feed["dir"], feed_dir.display().to_string());
+            assert_eq!(
+                feed["dir_from"],
+                "the environment variable BRUTEX_FEED_RECONCILE_DIR"
+            );
+            assert_eq!(feed["stocks"][0]["symbol"], "Q&Q");
+            let lacking = absent(feed_answer(&nowhere, "month=2025-04&limit=1&offset=0"));
+            assert!(
+                lacking.contains(&format!("`{}`", feed_dir.display())),
+                "{lacking}"
+            );
+            let tick = tick_answer(&nowhere, "year=2024&limit=1&offset=0").unwrap();
+            assert_eq!(
+                tick["dir_from"],
+                "the environment variable BRUTEX_TICK_SECOND_DIR"
+            );
+            assert_eq!(tick["year"]["year"], 2024);
+            let lacking = absent(tick_answer(&nowhere, "year=2023&limit=1&offset=0"));
+            assert!(
+                lacking.contains("no tick-to-second index of 2023"),
+                "{lacking}"
+            );
+        }
+        "empty" => {
+            // Set but empty is unset: the store's audit area, absent here.
+            let feed = feed_answer(&nowhere, "month=2025-03&limit=1&offset=0").unwrap();
+            assert_eq!(feed["stocks"][0]["symbol"], "Q&Q");
+            let tick = absent(tick_answer(&nowhere, "limit=1&offset=0"));
+            assert!(
+                tick.starts_with(&format!(
+                    "`{}` does not exist",
+                    nowhere.join("audit/tick-to-second").display()
+                )),
+                "{tick}"
+            );
+        }
+        _ => {
+            let gone = root.join("not-made");
+            let feed = absent(feed_answer(&nowhere, "limit=1&offset=0"));
+            assert!(
+                feed.starts_with(&format!("`{}` does not exist", gone.display())),
+                "{feed}"
+            );
+        }
+    }
+}
+
+/// **A CHECK FOLDER THE ENVIRONMENT NAMES IS THE FOLDER READ, AND IT SAYS
+/// SO** (BASE-COV-API repair 3, D-8661). The two variables are read from the
+/// process environment, so the reads run in children of this test binary
+/// with their own (`crate::isolated`); each child proves it ran by a file its
+/// parent reads. Extremes: the feed folder named by its variable; the tick
+/// folder named by its own; a month held there, served; a year held there,
+/// served; a store root that holds no audit folder at all, never read; a
+/// month the named folder lacks, absent by that folder's name; a year it
+/// lacks, the same; a variable set but empty, read as unset (the store's
+/// audit area); and, at once, both variables naming one folder's two halves
+/// while the store root is absent, and an empty variable beside a set one;
+/// out of the box, a folder the environment names that does not exist, named
+/// as missing.
+#[test]
+fn a_check_folder_the_environment_names_is_the_folder_read_and_said() {
+    if let Some(root) = std::env::var_os(ENV_CHILD) {
+        let root = PathBuf::from(root);
+        let mode = std::env::var(ENV_MODE).unwrap_or_default();
+        environment_reads(&root, &mode);
+        fs::write(root.join("child-ran"), mode.as_bytes()).expect("the child's proof");
+        return;
+    }
+    let root = Root::new("env-dirs");
+    write_feed(&root, "2025-03", 1, &month_days());
+    write_tick(&root, 2024, 1, &year_days());
+    let name = "server::feed_checks::tests::a_check_folder_the_environment_names_is_the_folder_read_and_said";
+    let (feed, tick) = (root.feed().into_os_string(), root.tick().into_os_string());
+    let gone = root.0.join("not-made").into_os_string();
+    let none = std::ffi::OsString::new();
+    for (mode, feed_dir, tick_dir) in [
+        ("named", &feed, &tick),
+        ("empty", &feed, &none),
+        ("missing", &gone, &tick),
+    ] {
+        let _ = fs::remove_file(root.0.join("child-ran"));
+        let _ = crate::isolated::rerun(
+            name,
+            &[
+                (ENV_CHILD, root.0.as_os_str()),
+                (ENV_MODE, std::ffi::OsStr::new(mode)),
+                (FEED_DIR_ENV, feed_dir.as_os_str()),
+                (TICK_DIR_ENV, tick_dir.as_os_str()),
+            ],
+        );
+        assert_eq!(
+            fs::read(root.0.join("child-ran")).ok().as_deref(),
+            Some(mode.as_bytes()),
+            "the child read every folder of {mode}"
+        );
+    }
+}
+
+/// Writes version 1 of 2024 whose CSV is `text`, with an index of
+/// [`year_days`] that records `text`'s BLAKE3, so the CSV is read and
+/// parsed rather than refused as another version's.
+fn crafted_tick(root: &Root, text: &str) {
+    write_tick(root, 2024, 1, &year_days());
+    let idx = root.tick().join("tick-to-second-2024.v001.idx");
+    let mut image = fs::read(&idx).unwrap();
+    image[48..80].copy_from_slice(&brutex_core::blake3::hash(text.as_bytes()));
+    fs::write(&idx, image).unwrap();
+    fs::write(root.tick().join("tick-to-second-2024.v001.csv"), text).unwrap();
+}
+
+/// **EVERY SHAPE OF A TICK YEAR'S CSV IS READ OR REFUSED BY NAME, AND A ROW
+/// CUT SHORT UNDER ITS NAME IS NEVER SERVED** (BASE-COV-API repair 3,
+/// D-8661). Extremes: a CSV of nothing at all; a header that is not this
+/// build's; a row one cell short; a row one cell long; a row of no symbol; a
+/// year whose index is gone, read directly; a year read whole and then cut to
+/// its header under its name, its source row asked; the same CSV whole
+/// again, its row served; and, at once, a short row of no symbol (the width's
+/// rule speaks first), and a header-only CSV beside an index that records
+/// exactly those bytes (read, and a year of no months is absent by name);
+/// out of the box, a CSV that is one newline and nothing else.
+#[test]
+fn every_shape_of_a_tick_years_csv_is_read_or_refused_and_a_cut_row_is_never_served() {
+    let header = cli::tick_second_check::HEADER;
+    let width = header.split(',').count();
+    let whole = tick_csv(&year_days());
+    let second = whole.lines().nth(1).unwrap().to_owned();
+    let no_symbol = second.replacen("Q&Q", "", 1);
+    let short = second.rsplit_once(',').unwrap().0.to_owned();
+    for (name, text, said) in [
+        ("empty", String::new(), "is refused: it is empty".to_owned()),
+        (
+            "newline",
+            "\n".to_owned(),
+            "is refused: its header is not this build's `cli::tick_second_check::HEADER`"
+                .to_owned(),
+        ),
+        (
+            "header",
+            format!("{}\n{second}\n", header.replacen("symbol", "share", 1)),
+            "is refused: its header is not this build's `cli::tick_second_check::HEADER`"
+                .to_owned(),
+        ),
+        (
+            "short",
+            format!("{header}\n{short}\n"),
+            format!(
+                "is refused: line 2: {} cells, the header names {width}",
+                width - 1
+            ),
+        ),
+        (
+            "long",
+            format!("{header}\n{second},7\n"),
+            format!(
+                "is refused: line 2: {} cells, the header names {width}",
+                width + 1
+            ),
+        ),
+        (
+            "no-symbol",
+            format!("{header}\n{no_symbol}\n"),
+            "is refused: line 2: an empty `symbol`".to_owned(),
+        ),
+        (
+            "short-no-symbol",
+            format!("{header}\n{}\n", no_symbol.rsplit_once(',').unwrap().0),
+            format!(
+                "is refused: line 2: {} cells, the header names {width}",
+                width - 1
+            ),
+        ),
+    ] {
+        let root = Root::new(&format!("tick-shape-{name}"));
+        crafted_tick(&root, &text);
+        let why = refused(tick_answer(&root.0, "year=2024&limit=1&offset=0"));
+        assert!(why.contains(&said), "{name}: {why}");
+        assert!(why.ends_with("the server restarts)"), "{name}: held: {why}");
+    }
+    // A header and no row, beside an index that records exactly those bytes:
+    // read, and a year of no months is absent by name, never an empty page.
+    let root = Root::new("tick-shape-header-only");
+    crafted_tick(&root, &format!("{header}\n"));
+    let none = absent(tick_answer(&root.0, "year=2024&limit=1&offset=0"));
+    assert_eq!(none, "there are no months in 2024");
+    // A year whose index is gone, read directly (the route asks its listing
+    // first, so only a reader holding a stale listing meets this).
+    let root = Root::new("tick-shape-no-index");
+    let gone = absent(super::files::tick_year(&root.tick(), 2024, 1).map(|_| Value::Null));
+    assert_eq!(
+        gone,
+        format!(
+            "`{}` holds no tick-to-second index of 2024",
+            root.tick().display()
+        )
+    );
+    // Read whole, then cut to its header under its name: the held row is
+    // never served from a file that no longer holds it.
+    let root = Root::new("tick-shape-cut");
+    write_tick(&root, 2024, 1, &year_days());
+    let row = tick_answer(&root.0, "year=2024&version=1&line=4").unwrap();
+    assert_eq!(row["row"]["day"], "2024-02-29");
+    let csv = root.tick().join("tick-to-second-2024.v001.csv");
+    fs::write(&csv, format!("{header}\n")).unwrap();
+    let why = refused(tick_answer(&root.0, "year=2024&version=1&line=4"));
+    assert!(
+        why.starts_with(&format!("`{}` line 4: ", csv.display())),
+        "{why}"
+    );
+    fs::write(&csv, &whole).unwrap();
+    let again = tick_answer(&root.0, "year=2024&version=1&line=4").unwrap();
+    assert_eq!(again["source"]["cells"][1], json!(["day", "2024-02-29"]));
+}

@@ -1006,4 +1006,143 @@ mod tests {
         );
         assert_eq!(builds.in_flight(), MAX_BUILDS);
     }
+
+    /// **A FULL VOTE MAP KEEPS NO NEW SERIES, AND STILL REPLACES ONE IT
+    /// HOLDS** (BASE-COV-API repair 3, D-8661): `Votes::keep` at
+    /// [`MAX_KEPT_VOTES`]. Extremes: an empty map, holding nothing; the first
+    /// vote; one below the bound; at the bound; a new series past it,
+    /// refused; a held series at the bound, replaced under a moved stamp; the
+    /// replaced vote under its old stamp, gone; the vote kept last, found;
+    /// and, at once, a new series at the bound under a moved stamp (refused,
+    /// nothing found), and a held series replaced twice in a row at the bound
+    /// (one entry still); out of the box, a series whose every name is empty,
+    /// refused at the bound like any other new one.
+    #[test]
+    fn a_full_vote_map_keeps_no_new_series_and_still_replaces_a_held_one() {
+        let (before, after) = two_stamps("calendar-build-votes");
+        let votes = Votes::default();
+        let vote = Arc::new(PeerCalendar {
+            calendar: None,
+            from: Vec::new(),
+            unreadable: Vec::new(),
+        });
+        let series = |n: usize| {
+            (
+                Vendor::Gdfl,
+                "NSE".to_owned(),
+                "CASH".to_owned(),
+                format!("ZZVOTE{n}"),
+            )
+        };
+        assert!(votes.kept(&series(0), &before).is_none(), "an empty map");
+        for n in 0..MAX_KEPT_VOTES {
+            assert!(
+                votes.keep(series(n), before.clone(), Arc::clone(&vote)),
+                "{n}"
+            );
+        }
+        assert!(votes.kept(&series(MAX_KEPT_VOTES - 1), &before).is_some());
+        assert!(
+            !votes.keep(series(MAX_KEPT_VOTES), before.clone(), Arc::clone(&vote)),
+            "a new series past the bound"
+        );
+        assert!(votes.kept(&series(MAX_KEPT_VOTES), &before).is_none());
+        assert!(
+            !votes.keep(series(MAX_KEPT_VOTES + 1), after.clone(), Arc::clone(&vote)),
+            "a new series past the bound, under a moved stamp"
+        );
+        assert!(votes.kept(&series(MAX_KEPT_VOTES + 1), &after).is_none());
+        for _ in 0..2 {
+            assert!(
+                votes.keep(series(0), after.clone(), Arc::clone(&vote)),
+                "a held series at the bound is replaced"
+            );
+        }
+        assert!(votes.kept(&series(0), &after).is_some());
+        assert!(
+            votes.kept(&series(0), &before).is_none(),
+            "replaced, not added"
+        );
+        let blank = (Vendor::Gdfl, String::new(), String::new(), String::new());
+        assert!(!votes.keep(blank.clone(), before.clone(), Arc::clone(&vote)));
+        assert!(votes.kept(&blank, &before).is_none());
+    }
+
+    /// **A PARKED ANSWER IS HANDED OUT FOR [`PARKED_FOR`] UNDER ITS OWN STAMP
+    /// ALONE, AND A FINISHED BUILD STILL PARKED IS QUEUED AFRESH AT START**
+    /// (BASE-COV-API repair 3, D-8661): `Build::deliverable` and
+    /// `Flights::queue_at_start`. Extremes: an answer finished now, under the
+    /// asked stamp, delivered; the same under another stamp, not; asked with
+    /// no stamp, not; finished one second past `PARKED_FOR` ago, not; finished
+    /// exactly at the bound's edge by the clock a moment later, not; a
+    /// running build asked to queue at start, handed back; a finished build a
+    /// waiter was told to come back for, still in the map, replaced by a new
+    /// start-up build; and, at once, an old answer under another stamp (both
+    /// refusals), and an answer of no stamp at all asked with none; out of the
+    /// box, a build entered with no census stamp, whose answer is never
+    /// delivered by stamp.
+    #[tokio::test]
+    async fn a_parked_answer_is_delivered_for_its_time_under_its_stamp_alone() {
+        let (before, after) = two_stamps("calendar-build-parked-for");
+        let build: Arc<Build> = Arc::new(Build::new(Origin::Request));
+        drop(build.enter(Some(before.clone())));
+        let finished_at = |ago: Duration| {
+            build.state.lock().expect("state").done = Some((
+                Instant::now().checked_sub(ago).expect("a past instant"),
+                answer("parked"),
+            ));
+        };
+        finished_at(Duration::ZERO);
+        let body = |kept: Option<KeptAnswer>| kept.map(|kept| kept.body);
+        assert_eq!(
+            body(build.deliverable(Some(&before))),
+            Some("parked".to_owned())
+        );
+        assert_eq!(body(build.deliverable(Some(&after))), None, "another stamp");
+        assert_eq!(body(build.deliverable(None)), None, "no stamp");
+        finished_at(PARKED_FOR + Duration::from_secs(1));
+        assert_eq!(
+            body(build.deliverable(Some(&before))),
+            None,
+            "past the bound"
+        );
+        assert_eq!(
+            body(build.deliverable(Some(&after))),
+            None,
+            "old and another stamp"
+        );
+        finished_at(PARKED_FOR);
+        assert_eq!(
+            body(build.deliverable(Some(&before))),
+            None,
+            "at the edge, a moment on"
+        );
+        let unstamped: Arc<Build> = Arc::new(Build::new(Origin::Request));
+        drop(unstamped.enter(None));
+        unstamped.state.lock().expect("state").done = Some((Instant::now(), answer("bare")));
+        assert_eq!(
+            body(unstamped.deliverable(None)),
+            None,
+            "none asked with none"
+        );
+        assert_eq!(body(unstamped.deliverable(Some(&before))), None);
+
+        let builds = Builds::default();
+        let running = builds.queue_at_start(&key("NIFTY")).expect("room");
+        let again = builds.queue_at_start(&key("NIFTY")).expect("room");
+        assert!(
+            Arc::ptr_eq(&running, &again),
+            "a running build is handed back"
+        );
+        assert_eq!(running.wait(Some(Duration::from_millis(1))).await, None);
+        builds.finish(&key("NIFTY"), &running, answer("told"));
+        assert_eq!(builds.in_flight(), 1, "told to come back: still in the map");
+        let fresh = builds.queue_at_start(&key("NIFTY")).expect("room");
+        assert!(
+            !Arc::ptr_eq(&running, &fresh),
+            "a finished build is queued afresh"
+        );
+        assert_eq!(fresh.progress().origin, Origin::StartUp);
+        assert_eq!(builds.in_flight(), 1);
+    }
 }

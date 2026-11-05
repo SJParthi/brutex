@@ -115,8 +115,9 @@ pub(crate) fn where_permission_binds(test: &str, body: impl FnOnce()) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let ran = output.status.success() && stdout.contains("1 passed");
-    // Formatted unconditionally, so no line is reached only when the child fails.
+    // Both read unconditionally (an array, not `&&`), and the message formatted
+    // unconditionally, so no line or side is reached only when the child fails.
+    let ran = ![output.status.success(), stdout.contains("1 passed")].contains(&false);
     let said = format!("child {test} (uid {uid}) failed or ran no test:\n{stdout}\n{stderr}");
     assert!(ran, "{said}");
 }
