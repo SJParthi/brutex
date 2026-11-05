@@ -2201,3 +2201,79 @@ fn a_ledger_holding_two_series_answers_each_only_its_own_dropped_stamps() {
         vec![rows[4].ts_micros, rows[5].ts_micros]
     );
 }
+
+/// **TWO KILLED RUNS OWE ONE MONTH, AND ONE APPLY FINISHES BOTH, COUNTING
+/// EVERY BAR** (BASE-COV-LIBS-LS1). Each run ledgered its intent and its
+/// promotion landed, and each died before its `dropped` line: the next apply
+/// finishes them oldest first and answers the bars of both, never only the
+/// last one's.
+#[test]
+fn two_runs_killed_after_their_promotions_are_both_resumed_and_counted() {
+    let store = Store::new("resume-two");
+    let path = minute("QFIXT", march());
+    let rows: Vec<Bar> = (0..7).map(|i| bar(i, 2_903)).collect();
+    store.month(path, &rows);
+    let first = [rows[2].ts_micros];
+    let second = [rows[4].ts_micros, rows[5].ts_micros];
+    for (named, who) in [(&first[..], "killed-first"), (&second[..], "killed-second")] {
+        let dropped: Vec<Bar> = rows
+            .iter()
+            .filter(|bar| named.contains(&bar.ts_micros))
+            .copied()
+            .collect();
+        record(
+            &store.root,
+            &Record {
+                path,
+                scope: Scope::Dropping,
+                cause: Cause::ForeignLevel,
+                stamps: named,
+                bars: dropped.len() as u64,
+                revision: 0,
+                source_digest: digest_of(&dropped),
+                who,
+                reason: "a run that died after its promotion",
+            },
+        )
+        .expect("the intent");
+        repair::drop_month(&store.root, path, SYMBOL, named, "a run that died").expect("promoted");
+    }
+    assert_eq!(
+        ledger_stamps(&store.root, path).expect("reads"),
+        Vec::<i64>::new(),
+        "neither run wrote its dropped line"
+    );
+    let both = [first[0], second[0], second[1]];
+    let resumed =
+        apply_month(&store.root, path, SYMBOL, &both, why(Cause::ForeignLevel)).expect("resumes");
+    assert!(
+        matches!(resumed, Applied::Resumed { bars: 3, .. }),
+        "both intents' bars are counted: {resumed:?}"
+    );
+    assert_eq!(
+        ledger_stamps(&store.root, path).expect("reads"),
+        both.to_vec(),
+        "each intent's dropped line is written"
+    );
+    assert!(
+        matches!(
+            probe(&store.root, path),
+            Ok(Probe::Quarantined(e)) if e.scope == Scope::Dropped && e.bars == 3 && e.revision == 2
+        ),
+        "the index counts both runs' bars at the served revision"
+    );
+    let kept: Vec<Bar> = rows
+        .iter()
+        .filter(|bar| !both.contains(&bar.ts_micros))
+        .copied()
+        .collect();
+    assert_eq!(store.served_bars(path), kept);
+    let again = apply_month(&store.root, path, SYMBOL, &both, why(Cause::ForeignLevel))
+        .expect("then nothing");
+    assert_eq!(
+        again,
+        Applied::Nothing {
+            why: "already_dropped"
+        }
+    );
+}
