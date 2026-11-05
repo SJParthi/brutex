@@ -164,7 +164,9 @@ fn a_run_that_meets_a_full_partition_installs_its_next_epoch() {
     assert_eq!((now.entries(), now.keys(), now.total_rows()), (2, 2, 7));
     assert!(now.header().generation > full.header().generation);
 
-    // A single file at its ceiling refuses, and nothing compacts it.
+    // A single file refuses a row whose count went backwards, and nothing
+    // compacts it. (Its ceiling, `MAX_ENTRIES` entries, is driven by
+    // `ps2_tests::a_single_file_at_its_ceiling_refuses_a_new_row_uncompacted`.)
     let mut single = Manifest::open(Vendor::Gdfl, &[], &[]).expect("genesis");
     single.record_held(row(0, 1)).expect("one");
     let mut never = false;
