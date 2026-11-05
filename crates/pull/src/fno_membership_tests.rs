@@ -1448,35 +1448,72 @@ fn two_builds_of_one_directory_at_once_leave_no_temporary_and_the_one_pass_bytes
             let second = scope.spawn(run);
             (first.join().unwrap(), second.join().unwrap())
         });
-        assert!(a.is_ok() || b.is_ok(), "round {round}: {a:?} | {b:?}");
-        for refusal in [&a, &b]
-            .into_iter()
-            .filter_map(|outcome| outcome.as_ref().err())
-        {
-            assert!(
-                matches!(
-                    refusal,
-                    MembershipError::Exists { .. } | MembershipError::Overlap { .. }
-                ),
-                "round {round}: {refusal}"
-            );
-        }
-        let hidden: Vec<String> = files(&dir)
-            .into_iter()
-            .map(|(name, _)| name)
-            .filter(|name| name.starts_with('.'))
-            .collect();
-        assert!(hidden.is_empty(), "round {round}: {hidden:?}");
-        assert_eq!(generations(&dir).unwrap().1, 0, "round {round}");
-        assert_eq!(
-            Membership::open(&dir).unwrap().sealed_through(),
-            Some(d(2024, 9, 30)),
-            "round {round}: the writer that finished sealed every day"
-        );
-        // A resume after both writes nothing: the source holds no later
-        // known day, so the days after 30 Sep are trailing, never sealed.
-        let resumed = build(&source, &dir, Window::Resume, 2, &mut |_| {}).unwrap();
-        assert_eq!(resumed.folded, 0, "round {round}");
-        assert_eq!(newest(&dir), newest(&once), "round {round}");
+        one_of_two_builds_won(&source, (round, &dir, &once), (&a, &b));
     }
+}
+
+/// The judgement of one round of
+/// [`two_builds_of_one_directory_at_once_leave_no_temporary_and_the_one_pass_bytes`]:
+/// one of the two builds won, a refused one says why (`Exists` or `Overlap`),
+/// no hidden temporary is left, the directory serves through 30 Sep, and a
+/// resume writes nothing and ends on the one-pass bytes. Which of the two
+/// loses depends on where they meet, so a loss of each is also made on purpose
+/// below (BASE-COV-PULL-PS1).
+fn one_of_two_builds_won(
+    source: &Fake,
+    (round, dir, once): (usize, &Path, &Path),
+    (a, b): (&Result<(), MembershipError>, &Result<(), MembershipError>),
+) {
+    assert!(a.is_ok() || b.is_ok(), "round {round}: {a:?} | {b:?}");
+    for refusal in [a, b]
+        .into_iter()
+        .filter_map(|outcome| outcome.as_ref().err())
+    {
+        assert!(
+            matches!(
+                refusal,
+                MembershipError::Exists { .. } | MembershipError::Overlap { .. }
+            ),
+            "round {round}: {refusal}"
+        );
+    }
+    let hidden: Vec<String> = files(dir)
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert!(hidden.is_empty(), "round {round}: {hidden:?}");
+    assert_eq!(generations(dir).unwrap().1, 0, "round {round}");
+    assert_eq!(
+        Membership::open(dir).unwrap().sealed_through(),
+        Some(d(2024, 9, 30)),
+        "round {round}: the writer that finished sealed every day"
+    );
+    // A resume after both writes nothing: the source holds no later
+    // known day, so the days after 30 Sep are trailing, never sealed.
+    let resumed = build(source, dir, Window::Resume, 2, &mut |_| {}).unwrap();
+    assert_eq!(resumed.folded, 0, "round {round}");
+    assert_eq!(newest(dir), newest(once), "round {round}");
+}
+
+/// The two builds' losses, made on purpose: a second build of the same typed
+/// window into a directory the first one sealed is refused `Overlap`, and the
+/// pair is judged as a round of the race above with the refused build first
+/// and then second, so each side of the judgement is taken whichever thread a
+/// race lets win (BASE-COV-PULL-PS1).
+#[test]
+fn a_build_into_a_directory_another_sealed_is_judged_as_the_race_s_loser() {
+    let source = aug_sep();
+    let once = scratch("two-once-in-turn");
+    build(&source, &once, aug_sep_window(), 2, &mut |_| {}).unwrap();
+    let dir = scratch("two-in-turn");
+    let first = build(&source, &dir, aug_sep_window(), 2, &mut |_| {}).map(|_| ());
+    let second = build(&source, &dir, aug_sep_window(), 2, &mut |_| {}).map(|_| ());
+    assert!(first.is_ok(), "{first:?}");
+    assert!(
+        matches!(second, Err(MembershipError::Overlap { .. })),
+        "{second:?}"
+    );
+    one_of_two_builds_won(&source, (0, &dir, &once), (&second, &first));
+    one_of_two_builds_won(&source, (1, &dir, &once), (&first, &second));
 }
