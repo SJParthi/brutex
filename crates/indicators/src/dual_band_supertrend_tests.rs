@@ -434,8 +434,18 @@ fn both_bands_ratchet_on_every_candle_and_reset_as_published() {
             let band = (i128::from(two.atr().unwrap()) * i128::from(factor)).div_euclid(1000);
             if let Some((before, close)) = prior {
                 let at = format!("seed {seed}, candle {t}");
-                assert!(now.upper == mid + band || now.upper == before.upper, "{at}");
-                assert!(now.lower == mid - band || now.lower == before.lower, "{at}");
+                // A membership test rather than `a || b`: a short-circuit inside
+                // an assertion leaves failing sides a green run never takes.
+                let uppers = [mid + band, before.upper];
+                let lowers = [mid - band, before.lower];
+                assert!(
+                    uppers.contains(&now.upper),
+                    "{at}: the upper band {uppers:?}"
+                );
+                assert!(
+                    lowers.contains(&now.lower),
+                    "{at}: the lower band {lowers:?}"
+                );
                 if close <= before.upper {
                     assert!(
                         now.upper <= before.upper,
@@ -463,7 +473,8 @@ fn both_bands_ratchet_on_every_candle_and_reset_as_published() {
                 for (side, (moved, crossed, basic)) in sides.into_iter().enumerate() {
                     match moved {
                         std::cmp::Ordering::Greater => {
-                            assert!(crossed && basic, "{at}: band {side} reset with no cross");
+                            assert!(crossed, "{at}: band {side} reset with no cross");
+                            assert!(basic, "{at}: band {side} reset off its basic band");
                             reset[side] += 1;
                         }
                         std::cmp::Ordering::Less => ratcheted[side] += 1,
@@ -522,7 +533,7 @@ fn a_turn_needs_a_close_beyond_the_current_band() {
         }
     }
     assert!(
-        turned[0] > 0 && turned[1] > 0,
+        turned.iter().all(|&count| count > 0),
         "both turns occur: {turned:?}"
     );
     // A close EQUAL to the current band does not turn; one paisa beyond does.
@@ -709,7 +720,8 @@ fn fixture_st_9_equal_bands_do_not_turn_an_up_candle() {
     let all = readings(&candles, 2, 500);
     let (three, four) = (all[3].unwrap(), all[4].unwrap());
     assert_eq!((three.upper, three.lower, three.line), (128, 128, 128));
-    assert!(i128::from(candles[4].close) < four.upper && four.trend == Up);
+    assert!(i128::from(candles[4].close) < four.upper);
+    assert_eq!(four.trend, Up);
 }
 
 #[test]
@@ -807,11 +819,13 @@ fn the_stream_equals_a_from_scratch_transcription_of_the_published_rules() {
             }
         }
     }
-    assert!(
-        compared > 10_000 && turns > 500 && equal_bands > 0,
+    let exercised = format!(
         "the series must exercise the rules: {compared} readings, {turns} turns, \
          {equal_bands} with equal bands"
     );
+    assert!(compared > 10_000, "{exercised}");
+    assert!(turns > 500, "{exercised}");
+    assert!(equal_bands > 0, "{exercised}");
 }
 
 #[test]
@@ -836,7 +850,8 @@ fn the_atr_is_the_engine_atr() {
             }
         }
     }
-    assert!(cold > 0 && warm > 0);
+    assert!(cold > 0, "some candles were folded before the ATR was warm");
+    assert!(warm > 0, "some candles were folded after it");
 }
 
 #[test]
@@ -959,7 +974,8 @@ fn a_corrupt_candle_is_refused_and_changes_nothing() {
         next.fold(candle).unwrap();
         states.push(next);
     }
-    assert!(states[1].reading().is_none() && states[6].reading().unwrap().settled);
+    assert!(states[1].reading().is_none(), "a warming state");
+    assert!(states[6].reading().unwrap().settled, "a settled state");
     for state in states {
         for (why, candle) in bad {
             let mut probe = state;
@@ -1022,12 +1038,13 @@ fn the_bench_measures_both_rows_at_tiny_sizes() {
             prior = Some(now.trend);
         }
     }
-    assert!(
-        turns[0] > 0 && turns[1] > 0,
-        "the synthetic stream turns down {} and up {} times in 2,000 candles",
-        turns[0],
-        turns[1]
-    );
+    // Bound before the assertions: a format argument is evaluated only on
+    // failure, so one in the message list is a region a green run never enters.
+    let [down, up] = turns;
+    let counted =
+        format!("the synthetic stream turns down {down} and up {up} times in 2,000 candles");
+    assert!(down > 0, "{counted}");
+    assert!(up > 0, "{counted}");
 }
 
 #[test]
