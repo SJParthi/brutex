@@ -77,6 +77,7 @@ pub mod vwap;
 // slot PSRB-WILLR (williams_r)
 
 // slot PSRB-CCI (cci)
+pub mod cci;
 
 // ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
 // ---- part; each part inserts its single `pub mod` line directly under its slot.
