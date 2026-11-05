@@ -5002,9 +5002,20 @@ fn a_month_cut_off_in_its_creation_is_counted_unborn() {
 /// time indexes and census of an import that was never killed, byte for
 /// byte. (A provenance record for a landing the kill cut off before its
 /// record is not written again by the resume, which finds the bars present;
-/// `/provenance.json` labels such bars reconstructed, as before WP-16.)
+/// `/provenance.json` labels such bars reconstructed, as before WP-16.) Two
+/// more children make on purpose what a kill at a share of the time met only
+/// by chance: one killed, after an unkilled run's whole time, while the test
+/// holds the journal lock the run's first line waits for, which leaves no day
+/// open and nothing of the run on disk; and one left to finish.
 #[test]
 fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store() {
+    /// Where a child is stopped (the loop below says how each is chosen).
+    #[derive(Clone, Copy, Debug)]
+    enum Stop {
+        At(u32),
+        BeforeTheFirstLine,
+        Never,
+    }
     const CHILD: &str = "BRUTEX_WP16_KILL_CHILD";
     let child_of = |root: &Path, store: &Path| {
         let (kind_of_source, path) = source_path(root, Src::Zips, ImportKind::Options);
@@ -5041,12 +5052,42 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
         })
         .collect();
     let mut interrupted = 0;
-    for (n, eighths) in [1_u32, 2, 3, 4, 5, 6, 7].into_iter().enumerate() {
+    // Where each child stops: at a share of an unkilled run's time, wherever
+    // that lands; after an unkilled run's whole time, while this test holds
+    // the journal lock the run's first line waits for (far inside its 30 s
+    // wait), so no day is open and nothing of the run is on disk; or nowhere,
+    // left to finish. The last two make on purpose the two outcomes a kill at
+    // a share of the time met only by chance: a killed child with no day
+    // open, and a child that ended before its kill (BASE-COV-PULL-PS1).
+    let stops = [
+        Stop::At(1),
+        Stop::At(2),
+        Stop::At(3),
+        Stop::At(4),
+        Stop::At(5),
+        Stop::At(6),
+        Stop::At(7),
+        Stop::BeforeTheFirstLine,
+        Stop::Never,
+    ];
+    for (n, stop) in stops.into_iter().enumerate() {
         let run = root.join(format!("kill-{n}"));
         std::fs::create_dir_all(&run).unwrap();
         std::os::unix::fs::symlink(&world_root, run.join("world")).unwrap();
         let store = run.join("store");
         std::fs::create_dir_all(&store).unwrap();
+        let journal_held = matches!(stop, Stop::BeforeTheFirstLine).then(|| {
+            let lock = journal_lock_path(&journal_path(&store));
+            std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+            let holder = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock)
+                .unwrap();
+            holder.lock().unwrap();
+            holder
+        });
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -5058,9 +5099,18 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        std::thread::sleep(took * eighths / 8);
-        child.kill().unwrap();
+        // How long the child runs before its kill; `None`, never killed.
+        let runs_for = match stop {
+            Stop::At(eighths) => Some(took * eighths / 8),
+            Stop::BeforeTheFirstLine => Some(took),
+            Stop::Never => None,
+        };
+        if let Some(runs_for) = runs_for {
+            std::thread::sleep(runs_for);
+            child.kill().unwrap();
+        }
         let status = child.wait().unwrap();
+        drop(journal_held);
         let journal = std::fs::read_to_string(journal_path(&store)).unwrap_or_default();
         let open_day = journal
             .lines()
@@ -5072,6 +5122,18 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
         // Whatever the kill left: every month whole, the journal and the
         // census readable.
         let (months, unborn) = every_month_reads_whole(&store);
+        match stop {
+            Stop::At(_) => {}
+            Stop::BeforeTheFirstLine => assert!(
+                !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+                "kill {n}: a child held at the journal lock left {months} months, \
+                 {unborn} unborn, {status:?}, journal {journal:?}"
+            ),
+            Stop::Never => assert!(
+                status.success() && !open_day && unborn == 0,
+                "kill {n}: a child left to finish: {status:?}, {unborn} unborn"
+            ),
+        }
         // A month cut off in its creation committed nothing, so the day that
         // was creating it cannot have closed: the kill left it open.
         assert!(
