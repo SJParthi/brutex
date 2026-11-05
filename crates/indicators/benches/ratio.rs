@@ -70,6 +70,8 @@ use indicators::{Candle, OI_NULL};
 // slot bench-mod PSRB-BOLL
 
 // slot bench-mod PSRB-STV
+#[path = "ratio/psrb_stv.rs"]
+mod psrb_stv;
 
 // ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
 // ---- part; each part inserts its bench module (the path attribute naming
@@ -783,6 +785,11 @@ fn main() {
     // slot bench-row PSRB-BOLL
 
     // slot bench-row PSRB-STV
+    let verdicts: Vec<bool> = verdicts
+        .iter()
+        .copied()
+        .chain([psrb_stv::row(floor, &["C-PSRB-STV-01", "C-PSRB-STV-02"])])
+        .collect();
 
     // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). `verdicts` is typed
     // `[bool; ROWS]`, so a row inside the array would make every part edit the one
