@@ -1,5 +1,20 @@
-STATUS: BLOCKED QUESTION
+STATUS: IN PROGRESS
 
+# BASE-COV-LIBS-LS1 (crate `store`): second continuation of 5 Nov 2026 (token `-3`)
+
+TOKEN `BASE-COV-LIBS-LS1-20261105-3`, continued from the branch tip `3ad11482586b` with the main
+session's answer to the question below (Q1: every one of the 61 rows gets an asserting test that
+runs the real code, host refusals through `#[cfg(test)]` seams, races through a hook where the test
+makes the real change on disk; Q2: the test-code rows are (F) by step 4's second clause, macOS-only
+arms owed to the Mac).
+
+- Code tip `095165bb`: the seams, the race hooks and 27 tests through them (pushed).
+- NEXT: the final Route B at `095165bb` (running), the test-code rows classified, red checks, the
+  lists, the report and the fix json.
+
+---
+
+## First continuation of 5 Nov 2026 (token `-2`), kept as it was written; its line 1 was `STATUS: BLOCKED QUESTION`
 # BASE-COV-LIBS-LS1 (crate `store`): continuation of 5 Nov 2026
 
 TOKEN `BASE-COV-LIBS-LS1-20261105-2` (a new account; the 3 Nov token `-20261103-1` is retired).
