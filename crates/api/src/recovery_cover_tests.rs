@@ -5,7 +5,20 @@
 //! name no vendor row; the symbols and their ISINs are the workspace's own
 //! universe table, not a vendor's.
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a whole-file test module; fixtures are bounded and a failed assertion is the test failing"
+)]
+
 use super::*;
+use std::fmt::Write as _;
+
+/// One master row: the symbol and its listing, removal and readmission days
+/// (`None` is the master's `0`).
+type MasterRow<'a> = (&'a str, Option<Day>, Option<Day>, Option<Day>);
 
 /// The day every master here is dated: past the closing auction's start
 /// (2026-08-03), so the cache installs it.
@@ -47,9 +60,11 @@ fn stored_gzip(text: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A master of `rows` (`symbol`, listing, removal, readmission; `None` is the
-/// master's `0`), installed and read back as the recovery reads it.
-fn lifecycle_of(name: &str, rows: &[(&str, Option<Day>, Option<Day>, Option<Day>)]) -> Lifecycle {
+/// A master of `rows`, installed and read back as the recovery reads it.
+fn lifecycle_of(
+    name: &str,
+    rows: &[MasterRow<'_>],
+) -> pull::cash_session_cache::VerifiedLifecycleMaster {
     let root = crate::scratch::path(name);
     let _ = std::fs::remove_dir_all(&root);
     let mut csv = String::from(
@@ -58,14 +73,16 @@ fn lifecycle_of(name: &str, rows: &[(&str, Option<Day>, Option<Day>, Option<Day>
     let cell = |day: Option<Day>| day.map_or_else(|| "0".to_owned(), since_1980);
     for (at, (symbol, listing, removal, readmission)) in rows.iter().enumerate() {
         let isin = brutex_core::universe::nse_isin(symbol).expect("an F&O share");
-        csv.push_str(&format!(
-            "{},{symbol},EQ,{},1,{},{},{}\n",
+        writeln!(
+            csv,
+            "{},{symbol},EQ,{},1,{},{},{}",
             900 + at,
             isin.as_str(),
             cell(*listing),
             cell(*removal),
             cell(*readmission)
-        ));
+        )
+        .expect("a row");
     }
     let masters = root.join("session-masters");
     pull::cash_session_cache::install(&masters, master_day(), &stored_gzip(csv.as_bytes()))
@@ -73,7 +90,7 @@ fn lifecycle_of(name: &str, rows: &[(&str, Option<Day>, Option<Day>, Option<Day>
     let read = pull::cash_session_cache::read_local_lifecycle(&masters, master_day())
         .expect("the master reads back");
     let _ = std::fs::remove_dir_all(&root);
-    Some(read)
+    read
 }
 
 /// What [`qualify_lifecycle`] leaves of `found`: the evidence issues and the
@@ -127,7 +144,7 @@ fn assessment(held: u64, missing: u64, retry: &[Day]) -> Assessment {
 )]
 fn a_lifecycle_qualifies_an_assessment_by_its_own_evidence() {
     let window = Window::new(on(2026, 8, 24), on(2026, 8, 27)).expect("a window");
-    let master = lifecycle_of(
+    let master = Some(lifecycle_of(
         "recovery-cover-lifecycle",
         &[
             ("RELIANCE", Some(on(2026, 8, 26)), None, None),
@@ -136,7 +153,7 @@ fn a_lifecycle_qualifies_an_assessment_by_its_own_evidence() {
             ("HDFCBANK", Some(on(2010, 5, 3)), Some(on(2009, 4, 1)), None),
             ("SBIN", None, None, None),
         ],
-    );
+    ));
     let (mon, tue, wed) = (on(2026, 8, 24), on(2026, 8, 25), on(2026, 8, 26));
 
     // AN INDEX: nothing about it is qualified, whatever is held.

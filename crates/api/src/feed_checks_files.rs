@@ -1460,3 +1460,7 @@ pub(crate) fn forget_held(under: &Path) {
         .unwrap_or_else(PoisonError::into_inner)
         .retain(|(dir, _), _| !dir.starts_with(under));
 }
+
+#[cfg(test)]
+#[path = "feed_checks_files_cover_tests.rs"]
+mod cover_tests;

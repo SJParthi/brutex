@@ -2832,3 +2832,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "detail_cover_tests.rs"]
+mod cover_tests;
