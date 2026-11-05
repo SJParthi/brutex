@@ -902,3 +902,89 @@ fn a_resting_level_outside_its_bar_fills_at_the_open_as_a_gap() {
         }
     }
 }
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A PRICEABLE CANDIDATE'S ONE REPLAYED ROW IS
+/// REFUSED WHEN ITS EXIT CANNOT BE STAMPED OR DOES NOT LIE ON ITS PATH: a time
+/// exit past the slice (priced flat, its exit bar not there to stamp), an
+/// occupancy that ends before its entry (the row exits on the entry bar,
+/// after that end), and an exit bar stamped before its entry bar (a candidate
+/// measured on ordered bars, replayed over restamped ones). Each is a
+/// candidate no walk over ordered bars builds, given by a caller.
+#[test]
+fn a_replayed_row_whose_exit_cannot_be_stamped_or_leaves_its_path_is_refused() {
+    let bars = four_bars();
+    let (stops, targets, trails) = (
+        Ladder::new(vec![10_000]).unwrap(),
+        Ladder::new(vec![900_000]).unwrap(),
+        Ladder::new(vec![900_000]).unwrap(),
+    );
+    let ladders = Ladders {
+        stops: &stops,
+        targets: &targets,
+        trails: &trails,
+    };
+    let rungs = (stops.rungs(), targets.rungs(), trails.rungs());
+    let baseline = Variant {
+        stop: None,
+        target: None,
+        tsl: None,
+        ttp: None,
+    };
+    let refused = |why| crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceRefused(why);
+    let clean = || long_candidate(&bars, (0, 1, 3), ladders);
+    let entry_micros = bars[1].ts_micros;
+    let mut row = Vec::new();
+    let mut path = |bars: &[Candle], candidate: &Candidate| {
+        priceable_candidate_path_v1(
+            bars,
+            candidate,
+            rungs,
+            baseline,
+            Side::Long,
+            entry_micros,
+            &mut row,
+        )
+        .map(|(bar, stamp, _)| (bar, stamp))
+    };
+    assert_eq!(path(&bars, &clean()), Ok((3, bars[3].ts_micros)));
+    assert_eq!(
+        path(
+            &bars,
+            &Candidate {
+                time_exit: 9,
+                ..clean()
+            }
+        ),
+        Err(refused(
+            "chosen exit coordinate is outside the execution slice"
+        ))
+    );
+    let mismatch = Err(refused(
+        "chosen candidate row does not reconcile with its occupancy path",
+    ));
+    assert_eq!(
+        path(
+            &bars,
+            &Candidate {
+                time_exit: 0,
+                ..clean()
+            }
+        ),
+        mismatch
+    );
+    let mut stamped_early = four_bars();
+    stamped_early[3].ts_micros = entry_micros - 60_000_000;
+    // Measured on the ordered bars, replayed over the restamped ones: a
+    // candidate built over the restamped bars is refused by its own crossing
+    // clock before it is priced.
+    assert_eq!(path(&stamped_early, &clean()), mismatch);
+    assert_eq!(
+        path(
+            &stamped_early,
+            &long_candidate(&stamped_early, (0, 1, 3), ladders)
+        ),
+        Err(refused(
+            "a priceable candidate did not replay to exactly one row"
+        ))
+    );
+}
