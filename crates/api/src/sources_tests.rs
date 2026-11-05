@@ -2266,3 +2266,122 @@ async fn crowded_sources_answer_429(fx: &Fixture) {
     }
     drop(crowd);
 }
+
+/// **A STORE ROOT THAT IS NO FOLDER, A RUNG FOLDER THAT CANNOT BE LOOKED AT,
+/// A SYMBOL A LINK MUST ESCAPE AND A FULL MEMO ARE EACH SAID**
+/// (BASE-COV-API-AS2). Extremes: (1) a store root that does not exist is a
+/// 503 naming the root; (2) one that is a file is a 503 saying it is no
+/// directory; (3) an instrument whose folder is a FILE where its rung
+/// folders go: the rung table still answers, and a note names the folder it
+/// could not read; (4) every other feed is still listed beside it; (5) a
+/// share named `M&M` links its calendar with the name as one escaped value,
+/// `M%26M`, never two fields; (6) a memo past its cap is emptied whole and
+/// then holds the newest entry; (7) a memo made at run time holds nothing;
+/// (8) the memo keeps the last of two values put under one key. Combined:
+/// (9) a root that is a file AND a share whose name must be escaped: the
+/// root's refusal, before any link is built; (10) the cap reached AND the
+/// next key already held: still emptied whole, then holds that key. Out of
+/// the box: (11) a key put once more than the cap allows, `u32::MAX`, is
+/// the one entry left.
+#[tokio::test]
+async fn a_root_no_folder_an_unlisted_rung_an_escaped_symbol_and_a_full_memo() {
+    let masters = crate::scratch::path("sources-as2-masters");
+    fs::create_dir_all(&masters).expect("empty offline masters");
+    let ask = |root: &Path| {
+        let site = Loaded::new(Site::load(&masters, root));
+        async move {
+            let uri: axum::http::Uri = format!("/sources.json?{SHARE}").parse().expect("URI");
+            sources_json(axum::extract::State(site), uri).await
+        }
+    };
+    // (1): no root at all.
+    let missing = crate::scratch::path("sources-as2-no-root");
+    let _ = fs::remove_dir_all(&missing);
+    let (status, _, body) = ask(&missing).await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{body}"
+    );
+    assert!(body.contains("cannot read store root"), "{body}");
+    // (2), (9): a root that is a file.
+    let file = crate::scratch::path("sources-as2-root-file");
+    fs::write(&file, b"not a store").expect("a file");
+    let (status, _, body) = ask(&file).await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{body}"
+    );
+    assert!(body.contains("is not a directory"), "{body}");
+    assert!(!body.contains("calendar"), "{body}");
+    let _ = fs::remove_file(&file);
+    // (3), (4): the share's folder is a file where its rungs go.
+    let fx = Fixture::empty("as2-rung-file");
+    let folder = fx.root.join("bars/zerodha/NSE/CASH/SYNTHA");
+    fs::create_dir_all(folder.parent().expect("a parent")).expect("the segment folder");
+    fs::write(&folder, b"not a folder").expect("a file where the rungs go");
+    let (status, body) = fx.get("/sources.json", SHARE).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+    let notes: Vec<&str> = body["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("cannot read ") && note.contains("SYNTHA")),
+        "{notes:#?}"
+    );
+    assert!(
+        body["feeds"]
+            .as_array()
+            .is_some_and(|feeds| feeds.len() > 1),
+        "{body:#}"
+    );
+    // (5): M&M's calendar link.
+    let fx = Fixture::empty("as2-escaped");
+    let a = day_a();
+    fx.counted(
+        Vendor::Zerodha,
+        Segment::Cash,
+        "M&M",
+        Timeframe::MINUTE_1,
+        &[bar(
+            t(a, 9, 15, 0),
+            (50_000, 50_100, 49_900, 50_000),
+            10,
+            OI_NULL,
+        )],
+    );
+    let (status, body) = fx
+        .get("/sources.json", "exchange=NSE&segment=CASH&symbol=M%26M")
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+    assert_eq!(
+        row(&body["rungs"], "zerodha_stored", "1min")["sessions"]["calendar"],
+        "/calendar.json?feed=zerodha&symbol=M%26M&rung=1min"
+    );
+    // (6)-(8), (10), (11): a memo of its own.
+    let memo: Memo<u32, u32> = Memo::new();
+    assert_eq!(memo.get(&1), None);
+    memo.put(1, 10);
+    memo.put(1, 11);
+    assert_eq!(memo.get(&1), Some(11));
+    for key in 2..=u32::try_from(MEMO_CAP).expect("small") {
+        memo.put(key, key);
+    }
+    assert_eq!(memo.get(&1), Some(11), "at the cap, nothing is dropped yet");
+    memo.put(1, 12);
+    assert_eq!(memo.get(&1), Some(12), "emptied whole, then the newest");
+    assert_eq!(memo.get(&2), None);
+    for key in 2..=u32::try_from(MEMO_CAP).expect("small") {
+        memo.put(key, key);
+    }
+    memo.put(u32::MAX, 0);
+    assert_eq!(memo.get(&u32::MAX), Some(0));
+    assert_eq!(memo.get(&1), None, "the one entry left is the newest");
+    let _ = fs::remove_dir_all(&masters);
+}
