@@ -88244,9 +88244,9 @@ allocator fails, a `#[cfg(test)]` line asks
 `crate::reservation_refusal::asked` for its size: on the n-th seamed
 reservation of the thread, armed by `refusing(n, ..)`, the answer is
 `usize::MAX`, so `try_reserve_exact` answers the genuine `TryReserveError`
-and everything after it is shipping code. Nothing of it is compiled into a
-build: the call that ships is the call every test runs, with the size it
-always asked for.
+and everything after it is shipping code. Nothing of the door is compiled
+into a build: a build binds the size the reservation always asked for to a
+local (`let asked = ...`) and makes the call every test runs with it.
 
 The eight seamed sites: the observed stops, targets and trails of
 `exit_grid_policy::observed_ranges`; `admitted_ratio_pairs`; the ladder
