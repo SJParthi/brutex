@@ -132,11 +132,14 @@ async fn a_receipt_nobody_saved_is_refused_by_name_on_every_door() {
 }
 
 /// **A QUERY A DOOR CANNOT READ IS A `400`, BEFORE THE STORE.** Extremes, on
-/// every door: no query at all, an identity of the wrong case, one hex digit
-/// short, one digit over, and a bare key; a repeated field, an unknown field
-/// beside a good one and a limit past every door's cap; the two together, a
-/// good identity with both a repeated and an unknown field; and, out of the
-/// box, a query that is one long run of `&` and a non-ASCII digit in the hex.
+/// every door: (1) no query at all, (2) an identity of the wrong case, (3) one
+/// hex digit short, (4) one digit over, (5) a bare key, (6) a repeated field,
+/// (7) an unknown field beside a good one and (8) a limit past every door's
+/// cap; combined: (9) a good identity with both a repeated and an unknown
+/// field, and (10) an identity that is at once of the wrong case AND one digit
+/// over, beside a limit past every cap (three refusals in one query; the
+/// door answers one `400`, before the store); out of the box: (11) a query
+/// that is one long run of `&` and (12) a non-ASCII digit in the hex.
 #[tokio::test]
 async fn a_query_a_door_cannot_read_is_a_400_before_the_store() {
     let long = "&".repeat(600);
@@ -145,6 +148,10 @@ async fn a_query_a_door_cannot_read_is_a_400_before_the_store() {
         let short = query.replacen(ID, &ID[1..], 1);
         let over = query.replacen(ID, &format!("{ID}1"), 1);
         let bad_digit = query.replacen(ID, &format!("%D9%A1{}", &ID[1..]), 1);
+        let upper_over_past_cap = format!(
+            "{}&limit=18446744073709551616",
+            query.replacen(ID, &"A".repeat(65), 1)
+        );
         for bad in [
             String::new(),
             upper,
@@ -156,6 +163,7 @@ async fn a_query_a_door_cannot_read_is_a_400_before_the_store() {
             format!("{query}&alien=1"),
             format!("{query}&limit=18446744073709551616"),
             format!("{query}&identity={ID}&alien=1"),
+            upper_over_past_cap,
             long.clone(),
         ] {
             let (status, body) = ask(door, uri(&bad)).await;
@@ -163,4 +171,12 @@ async fn a_query_a_door_cannot_read_is_a_400_before_the_store() {
             assert_refused(door, &bad, &body);
         }
     }
+}
+
+/// **A DOOR THIS FILE DOES NOT NAME IS REFUSED LOUDLY**, never asked as one it
+/// does: a misspelt door in a row above would otherwise test nothing.
+#[tokio::test]
+#[should_panic(expected = "no door named boolean-nowhere")]
+async fn a_door_this_file_does_not_name_is_refused_loudly() {
+    let _ = ask("boolean-nowhere", uri(&format!("identity={ID}"))).await;
 }

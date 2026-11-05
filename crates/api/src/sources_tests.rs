@@ -862,10 +862,16 @@ async fn one_source_is_not_compared_and_an_option_folds_its_last_carried_oi() {
             .any(|note| note.contains("one source holds this rung")),
         "{notes:#?}"
     );
-    // THE FEED THAT GIVES NO SOURCE IS NAMED, AND WHY.
+    // THE FEED THAT GIVES NO SOURCE IS NAMED, AND WHY: exactly one note
+    // speaks for Zerodha, and it names the contract. Every note is read, so
+    // the one-source note above is read as the one that is not Zerodha's.
+    let zerodha: Vec<&&str> = notes
+        .iter()
+        .filter(|note| note.starts_with("Zerodha"))
+        .collect();
+    assert_eq!(zerodha.len(), 1, "{notes:#?}");
     assert!(
-        notes.iter().any(|note| note.starts_with("Zerodha")
-            && note.contains("NSE-FNO-NIFTY-2019-03-28-110000-CE")),
+        zerodha[0].contains("NSE-FNO-NIFTY-2019-03-28-110000-CE"),
         "{notes:#?}"
     );
     let (_, seconds) = fx
@@ -2097,23 +2103,35 @@ fn a_signed_month_file_name_is_not_listed_as_a_held_month() {
 
 /// **A SOURCES QUESTION THAT CANNOT BE READ IS A 400 THAT NAMES THE FIELD,
 /// AND A FULL STORE-READ POOL IS A 429 THAT NAMES THE TABLE** (BASE-COV-API,
-/// D-7346). Extremes: an empty symbol, one of 25 bytes, a contract no store
-/// names, a cursor that is no whole number of seconds and one that overflows
-/// microseconds; and, at once, every slot of the store-read pool taken while
-/// the rung table, the timeline and the day table are each asked a good
-/// question, the timeline's a month with no end day. The crowd runs in a child
-/// process ([`crate::isolated`]): a full pool in this one would refuse every
-/// other sources test of the binary while it stood.
+/// D-7346; widened to thirteen cases by BASE-COV-API-AS2). Extremes: (1) an
+/// empty symbol, (2) one of 25 bytes, (3) a contract no store names, (4) a
+/// cursor that is no whole number of seconds, (5) one that overflows
+/// microseconds upward (`i64::MAX` seconds) and (6) one that overflows them
+/// downward (`i64::MIN`), (7) a day of four fields, (8) a month field one
+/// digit wide, (9) a timeline page of no rows (`limit=0`), (10) a day-table
+/// order nobody names; combined: (11) a day table asked from after its own end
+/// AND in an order nobody names at once, which names the range, the first
+/// field it reads, and nothing else, and (12) every slot of the store-read pool
+/// taken while the rung table, the timeline and the day table are each asked a
+/// good question, the timeline's a month with no end day; out of the box:
+/// (13) a SIGNED year field (`%2B024`): four bytes that `str::parse` alone
+/// reads as the year 24 (the lens-8 attack of cloud-attack-law-20261016, here
+/// on a day rather than a month file name). The crowd runs in a child process
+/// ([`crate::isolated`]): a full pool in this one would refuse every other
+/// sources test of the binary while it stood. The child proves it ran by a
+/// file its parent reads, never by a print: gate 23 refuses a print site it
+/// does not declare.
 #[tokio::test]
 async fn a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name() {
     const CROWD_CHILD: &str = "BRUTEX_TEST_SOURCES_CROWD_CHILD";
     let fx = Fixture::empty("unreadable-questions");
-    if std::env::var_os(CROWD_CHILD).is_some() {
+    if let Some(proof) = std::env::var_os(CROWD_CHILD) {
         crowded_sources_answer_429(&fx).await;
-        println!("SOURCES-CROWD 429 on three doors");
+        fs::write(Path::new(&proof).join("child-ran"), b"crowded").expect("the child's proof");
         return;
     }
     let long = "S".repeat(25);
+    let timeline = "exchange=NSE&segment=INDEX&symbol=NIFTY&rung=1min";
     for (route, query, said) in [
         (
             "/sources.json",
@@ -2144,6 +2162,42 @@ async fn a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name() {
             ),
             "is not a whole number of unix seconds",
         ),
+        (
+            "/sources/bars.json",
+            format!("{timeline}&from=2024-01&cursor={}", i64::MIN),
+            "is not a whole number of unix seconds",
+        ),
+        (
+            "/sources/bars.json",
+            format!("{timeline}&from=2024-01-02-03"),
+            "from=\"2024-01-02-03\" is not a day YYYY-MM-DD or a month YYYY-MM",
+        ),
+        (
+            "/sources/bars.json",
+            format!("{timeline}&from=2024-1"),
+            "from=\"2024-1\" is not a day YYYY-MM-DD or a month YYYY-MM",
+        ),
+        (
+            "/sources/bars.json",
+            format!("{timeline}&from=2024-01&limit=0"),
+            "limit=0 is not a page this timeline serves at 1min: 1 to 200",
+        ),
+        (
+            "/sources/day.json",
+            "exchange=NSE&segment=INDEX&symbol=NIFTY&from=2024-01-02&order=sideways".to_owned(),
+            "order=\"sideways\" is not asc or desc",
+        ),
+        (
+            "/sources/day.json",
+            "exchange=NSE&segment=INDEX&symbol=NIFTY&from=2024-02-01&to=2024-01-01&order=sideways"
+                .to_owned(),
+            "from=2024-02-01 is after to=2024-01-01",
+        ),
+        (
+            "/sources/bars.json",
+            format!("{timeline}&from=%2B024-01"),
+            "from=\"+024-01\" is not a day YYYY-MM-DD or a month YYYY-MM",
+        ),
     ] {
         let (status, body) = fx.get(route, &query).await;
         assert_eq!(
@@ -2156,11 +2210,29 @@ async fn a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name() {
             "{route}?{query}: {body}"
         );
     }
-    let out = crate::isolated::rerun(
+    let proof = crate::scratch::path("sources-crowd-proof");
+    let _ = fs::remove_dir_all(&proof);
+    fs::create_dir_all(&proof).expect("the child's proof folder");
+    let _ = crate::isolated::rerun(
         "server::sources::tests::a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name",
-        &[(CROWD_CHILD, std::ffi::OsStr::new("1"))],
+        &[(CROWD_CHILD, proof.as_os_str())],
     );
-    assert!(out.contains("SOURCES-CROWD 429 on three doors"), "{out}");
+    assert_eq!(
+        fs::read(proof.join("child-ran")).ok().as_deref(),
+        Some(&b"crowded"[..]),
+        "the child crowded the store-read pool and heard three 429s"
+    );
+    let _ = fs::remove_dir_all(&proof);
+}
+
+/// **A ROUTE THE FIXTURE DOES NOT SERVE IS REFUSED LOUDLY**, never answered
+/// as one of the three it does: a typo in a test's route would otherwise ask
+/// the wrong handler and pass on its answer.
+#[tokio::test]
+#[should_panic(expected = "not a route here: /sources/nowhere.json")]
+async fn a_route_the_fixture_does_not_serve_is_refused_loudly() {
+    let fx = Fixture::empty("not-a-route");
+    let _ = fx.get("/sources/nowhere.json", NIFTY).await;
 }
 
 /// The child half of the test above: every slot of the store-read pool taken,
