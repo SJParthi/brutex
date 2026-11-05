@@ -72,14 +72,12 @@ fn one_step_whatever_the_period(id: &str) -> bool {
 }
 
 /// Sorts each round, reads it by rank, prints the best, median and worst rounds, and
-/// returns the best. A refusal prints its reason and leaves no sample, which the verdict
-/// fails.
+/// returns the best. Every line names the measurement's refusal, `None` when there was
+/// none; a refusal leaves no round, so the best reads p99 0 and the verdict fails.
 fn best_round(id: &str, label: &str, measured: Result<Vec<Vec<u64>>, Refusal>) -> StepCost {
-    let rounds = measured.unwrap_or_else(|why| {
-        println!("{id} {label}: REFUSED {why:?}");
-        Vec::new()
-    });
-    let mut costs: Vec<StepCost> = rounds
+    let refusal = measured.as_ref().err().copied();
+    let mut costs: Vec<StepCost> = measured
+        .unwrap_or_default()
         .into_iter()
         .map(|mut round| {
             round.sort_unstable();
@@ -91,7 +89,7 @@ fn best_round(id: &str, label: &str, measured: Result<Vec<Vec<u64>>, Refusal>) -
     let median = costs.get(costs.len() / 2).copied().unwrap_or_default();
     let worst = costs.last().copied().unwrap_or_default();
     println!(
-        "{id} {label}: best of {} rounds p50 {} ns, p99 {} ns, max {} ns, n {}; median round p99 {} ns; worst round p99 {} ns",
+        "{id} {label}: best of {} rounds p50 {} ns, p99 {} ns, max {} ns, n {}; median round p99 {} ns; worst round p99 {} ns; refusal {refusal:?}",
         costs.len(),
         best.p50_ns,
         best.p99_ns,
