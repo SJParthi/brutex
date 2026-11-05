@@ -68,6 +68,8 @@ use indicators::{Candle, OI_NULL};
 // slot bench-mod PSRB-RSI
 
 // slot bench-mod PSRB-BOLL
+#[path = "ratio/psrb_boll.rs"]
+mod psrb_boll;
 
 // slot bench-mod PSRB-STV
 
@@ -781,6 +783,11 @@ fn main() {
     // slot bench-row PSRB-RSI
 
     // slot bench-row PSRB-BOLL
+    let verdicts: Vec<bool> = verdicts
+        .iter()
+        .copied()
+        .chain([psrb_boll::row(floor, &["C-PSRB-BOLL-01", "C-PSRB-BOLL-02"])])
+        .collect();
 
     // slot bench-row PSRB-STV
 
