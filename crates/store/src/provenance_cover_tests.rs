@@ -304,3 +304,95 @@ fn a_batch_sealed_under_a_writer_leaves_the_flush_to_the_writer() {
     let held = open.make_durable(1).unwrap();
     assert_eq!((held.files, held.directories), (1, 1), "{held:?}");
 }
+
+/// **A SEALED FORM WHOSE HEAD DOES NOT DECODE REFUSES THE READ BY ITS
+/// NAME.** The door asks the sealed form first: a `.sbar` of zeros is no
+/// sealed month, and the read says so by the `.sbar`, never falling back to
+/// the raw sidecar beside it.
+#[test]
+fn a_sealed_form_whose_head_does_not_decode_refuses_the_read() {
+    let root = Root::new("sbar-zeros");
+    let june = month(2024, 6);
+    drop(landed(&root, june, 3));
+    let sbar = root.file(june, FileKind::SealedBars);
+    fs::write(&sbar, [0_u8; 1_024]).unwrap();
+    match read(&root.0, june) {
+        Err(ProvenanceError::Io {
+            path,
+            action: "reading the sealed month's provenance",
+            ..
+        }) => assert_eq!(path, sbar),
+        other => panic!("the undecodable head refuses the read: {other:?}"),
+    }
+}
+
+/// **A LANDING WHOSE SIDECAR LOCK THE HOST REFUSES IS REFUSED BY THE LOCK,
+/// AND WRITES NOTHING** (the flock test seam: no lock file refuses a
+/// `flock` other than by contention on request). The next landing records.
+#[test]
+fn a_landing_whose_sidecar_lock_the_host_refuses_is_refused_by_the_lock() {
+    let root = Root::new("lock-refused");
+    let june = month(2024, 6);
+    let mut file = BarFile::open_or_create(&root.0, june, SYMBOL).unwrap();
+    let appended = file.append(&bars(june, 4)).unwrap();
+    let at = root.file(june, FileKind::Provenance);
+    crate::flock::tests::refuse_next_lock(std::io::ErrorKind::Interrupted);
+    match record(&root.0, &file, june, appended, &landing(june, 11)) {
+        Err(ProvenanceError::Io {
+            path,
+            action: "lock",
+            source,
+        }) => {
+            assert_eq!(path, at);
+            assert_eq!(source.kind(), std::io::ErrorKind::Interrupted);
+        }
+        other => panic!("the lock refuses the landing: {other:?}"),
+    }
+    assert!(!crate::flock::tests::lock_refusal_armed());
+    assert!(
+        fs::read(&at).unwrap_or_default().is_empty(),
+        "nothing written"
+    );
+    assert!(matches!(
+        record(&root.0, &file, june, appended, &landing(june, 11)),
+        Ok(Recorded::Written(_))
+    ));
+}
+
+/// **A DEVICE THE HOST WILL NOT MEASURE REFUSES THE DEFERRED FLUSH BY THE
+/// SIDECAR'S NAME** (the file test seam, as `measuring`): a once-per-device
+/// batch must know the sidecar's device to hold its flush, and a refused
+/// look is that refusal, named, never a flush silently dropped.
+#[test]
+fn a_device_the_host_will_not_measure_refuses_the_deferred_flush() {
+    let root = Root::new("defer-refused");
+    let june = month(2024, 6);
+    drop(landed(&root, june, 3));
+    let at = root.file(june, FileKind::Provenance);
+    let file = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&at)
+        .unwrap();
+    let batch = DurableBatch::new(BatchFlush::OncePerDevice);
+    crate::file::tests::arm_host_fault(
+        crate::file::Action::Measure,
+        &at,
+        0,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let refused = sync_data(&file, &at, Some(&batch));
+    let fired = !crate::file::tests::host_fault_armed();
+    crate::file::tests::disarm_host_fault();
+    assert!(fired, "the seam was reached");
+    match refused {
+        Err(ProvenanceError::Io {
+            path,
+            action: "measure the device of",
+            ..
+        }) => assert_eq!(path, at),
+        other => panic!("the refused look refuses the flush: {other:?}"),
+    }
+    let made = batch.make_durable(1).unwrap();
+    assert_eq!(made.files, 0, "the batch holds no flush of it: {made:?}");
+}

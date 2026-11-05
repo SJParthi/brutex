@@ -171,3 +171,23 @@ fn a_kept_summary_the_host_will_not_open_is_unreadable_in_its_words_body() {
         other => panic!("the open is refused in the host's words: {other:?}"),
     }
 }
+
+/// **A BIT PAST A BITMAP'S END IS DROPPED, NEVER WRAPPED INTO IT** (both
+/// bit writers' own contracts, asked directly: every caller stays inside
+/// its bitmap or refuses first). Setting bit 64 of a one-word bitmap, or
+/// OR-ing a byte from bit 64, changes nothing; a byte from bit 60 keeps its
+/// four low bits and drops the four that run past the end.
+#[test]
+fn a_bit_past_a_bitmaps_end_is_dropped_never_wrapped() {
+    let mut words = [0_u64; 1];
+    set(&mut words, 64);
+    set(&mut words, 1_000_000);
+    assert_eq!(words, [0], "set past the end");
+    or_byte(&mut words, 64, 0xFF);
+    or_byte(&mut words, 1_000, 0xFF);
+    assert_eq!(words, [0], "or past the end");
+    or_byte(&mut words, 60, 0xFF);
+    assert_eq!(words, [0xF << 60], "the bits inside are kept");
+    set(&mut words, 3);
+    assert_eq!(words, [(0xF << 60) | 0b1000]);
+}
