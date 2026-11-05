@@ -87989,3 +87989,127 @@ sides). Its open items: (F) 754, (U) 91 with proofs, inside `#[ignore]` tests
 `vendor.rs` and are closed by D-7338. Eleven of its (U) rows are lines that
 run only in a child process a test kills with SIGKILL, which Route B cannot
 count (L-BCP-5). Invariants BCP-16 to BCP-19.
+
+### D-7338 — BASE-COV-PULL-PSA: the three shards assembled, every shard's need settled or named, and the pull crate measured whole at the assembled tip; the bar is still NOT held — 2026-11-05
+
+**What.** The assembly of the 3 Nov 2026 cloud wave's split of BASE-COV-PULL
+(D6; D-7335 to D-7337), session BASE-COV-PULL-PSA, branch
+`cloud/cov-pull-psa-20261103`. All three shards had ended `BLOCKED OUTSIDE`.
+
+1. **The stack.** The kit's `replay-minus-reports.sh` replayed each shard's
+   own commits, less every file under `reports/`, onto the last: PS1
+   (`db608fb4`, from the kit commit `5789f435`) onto START `f98a899398f6`, 26
+   commits; PS2 (`3b18385c`) and PS3 (`f8435521`), each from PS1's GREEN-TIP
+   `2e7a0b6d`, 51 and 17 commits. Its proofs held at each call (every file the
+   shard changed equals its tip's, nothing else moved, no report crossed, no
+   merge). ASSEMBLED `dac5db855377`: 174 files over START in 94 commits. The
+   two files PS1 and PS3 both changed (`gdfl_dropbox_cov_tests.rs`,
+   `gdfl_run_start_cov_tests.rs`) PS1 changed only before the GREEN-TIP PS3
+   began from, so each equals PS3's.
+2. **Green as root.** On the assembled tree, and again on the code tip, `cargo
+   test -p pull --locked --no-fail-fast` (stable 1.97.1, root, 4 cores) passes
+   whole: 34 binaries, 3,607 passed, 0 failed, 54 ignored, on both the tree of
+   `a52270b1f00a` and the code tip `cef062ebf194`. The nine root-only reds of
+   PS1's list are gone (PS2 and PS3 run them where the bits bind, D-0995). fmt
+   and `clippy -D warnings` are clean.
+3. **The needs settled.** (a) PS3's last two rows, `tenor.rs` 203-204
+   (`TenorError::HoursUnverified`'s words), needed a session refusal only
+   `vendor.rs` can build:
+   `vendor::tests::a_tenor_refused_for_unverified_hours_quotes_the_refusal`
+   states them over each venue, both window shapes, the calendar's two ends
+   together and two citations no shipped row has (BCP-20). (b) PS1's gate 1d
+   words: gate 1d named 1,129 undeclared literals on the assembled tree, 637
+   at START and 481 at feat/db-fix; the 648 the package added (156 by its
+   earlier attempts, 492 by the shards, none removed) were each read at the
+   literal that produces it and are declared as one group with their six kinds
+   (`.github/gates_tree.rs`, `BASE_COV_PULL_LITERAL`, BCP-21), so gate 1d
+   names exactly feat/db-fix's own 481. (c) PS1's kill-test pair
+   (`gdfl_import_tests.rs`, `unborn == 0 || open_day`), which only a timed
+   SIGKILL inside a month's creation reached: no child can be held there, but
+   what such a kill leaves can be written, so `Stop::CutInCreation` writes the
+   run's journal to its first `begin` and the month's header region of zeros,
+   then judges and resumes it as every kill (no production line, no hook; red
+   with the store's repair of an existing interrupted genesis switched off by
+   hand). PS1 had named a store pause point for the operator; none is needed.
+   (d) Docs: D-7335 to D-7337 from the shards' drafts; BCP-08 to BCP-12
+   flipped to ✓ (their fifteen tests pass); BCP-13 to BCP-21 added; BCP-02 now
+   names its twelve tests (gate 10 refused it as naming none), so gate 10
+   refuses on this tree only what it refuses on feat/db-fix.
+4. **Figures** (D-7330's instrument: the kit's `d3-route-b-cloud.sh`
+   unchanged, rustc 1.99.0-nightly (1a98b1e13 2026-08-07) with its own LLVM
+   23.1.0 llvm-profdata and llvm-cov; reading `whole:pull`; 255 files, every
+   tracked `.rs` of `crates/pull` but the 8 bench files, in no test object; a
+   root cloud host under D-7339's four conditions). BEFORE, the second check's
+   measure of `c9d653d5f`: lines 151,638/158,587, branches 11,522/14,216. At
+   the code tip `a52270b1f00a` (run 1): lines 175,277/179,855 (4,578
+   uncovered), branches 12,614/14,454 (1,840 sides). AT THE CODE TIP
+   `cef062ebf194` (run 2): lines 175,299/179,878 (4,579 uncovered), branches
+   12,622/14,464 (1,842 sides); its instrumented suite passed whole (3,607
+   passed, 0 failed, 54 ignored) and wrote 132 profiles, 62 of them by
+   uid-65534 children; build 1 minute, tests 4, reading 35 (17:10:38 to
+   17:50:52 IST). By group: G1 (91 files: PS1's 89 and repair 2's
+   `census_store_cov_tests.rs` and `gdfl_rekey_cov_tests.rs`, which no shard
+   counted, both whole) lines 57,738/59,292, branches 4,193/4,954; G2 (93)
+   58,766/60,545 and 4,140/4,724; G3 (71) 58,795/60,041 and 4,289/4,786, each
+   group's uncovered rows exactly its shard's last run's, less the rows this
+   assembly closed.
+5. **Every uncovered row is classed**, each carried from the owning shard's
+   list of the same row (file, line, column, side and text), but for the five
+   rows of this assembly's own new test code: 6,421 rows: (F) 2,231, (U) 364
+   (21 of them on a private-field type invariant, marked by PS2 for the
+   operator), IGNORED 3,798 (L-BCP-3), UNMEASURED 11 (L-BCP-5), GAP 17; the
+   five of this assembly's own test code are (F), read by hand. The list is
+   `state/fix/round2/base-cov-pull-fu.txt` (on the branch,
+   `reports/base-cloud-20261103/base-cov-pull-fu.txt.md`; every row with its
+   class in `gaps-PSA.txt.md`). PS3 listed eleven of the rows as (U); they
+   run, in a child its test kills with SIGKILL, which writes no profile, so
+   they are UNMEASURED (L-BCP-5), not unreachable.
+6. **What is left, and whose.** GAP, 17 rows: `listing_tests.rs:490`, the
+   Darwin errno arm (macOS only: the Mac's, never claimed here); `ssm.rs` 966,
+   970 and 971, after a signed send reached AWS (an endpoint argument for the
+   signed read: the operator's call, L-BCP-4); and 13 rows of `upkeep.rs` (4)
+   and `upkeep_tests.rs` (9), files BASE-MSUM-BACKFILL owns and is changing
+   (MS1's, or the operator's: closed on whichever of the two lands second).
+   IGNORED: the 54 `#[ignore]` tests and the helpers only they reach (L-BCP-3,
+   the operator's). UNMEASURED: L-BCP-5, the operator's. The bar is therefore
+   NOT held, and D-7250's narrow reading does NOT end for `pull` at this tip;
+   Route B on the Mac's pin replaces these cloud figures. Limits L-BCP-1,
+   L-BCP-3, L-BCP-4 restated, L-BCP-5 added. Mutants: deferred (operator, 30
+   Oct); the set file keeps the mutants lines (1,952, the D2 set of
+   `f01d7a0e4...cef062ebf194`) for the background pass.
+
+### D-7339 — BASE-COV-PULL-PSA: a Route B figure taken on a cloud host that runs as root counts its uid-65534 children only under four conditions, and says it held them — 2026-11-05
+
+**Why.** The cloud hosts of the 3 Nov 2026 wave run as root on 4 cores.
+Since D-0995 a test whose permission bits root would defeat
+(`support::where_permission_binds`) runs its body again as uid 65534 in a child
+process, and at the assembled tip 62 of Route B's 132 profiles were written by
+such children. Route B counts a line only if the process that ran it wrote a
+profile, so whatever stops a uid-65534 child from writing its profile, or makes
+its test fail, removes coverage without a word: the test passes, its rows read
+as uncovered, and the script prints no NOT PROVED line. The shards found four
+such conditions, each by a run that lost rows.
+
+1. `TMPDIR` of mode 1777: the child makes its scratch folder there (PS1: at
+   0755, 13 more lib tests went red).
+2. A profile folder every uid can reach and write: `LLVM_PROFILE_FILE` under a
+   folder of mode 0777 on a path each uid can search (PS1: under a 0700
+   scratchpad, its first run held no profile of uid 65534).
+3. The script's own folders made under umask 0000, and cargo and the tests run
+   under umask 0022 (a wrapper of the nightly's cargo as `D3_CARGO`): a whole
+   run under umask 0000 makes a test's configuration file 0666, and
+   `gdfl_dropbox::tests::a_missing_link_is_a_named_wait` refuses it
+   (`dropbox_config_too_open`) (PS1).
+4. `kernel.pid_max` raised from 32,768 to 4,194,304, so no pid wraps within a
+   run: the kit names a profile `%p-%m.profraw`, and a uid-65534 child given the
+   pid of an earlier root process of the same binary cannot merge into that
+   root-owned 0644 file, so it writes nothing (PS2: one child's profile lost in
+   two runs, 28 rows of a passing test read as uncovered).
+
+**Decision.** A cloud Route B figure of this package is taken under all four
+and says so; one taken without them is no figure. The assembly's run of D-7338
+held all four (`TMPDIR` a tmpfs folder of mode 1777, profiles under a folder of
+mode 0777, the kit's `d3-route-b-cloud.sh` unchanged under umask 0000 with a
+umask-0022 cargo, `pid_max` 4,194,304). On the operator's Mac Route B runs as a
+user who is not root, where no child changes its uid, so none of the four binds
+there; the Mac's own Route B on its pin replaces every cloud figure.
