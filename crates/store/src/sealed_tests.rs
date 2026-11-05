@@ -1012,6 +1012,7 @@ fn a_full_disk_at_any_byte_is_the_writers_refusal_and_the_prefix_is_never_a_mont
         room: len,
     };
     built.write_to(&mut device).unwrap();
+    io::Write::flush(&mut device).expect("a device that took the whole file holds nothing back");
     assert_eq!(device.taken, bytes, "room for the whole file is the file");
     let month = open(path, device.taken);
     assert_eq!(month.audit().unwrap().rows, 17_000);

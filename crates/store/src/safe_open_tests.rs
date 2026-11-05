@@ -257,19 +257,30 @@ fn an_absent_name_is_the_hosts_not_found_and_nothing_else_is() {
 
 /// A regular file the host will not open (no read permission) keeps the
 /// host's own refusal: the look that names a kind finds a regular file and
-/// names none. Skipped where the test runs with the power to read anyway.
+/// names none. Root reads a 000 file, so the body runs where the mode bits
+/// bind: re-run as `nobody` when this process is root (D-0995), never
+/// skipped (BASE-COV-LIBS-LS1: it used to assert nothing as root).
 #[test]
 fn a_regular_file_the_host_refuses_keeps_the_hosts_words() {
+    crate::support::where_permission_binds(
+        "safe_open::tests::a_regular_file_the_host_refuses_keeps_the_hosts_words",
+        a_regular_file_the_host_refuses_keeps_the_hosts_words_body,
+    );
+}
+
+fn a_regular_file_the_host_refuses_keeps_the_hosts_words_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = dir("denied");
     let path = dir.join("denied.bin");
     fs::write(&path, b"x").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-    if fs::File::open(&path).is_err() {
-        let refusal = open_read(&path).unwrap_err();
-        assert_eq!((refusal.word(), refusal.found()), ("io", None), "{refusal}");
-        assert!(!refusal.is_missing());
-    }
+    assert!(
+        fs::File::open(&path).is_err(),
+        "the premise: the mode bits bind here"
+    );
+    let refusal = open_read(&path).unwrap_err();
+    assert_eq!((refusal.word(), refusal.found()), ("io", None), "{refusal}");
+    assert!(!refusal.is_missing());
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(open_read_len(&path).unwrap().1, 1);
     let _ = fs::remove_dir_all(&dir);

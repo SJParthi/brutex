@@ -601,3 +601,14 @@ fn a_bar_the_crossing_commit_cannot_hold_is_refused_before_any_byte() {
     assert!(root.tix(Timeframe::SECOND_1).exists());
     assert_eq!(writer.time_lookup(), TimeLookup::Indexed);
 }
+
+/// AN EMPTY MONTH IS PROBED AT ITS FIXED EDGES ALONE (BASE-COV-LIBS-LS1):
+/// with no bar there is no stamp, gap or last bar to probe about.
+#[test]
+fn an_empty_month_is_probed_at_its_edges_alone() {
+    let (from, until) = month().ist_bounds_micros();
+    assert_eq!(
+        probes(&[]),
+        vec![i64::MIN, from - 1, from, until - 1, until, i64::MAX]
+    );
+}

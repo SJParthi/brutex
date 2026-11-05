@@ -347,3 +347,14 @@ fn a_month_with_no_trustworthy_sidecar_is_unrecorded_and_still_opens() {
     ));
     assert!(BarFile::open_existing(&root.0, sibling(), id).is_err());
 }
+
+/// THE INVENTED BARS' CIVIL-DAY COUNT IS HINNANT'S (BASE-COV-LIBS-LS1): the
+/// epoch, the last day of a leap February and the day after it, and the
+/// November day this file's contracts expire on, each its known count.
+#[test]
+fn the_civil_day_count_is_hinnants_on_known_days() {
+    assert_eq!(days_from_epoch(1970, 1, 1), 0);
+    assert_eq!(days_from_epoch(2000, 2, 29), 11_016);
+    assert_eq!(days_from_epoch(2000, 3, 1), 11_017);
+    assert_eq!(days_from_epoch(2019, 11, 28), 18_228);
+}

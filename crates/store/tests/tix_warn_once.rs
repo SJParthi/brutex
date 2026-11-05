@@ -356,3 +356,15 @@ fn a_month_that_bisects_is_named_once_per_kind_of_reason_however_many_handles_as
     let _ = fs::remove_dir_all(&log);
     let _ = fs::remove_dir_all(&root);
 }
+
+/// THE VALUE READERS TAKE WHAT THE SINK GIVES BACK (BASE-COV-LIBS-LS1): text
+/// as itself and any other kind by its debug form, and a count past
+/// `i64::MAX`, which the sink reads back as `Uint`, as that count.
+#[test]
+fn the_value_readers_take_what_the_sink_gives_back() {
+    assert_eq!(text(&OwnedValue::Str("noted".to_owned())), "noted");
+    assert_eq!(text(&OwnedValue::Bool(false)), "Bool(false)");
+    let fields = vec![("bars".to_owned(), OwnedValue::Uint(u64::MAX))];
+    assert_eq!(uint(&fields, "bars"), u64::MAX);
+    assert_eq!(field(&fields, "bars"), "Uint(18446744073709551615)");
+}

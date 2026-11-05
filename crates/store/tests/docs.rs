@@ -208,9 +208,12 @@ fn the_header_module_doc_claims_no_mapping() {
 
 /// **The C-01 paragraph's syscall sentence is superseded where it stands.**
 ///
-/// `docs/04-invariants.md` is append-only, so the paragraph under C-01 that
-/// says no bench times a syscall stays as written. While it does, D-0790 must
-/// name it superseded and row C4-DOCS-WEB-07 must exist.
+/// While the paragraph under C-01 in `docs/04-invariants.md` said no bench
+/// times a syscall, D-0790 named it superseded and row C4-DOCS-WEB-07
+/// recorded it. D-1448 has since corrected the paragraph itself, and both
+/// records stay (the two documents are append-only), so both are checked on
+/// every run, never only while the sentence stands: a check that runs only on
+/// text that is gone checks nothing (BASE-COV-LIBS-LS1).
 #[test]
 fn the_c01_syscall_sentence_is_superseded_where_it_stands() {
     assert!(
@@ -221,9 +224,6 @@ fn the_c01_syscall_sentence_is_superseded_where_it_stands() {
         FILE_RS.contains("FileExt::read_at(self, buf, offset)"),
         "the read `read_record` performs is a positional read"
     );
-    if !flat(INVARIANTS_DOC).contains("no bench in this repository times a syscall") {
-        return;
-    }
     let entry = DECISIONS_DOC
         .split("\n### D-0790 ")
         .nth(1)

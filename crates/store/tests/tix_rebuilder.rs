@@ -522,3 +522,14 @@ fn a_sidecar_path_a_link_below_the_root_and_a_wrong_symbol_are_refused_before_an
     ));
     assert!(!root.tix(tf).exists());
 }
+
+/// AN EMPTY MONTH IS PROBED AT ITS FIXED EDGES ALONE (BASE-COV-LIBS-LS1):
+/// with no bar there is no stamp, gap or last bar to probe about.
+#[test]
+fn an_empty_month_is_probed_at_its_edges_alone() {
+    let (from, until) = month().ist_bounds_micros();
+    assert_eq!(
+        probes(&[]),
+        vec![i64::MIN, from - 1, from, until - 1, until, i64::MAX]
+    );
+}

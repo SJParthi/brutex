@@ -6706,6 +6706,28 @@ pub(crate) mod tests {
         }
     }
 
+    /// THE OPERATION REFUSAL FIRES ONCE, ON ITS WORD AND PATH, AFTER ITS
+    /// SKIPS (BASE-COV-LIBS-LS1, D-8561): another word on the armed path and
+    /// the armed word on another path pass it by, the matching lift it lets
+    /// through passes, the next is refused in the armed kind, and after that
+    /// nothing is refused.
+    #[test]
+    fn the_operation_refusal_fires_once_on_its_word_and_path_after_its_skips() {
+        let armed = Path::new("/brutex-ls1/armed.bin");
+        arm_refusal("write", armed, 1, ErrorKind::StorageFull);
+        assert!(refusal("read", armed).is_none(), "another word passes");
+        assert!(
+            refusal("write", Path::new("/brutex-ls1/other.bin")).is_none(),
+            "another path passes"
+        );
+        assert!(refusal("write", armed).is_none(), "the one it lets through");
+        assert!(refusal_armed());
+        let fired = refusal("write", armed).expect("the next is refused");
+        assert_eq!(fired.kind(), ErrorKind::StorageFull);
+        assert!(!refusal_armed());
+        assert!(refusal("write", armed).is_none(), "once");
+    }
+
     /// Arms the threshold write's fault for the next one on this thread.
     pub(super) fn arm_threshold_fault() {
         THRESHOLD_FAULT.with(|armed| armed.set(true));

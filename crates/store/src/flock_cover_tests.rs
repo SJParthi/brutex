@@ -198,6 +198,17 @@ fn a_hold_sentence_a_formatter_refuses_ends_at_the_refusal() {
     };
     assert!(write!(refused, "{held}").is_err());
     assert_eq!(refused.took, "", "nothing after the refused piece");
+    let mut second = Refuses {
+        refuse: 1,
+        calls: 0,
+        took: String::new(),
+    };
+    assert!(write!(second, "{held}").is_err());
+    assert!(
+        !second.took.is_empty() && !second.took.contains("pid 1 holds it"),
+        "the first piece is taken, nothing after the refused second: {}",
+        second.took
+    );
     let whole_sentence = held.to_string();
     assert!(
         whole_sentence.starts_with("still held after waiting 21 ms of a 20 ms bound")

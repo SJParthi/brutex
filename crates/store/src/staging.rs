@@ -295,6 +295,10 @@ pub fn create(path: &Path) -> Result<Staged, StagingError> {
         }
         Ok(Seen { len, .. }) => {
             calls += 1;
+            // Under `cfg(test)` another actor may remove the leftover here,
+            // between the look and the removal (D-8561).
+            #[cfg(test)]
+            crate::file::tests::race("staging leftover looked at", path);
             match fs::remove_file(path) {
                 Err(why) if why.kind() != ErrorKind::NotFound => return Err(io("remove", why)),
                 _ => {}
