@@ -6228,8 +6228,8 @@ fn a_stocks_run_that_meets_a_sidecar_another_holds_names_the_lock() {
     assert_eq!(std::fs::read(&sidecar).unwrap(), b"", "nothing filed");
     let after = run_cm(&source, &run).unwrap();
     assert!(after.failures.is_empty(), "{:?}", after.failures);
-    let filed = crate::gdfl_cm::auction::read(&sidecar).unwrap().unwrap();
-    assert_eq!(filed.records.len(), 1, "the print, once the lock is free");
+    let printed = crate::gdfl_cm::auction::read(&sidecar).unwrap().unwrap();
+    assert_eq!(printed.records.len(), 1, "the print, once the lock is free");
     std::fs::remove_dir_all(root).unwrap();
 }
 
