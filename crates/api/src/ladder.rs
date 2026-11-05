@@ -881,13 +881,10 @@ mod tests {
         // YOUNG: first bar in March, every month after held — owes nothing.
         // HOLED: held Jan..=Apr and Jul..=Sep — owes May..=Jun inside, and
         // Oct..=Dec after its last held month. NONE: holds nothing.
-        let held = |k: &EntryKey| {
-            k.timeframe == Timeframe::DAY_1
-                && match k.symbol.as_str() {
-                    "YOUNG" => k.month >= at(3),
-                    "HOLED" => matches!(k.month.month(), 1..=4 | 7..=9),
-                    _ => false,
-                }
+        let held = |k: &EntryKey| match (k.timeframe, k.symbol.as_str()) {
+            (Timeframe::DAY_1, "YOUNG") => k.month >= at(3),
+            (Timeframe::DAY_1, "HOLED") => matches!(k.month.month(), 1..=4 | 7..=9),
+            _ => false,
         };
         let gated = gate(
             held,
@@ -923,27 +920,27 @@ mod tests {
         // THE NAMES ARE BOUNDED, THE COUNTS ARE NOT.
         let many: Vec<String> = (0..OWED_NAMED + 5).map(|i| format!("N{i}")).collect();
         let names: Vec<&str> = many.iter().map(String::as_str).collect();
-        let Gate::RungFirst {
-            missing,
-            owed,
-            runs,
-            ..
-        } = gate(
-            |_| false,
-            Feed::Zerodha,
-            Timeframe::MINUTE_1,
-            &asked(&names),
-        )
-        else {
-            panic!("nothing held must refuse");
-        };
-        assert_eq!(missing, (OWED_NAMED + 5) * 12);
-        assert_eq!(runs, OWED_NAMED + 5);
-        assert_eq!(owed.len(), OWED_NAMED);
-        assert_eq!(owed.first().map(|o| o.symbol), Some(sym("N0")));
+        // EVERY FIELD OF THE REFUSAL: the first OWED_NAMED runs named in the
+        // caller's order (N0 first, N{OWED_NAMED - 1} last, 12 months each),
+        // every run and every month counted.
         assert_eq!(
-            owed.last().map(|o| (o.symbol, o.months)),
-            Some((sym(&format!("N{}", OWED_NAMED - 1)), 12))
+            gate(
+                |_| false,
+                Feed::Zerodha,
+                Timeframe::MINUTE_1,
+                &asked(&names),
+            ),
+            Gate::RungFirst {
+                needs: Timeframe::DAY_1,
+                missing: (OWED_NAMED + 5) * 12,
+                of: (OWED_NAMED + 5) * 12,
+                owed: names[..OWED_NAMED]
+                    .iter()
+                    .map(|name| run(name, 1, 12, 12, OwedWhy::NothingHeld))
+                    .collect(),
+                runs: OWED_NAMED + 5,
+            },
+            "nothing held must refuse"
         );
     }
 
@@ -1038,8 +1035,12 @@ mod tests {
             .collect();
 
         // THE LISTING SHAPE: nothing before 2024-11, everything from it.
-        let listed_in_november =
-            |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && k.month >= at(2024, 11);
+        let listed_in_november = |k: &EntryKey| {
+            matches!(
+                (k.timeframe, k.month >= at(2024, 11)),
+                (Timeframe::DAY_1, true)
+            )
+        };
         assert_eq!(
             gate(
                 listed_in_november,
@@ -1050,13 +1051,27 @@ mod tests {
             Gate::Open,
             "the months before the IPO are not months anybody owes"
         );
+        assert_eq!(
+            counts(&gate(
+                listed_in_november,
+                Feed::Zerodha,
+                Timeframe::MINUTE_1,
+                &wanted
+            )),
+            None,
+            "an open gate counts no owed month"
+        );
 
         // AND AN INTERIOR HOLE STILL REFUSES. Narrowing the question must not
         // weaken it: a month missing INSIDE the held span is a real gap, and
         // excusing it would let the minute rung run over a day pass that had
         // actually failed.
-        let hole_in_the_middle =
-            |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && k.month != at(2024, 10);
+        let hole_in_the_middle = |k: &EntryKey| {
+            matches!(
+                (k.timeframe, k.month != at(2024, 10)),
+                (Timeframe::DAY_1, true)
+            )
+        };
         assert!(
             matches!(
                 gate(

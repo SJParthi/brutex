@@ -8932,14 +8932,11 @@ mod tests {
         // THE WALK AT START IS UNDER WAY: its mark is on the tail, and nothing
         // is installed yet.
         mark_walking(&path);
-        match read_pull_journal(&root, "ZZOIL") {
-            Err(PullUnread::Warming { records, .. }) => assert_eq!(records, 2),
-            Err(PullUnread::Failed(why)) => panic!("the journal is there: {why}"),
-            Ok(read) => panic!(
-                "a request does not walk beside the start; it read {} record(s)",
-                read.read_now
-            ),
-        }
+        let unread = read_pull_journal(&root, "ZZOIL").err();
+        let Some(PullUnread::Warming { records, .. }) = unread else {
+            panic!("a request walked beside the start, or the journal is gone: {unread:?}");
+        };
+        assert_eq!(records, 2);
         let got = answer(
             &root,
             &ask("feed=zerodha&instrument=NSE-INDEX-ZZOIL&from=2020-01-13"),
@@ -9468,11 +9465,12 @@ mod tests {
     fn spoil_block_of(root: &Path, series: (Vendor, &str, Timeframe), on: &str, row: u64) {
         // A month under the small-month threshold has none to take away
         // (D-4933); one past it does.
-        match std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex)) {
-            Ok(()) => {}
-            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => {}
-            Err(other) => panic!("the month's time index: {other}"),
-        }
+        let removed = std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex));
+        let kind = removed.as_ref().map_err(std::io::Error::kind);
+        assert!(
+            matches!(kind, Ok(_) | Err(std::io::ErrorKind::NotFound)),
+            "the month's time index: {removed:?}"
+        );
         let path = month_file(root, series, on, FileKind::Bars);
         let mut bytes = std::fs::read(&path).expect("the month's bars");
         let at = usize::try_from(store::format::HEADER_LEN + row * store::format::RECORD_STRIDE)
@@ -9866,3 +9864,9 @@ mod tests {
         assert!(sampled_rule_held().contains(&most.to_string()));
     }
 }
+
+/// The day band's remaining paths, each driven by the input that reaches it
+/// (BASE-COV-API-AS3).
+#[cfg(test)]
+#[path = "dayflags_cover_tests.rs"]
+mod cover_tests;

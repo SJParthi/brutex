@@ -701,4 +701,56 @@ mod tests {
         );
         assert_eq!(month_before(month(1970, 2)), Some(month(1970, 1)));
     }
+
+    /// **THE LOOK BACK STOPS AT THE FIRST MONTH THE STORE CAN NAME AND AT ITS
+    /// BOUND, AND NEVER LOOKS FORWARD.** Near 1970-01 the year of probes is
+    /// cut by the floor: it asks every month down to it, then stops, rather
+    /// than asking for a month no path can name.
+    ///
+    /// Extremes: singles — the floor itself (no month before, no probe), the
+    /// month after the floor, a look back cut by the floor two months in, the
+    /// floor held as the month before, eleven months above the floor with
+    /// nothing held, the last month a path can name with nothing held, its
+    /// look back's last month held (the bound itself), the month past the
+    /// bound held; combinations — the floor held two months back while the look
+    /// back is cut by it at once, the last month with the bound's own month
+    /// held at once; out of the box — a census holding only months after the
+    /// one asked about (never asked, never found).
+    #[test]
+    fn the_look_back_stops_at_the_first_month_and_never_looks_forward() {
+        let look = |(year, ordinal): (u16, u8), holds: &[(u16, u8)]| {
+            let mut asked: Vec<(u16, u8)> = Vec::new();
+            let got = previous_of(month(year, ordinal), |at| {
+                asked.push((at.year(), at.month()));
+                holds
+                    .contains(&(at.year(), at.month()))
+                    .then(|| priced(1, 2))
+            });
+            (got, asked)
+        };
+        assert_eq!(look((1970, 1), &[]), (Previous::None, Vec::new()));
+        assert_eq!(look((1970, 2), &[]), (Previous::None, vec![(1970, 1)]));
+        assert_eq!(
+            look((1970, 3), &[]),
+            (Previous::None, vec![(1970, 2), (1970, 1)]),
+            "cut by the floor, never past it"
+        );
+        assert_eq!(
+            look((1970, 2), &[(1970, 1)]).0,
+            Previous::Adjacent(priced(1, 2))
+        );
+        assert_eq!(look((1970, 3), &[(1970, 1)]).0, Previous::Gap);
+        let (none, asked) = look((1970, 12), &[]);
+        assert_eq!(none, Previous::None);
+        assert_eq!(asked.len(), 11, "1970-11 down to 1970-01, and no further");
+        let (none, asked) = look((9999, 12), &[]);
+        assert_eq!(none, Previous::None);
+        assert_eq!(asked.len(), 1 + GAP_LOOKBACK_MONTHS);
+        assert_eq!(asked.last(), Some(&(9998, 11)));
+        assert_eq!(look((9999, 12), &[(9998, 11)]).0, Previous::Gap);
+        assert_eq!(look((9999, 12), &[(9998, 10)]).0, Previous::None);
+        let (none, asked) = look((2026, 9), &[(2026, 10), (2027, 1)]);
+        assert_eq!(none, Previous::None);
+        assert!(asked.iter().all(|at| *at < (2026, 9)), "{asked:?}");
+    }
 }

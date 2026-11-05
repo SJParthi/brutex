@@ -532,9 +532,10 @@ fn a_newer_whole_tree_close_wins_over_an_older_naming_list() {
     );
     assert_eq!(failed["import"]["refusals"]["this_count"], 1);
     let said = says(&failed);
+    let incomplete = said.iter().find(|s| s.starts_with("incomplete at import"));
     assert!(
-        said.iter().any(|s| s.starts_with("incomplete at import")
-            && s.contains("NIFTY28APR2699999CE: line 5: not ten well-formed fields")),
+        incomplete
+            .is_some_and(|s| s.contains("NIFTY28APR2699999CE: line 5: not ten well-formed fields")),
         "{said:?}"
     );
 }
@@ -698,10 +699,11 @@ fn unread(n: u32) -> String {
 /// about this instrument".
 fn never_b(record: &Value) -> Vec<String> {
     let said = says(record);
+    assert!(!said.iter().any(|s| s.contains(ABC)), "{said:?}");
     assert!(
         !said
             .iter()
-            .any(|s| s.contains(ABC) || s.contains("none about this instrument")),
+            .any(|s| s.contains("none about this instrument")),
         "{said:?}"
     );
     said
@@ -878,4 +880,43 @@ fn a_whole_day_refusal_no_close_owns_reaches_every_instrument_it_is_about() {
 #[test]
 fn the_logs_read_are_named_in_their_order() {
     assert_eq!(logs_read(), LOGS_READ);
+}
+
+/// **THE WORDS FOR REFUSALS NO LOG READ HOLDS ARE THE ROUTE'S OWN, FOR ONE
+/// AND FOR MANY** (AF-02 repair 2): [`unread`], which the tests above compare
+/// the route's sentences with, says what [`Tally::unseen`] says, whatever
+/// the counts.
+///
+/// Extremes: singles — one missing, two missing, none missing, every failure
+/// seen, one missing of three, one missing where only other files' were seen,
+/// the most a `u32` counts missing, more seen than the close counts;
+/// combinations — more seen than counted with this instrument's and other
+/// files' both past the close at once, the `u32` bound missing with none seen
+/// at once; out of the box — every count at `u64::MAX` (the sums saturate,
+/// none missing).
+#[test]
+fn the_words_for_refusals_no_log_holds_are_the_routes_for_one_and_for_many() {
+    let most = u64::from(u32::MAX);
+    for (failures, this, other, missing) in [
+        (1, 0, 0, 1),
+        (2, 0, 0, 2),
+        (0, 0, 0, 0),
+        (3, 2, 1, 0),
+        (3, 1, 1, 1),
+        (5, 0, 4, 1),
+        (most, 0, 0, u32::MAX),
+        (1, 5, 5, 0),
+        (u64::MAX, u64::MAX, u64::MAX, 0),
+    ] {
+        assert_eq!(
+            Tally {
+                failures,
+                this,
+                other
+            }
+            .unseen(),
+            unread(missing),
+            "{failures} counted, {this} and {other} seen"
+        );
+    }
 }
