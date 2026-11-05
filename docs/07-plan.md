@@ -1081,6 +1081,13 @@ the first was closed in code afterwards.
   expression-stored` and the explicit program catalog both parse operator
   text, and a displayed candidate can exceed the parser's nesting or byte
   limit. The exact round trip is the wire encoding.
+
+## PSRB-WILLR: Williams %R — 2026-11-05 (D-8640 to D-8644)
+
+| Part | What | State |
+|---|---|---|
+| PSRB-WILLR | `indicators::williams_r`: Williams %R over the last `period` candles in exact integers for the PSRB family (narrow CPR and Pivot R1, Supertrend, Bollinger, RSI, Williams %R, CCI, EMA 200; NSE F&O stocks, cash, intraday): two monotonic deques allocated once, a wrapping `u64` candle number and a saturating `u32` warm count, exact comparisons against a level in ppm, a window of one price with no value, the `ta.crossover` / `ta.crossunder` crossings; its 28 tests and the `C-PSRB-WILLR-01` and `C-PSRB-WILLR-02` bench rows; no vocabulary position | Built on `cloud/psrb-willr-20261105`; not merged (D1). PSRB-STRAT is its first caller |
+
 ## GDFL one-second fills: the capital-market reader and its archive check — 2026-10-01 (D-0808, D-0812)
 
 | Item | State |
