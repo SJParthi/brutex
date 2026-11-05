@@ -3351,6 +3351,10 @@ mod tests {
     /// overlapping spans at once (one span, the widest); out of the box — a
     /// key folded in that the part does not hold (nothing changes).
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture per evidence shape, each asserted beside the shape it builds"
+    )]
     fn the_archive_evidence_and_the_store_rows_name_every_shape_they_meet() {
         let today = epoch_of(2026, 10, 15);
         let open_only = journaled("feeds-evidence-open-only", &["begin indices 2026-09-28 *"]);
@@ -3404,11 +3408,12 @@ mod tests {
         let unmade = not_after_today(span(today + 1), Some(today));
         assert_eq!(
             unmade.span,
-            Err(format!(
+            Err(
                 "names 2026-10-16 as its last day, after today 2026-10-15 (IST): a day that \
                  has not happened shows no delivery, so this evidence sets neither end of the \
                  archive"
-            ))
+                    .to_owned()
+            )
         );
         assert_eq!(
             not_after_today(span(today), Some(today)).span,
