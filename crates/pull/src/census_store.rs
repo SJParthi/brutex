@@ -269,7 +269,10 @@ pub fn current_epoch_in(dir: &Path) -> Result<Option<u32>, ListRefusal> {
             // is followed nowhere and is refused here, by name. The type
             // comes with the listing's own entry (no extra call where the
             // host reports it).
-            let kind = entry.file_type().map_err(|why| ListRefusal::Io {
+            let kind = entry.file_type();
+            #[cfg(test)]
+            let kind = seam::answer("segment.typed", kind);
+            let kind = kind.map_err(|why| ListRefusal::Io {
                 sentence: format!("{} could not be measured: {why}", entry.path().display()),
                 kind: why.kind(),
             })?;
@@ -1961,7 +1964,10 @@ impl KeptCensus {
         let Ok(file) = store::safe_open::open_read(&self.loaded.path) else {
             return Ok(Err("unopened"));
         };
-        let Ok(meta) = file.metadata() else {
+        let measured = file.metadata();
+        #[cfg(test)]
+        let measured = seam::answer("kept.measured", measured);
+        let Ok(meta) = measured else {
             return Ok(Err("unmeasured"));
         };
         let now = Stamp::of(&meta);
@@ -2752,7 +2758,10 @@ pub fn reader_refusal(root: &Path, vendor: Vendor) -> Option<String> {
         ));
     }
     let mut bytes = Vec::new();
-    if let Err(why) = file.take(REQUIRES_CAP + 1).read_to_end(&mut bytes) {
+    let read = file.take(REQUIRES_CAP + 1).read_to_end(&mut bytes);
+    #[cfg(test)]
+    let read = seam::answer("reader.read", read);
+    if let Err(why) = read {
         return Some(format!(
             "{} could not be read ({why}); {}'s census is refused rather than guessed \
              at (DB-B68)",
@@ -3259,15 +3268,18 @@ fn install_stub(legacy: &Path, vendor: Vendor) -> Result<(), String> {
     let mut file = store::staging::create(&staged)
         .map_err(|refused| format!("{refused}; {} still holds the census", legacy.display()))?
         .file;
-    file.write_all(&sealed_stub(vendor))
-        .and_then(|()| file.sync_all())
-        .map_err(|why| {
-            format!(
-                "{}: {why}; {} still holds the census",
-                staged.display(),
-                legacy.display()
-            )
-        })?;
+    let written = file
+        .write_all(&sealed_stub(vendor))
+        .and_then(|()| file.sync_all());
+    #[cfg(test)]
+    let written = seam::answer("stub.written", written);
+    written.map_err(|why| {
+        format!(
+            "{}: {why}; {} still holds the census",
+            staged.display(),
+            legacy.display()
+        )
+    })?;
     drop(file);
     #[cfg(test)]
     seam::at("stub.staged", legacy);
@@ -4524,6 +4536,11 @@ fn append_journal(path: &Path, lines: &str) -> Result<(), String> {
 /// another writer landing between the two calls would. Per thread, so tests
 /// running at once never meet each other's steps; and absent from every build
 /// but this crate's own tests.
+///
+/// A host call no file, folder or name can make fail (a measure of an open
+/// descriptor, a read or write of a regular file, a directory entry's type)
+/// takes a planted fault instead: the call is made, and its answer is the
+/// host's error, once, as a failing device's would be.
 #[cfg(test)]
 pub(crate) mod seam {
     use std::cell::RefCell;
@@ -4533,6 +4550,7 @@ pub(crate) mod seam {
 
     thread_local! {
         static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+        static FAULTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     }
 
     /// Plants `step` for the next pass of `name` on this thread.
@@ -4548,6 +4566,25 @@ pub(crate) mod seam {
         });
         if let Some(step) = step {
             step(path);
+        }
+    }
+
+    /// Plants a host fault for the next pass of `name` on this thread.
+    pub(crate) fn fail(name: &'static str) {
+        FAULTS.with_borrow_mut(|held| held.push(name));
+    }
+
+    /// The host's answer at `name`, or the fault planted there, once.
+    pub(super) fn answer<T>(name: &'static str, host: std::io::Result<T>) -> std::io::Result<T> {
+        let planted = FAULTS.with_borrow_mut(|held| {
+            let found = held.iter().position(|at| *at == name)?;
+            Some(held.remove(found))
+        });
+        match planted {
+            Some(at) => Err(std::io::Error::other(format!(
+                "invented: the host fault planted at {at}"
+            ))),
+            None => host,
         }
     }
 }

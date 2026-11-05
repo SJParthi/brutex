@@ -1457,3 +1457,94 @@ fn a_staged_epoch_that_differs_in_any_count_is_refused() {
         assert!(fs::symlink_metadata(vendor_dir(root, Vendor::Zerodha)).is_err());
     }
 }
+
+// ═══ Host faults (planted answers, D-7336) ══════════════════════════════════
+
+/// AN EPOCH'S ENTRY WHOSE TYPE THE HOST CANNOT TELL stops the listing with
+/// the host's words and the entry's path, as a refusal of kind `Io`: never a
+/// guess that it is the census's file.
+#[test]
+fn an_epoch_entry_whose_type_the_host_cannot_tell_is_refused_by_its_path() {
+    let scratch = Scratch::new("FAULT-TYPED");
+    let dir = scratch.root().join("segment");
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(dir.join("000001.man"), b"invented").expect("an epoch's name");
+    seam::fail("segment.typed");
+    assert_eq!(
+        current_epoch_in(&dir),
+        Err(ListRefusal::Io {
+            sentence: format!(
+                "{} could not be measured: invented: the host fault planted at segment.typed",
+                dir.join("000001.man").display()
+            ),
+            kind: std::io::ErrorKind::Other,
+        })
+    );
+    assert_eq!(
+        current_epoch_in(&dir),
+        Ok(Some(1)),
+        "the fault is taken once"
+    );
+}
+
+/// A KEPT CENSUS WHOSE OPEN FILE THE HOST CANNOT MEASURE is not current
+/// ("unmeasured"), and the same census, measured, is.
+#[test]
+fn a_kept_census_the_host_cannot_measure_is_not_current() {
+    let scratch = Scratch::new("FAULT-MEASURED");
+    let root = scratch.root();
+    let target = Target::single(root, Vendor::Zerodha);
+    let _ = record(root, Vendor::Zerodha, &[row(0, 1)]).expect("a census file");
+    let loaded = target.load().expect("loads");
+    let stamp = Stamp::of(&fs::symlink_metadata(&loaded.path).expect("stat"));
+    let held = KeptCensus { loaded, stamp };
+    seam::fail("kept.measured");
+    assert_eq!(held.still_current(&target), Ok(Err("unmeasured")));
+    assert_eq!(held.still_current(&target), Ok(Ok(())), "measured, it is");
+}
+
+/// A REQUIREMENTS FILE THE HOST CANNOT READ refuses the vendor's census in
+/// the host's words (DB-B68): what it requires cannot be told. The same file,
+/// read, requires nothing.
+#[test]
+fn a_requirements_file_the_host_cannot_read_refuses_the_census() {
+    let scratch = Scratch::new("FAULT-READ");
+    let root = scratch.root();
+    let at = requires_path(root);
+    fs::write(&at, format!("{REQUIRES_FORMAT}\n")).expect("a requirements file");
+    seam::fail("reader.read");
+    assert_eq!(
+        reader_refusal(root, Vendor::Gdfl),
+        Some(format!(
+            "{} could not be read (invented: the host fault planted at reader.read); \
+             gdfl's census is refused rather than guessed at (DB-B68)",
+            at.display()
+        ))
+    );
+    assert_eq!(
+        reader_refusal(root, Vendor::Gdfl),
+        None,
+        "read, it binds nothing"
+    );
+}
+
+/// A SEAL'S STUB THAT CANNOT BE WRITTEN leaves the single file holding the
+/// census, byte for byte, and says so with the staged name.
+#[test]
+fn a_seal_whose_stub_cannot_be_written_leaves_the_census_in_place() {
+    let scratch = Scratch::new("FAULT-STUB");
+    let root = scratch.root();
+    let legacy = migrated_with(root, 40);
+    seam::fail("stub.written");
+    let why = seal_legacy(root, Vendor::Zerodha).expect_err("refused");
+    assert_eq!(
+        why,
+        format!(
+            "{}.seal.tmp: invented: the host fault planted at stub.written; {} still holds \
+             the census",
+            legacy.display(),
+            legacy.display()
+        )
+    );
+    assert_eq!(fs::read(&legacy).expect("the single file"), vec![7_u8; 40]);
+}
