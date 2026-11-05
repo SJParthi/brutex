@@ -156,3 +156,17 @@ fn a_first_summary_and_a_month_dense_again_are_logged_and_extension_is_silent() 
     let _ = fs::remove_dir_all(&log);
     let _ = fs::remove_dir_all(&root);
 }
+
+/// THE FIELD READER SAYS EVERY VALUE AS TEXT (BASE-COV-LIBS-LS1): a count
+/// past `i64::MAX`, which the sink reads back as `Uint`, as its digits; any
+/// other kind by its debug form; a key the line does not carry as nothing.
+#[test]
+fn the_field_reader_says_every_value_as_text() {
+    let fields = vec![
+        ("big".to_owned(), OwnedValue::Uint(u64::MAX)),
+        ("flag".to_owned(), OwnedValue::Bool(true)),
+    ];
+    assert_eq!(field(&fields, "big"), "18446744073709551615");
+    assert_eq!(field(&fields, "flag"), "Bool(true)");
+    assert_eq!(field(&fields, "absent"), "");
+}

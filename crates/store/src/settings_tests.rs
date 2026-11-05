@@ -250,8 +250,9 @@ fn a_change_is_checked_as_a_whole_before_any_byte() {
             Err(Refusal::Invalid { key: None, .. })
         ));
     }
-    // THE CALLER'S OWN CHECK RUNS BEFORE ANY BYTE.
-    let refused = save(&mut reader, &change(0, &[(Key::OpenFeed, "dhan")]), |s| {
+    // THE CALLER'S OWN CHECK RUNS BEFORE ANY BYTE, and refuses only what it
+    // does not offer.
+    let offered = |s: &Settings| {
         if s.get(Key::OpenFeed) == Some("dhan") {
             Err(Refusal::Invalid {
                 key: Some(Key::OpenFeed),
@@ -260,7 +261,9 @@ fn a_change_is_checked_as_a_whole_before_any_byte() {
         } else {
             Ok(())
         }
-    });
+    };
+    assert_eq!(offered(&Settings::default()), Ok(()), "no feed set passes");
+    let refused = save(&mut reader, &change(0, &[(Key::OpenFeed, "dhan")]), offered);
     assert!(matches!(
         refused,
         Err(Refusal::Invalid {

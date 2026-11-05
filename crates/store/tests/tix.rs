@@ -609,3 +609,14 @@ fn a_small_month_bisects_without_a_warning() {
     assert!(about_it.is_empty(), "{about_it:?}");
     let _ = fs::remove_dir_all(&log);
 }
+
+/// AN EMPTY MONTH IS PROBED AT ITS FIXED EDGES ALONE (BASE-COV-LIBS-LS1):
+/// with no bar there is no stamp, gap or last bar to probe about.
+#[test]
+fn an_empty_month_is_probed_at_its_edges_alone() {
+    let (from, until) = YearMonth::new(2024, 6).unwrap().ist_bounds_micros();
+    assert_eq!(
+        probes(&[]),
+        vec![i64::MIN, 0, from - 1, from, until - 1, until, i64::MAX]
+    );
+}

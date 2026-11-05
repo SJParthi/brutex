@@ -1002,3 +1002,27 @@ fn d_0693_lists_each_bracket_site_at_a_commit_where_its_line_takes_a_lock() {
         "at {commit} these listed lines take no lock: {wrong:#?}"
     );
 }
+
+/// D-0693'S SITE LIST IS READ TOKEN BY TOKEN, AND A WORD THAT NAMES NO SITE
+/// IS PASSED OVER (BASE-COV-LIBS-LS1): a module in backticks, a version of
+/// its family, line numbers joined by slashes, and between them a two-letter
+/// word that is no version and punctuation standing alone, neither of which
+/// names a site. Invented text, never the decision's own.
+#[test]
+fn a_site_list_passes_over_words_that_name_no_site() {
+    let (commit, sites) = bracket_sites(
+        "The sites are: `flock_v1` 12/14, v2 7; ab 8 , and `pool` 9. \
+         Line numbers are as of `0123abc`, which is invented.",
+    );
+    assert_eq!(commit, "0123abc");
+    assert_eq!(
+        sites,
+        [
+            ("flock_v1".to_owned(), 12),
+            ("flock_v1".to_owned(), 14),
+            ("flock_v2".to_owned(), 7),
+            ("flock_v2".to_owned(), 8),
+            ("pool".to_owned(), 9),
+        ]
+    );
+}

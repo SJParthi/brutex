@@ -239,3 +239,22 @@ fn flip_byte(path: &Path, at: usize) {
     bytes[at] ^= 0x01;
     std::fs::write(path, bytes).expect("written back");
 }
+
+/// THE COUNT READER TAKES A COUNT PAST `i64::MAX` (BASE-COV-LIBS-LS1): the
+/// sink reads such a count back as `Uint`, and it is that count.
+#[test]
+fn the_count_reader_takes_a_count_past_the_signed_range() {
+    let record = telemetry::Record {
+        seq: 0,
+        run: 0,
+        at_unix_millis: 0,
+        at_utc: String::new(),
+        level: telemetry::Level::Warn,
+        target: "store.slot".to_owned(),
+        message: "an invented line".to_owned(),
+        fields: vec![("generation".to_owned(), OwnedValue::Uint(u64::MAX))],
+        cut: false,
+        dropped_fields: 0,
+    };
+    assert_eq!(uint(&record, "generation"), u64::MAX);
+}

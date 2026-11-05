@@ -672,3 +672,86 @@ fn a_published_revision_changed_before_its_read_back_is_never_served() {
     );
     assert_eq!(served_ordinal(&root), 0, "and never served");
 }
+
+/// **A REVISION DIRECTORY THAT TAKES NO NEW NAME REFUSES THE RESERVATION**
+/// (D-8561): the revision's month directory is there but closed to new
+/// names (mode 0o555; root makes names there anyway, so the body runs where
+/// the mode bits bind, as `nobody` when this process is root, D-0995). The
+/// reservation's `create_new` is refused: `Io` "reserve revision" naming the
+/// reservation, in the host's kind, claiming nothing visible, and nothing is
+/// reserved.
+#[test]
+fn a_revision_directory_that_takes_no_name_refuses_the_reservation() {
+    crate::support::where_permission_binds(
+        "repair::door_cover_tests::a_revision_directory_that_takes_no_name_refuses_the_reservation",
+        a_revision_directory_that_takes_no_name_refuses_the_reservation_body,
+    );
+}
+
+fn a_revision_directory_that_takes_no_name_refuses_the_reservation_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("reserve-refused");
+    let held = bars(0..6);
+    let source = original(&root, &held);
+    let reservation = revision_file(&root, "reserved-v1");
+    let directory = reservation.parent().unwrap().to_path_buf();
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = publish(
+        &root.0,
+        month(),
+        SYMBOL,
+        Revision::new(1).unwrap(),
+        source,
+        &held,
+    );
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    match refused {
+        Err(RepairError::Io {
+            path,
+            operation: "reserve revision",
+            kind: std::io::ErrorKind::PermissionDenied,
+            publication_may_be_visible: false,
+        }) => assert_eq!(path, reservation),
+        other => panic!("the reservation is refused: {other:?}"),
+    }
+    assert!(!reservation.exists(), "nothing is reserved");
+}
+
+/// **A RECEIPT ANOTHER ACTOR MAKES BEFORE THE PUBLISHER'S IS NEVER WRITTEN
+/// OVER** (D-8561): between the revision's appends and its receipt, another
+/// actor makes a file at the receipt's name (a real change, the race
+/// hook's). The publisher's `create_new` is refused as the name exists: `Io`
+/// "create receipt" naming the receipt, claiming nothing visible, the other
+/// actor's bytes left as they were, and nothing served.
+#[test]
+fn a_receipt_another_actor_made_first_is_never_written_over() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("receipt-race");
+    let held = bars(0..6);
+    let source = original(&root, &held);
+    let receipt = revision_file(&root, "repair-v1");
+    crate::file::tests::arm_race("revision appended", |bars| {
+        fs::write(bars.with_extension("repair-v1"), b"another actor's").unwrap();
+    });
+    match publish(
+        &root.0,
+        month(),
+        SYMBOL,
+        Revision::new(1).unwrap(),
+        source,
+        &held,
+    ) {
+        Err(RepairError::Io {
+            path,
+            operation: "create receipt",
+            kind: std::io::ErrorKind::AlreadyExists,
+            publication_may_be_visible: false,
+        }) => assert_eq!(path, receipt),
+        other => panic!("the receipt's creation is refused: {other:?}"),
+    }
+    assert!(!crate::file::tests::race_armed(), "the race ran");
+    assert_eq!(fs::read(&receipt).unwrap(), b"another actor's");
+    assert_eq!(served_ordinal(&root), 0);
+}
