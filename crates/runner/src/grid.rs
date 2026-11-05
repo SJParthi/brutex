@@ -3379,13 +3379,15 @@ pub(crate) fn replay_universe_v1(
     })?;
 
     let mut candidates = Vec::new();
-    candidates
-        .try_reserve_exact(timed.occupancy.len())
-        .map_err(
-            |_| crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceAllocationRefused {
-                requested_paths,
-            },
-        )?;
+    let asked = timed.occupancy.len();
+    // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+    #[cfg(test)]
+    let asked = crate::reservation_refusal::asked(asked);
+    candidates.try_reserve_exact(asked).map_err(|_| {
+        crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceAllocationRefused {
+            requested_paths,
+        }
+    })?;
     for path in &timed.occupancy {
         let (entry_pess, entry_price) = entry_fills(bars, path.entry_bar, side);
         candidates.push(Candidate {
@@ -3435,13 +3437,21 @@ fn replay_universe_from_candidates_v1(
         )
     })?;
     let mut evidence = Vec::new();
-    evidence.try_reserve_exact(candidates.len()).map_err(|_| {
+    let asked = candidates.len();
+    // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+    #[cfg(test)]
+    let asked = crate::reservation_refusal::asked(asked);
+    evidence.try_reserve_exact(asked).map_err(|_| {
         crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceAllocationRefused {
             requested_paths,
         }
     })?;
     let mut one_row = Vec::new();
-    one_row.try_reserve_exact(1).map_err(|_| {
+    let asked = 1;
+    // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+    #[cfg(test)]
+    let asked = crate::reservation_refusal::asked(asked);
+    one_row.try_reserve_exact(asked).map_err(|_| {
         crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceAllocationRefused {
             requested_paths: 1,
         }

@@ -3479,12 +3479,16 @@ fn observed_ranges(
         ("observed targets", &mut out.targets),
         ("observed trails", &mut out.trails),
     ] {
-        values.try_reserve_exact(bars.len()).map_err(|_| {
-            ExitGridErrorV1::BufferAllocationRefused {
+        let asked = bars.len();
+        // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+        #[cfg(test)]
+        let asked = crate::reservation_refusal::asked(asked);
+        values
+            .try_reserve_exact(asked)
+            .map_err(|_| ExitGridErrorV1::BufferAllocationRefused {
                 buffer: name,
                 elements: bars.len(),
-            }
-        })?;
+            })?;
     }
     for bar in bars {
         // The product owns no position at or after 15:10 IST. Those rows may
@@ -3692,7 +3696,11 @@ fn admitted_ratio_pairs(
             ))?;
     let policy_cap = usize::try_from(limits.max_pairs()).unwrap_or(usize::MAX);
     let reserve = possible.min(policy_cap);
-    out.try_reserve_exact(reserve)
+    let asked = reserve;
+    // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+    #[cfg(test)]
+    let asked = crate::reservation_refusal::asked(asked);
+    out.try_reserve_exact(asked)
         .map_err(|_| ExitGridErrorV1::BufferAllocationRefused {
             buffer: "admitted ratio pairs",
             elements: reserve,
@@ -8271,6 +8279,105 @@ mod tests {
                 "{selector:?}"
             );
         }
+    }
+
+    /// BASE-COV-LIBS-LSA (D-8569): EVERY BUFFER OF A RESOLUTION AND OF ITS
+    /// VIEW THAT ONLY A REFUSING ALLOCATOR FAILS IS REFUSED BY NAME, WITH THE
+    /// SIZE IT ASKED FOR: the observed stops, targets and trails (one slot per
+    /// bar), the admitted ratio pairs (the coordinate product under the pair
+    /// ceiling), the copy of each exact ladder and the coordinate row offsets,
+    /// each by the real reservation refused (`reservation_refusal`); and the
+    /// ratio bitmap by a direct call whose length no allocator can hold.
+    ///
+    /// Extreme cases: the first and the last reservation of a resolution
+    /// refused; each of the three ladder copies; a bitmap of `isize::MAX + 1`
+    /// slots, which no allocator is even asked for; an empty pair list beside
+    /// it; combinations: a refusal armed past every reservation a resolution
+    /// makes (it resolves to the same grid and the arming is reported
+    /// unspent), and a view refused once and then asked again (it answers);
+    /// out of the box, a bitmap whose length overflows before it is reserved,
+    /// which names the overflow and never reaches the reservation.
+    #[test]
+    fn every_buffer_only_a_refusing_allocator_fails_is_refused_by_name_with_its_size() {
+        use crate::reservation_refusal::refusing;
+        let input = bars(100);
+        let policy = policy();
+        let resolved = policy
+            .resolve(&nifty(), &input)
+            .expect("the fixture resolves");
+        let (stops, targets, trails) = (
+            resolved.stop_levels_ppm.len(),
+            resolved.target_levels_ppm.len(),
+            resolved.trail_levels_ppm.len(),
+        );
+        assert!(
+            stops > 0 && targets > 0 && trails > 0,
+            "every axis has a rung"
+        );
+        let refused = |buffer, elements| {
+            Err::<(), _>(ExitGridErrorV1::BufferAllocationRefused { buffer, elements })
+        };
+        for (n, buffer, elements) in [
+            (0, "observed stops", input.len()),
+            (1, "observed targets", input.len()),
+            (2, "observed trails", input.len()),
+            (3, "admitted ratio pairs", (stops * targets).min(16)),
+        ] {
+            let (out, fired) = refusing(n, || policy.resolve(&nifty(), &input));
+            assert!(fired, "{buffer}: the armed reservation came");
+            assert_eq!(out.map(|_| ()), refused(buffer, elements), "{buffer}");
+        }
+        let (out, fired) = refusing(4, || policy.resolve(&nifty(), &input));
+        assert!(!fired, "a resolution makes exactly four such reservations");
+        assert_eq!(out, Ok(resolved.clone()), "and resolves as it always does");
+
+        let view = resolved.view();
+        for (n, elements) in [(0, stops), (1, targets), (2, trails)] {
+            let (out, fired) = refusing(n, || view.ladders());
+            assert!(fired, "ladder copy {n}");
+            assert_eq!(
+                out.map(|_| ()),
+                refused("exact expression ladder", elements),
+                "ladder copy {n}"
+            );
+        }
+        assert!(
+            view.ladders().is_ok(),
+            "unarmed, the view copies its ladders"
+        );
+        let rows = (stops + 1) * (targets + 1);
+        let (out, fired) = refusing(0, || view.coordinate_row_offsets());
+        assert!(fired);
+        assert_eq!(out.map(|_| ()), refused("coordinate row offsets", rows));
+        let offsets = view
+            .coordinate_row_offsets()
+            .expect("asked again, the same view answers");
+        assert_eq!(offsets.len(), rows);
+        // A caller's stop rung whose row slot passes `usize::MAX` is named, by
+        // a direct call: never wrapped onto another row's ordinal.
+        assert_eq!(
+            view.canonical_coordinate_ordinal(
+                &offsets,
+                crate::grid::Chosen {
+                    stop: Some(usize::MAX),
+                    ..crate::grid::Chosen::default()
+                },
+            ),
+            Err(ExitGridErrorV1::ArithmeticOverflow(
+                "coordinate row-offset slot"
+            ))
+        );
+
+        let past = usize::MAX / 2 + 1;
+        assert_eq!(
+            ratio_bitmap_of(past, 1, &[]).map(|_| ()),
+            refused("ratio admission bitmap", past)
+        );
+        assert_eq!(
+            ratio_bitmap_of(past, 2, &[]),
+            Err(ExitGridErrorV1::ArithmeticOverflow("ratio bitmap length")),
+            "a length that overflows is named before anything is reserved"
+        );
     }
 
     /// A RESOLUTION WITH MORE LEVELS ON AN AXIS THAN ITS LIMIT IS REFUSED BY

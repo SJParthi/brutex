@@ -988,3 +988,117 @@ fn a_replayed_row_whose_exit_cannot_be_stamped_or_leaves_its_path_is_refused() {
         ))
     );
 }
+
+/// BASE-COV-LIBS-LSA (D-8569): A REPLAY WHOSE BUFFER ONLY A REFUSING
+/// ALLOCATOR FAILS IS REFUSED BY THE RECEIPT'S OWN NAME, WITH THE PATHS IT
+/// ASKED FOR: `replay_universe_v1`'s candidates, then the evidence rows and
+/// the one-row scratch of the universe they build, each by the real
+/// reservation refused (`reservation_refusal`); and a universe built from a
+/// caller's candidates is refused at its reservations before any candidate
+/// is read.
+///
+/// Extreme cases: the first, the second and the last reservation of a replay
+/// refused; a single candidate, where the evidence and the scratch both ask
+/// for one path; combinations: three duplicate candidates refused for memory
+/// before their duplication is seen, and a refusal armed past every
+/// reservation (the replay answers as it does unarmed, and the arming is
+/// reported unspent); out of the box, an every-bar mask over eight generated
+/// sessions, so the candidates are the occupancy of a real walk.
+#[test]
+fn a_replay_whose_buffer_only_a_refusing_allocator_fails_names_its_paths() {
+    use crate::exit_grid_policy::ExitGridErrorV1;
+    use crate::reservation_refusal::refusing;
+    let refused = |requested_paths| {
+        Err::<(), _>(ExitGridErrorV1::ReplayEvidenceAllocationRefused { requested_paths })
+    };
+
+    let (bars, column) = swept(8);
+    let facts = crate::trade::SliceFacts::of(&bars, &column);
+    let horizon = Horizon::bars(15).expect("a nonzero horizon");
+    let mask = ConditionMask::default();
+    let over = evaluate_over(
+        &bars,
+        &column,
+        &mask,
+        horizon,
+        Side::Long,
+        Levels::derived(3),
+        &facts,
+    );
+    let ladders = Ladders {
+        stops: &over.stops,
+        targets: &over.targets,
+        trails: &over.trails,
+    };
+    let chosen = Chosen::from_cell(over.cells.first().expect("a grid has cells"));
+    let replay = || {
+        replay_universe_v1(
+            &bars,
+            &column,
+            &mask,
+            horizon,
+            Side::Long,
+            ladders,
+            chosen,
+            &facts,
+        )
+    };
+    let whole = replay().expect("unarmed, the replay answers");
+    let paths = u64::try_from(whole.candidates.len()).expect("a count");
+    assert!(paths > 1, "the walk occupied more than one path");
+    for (n, requested) in [(0, paths), (1, paths), (2, 1)] {
+        let (out, fired) = refusing(n, replay);
+        assert!(fired, "reservation {n} came");
+        assert_eq!(out.map(|_| ()), refused(requested), "reservation {n}");
+    }
+    let (out, fired) = refusing(3, replay);
+    assert!(!fired, "a replay makes exactly three such reservations");
+    assert_eq!(out, Ok(whole), "and answers as it does unarmed");
+
+    let bars = four_bars();
+    let (stops, targets, trails) = (
+        Ladder::new(vec![10_000]).unwrap(),
+        Ladder::new(vec![900_000]).unwrap(),
+        Ladder::new(vec![900_000]).unwrap(),
+    );
+    let ladders = Ladders {
+        stops: &stops,
+        targets: &targets,
+        trails: &trails,
+    };
+    let rungs = (stops.rungs(), targets.rungs(), trails.rungs());
+    let baseline = Variant {
+        stop: None,
+        target: None,
+        tsl: None,
+        ttp: None,
+    };
+    let candidate = || long_candidate(&bars, (0, 1, 3), ladders);
+    let one = [candidate()];
+    let three = [candidate(), candidate(), candidate()];
+    let build = |candidates: &[Candidate]| {
+        replay_universe_from_candidates_v1(&bars, candidates, rungs, baseline, Side::Long)
+            .map(|_| ())
+    };
+    for (n, requested) in [(0, 1), (1, 1)] {
+        let (out, fired) = refusing(n, || build(&one));
+        assert!(fired, "one candidate, reservation {n}");
+        assert_eq!(out, refused(requested));
+    }
+    for (n, requested) in [(0, 3), (1, 1)] {
+        let (out, fired) = refusing(n, || build(&three));
+        assert!(fired, "three candidates, reservation {n}");
+        assert_eq!(
+            out,
+            refused(requested),
+            "refused before the duplicates are read"
+        );
+    }
+    assert_eq!(
+        build(&three),
+        Err(ExitGridErrorV1::ReplayEvidenceRefused(
+            "candidate entries are duplicated or out of order"
+        )),
+        "unarmed, the duplicates are what is refused"
+    );
+}

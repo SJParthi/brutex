@@ -1494,3 +1494,38 @@ fn an_execution_side_that_is_empty_unsorted_or_not_its_context_is_refused() {
         Some(Error::Source)
     );
 }
+
+/// BASE-COV-LIBS-LSA (D-8569): A PREPARATION WHOSE PER-DAY TABLE ONLY A
+/// REFUSING ALLOCATOR FAILS IS REFUSED AS AN ALLOCATION, NEVER PREPARED IN
+/// PART: the rows' prefix table, then the periods' (the second is the one no
+/// input can fail, since the first has just measured the same span), each by
+/// the real reservation refused (`reservation_refusal`).
+///
+/// Extreme cases: the first and the last reservation refused; a one-minute
+/// signal timeframe and a five-minute one; combinations: a refusal armed past
+/// both reservations (the preparation answers as it does unarmed, and the
+/// arming is reported unspent) and the same fixture refused and then prepared
+/// again; out of the box, the refusal is the error a host out of memory would
+/// give, so its words are the allocation's own.
+#[test]
+fn a_preparation_whose_day_table_the_allocator_refuses_is_an_allocation_error() {
+    use crate::reservation_refusal::refusing;
+    for minutes in [1, 5] {
+        let fixture = Fixture::new(minutes, 60);
+        let prepare = || Prepared::new(Policy::V1, fixture.source()).err();
+        for n in [0, 1] {
+            let (out, fired) = refusing(n, prepare);
+            assert!(fired, "{minutes}min: day table {n}");
+            assert_eq!(out, Some(Error::Allocation), "{minutes}min: day table {n}");
+        }
+        let (out, fired) = refusing(2, prepare);
+        assert!(!fired, "{minutes}min: a preparation makes exactly two");
+        assert_eq!(out, None, "{minutes}min: and prepares as it does unarmed");
+    }
+    assert!(
+        Error::Allocation
+            .to_string()
+            .starts_with("signal-candle stop"),
+        "the refusal speaks as this module does"
+    );
+}

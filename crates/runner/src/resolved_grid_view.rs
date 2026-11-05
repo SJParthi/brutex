@@ -122,7 +122,11 @@ impl ResolvedGridViewV1<'_> {
     pub(crate) fn ladders(&self) -> Result<ResolvedLaddersV1, ExitGridErrorV1> {
         let ladder = |values: &[Ppm], name| {
             let mut copy = Vec::new();
-            copy.try_reserve_exact(values.len()).map_err(|_| {
+            let asked = values.len();
+            // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+            #[cfg(test)]
+            let asked = crate::reservation_refusal::asked(asked);
+            copy.try_reserve_exact(asked).map_err(|_| {
                 ExitGridErrorV1::BufferAllocationRefused {
                     buffer: "exact expression ladder",
                     elements: values.len(),
@@ -227,12 +231,16 @@ impl ResolvedGridViewV1<'_> {
             ExitGridErrorV1::ArithmeticOverflow("coordinate row-offset count"),
         )?;
         let mut offsets = Vec::new();
-        offsets.try_reserve_exact(row_count).map_err(|_| {
-            ExitGridErrorV1::BufferAllocationRefused {
+        let asked = row_count;
+        // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+        #[cfg(test)]
+        let asked = crate::reservation_refusal::asked(asked);
+        offsets
+            .try_reserve_exact(asked)
+            .map_err(|_| ExitGridErrorV1::BufferAllocationRefused {
                 buffer: "coordinate row offsets",
                 elements: row_count,
-            }
-        })?;
+            })?;
         let mut ordinal = 0_usize;
         for stop_setting in 0..stop_settings {
             for target_setting in 0..target_settings {

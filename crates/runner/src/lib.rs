@@ -79,6 +79,12 @@ pub mod topn;
 pub mod trade;
 pub mod validate;
 
+/// BASE-COV-LIBS-LSA (D-8569): the test-only door that refuses the n-th seamed
+/// reservation of a thread, so a buffer only a refusing allocator fails is
+/// reached by the real path it takes (`engine::reserved`'s door, D-7329).
+#[cfg(test)]
+mod reservation_refusal;
+
 use engine::{Ladder, Sweep};
 use indicators::column::{Census, Column};
 use indicators::evaluator::Evaluator;

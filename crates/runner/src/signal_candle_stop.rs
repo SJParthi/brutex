@@ -1450,8 +1450,12 @@ fn days_before(source: &Source<'_>, days: &[i64]) -> Result<Vec<usize>, Error> {
         .and_then(|entries| usize::try_from(entries).ok())
         .ok_or(Error::Arithmetic)?;
     let mut table = Vec::new();
+    let asked = span;
+    // BASE-COV-LIBS-LSA (D-8569): a test may have this reservation refused.
+    #[cfg(test)]
+    let asked = crate::reservation_refusal::asked(asked);
     table
-        .try_reserve_exact(span)
+        .try_reserve_exact(asked)
         .map_err(|_| Error::Allocation)?;
     let mut seen = days.iter().peekable();
     let mut count = 0_usize;
