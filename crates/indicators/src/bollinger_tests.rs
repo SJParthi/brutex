@@ -786,9 +786,11 @@ fn parity_with_the_published_definition() {
                     published.below(probe, milli)
                 );
                 let upper = window.upper_floor(z);
-                assert!(!published.above(upper, milli) && published.above(upper + 1, milli));
+                assert!(!published.above(upper, milli));
+                assert!(published.above(upper + 1, milli));
                 let lower = window.lower_ceil(z);
-                assert!(!published.below(lower, milli) && published.below(lower - 1, milli));
+                assert!(!published.below(lower, milli));
+                assert!(published.below(lower - 1, milli));
             }
             match window.z_milli(close(probe)) {
                 None => assert_eq!(published.spread, 0),
