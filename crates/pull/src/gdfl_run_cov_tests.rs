@@ -625,3 +625,50 @@ fn with_a_sink_body() {
     );
     assert_eq!(Progress::read(progress.path()).unwrap(), record);
 }
+
+// ───── BASE-COV-PULL-PS2 (D-7336): host faults, through a planted answer ─────
+
+/// A CENSUS VERB WHOSE CLAIM THE HOST CANNOT WRITE is refused
+/// `claim_unwritten`, naming the claim's file and the host's words, and
+/// leaves the store free: the same claim is then taken and released.
+#[test]
+fn a_census_claim_the_host_cannot_write_is_refused_by_its_file() {
+    let store = scratch("ps2-claim-unwritten");
+    seam::fail("claim.written");
+    let refused = claim_census(&store, "census-recount").unwrap_err();
+    assert_eq!(refused.code(), "claim_unwritten");
+    assert_eq!(
+        refused,
+        RunRefusal::ClaimUnwritten {
+            why: format!(
+                "{}: invented: the host fault planted at claim.written",
+                locks::STORE_LOCK
+            ),
+        }
+    );
+    let hold = claim_census(&store, "census-recount").expect("the store is free");
+    hold.release().unwrap();
+    std::fs::remove_dir_all(store).unwrap();
+}
+
+/// A PROGRESS RECORD THE HOST CANNOT WRITE is not counted written and keeps
+/// its fault by the record's name and the host's words; the next write,
+/// answered, is counted, and the first fault is the one kept.
+#[test]
+fn a_progress_write_the_host_refuses_is_kept_by_name_and_not_counted() {
+    let root = scratch("ps2-progress-unwritten");
+    let path = root.join("p");
+    let progress = ProgressFile::of_record(path.clone(), sample());
+    seam::fail("progress.written");
+    progress.refused(&RunRefusal::SourceUnset { var: "ZQ_VAR" });
+    assert_eq!(progress.writes(), 0);
+    let kept = format!(
+        "{}: invented: the host fault planted at progress.written",
+        path.display()
+    );
+    assert_eq!(progress.fault(), Some(kept.clone()));
+    progress.refused(&RunRefusal::SourceUnset { var: "ZQ_VAR" });
+    assert_eq!(progress.writes(), 1, "answered, it is written");
+    assert_eq!(progress.fault(), Some(kept), "the first fault is kept");
+    std::fs::remove_dir_all(root).unwrap();
+}
