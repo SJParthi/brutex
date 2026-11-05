@@ -1,37 +1,37 @@
 # gaps-PSA.txt.md
 
-Written by BASE-COV-PULL-PSA from Route B 1 on the code tip `a52270b1f00a6c0f744a0190d67053b1fdeb6440`: the per-file table of every file of the set (crate `pull`, reading `whole:pull`) and every uncovered line and branch side with its class. The (U) proofs, (F) reasons and GAP owners are in `base-cov-pull-fu.txt.md`. One fenced block below.
+Written by BASE-COV-PULL-PSA from Route B 2 on the code tip `cef062ebf194068b9c7a8a2ce790b20021139476`: the per-file table of every file of the set (crate `pull`, reading `whole:pull`) and every uncovered line and branch side with its class. The (U) proofs, (F) reasons and GAP owners are in `base-cov-pull-fu.txt.md`. One fenced block below.
 
 `````text
-BASE-COV-PULL-PSA: Route B (the kit's d3-route-b-cloud.sh, unchanged) on the code tip a52270b1f00a6c0f744a0190d67053b1fdeb6440, run 1, reading whole:pull,
-set deep-BASE-COV-PULL-PSA-a52270b1f00a-set.txt (255 coverage lines: every tracked .rs of crates/pull but the 8 bench files, in no test object).
+BASE-COV-PULL-PSA: Route B (the kit's d3-route-b-cloud.sh, unchanged) on the code tip cef062ebf194068b9c7a8a2ce790b20021139476, run 2, reading whole:pull,
+set deep-BASE-COV-PULL-PSA-cef062ebf194-set.txt (255 coverage lines: every tracked .rs of crates/pull but the 8 bench files, in no test object).
 Pins: rustc 1.99.0-nightly (1a98b1e13 2026-08-07); llvm-cov and llvm-profdata LLVM version 23.1.0-rust-1.99.0-nightly. Host: Linux x86_64, root, 4 cores,
 under the four conditions of D-7339 (TMPDIR a 1777 tmpfs, profiles under a 0777 folder, the script under umask 0000 with a umask-0022 cargo, kernel.pid_max 4194304).
 
-ROUTE-B START 2026-11-05 16:12:43 IST tree /home/user/brutex tip a52270b1f00a6c0f744a0190d67053b1fdeb6440 packages pull K /home/user/psa-k P /home/user/psa-prof/a52270b1f00a-1-B (entries before: 0)
+ROUTE-B START 2026-11-05 17:10:38 IST tree /home/user/brutex tip cef062ebf194068b9c7a8a2ce790b20021139476 packages pull K /home/user/psa-k P /home/user/psa-prof/cef062ebf194-2-B (entries before: 0)
 versions: rustc 1.99.0-nightly (1a98b1e13 2026-08-07) | llvm-cov  LLVM version 23.1.0-rust-1.99.0-nightly | llvm-profdata  LLVM version 23.1.0-rust-1.99.0-nightly
-OPS-10: every tracked file of /home/user/brutex touched 2026-11-05 16:12:43 IST
-== build START 2026-11-05 16:12:43 IST: cargo test -p pull --locked --no-run --message-format=json (RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch', opt-level 0, CARGO_TARGET_DIR=/home/user/psa-k/cov)
-== build rc=0 END 2026-11-05 16:13:57 IST (1 min); 168 artifacts, 0 reused
-objects: 33 (/home/user/psa-prof/a52270b1f00a-1-B/objects.txt, from this build's own report)
-== test pull START 2026-11-05 16:13:57 IST
-== test pull rc=0 END 2026-11-05 16:18:05 IST (4 min); tests passed 3607 failed 0 ignored 54
+OPS-10: every tracked file of /home/user/brutex touched 2026-11-05 17:10:38 IST
+== build START 2026-11-05 17:10:38 IST: cargo test -p pull --locked --no-run --message-format=json (RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch', opt-level 0, CARGO_TARGET_DIR=/home/user/psa-k/cov)
+== build rc=0 END 2026-11-05 17:11:42 IST (1 min); 168 artifacts, 129 reused
+objects: 33 (/home/user/psa-prof/cef062ebf194-2-B/objects.txt, from this build's own report)
+== test pull START 2026-11-05 17:11:42 IST
+== test pull rc=0 END 2026-11-05 17:16:04 IST (4 min); tests passed 3607 failed 0 ignored 54
 profraw files: 132
-merged /home/user/psa-prof/a52270b1f00a-1-B/pull/merged.profdata
-ROUTE-B DONE 2026-11-05 16:51:24 IST: every package measured and read (pull)
+merged /home/user/psa-prof/cef062ebf194-2-B/pull/merged.profdata
+ROUTE-B DONE 2026-11-05 17:50:52 IST: every package measured and read (pull)
 
-whole pull (255 files): lines 175277/179855 (4578 uncovered), branches 12614/14454 (1840 sides)
-G1 (every file PS2 and PS3 do not name: PS1's 89 and repair 2's census_store_cov_tests.rs and gdfl_rekey_cov_tests.rs, which no shard counted, both whole; 91 files): lines 57716/59269 (1553 uncovered), branches 4185/4944 (759 sides)
+whole pull (255 files): lines 175299/179878 (4579 uncovered), branches 12622/14464 (1842 sides)
+G1 (every file PS2 and PS3 do not name: PS1's 89 and repair 2's census_store_cov_tests.rs and gdfl_rekey_cov_tests.rs, which no shard counted, both whole; 91 files): lines 57738/59292 (1554 uncovered), branches 4193/4954 (761 sides)
 G2 (PS2's 93 files, as its per-file table marks them; 93 in this set): lines 58766/60545 (1779 uncovered), branches 4140/4724 (584 sides)
 G3 (PS3's 71 files; 71 in this set): lines 58795/60041 (1246 uncovered), branches 4289/4786 (497 sides)
-uncovered rows: 6418; by class: F 2226, U 364, IGNORED 3798, UNMEASURED 11, GAP 19
-  G1: F 849, U 138, IGNORED 1306, UNMEASURED 0, GAP 19
+uncovered rows: 6421; by class: F 2231, U 364, IGNORED 3798, UNMEASURED 11, GAP 17
+  G1: F 854, U 138, IGNORED 1306, UNMEASURED 0, GAP 17
   G2: F 623, U 146, IGNORED 1594, UNMEASURED 0, GAP 0
   G3: F 754, U 80, IGNORED 898, UNMEASURED 11, GAP 0
 Classes: F and U as recipe v4 step 4 limits them, each carried from the owning shard's list of the same row (same file, line, column, side and text;
-vendor.rs rows past the assembly's inserted test shifted back by its 62 lines); IGNORED = inside an #[ignore] real-data or measurement test, or a helper
+each line mapped back to the shard's tip through git diff -U0); IGNORED = inside an #[ignore] real-data or measurement test, or a helper
 only those reach (L-BCP-3, the operator's); UNMEASURED = runs only in a child process its test kills with SIGKILL, so no profile is written (L-BCP-5);
-GAP = left open, each with its owner in base-cov-pull-fu.txt.md. No row is new: every row of this run is a row of a shard's list.
+GAP = left open, each with its owner in base-cov-pull-fu.txt.md. Every row is a row of a shard's list, but those of the assembly's own test code, read by hand (marked PSA).
 
 Per-file table (lines a/b, branches c/d; the group after each):
 crates/pull/src/alerts.rs lines 982/982, branches 165/166 G2
@@ -133,7 +133,7 @@ crates/pull/src/gdfl_import_quality.rs lines 468/468, branches 108/110 G2
 crates/pull/src/gdfl_import_quality_ps2_tests.rs lines 115/115, branches 0/0 G2
 crates/pull/src/gdfl_import_scope.rs lines 250/250, branches 14/18 G2
 crates/pull/src/gdfl_import_split_tests.rs lines 462/463, branches 38/40 G3
-crates/pull/src/gdfl_import_tests.rs lines 4683/4709, branches 201/294 G1
+crates/pull/src/gdfl_import_tests.rs lines 4705/4732, branches 209/304 G1
 crates/pull/src/gdfl_lineage.rs lines 822/822, branches 154/154 G3
 crates/pull/src/gdfl_lineage_tests.rs lines 1116/1212, branches 13/26 G3
 crates/pull/src/gdfl_nfo.rs lines 920/920, branches 180/180 G1
@@ -2358,43 +2358,46 @@ F crates/pull/src/gdfl_import_tests.rs:4944:21 False [G1 PS1]: u64::try_from(byt
 F crates/pull/src/gdfl_import_tests.rs:4945:28 False [G1 PS1]: && rest.iter().all(|&byte| byte == 0)
 F crates/pull/src/gdfl_import_tests.rs:4946:28 False [G1 PS1]: && store::header::Header::decode(slot).is_err(),
 F crates/pull/src/gdfl_import_tests.rs:4948 [G1 PS1]: bytes.len()
-F crates/pull/src/gdfl_import_tests.rs:5128:17 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
-F crates/pull/src/gdfl_import_tests.rs:5128:38 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
-F crates/pull/src/gdfl_import_tests.rs:5128:60 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
-F crates/pull/src/gdfl_import_tests.rs:5128:75 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
-F crates/pull/src/gdfl_import_tests.rs:5133:17 False [G1 PS1]: status.success() && !open_day && unborn == 0,
-F crates/pull/src/gdfl_import_tests.rs:5133:37 False [G1 PS1]: status.success() && !open_day && unborn == 0,
-F crates/pull/src/gdfl_import_tests.rs:5133:50 False [G1 PS1]: status.success() && !open_day && unborn == 0,
-GAP crates/pull/src/gdfl_import_tests.rs:5140:13 False [G1 PS1]: unborn == 0 || open_day,
-F crates/pull/src/gdfl_import_tests.rs:5140:28 False [G1 PS1]: unborn == 0 || open_day,
-GAP crates/pull/src/gdfl_import_tests.rs:5140:28 True [G1 PS1]: unborn == 0 || open_day,
-F crates/pull/src/gdfl_import_tests.rs:5186 [G1 PS1]: rel.display()
-F crates/pull/src/gdfl_import_tests.rs:5374:13 False [G1 PS1]: assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
-F crates/pull/src/gdfl_import_tests.rs:5374:50 False [G1 PS1]: assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
-F crates/pull/src/gdfl_import_tests.rs:5382 [G1 PS1]: durability.as_str()
-F crates/pull/src/gdfl_import_tests.rs:5388 [G1 PS1]: durability.as_str()
-F crates/pull/src/gdfl_import_tests.rs:5394 [G1 PS1]: durability.as_str(),
-F crates/pull/src/gdfl_import_tests.rs:5395 [G1 PS1]: rel.display()
-F crates/pull/src/gdfl_import_tests.rs:5514:9 False [G1 PS1]: let Err(ImportRefusal::Durability {
-F crates/pull/src/gdfl_import_tests.rs:5521 [G1 PS1]: panic!("the run stopped at the day's flush: {refused:?}");
-F crates/pull/src/gdfl_import_tests.rs:5525:9 False [G1 PS1]: why.contains("syncing") && why.contains(&store.display().to_string()),
-F crates/pull/src/gdfl_import_tests.rs:5525:36 False [G1 PS1]: why.contains("syncing") && why.contains(&store.display().to_string()),
-F crates/pull/src/gdfl_import_tests.rs:5675 [G1 PS1]: rel.display()
-F crates/pull/src/gdfl_import_tests.rs:5685 [G1 PS1]: one.display()
-F crates/pull/src/gdfl_import_tests.rs:5820:13 False [G1 PS1]: last.starts_with(&format!("incomplete options {}", d2()))
-F crates/pull/src/gdfl_import_tests.rs:5821:20 False [G1 PS1]: && last.contains(&format!(" failures={} ", refused + 1)),
-F crates/pull/src/gdfl_import_tests.rs:5837 [G1 PS1]: rel.display()
-F crates/pull/src/gdfl_import_tests.rs:5908:13 False [G1 PS1]: assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
-F crates/pull/src/gdfl_import_tests.rs:5908:41 False [G1 PS1]: assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
-F crates/pull/src/gdfl_import_tests.rs:5976 [G1 PS1]: Err(std::io::Error::other(format!(
-F crates/pull/src/gdfl_import_tests.rs:5977 [G1 PS1]: "{word}: the back-fill day's batch flushed {}",
-F crates/pull/src/gdfl_import_tests.rs:5978 [G1 PS1]: path.display()
-F crates/pull/src/gdfl_import_tests.rs:5979 [G1 PS1]: )))
-F crates/pull/src/gdfl_import_tests.rs:5980 [G1 PS1]: }),
-F crates/pull/src/gdfl_import_tests.rs:6036 [G1 PS1]: rel.display()
-F crates/pull/src/gdfl_import_tests.rs:6181:46 False [G1 PS1]: why.contains("holds") || why.contains("lock"),
-F crates/pull/src/gdfl_import_tests.rs:6388:9 False [G1 PS1]: let Err(ImportRefusal::CensusRefused { day: at, why, .. }) = &got else {
-F crates/pull/src/gdfl_import_tests.rs:6389 [G1 PS1]: panic!("the run is refused at the census: {got:?}")
+F crates/pull/src/gdfl_import_tests.rs:5013 [G1 PSA]: month.display()
+F crates/pull/src/gdfl_import_tests.rs:5171:17 False [G1 PSA]: !status.success() && open_day && months == 0 && unborn == 1,
+F crates/pull/src/gdfl_import_tests.rs:5171:38 False [G1 PSA]: !status.success() && open_day && months == 0 && unborn == 1,
+F crates/pull/src/gdfl_import_tests.rs:5171:50 False [G1 PSA]: !status.success() && open_day && months == 0 && unborn == 1,
+F crates/pull/src/gdfl_import_tests.rs:5171:65 False [G1 PSA]: !status.success() && open_day && months == 0 && unborn == 1,
+F crates/pull/src/gdfl_import_tests.rs:5176:17 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+F crates/pull/src/gdfl_import_tests.rs:5176:38 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+F crates/pull/src/gdfl_import_tests.rs:5176:60 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+F crates/pull/src/gdfl_import_tests.rs:5176:75 False [G1 PS1]: !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+F crates/pull/src/gdfl_import_tests.rs:5181:17 False [G1 PS1]: status.success() && !open_day && unborn == 0,
+F crates/pull/src/gdfl_import_tests.rs:5181:37 False [G1 PS1]: status.success() && !open_day && unborn == 0,
+F crates/pull/src/gdfl_import_tests.rs:5181:50 False [G1 PS1]: status.success() && !open_day && unborn == 0,
+F crates/pull/src/gdfl_import_tests.rs:5188:28 False [G1 PS1]: unborn == 0 || open_day,
+F crates/pull/src/gdfl_import_tests.rs:5234 [G1 PS1]: rel.display()
+F crates/pull/src/gdfl_import_tests.rs:5422:13 False [G1 PS1]: assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
+F crates/pull/src/gdfl_import_tests.rs:5422:50 False [G1 PS1]: assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
+F crates/pull/src/gdfl_import_tests.rs:5430 [G1 PS1]: durability.as_str()
+F crates/pull/src/gdfl_import_tests.rs:5436 [G1 PS1]: durability.as_str()
+F crates/pull/src/gdfl_import_tests.rs:5442 [G1 PS1]: durability.as_str(),
+F crates/pull/src/gdfl_import_tests.rs:5443 [G1 PS1]: rel.display()
+F crates/pull/src/gdfl_import_tests.rs:5562:9 False [G1 PS1]: let Err(ImportRefusal::Durability {
+F crates/pull/src/gdfl_import_tests.rs:5569 [G1 PS1]: panic!("the run stopped at the day's flush: {refused:?}");
+F crates/pull/src/gdfl_import_tests.rs:5573:9 False [G1 PS1]: why.contains("syncing") && why.contains(&store.display().to_string()),
+F crates/pull/src/gdfl_import_tests.rs:5573:36 False [G1 PS1]: why.contains("syncing") && why.contains(&store.display().to_string()),
+F crates/pull/src/gdfl_import_tests.rs:5723 [G1 PS1]: rel.display()
+F crates/pull/src/gdfl_import_tests.rs:5733 [G1 PS1]: one.display()
+F crates/pull/src/gdfl_import_tests.rs:5868:13 False [G1 PS1]: last.starts_with(&format!("incomplete options {}", d2()))
+F crates/pull/src/gdfl_import_tests.rs:5869:20 False [G1 PS1]: && last.contains(&format!(" failures={} ", refused + 1)),
+F crates/pull/src/gdfl_import_tests.rs:5885 [G1 PS1]: rel.display()
+F crates/pull/src/gdfl_import_tests.rs:5956:13 False [G1 PS1]: assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
+F crates/pull/src/gdfl_import_tests.rs:5956:41 False [G1 PS1]: assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
+F crates/pull/src/gdfl_import_tests.rs:6024 [G1 PS1]: Err(std::io::Error::other(format!(
+F crates/pull/src/gdfl_import_tests.rs:6025 [G1 PS1]: "{word}: the back-fill day's batch flushed {}",
+F crates/pull/src/gdfl_import_tests.rs:6026 [G1 PS1]: path.display()
+F crates/pull/src/gdfl_import_tests.rs:6027 [G1 PS1]: )))
+F crates/pull/src/gdfl_import_tests.rs:6028 [G1 PS1]: }),
+F crates/pull/src/gdfl_import_tests.rs:6084 [G1 PS1]: rel.display()
+F crates/pull/src/gdfl_import_tests.rs:6229:46 False [G1 PS1]: why.contains("holds") || why.contains("lock"),
+F crates/pull/src/gdfl_import_tests.rs:6436:9 False [G1 PS1]: let Err(ImportRefusal::CensusRefused { day: at, why, .. }) = &got else {
+F crates/pull/src/gdfl_import_tests.rs:6437 [G1 PS1]: panic!("the run is refused at the census: {got:?}")
 F crates/pull/src/gdfl_lineage_tests.rs:1092:9 False [G3 PS3]: let Err(Stale::AfterChange(change)) = filed("NIITTECH", d(2020, 8, 20)) else {
 F crates/pull/src/gdfl_lineage_tests.rs:1093 [G3 PS3]: panic!("an old name on its change day");
 F crates/pull/src/gdfl_lineage_tests.rs:1135:9 False [G3 PS3]: said.contains("NIITTECH27AUG201900CE")
