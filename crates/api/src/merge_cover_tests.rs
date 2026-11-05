@@ -40,6 +40,10 @@ fn equity(symbol: &str, id: &str, isin: Option<&str>) -> Listing {
 /// ambiguous (it stays withheld); out of the box, the same assertion a
 /// hundred times (one key, never ambiguous).
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one key asserted again in every way, each beside the others it is read against"
+)]
 fn a_vendor_that_asserts_one_key_again_is_ambiguous_only_when_it_says_something_else() {
     let reliance = |id, isin| equity("RELIANCE", id, isin);
     let key = reliance("1333", None).key;

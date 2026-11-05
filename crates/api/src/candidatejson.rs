@@ -934,3 +934,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "candidatejson_cover_tests.rs"]
+mod cover_tests;

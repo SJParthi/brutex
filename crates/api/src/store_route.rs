@@ -2781,4 +2781,62 @@ mod tests {
             "a reader holding nothing gets the body"
         );
     }
+
+    /// **A JOURNAL THAT WILL NOT READ IS SAID, A CENSUS THAT HOLDS NOTHING
+    /// HOLDS NO ROW, AND DECEMBER IS FOLLOWED BY JANUARY** (BASE-COV-API
+    /// repair 3, D-8661). Extremes: a GDFL import journal whose path lies
+    /// under a file (kept, unread, named); another feed (not kept); the reason
+    /// header of an unread journal, of one behind by days, and of both at
+    /// once; an absent census and an unreadable one, each holding no row;
+    /// December, into the next year; and the last month the store addresses,
+    /// followed by none.
+    #[test]
+    fn a_journal_that_will_not_read_is_said_and_december_is_followed_by_january() {
+        let root = crate::scratch::path("store-route-cover-journal");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch store");
+        std::fs::write(root.join("imports"), b"a file where the folder goes").expect("a file");
+        let site = Site::load(&root.join("missing-masters"), &root);
+        let unread = journal_behind(&site, Vendor::Gdfl);
+        assert!(unread.kept, "GDFL keeps an import journal");
+        let why = unread.unread.clone().expect("the journal would not read");
+        assert!(why.contains("gdfl"), "{why}");
+        assert_eq!(journal_behind(&site, Vendor::Dhan), Behind::default());
+        let said = reason(None, Some(&unread));
+        assert!(
+            said.starts_with("the import journal could not be read (")
+                && said.ends_with("so whether this census is behind its import is not known"),
+            "{said}"
+        );
+        let both = Behind {
+            days: 2,
+            from: Some(pull::session::Day::new(2026, 8, 3).expect("a day")),
+            ..unread
+        };
+        let said = reason(None, Some(&both));
+        assert!(
+            said.starts_with("behind: ") && said.contains("; the import journal could not be read"),
+            "{said}"
+        );
+
+        let row = series(Segment::Cash, "QSTORE").at(month(2026, 6));
+        for state in [
+            census::Census::Absent,
+            census::Census::Unreadable {
+                reason: "invented".to_owned(),
+                fault: census::Fault::Refused,
+            },
+        ] {
+            let held = census::VendorCensus {
+                vendor: Vendor::Groww,
+                path: std::path::PathBuf::from("/nowhere/groww.man"),
+                state,
+            };
+            assert!(held_row(&held, &row).is_none());
+        }
+        assert_eq!(month_after(month(2026, 12)), Some(month(2027, 1)));
+        assert_eq!(month_after(month(2026, 11)), Some(month(2026, 12)));
+        assert_eq!(month_after(month(9999, 12)), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

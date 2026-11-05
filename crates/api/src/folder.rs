@@ -693,4 +693,48 @@ mod tests {
         assert!(out.contains(r#""collisions":2"#), "{out}");
         assert!(out.contains(r#""files":3"#), "{out}");
     }
+
+    /// **EVERY REJECTED MEMBER IS NAMED, EACH WITH ITS OWN PATH AND WORDS**
+    /// (BASE-COV-API repair 3, D-8661): `body`'s strays, which no test gave
+    /// more than none. Extremes: two rejected members, comma-joined in walk
+    /// order; a path and a reason holding a quote, escaped; and one member
+    /// alone, with no comma.
+    #[test]
+    fn every_rejected_member_is_named_with_its_own_path_and_words() {
+        let rejected = |path: &str, why: &str| pull::archive::Rejected {
+            path: std::path::PathBuf::from(path),
+            why: why.to_owned(),
+        };
+        let census = |rejected: Vec<pull::archive::Rejected>| pull::folder::Census {
+            reach: pull::folder::Reach::Empty,
+            instruments: Vec::new(),
+            collisions: 0,
+            rejected,
+        };
+        let two = body(
+            Feed::TrueData,
+            SourceKind::Folder,
+            "/p",
+            &census(vec![
+                rejected("/p/A_BACKADJUSTED.csv", "nine fields, the layout has ten"),
+                rejected("/p/odd\"name.csv", "a \"quoted\" reason"),
+            ]),
+        );
+        assert!(
+            two.contains(
+                r#""rejected":[{"path":"/p/A_BACKADJUSTED.csv","why":"nine fields, the layout has ten"},{"path":"/p/odd\"name.csv","why":"a \"quoted\" reason"}]"#
+            ),
+            "{two}"
+        );
+        let one = body(
+            Feed::TrueData,
+            SourceKind::Folder,
+            "/p",
+            &census(vec![rejected("/p/one.csv", "one")]),
+        );
+        assert!(
+            one.contains(r#""rejected":[{"path":"/p/one.csv","why":"one"}]"#),
+            "{one}"
+        );
+    }
 }
