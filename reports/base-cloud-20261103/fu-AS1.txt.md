@@ -1,11 +1,11 @@
 # fu-AS1.txt.md
 
-Session BASE-COV-API-AS1. One fenced block below: every uncovered row of G1's files that is an (F) failing arm of an assert or panic in test code whose statement ran, or a (U) row with its proof in brackets.
+Session BASE-COV-API-AS1 (continued, token BASE-COV-API-AS1-20261105-2). One fenced block below: every uncovered row of G1's files that is an (F) failing arm of an assert or panic in test code whose statement ran, or a (U) row with its proof in brackets.
 
 `````text
-BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip 3f324ee88b6c24fff98aa59779ac164896a13a31, reading whole:api, set whole-api-set-4.txt
-G1 files read 76 of 76: lines 55261/56448 (1187 uncovered), branches 4033/4890 (857 uncovered sides)
-classified: GAP prod 821 lines 366 sides; GAP test 116 lines 112 sides; GAP ignored 37 lines 0 sides; HOST 64 lines 10 sides; (F) 125 lines 357 sides; (U) 24 lines 12 sides
+BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip b85ecf4deef037dfcf26ecd0979c35dc05203d08, reading whole:api, set whole-api-set-5.txt (the kit's 205 coverage files and the 11 test files AS1 added, 216)
+G1 files read 87 of 87 (SHARDS.md's 76 and the 11 test files AS1 declared in them): lines 58420/59479 (1059 uncovered), branches 4178/4966 (788 uncovered sides)
+classified: GAP prod 702 lines 277 sides; GAP test 86 lines 86 sides; GAP ignored 37 lines 0 sides; HOST 52 lines 10 sides; (F) 133 lines 387 sides; (U) 49 lines 28 sides
 HOST = covered on the Mac's run of START (the kit's lists hold no row for it) and not here: the test that reaches it is a host red of this 4-core root host or one of the two tests skipped here as 4-core hangs; owed to the Mac's Route B.
 (F) LINE crates/api/src/assets.rs:1137  default_web_dir().display()
 (F) LINE crates/api/src/assets.rs:1453  assets.named().display()
@@ -15,49 +15,41 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/assets.rs:1565:13 False  let Build::Stale { ref newer, by_secs } = *built.build() else {
 (F) BRANCH crates/api/src/assets.rs:1582:13 False  note.contains("STALE") && note.contains("does not carry that edit"),
 (F) BRANCH crates/api/src/assets.rs:1582:39 False  note.contains("STALE") && note.contains("does not carry that edit"),
+(F) BRANCH crates/api/src/audit_json_commit_tests.rs:86:80 False  matches!(census.state, crate::census::Census::Held { ref manifest } if manifest.is_partitioned()),
+(F) BRANCH crates/api/src/audit_json_commit_tests.rs:184:9 False  note.contains("CASH") && note.contains("lower bound"),
+(F) BRANCH crates/api/src/audit_json_commit_tests.rs:184:34 False  note.contains("CASH") && note.contains("lower bound"),
+(F) BRANCH crates/api/src/audit_json_commit_tests.rs:256:9 False  note.contains("is a directory") && note.contains("not a commit"),
+(F) BRANCH crates/api/src/audit_json_commit_tests.rs:256:44 False  note.contains("is a directory") && note.contains("not a commit"),
+(U) LINE crates/api/src/audit_json.rs:634  [(U) on every target: last_runs asks Journal::page(first + 1, 0, 1): records >= 1, skip 0 and take 1 give wanted == 1 (audit.rs:1982-1987), so it answers one entry or an error, never an empty page] continue;
+(F) LINE crates/api/src/audit_json.rs:1538  other.as_str()
+(F) LINE crates/api/src/audit_json.rs:1840  panic!("counted again for an unchanged census")
+(U) BRANCH crates/api/src/audit_json.rs:633:17 False  [(U) on every target: last_runs asks Journal::page(first + 1, 0, 1): records >= 1, skip 0 and take 1 give wanted == 1 (audit.rs:1982-1987), so it answers one entry or an error, never an empty page] let Some(entry) = record.into_iter().next() else {
+(F) BRANCH crates/api/src/audit_json.rs:1425:17 False  assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
+(F) BRANCH crates/api/src/audit_json.rs:1425:42 False  assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
+(F) LINE crates/api/src/audit_lock_wait_tests.rs:659  panic!("the parent should have killed this child");
+(F) BRANCH crates/api/src/audit_lock_wait_tests.rs:715:9 False  !source.contains("\nstatic ") && !source.contains("LazyLock") && !source.contains("Mutex<"),
+(F) BRANCH crates/api/src/audit_lock_wait_tests.rs:715:42 False  !source.contains("\nstatic ") && !source.contains("LazyLock") && !source.contains("Mutex<"),
+(F) BRANCH crates/api/src/audit_lock_wait_tests.rs:715:74 False  !source.contains("\nstatic ") && !source.contains("LazyLock") && !source.contains("Mutex<"),
+(U) LINE crates/api/src/audit.rs:634  [(U) on every target: the wildcard arm of a match on pull::session::DropReason, a foreign #[non_exhaustive] enum with exactly five constructors, each matched above (the source comment says so)] _ => 0,
 (F) LINE crates/api/src/audit.rs:3566  panic!("three entries: {page:?}");
 (F) LINE crates/api/src/audit.rs:3635  &read[read.len().saturating_sub(40)..]
 (F) LINE crates/api/src/audit.rs:4041  kind.label(),
 (F) LINE crates/api/src/audit.rs:4042  scope.label(),
 (F) LINE crates/api/src/audit.rs:4043  outcome.label()
 (F) LINE crates/api/src/audit.rs:5670  [START line 5587] panic!(
-(F) LINE crates/api/src/audit.rs:6162  [panic/unreachable line] panic!("one entry: {page:?}");
+(F) LINE crates/api/src/audit.rs:6162  [START line 6079] panic!("one entry: {page:?}");
 (F) BRANCH crates/api/src/audit.rs:3410:13 False  empty.failures.is_empty() && empty.balances(),
 (F) BRANCH crates/api/src/audit.rs:3410:42 False  empty.failures.is_empty() && empty.balances(),
 (F) BRANCH crates/api/src/audit.rs:3565:13 False  let [run, fits, whole] = page.as_slice() else {
 (F) BRANCH crates/api/src/audit.rs:4431:13 False  refusal.contains("injected short write")
 (F) BRANCH crates/api/src/audit.rs:4432:20 False  && refusal.contains("truncated back to 256 bytes"),
+(F) BRANCH crates/api/src/audit.rs:5416:25 False  assert!(p50 <= p99 && p99 <= max, "{tag}: {p50} {p99} {max}");
+(F) BRANCH crates/api/src/audit.rs:5416:39 False  assert!(p50 <= p99 && p99 <= max, "{tag}: {p50} {p99} {max}");
 (F) BRANCH crates/api/src/audit.rs:5669:13 False  [START line 5586] let Some(Err(why)) = &page[0].whole_note else {
-(F) BRANCH crates/api/src/audit.rs:5416:25 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] assert!(p50 <= p99 && p99 <= max, "{tag}: {p50} {p99} {max}");
-(F) BRANCH crates/api/src/audit.rs:5416:39 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] assert!(p50 <= p99 && p99 <= max, "{tag}: {p50} {p99} {max}");
-(F) LINE crates/api/src/audit_json.rs:1538  other.as_str()
-(F) LINE crates/api/src/audit_json.rs:1840  panic!("counted again for an unchanged census")
-(F) BRANCH crates/api/src/audit_json.rs:1425:17 False  assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
-(F) BRANCH crates/api/src/audit_json.rs:1425:42 False  assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
-(F) BRANCH crates/api/src/audit_json_commit_tests.rs:86:80 False  matches!(census.state, crate::census::Census::Held { ref manifest } if manifest.is_partitioned()),
-(F) BRANCH crates/api/src/audit_json_commit_tests.rs:184:9 False  note.contains("CASH") && note.contains("lower bound"),
-(F) BRANCH crates/api/src/audit_json_commit_tests.rs:184:34 False  note.contains("CASH") && note.contains("lower bound"),
-(F) BRANCH crates/api/src/audit_json_commit_tests.rs:256:9 False  note.contains("is a directory") && note.contains("not a commit"),
-(F) BRANCH crates/api/src/audit_json_commit_tests.rs:256:44 False  note.contains("is a directory") && note.contains("not a commit"),
-(F) LINE crates/api/src/audit_lock_wait_tests.rs:659  panic!("the parent should have killed this child");
-(F) BRANCH crates/api/src/audit_lock_wait_tests.rs:715:9 False  !source.contains("\nstatic ") && !source.contains("LazyLock") && !source.contains("Mutex<"),
-(F) BRANCH crates/api/src/audit_lock_wait_tests.rs:715:42 False  !source.contains("\nstatic ") && !source.contains("LazyLock") && !source.contains("Mutex<"),
-(F) BRANCH crates/api/src/audit_lock_wait_tests.rs:715:74 False  !source.contains("\nstatic ") && !source.contains("LazyLock") && !source.contains("Mutex<"),
 (F) LINE crates/api/src/autopilot_stall_tests.rs:105  feeds[0].stalls
-(F) LINE crates/api/src/backtest.rs:2326  broken.to_json()
+(F) LINE crates/api/src/backtest.rs:2330  [START line 2326] broken.to_json()
 (F) BRANCH crates/api/src/backtest.rs:2151:13 False  body.contains(r#""runs":[]"#) && body.contains(r#""best_complete":null"#),
 (F) BRANCH crates/api/src/backtest.rs:2151:46 False  body.contains(r#""runs":[]"#) && body.contains(r#""best_complete":null"#),
-(F) LINE crates/api/src/bars.rs:2869  found.len()
-(F) LINE crates/api/src/bars.rs:3028  compared.get()
-(F) LINE crates/api/src/bars.rs:3103  ist_clock(at)
-(F) LINE crates/api/src/bars.rs:3656  got.bars[0].chg_why
-(F) LINE crates/api/src/bars.rs:4620  panic!("one request took more than 256 looks at its flag");
-(F) BRANCH crates/api/src/bars.rs:3920:17 False  !body.contains("note_unreadable_records") && !body.contains("telemetry::emit"),
-(F) BRANCH crates/api/src/bars.rs:3920:62 False  !body.contains("note_unreadable_records") && !body.contains("telemetry::emit"),
-(F) BRANCH crates/api/src/bars.rs:4202:13 False  got.faults[0].contains(" record 73: ")
-(F) BRANCH crates/api/src/bars.rs:4203:20 False  && got.faults[0].contains("73 kept rows of 2026-01 in this window would not read"),
-(F) BRANCH crates/api/src/bars.rs:4301:17 False  assert!(first.oi_applies && first.v_why.is_none());
-(F) BRANCH crates/api/src/bars.rs:4301:37 False  assert!(first.oi_applies && first.v_why.is_none());
 (F) BRANCH crates/api/src/bars_change.rs:764:13 False  why.contains("UNVERIFIED") && why.contains("absent"),
 (F) BRANCH crates/api/src/bars_change.rs:764:43 False  why.contains("UNVERIFIED") && why.contains("absent"),
 (F) BRANCH crates/api/src/bars_change.rs:1036:13 False  fault.starts_with("cannot read ") && fault.ends_with("no lineage was applied"),
@@ -65,6 +57,17 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) LINE crates/api/src/bars_page_tests.rs:465  panic!("{route}: the pool stayed full for two seconds");
 (F) BRANCH crates/api/src/bars_page_tests.rs:286:9 False  !page.contains("/FNO/NIFTY/1s/") && !page.contains("/INDEX/"),
 (F) BRANCH crates/api/src/bars_page_tests.rs:286:45 False  !page.contains("/FNO/NIFTY/1s/") && !page.contains("/INDEX/"),
+(F) LINE crates/api/src/bars.rs:2892  [START line 2869] found.len()
+(F) LINE crates/api/src/bars.rs:3051  [START line 3028] compared.get()
+(F) LINE crates/api/src/bars.rs:3126  [START line 3103] ist_clock(at)
+(F) LINE crates/api/src/bars.rs:3679  [START line 3656] got.bars[0].chg_why
+(F) LINE crates/api/src/bars.rs:4643  [START line 4620] panic!("one request took more than 256 looks at its flag");
+(F) BRANCH crates/api/src/bars.rs:3943:17 False  [START line 3920] !body.contains("note_unreadable_records") && !body.contains("telemetry::emit"),
+(F) BRANCH crates/api/src/bars.rs:3943:62 False  [START line 3920] !body.contains("note_unreadable_records") && !body.contains("telemetry::emit"),
+(F) BRANCH crates/api/src/bars.rs:4225:13 False  [START line 4202] got.faults[0].contains(" record 73: ")
+(F) BRANCH crates/api/src/bars.rs:4226:20 False  [START line 4203] && got.faults[0].contains("73 kept rows of 2026-01 in this window would not read"),
+(F) BRANCH crates/api/src/bars.rs:4324:17 False  [START line 4301] assert!(first.oi_applies && first.v_why.is_none());
+(F) BRANCH crates/api/src/bars.rs:4324:37 False  [START line 4301] assert!(first.oi_applies && first.v_why.is_none());
 (F) LINE crates/api/src/basis_route_tests.rs:181  body["corporate_actions"]
 (F) LINE crates/api/src/basis_route_tests.rs:243  body["corporate_actions"]
 (F) LINE crates/api/src/basis_route_tests.rs:499  repaired.actions.table().err()
@@ -75,33 +78,40 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) LINE crates/api/src/calendar_build.rs:856  panic!("the first request leads");
 (F) LINE crates/api/src/calendar_build.rs:881  panic!("leads");
 (F) LINE crates/api/src/calendar_build.rs:904  panic!("leads");
-(F) LINE crates/api/src/calendar_build.rs:930  [panic/unreachable line] panic!("a queued key is followed: {joined:?}");
+(F) LINE crates/api/src/calendar_build.rs:930  panic!("a queued key is followed: {joined:?}");
 (F) LINE crates/api/src/calendar_build.rs:935  [START line 933] matches!(
-(F) LINE crates/api/src/calendar_build.rs:988  [panic/unreachable line] panic!("room for build {n}: {joined:?}");
+(F) LINE crates/api/src/calendar_build.rs:988  panic!("room for build {n}: {joined:?}");
 (F) BRANCH crates/api/src/calendar_build.rs:821:13 False  let Joined::Lead(lead) = builds.join(&key("NIFTY"), None) else {
 (F) BRANCH crates/api/src/calendar_build.rs:824:13 False  let Joined::Follow(follow) = builds.join(&key("NIFTY"), None) else {
 (F) BRANCH crates/api/src/calendar_build.rs:855:13 False  let Joined::Lead(lead) = builds.join(&key("NIFTY"), Some(&stamp)) else {
 (F) BRANCH crates/api/src/calendar_build.rs:880:13 False  let Joined::Lead(second) = builds.join(&key("BANKNIFTY"), Some(&stamp)) else {
 (F) BRANCH crates/api/src/calendar_build.rs:903:13 False  let Joined::Lead(lead) = builds.join(&key("NIFTY"), None) else {
-(F) BRANCH crates/api/src/calendar_build.rs:929:17 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Joined::Follow(build) = joined else {
-(F) BRANCH crates/api/src/calendar_build.rs:987:17 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Joined::Lead(build) = joined else {
+(F) BRANCH crates/api/src/calendar_build.rs:929:17 False  let Joined::Follow(build) = joined else {
+(F) BRANCH crates/api/src/calendar_build.rs:987:17 False  let Joined::Lead(build) = joined else {
 (F) BRANCH crates/api/src/catalog.rs:918:17 False  assert!(Pill::Fno.admits(Universe::FNO) && !Pill::Fno.admits(Universe::INDEX));
 (F) BRANCH crates/api/src/catalog.rs:918:52 False  assert!(Pill::Fno.admits(Universe::FNO) && !Pill::Fno.admits(Universe::INDEX));
 (F) BRANCH crates/api/src/catalog.rs:919:17 False  assert!(Pill::Ntm.admits(Universe::TOTAL_MARKET) && !Pill::Ntm.admits(Universe::FNO));
 (F) BRANCH crates/api/src/catalog.rs:919:61 False  assert!(Pill::Ntm.admits(Universe::TOTAL_MARKET) && !Pill::Ntm.admits(Universe::FNO));
 (F) BRANCH crates/api/src/catalog.rs:920:17 False  assert!(Pill::Index.admits(Universe::INDEX) && !Pill::Index.admits(Universe::NONE));
 (F) BRANCH crates/api/src/catalog.rs:920:56 False  assert!(Pill::Index.admits(Universe::INDEX) && !Pill::Index.admits(Universe::NONE));
-(F) LINE crates/api/src/census.rs:2646  got.note()
-(F) LINE crates/api/src/census.rs:3189  grid.len()
-(F) BRANCH crates/api/src/census.rs:2764:13 False  note.contains(&(MAX_MANIFEST_BYTES + 1).to_string())
-(F) BRANCH crates/api/src/census.rs:2765:20 False  && note.contains(&MAX_MANIFEST_BYTES.to_string()),
-(F) BRANCH crates/api/src/census.rs:2824:17 False  why.contains("(char_device)")
-(F) BRANCH crates/api/src/census.rs:2825:24 False  && why.contains("a character device, not a regular file"),
-(F) BRANCH crates/api/src/census.rs:2836:17 False  why.contains("(symlink)") && why.contains("a symbolic link, not a regular file"),
-(F) BRANCH crates/api/src/census.rs:2836:46 False  why.contains("(symlink)") && why.contains("a symbolic link, not a regular file"),
-(F) BRANCH crates/api/src/census.rs:2841:21 False  assert!(census.is_loud() && census.note().contains("not a regular file"));
-(F) BRANCH crates/api/src/census.rs:2841:41 False  assert!(census.is_loud() && census.note().contains("not a regular file"));
-(F) BRANCH crates/api/src/census.rs:3193:26 False  rows == 0 || filled > 0,
+(F) LINE crates/api/src/census_cover_tests.rs:529  panic!("{segment:?}: not refused: {}", census.note());
+(F) LINE crates/api/src/census_cover_tests.rs:706  after.note()
+(F) LINE crates/api/src/census_cover_tests.rs:730  after.note()
+(F) LINE crates/api/src/census_cover_tests.rs:756  after.note()
+(F) LINE crates/api/src/census_cover_tests.rs:912  after.note()
+(F) BRANCH crates/api/src/census_cover_tests.rs:118:13 False  assert!(tail.settled.changes.is_empty() && tail.fresh.changes.is_empty());
+(F) BRANCH crates/api/src/census_cover_tests.rs:118:48 False  assert!(tail.settled.changes.is_empty() && tail.fresh.changes.is_empty());
+(F) BRANCH crates/api/src/census_cover_tests.rs:141:13 False  assert!(tail.settled.held.contains_key(&row) && tail.fresh.held.is_empty());
+(F) BRANCH crates/api/src/census_cover_tests.rs:141:53 False  assert!(tail.settled.held.contains_key(&row) && tail.fresh.held.is_empty());
+(F) BRANCH crates/api/src/census_cover_tests.rs:167:13 False  assert!(none.is_partitioned() && none.parts().is_empty());
+(F) BRANCH crates/api/src/census_cover_tests.rs:167:38 False  assert!(none.is_partitioned() && none.parts().is_empty());
+(F) BRANCH crates/api/src/census_cover_tests.rs:234:9 False  refused.starts_with("refused Refused") && refused.contains("is not a directory"),
+(F) BRANCH crates/api/src/census_cover_tests.rs:234:51 False  refused.starts_with("refused Refused") && refused.contains("is not a directory"),
+(F) BRANCH crates/api/src/census_cover_tests.rs:253:9 False  refused.starts_with("refused Io(FilesystemLoop)")
+(F) BRANCH crates/api/src/census_cover_tests.rs:254:16 False  && refused.contains("could not be measured"),
+(F) BRANCH crates/api/src/census_cover_tests.rs:299:13 False  assert!(all.is_empty() && all.keeps(&cash, july));
+(F) BRANCH crates/api/src/census_cover_tests.rs:299:31 False  assert!(all.is_empty() && all.keeps(&cash, july));
+(F) BRANCH crates/api/src/census_cover_tests.rs:528:13 False  let Census::Unreadable { reason, fault } = &census.state else {
 (F) LINE crates/api/src/census_epoch_link_tests.rs:92  panic!("a link must be refused, never read: {}", census.note());
 (F) LINE crates/api/src/census_epoch_link_tests.rs:104  path.display()
 (F) LINE crates/api/src/census_epoch_link_tests.rs:136  census.note()
@@ -127,10 +137,44 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/census_warm_tests.rs:981:38 False  .all(|(_, kind, thread)| *kind != "whole" && is_census_thread(thread)),
 (F) BRANCH crates/api/src/census_warm_tests.rs:1032:13 False  assert!(whole["underlying"].is_null() && whole["exchange"].is_null());
 (F) BRANCH crates/api/src/census_warm_tests.rs:1032:46 False  assert!(whole["underlying"].is_null() && whole["exchange"].is_null());
+(U) LINE crates/api/src/census.rs:582  [(U) on every target: read_back passes line 563 only when the base holds an entry (from < to = base.n_valid), and a part read from a file with entries carries its first entry (read_single and read_partitioned take it from the bytes Manifest::open validated; extend keeps previous.first_entry)] }
+(U) LINE crates/api/src/census.rs:667  [(U) on every target: still_holds_last_of runs only when same holds, which needs other.first_entry Some; a part carries its first and last entries together from the same validated bytes (read_single, read_partitioned) or from the appended entries (extend, adding >= 1 whenever its header moved)] return header.n_valid == 0;
+(U) LINE crates/api/src/census.rs:670  [(U) on every target: other.header() is a header ManifestHeader::decode accepted (read_region or extend's newest_slot), and decode resolves the version through Layout::for_version (pull/src/manifest.rs:2651), so the same call cannot fail here] return false;
+(U) LINE crates/api/src/census.rs:678  [(U) on every target: last_entry Some means other read at least one entry (n_valid >= 1), and n_valid <= its limit (2,097,152 or a u32 capacity) times a stride of at most 128 plus the header region cannot overflow u64] return false;
+(U) LINE crates/api/src/census.rs:1733  [(U) on every target: a part read from a file carries its first and last entries together and both are Some whenever it holds an entry (read_single, read_partitioned, extend), so the pair is (Some, Some) or (None, None) with n_valid 0] _ => return None,
+(U) LINE crates/api/src/census.rs:1941  [(U) on every target: store::safe_open::ReadRefusal has two variants and found() is None only for ReadRefusal::Io (crates/store/src/safe_open.rs:143-188), which the arm above takes] other => Ok(Err(other.to_string())),
+(U) LINE crates/api/src/census.rs:1955  [(U) on Linux x86_64/aarch64 and on macOS: NONBLOCK is Some(0x800) and Some(0x4) there (census.rs:1893-1899); the None arm exists for other targets only] }
+(F) LINE crates/api/src/census.rs:2646  got.note()
+(F) LINE crates/api/src/census.rs:3189  grid.len()
+(U) BRANCH crates/api/src/census.rs:577:16 False  [(U) on every target: read_back passes line 563 only when the base holds an entry (from < to = base.n_valid), and a part read from a file with entries carries its first entry (read_single and read_partitioned take it from the bytes Manifest::open validated; extend keeps previous.first_entry)] if let Some(first) = self.first_entry.as_deref() {
+(U) BRANCH crates/api/src/census.rs:666:13 False  [(U) on every target: still_holds_last_of runs only when same holds, which needs other.first_entry Some; a part carries its first and last entries together from the same validated bytes (read_single, read_partitioned) or from the appended entries (extend, adding >= 1 whenever its header moved)] let Some(last) = other.last_entry.as_deref() else {
+(U) BRANCH crates/api/src/census.rs:669:13 False  [(U) on every target: other.header() is a header ManifestHeader::decode accepted (read_region or extend's newest_slot), and decode resolves the version through Layout::for_version (pull/src/manifest.rs:2651), so the same call cannot fail here] let Ok(layout) = Layout::for_version(header.format_version) else {
+(U) BRANCH crates/api/src/census.rs:677:13 False  [(U) on every target: last_entry Some means other read at least one entry (n_valid >= 1), and n_valid <= its limit (2,097,152 or a u32 capacity) times a stride of at most 128 plus the header region cannot overflow u64] let Some(at) = at else {
+(U) BRANCH crates/api/src/census.rs:684:12 True  [(U) on every unix target (Linux and aarch64-apple-darwin): FileId::of is Some(dev, ino) from MetadataExt on unix (census.rs:160-172); its None is the not-unix twin only] if identity.is_none() || identity != self.file {
+(U) BRANCH crates/api/src/census.rs:1691:12 True  [(U) on every target: ManifestHeader::decode refuses a stride other than its version's layout (pull/src/manifest.rs decode_with_layout, StrideMismatch), so two decoded headers of one format_version (1690 False) carry one stride] || newest.entry_stride != before.entry_stride
+(U) BRANCH crates/api/src/census.rs:1732:25 False  [(U) on every target: a part read from a file carries its first and last entries together and both are Some whenever it holds an entry (read_single, read_partitioned, extend), so the pair is (Some, Some) or (None, None) with n_valid 0] (None, None) if before.n_valid == 0 => {}
+(U) BRANCH crates/api/src/census.rs:1952:12 False  [(U) on Linux x86_64/aarch64 and on macOS: NONBLOCK is Some(0x800) and Some(0x4) there (census.rs:1893-1899); the None arm exists for other targets only] if let Some(flags) = NONBLOCK {
+(F) BRANCH crates/api/src/census.rs:2764:13 False  note.contains(&(MAX_MANIFEST_BYTES + 1).to_string())
+(F) BRANCH crates/api/src/census.rs:2765:20 False  && note.contains(&MAX_MANIFEST_BYTES.to_string()),
+(F) BRANCH crates/api/src/census.rs:2824:17 False  why.contains("(char_device)")
+(F) BRANCH crates/api/src/census.rs:2825:24 False  && why.contains("a character device, not a regular file"),
+(F) BRANCH crates/api/src/census.rs:2836:17 False  why.contains("(symlink)") && why.contains("a symbolic link, not a regular file"),
+(F) BRANCH crates/api/src/census.rs:2836:46 False  why.contains("(symlink)") && why.contains("a symbolic link, not a regular file"),
+(F) BRANCH crates/api/src/census.rs:2841:21 False  assert!(census.is_loud() && census.note().contains("not a regular file"));
+(F) BRANCH crates/api/src/census.rs:2841:41 False  assert!(census.is_loud() && census.note().contains("not a regular file"));
+(F) BRANCH crates/api/src/census.rs:3193:26 False  rows == 0 || filled > 0,
+(F) BRANCH crates/api/src/chain_cover_tests.rs:125:9 False  why.starts_with("unreadable: ") && why.contains("gdfl.lineage"),
+(F) BRANCH crates/api/src/chain_cover_tests.rs:125:44 False  why.starts_with("unreadable: ") && why.contains("gdfl.lineage"),
+(F) BRANCH crates/api/src/chain_cover_tests.rs:197:13 False  assert!(ladder_now.stored.is_empty() && ladder_now.atm.is_none());
+(F) BRANCH crates/api/src/chain_cover_tests.rs:197:45 False  assert!(ladder_now.stored.is_empty() && ladder_now.atm.is_none());
+(F) BRANCH crates/api/src/chain_cover_tests.rs:230:9 False  faults.is_empty() && months.opened.is_empty(),
+(F) BRANCH crates/api/src/chain_cover_tests.rs:230:30 False  faults.is_empty() && months.opened.is_empty(),
 (F) BRANCH crates/api/src/chain_route_tests.rs:423:17 False  assert!(chain["atm"].is_null() && chain["pick"]["rung"].is_null());
 (F) BRANCH crates/api/src/chain_route_tests.rs:423:43 False  assert!(chain["atm"].is_null() && chain["pick"]["rung"].is_null());
 (F) BRANCH crates/api/src/chain_route_tests.rs:440:13 False  assert!(chain["spot"].is_null() && chain["spot_t"].is_null());
 (F) BRANCH crates/api/src/chain_route_tests.rs:440:40 False  assert!(chain["spot"].is_null() && chain["spot_t"].is_null());
+(U) LINE crates/api/src/chain.rs:917  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] return bad_request("no census row for this feed");
+(U) BRANCH crates/api/src/chain.rs:916:9 False  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] let Some(census) = now.census() else {
 (F) BRANCH crates/api/src/cost_limits_tests.rs:108:9 False  !inside.contains("ingestion_observations") && inside.contains("land_bodies_observed("),
 (F) BRANCH crates/api/src/cost_limits_tests.rs:108:55 False  !inside.contains("ingestion_observations") && inside.contains("land_bodies_observed("),
 (F) BRANCH crates/api/src/cost_limits_tests.rs:149:13 False  assert!(append < hook && repair < hook, "{body}");
@@ -195,17 +239,19 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/credential_law_tests.rs:700:38 False  seen[1].contains("fresh") && seen[2].contains("fresh"),
 (F) BRANCH crates/api/src/credential_law_tests.rs:720:9 False  seen[0].contains("stale") && seen[1].contains("fresh"),
 (F) BRANCH crates/api/src/credential_law_tests.rs:720:38 False  seen[0].contains("stale") && seen[1].contains("fresh"),
+(F) BRANCH crates/api/src/detail_cover_tests.rs:175:9 False  why.contains("runs.bin at")
+(F) BRANCH crates/api/src/detail_cover_tests.rs:176:16 False  && why.contains("could not be measured before its bounded read"),
 (F) LINE crates/api/src/detail.rs:1977  [START line 1978] pool.name()
 (F) LINE crates/api/src/detail.rs:2182  [START line 2147] started.elapsed()
-(F) LINE crates/api/src/detail.rs:2341  [panic/unreachable line] || -> Result<u32, String> { unreachable!("a fallback never hides the failed check") },
-(F) LINE crates/api/src/detail.rs:2373  [panic/unreachable line] |_| -> Result<(), String> { unreachable!("a new root is opened") },
-(F) LINE crates/api/src/detail.rs:2379  [panic/unreachable line] |_| -> Result<(), String> { unreachable!("nothing cached here, so nothing refreshes") },
-(F) LINE crates/api/src/detail.rs:2389  [panic/unreachable line] || -> Result<u32, String> { unreachable!("the handle is cached, so nothing opens") },
-(F) LINE crates/api/src/detail.rs:2438  [panic/unreachable line] |_| -> Result<(), String> { unreachable!("the first call never refreshes") },
-(F) LINE crates/api/src/detail.rs:2450  [panic/unreachable line] || -> Result<u32, String> { unreachable!("the second call reuses the handle") },
-(F) LINE crates/api/src/detail.rs:2485  [panic/unreachable line] |_| -> Result<(), String> { unreachable!("another root opens, it does not refresh") },
-(F) LINE crates/api/src/detail.rs:2501  [panic/unreachable line] |_| -> Result<(), String> { unreachable!("a third root has nothing to refresh") },
-(F) LINE crates/api/src/detail.rs:2513  [panic/unreachable line] || -> Result<u32, String> { unreachable!("the prior handle refreshes, never reopens") },
+(F) LINE crates/api/src/detail.rs:2341  || -> Result<u32, String> { unreachable!("a fallback never hides the failed check") },
+(F) LINE crates/api/src/detail.rs:2373  |_| -> Result<(), String> { unreachable!("a new root is opened") },
+(F) LINE crates/api/src/detail.rs:2379  |_| -> Result<(), String> { unreachable!("nothing cached here, so nothing refreshes") },
+(F) LINE crates/api/src/detail.rs:2389  || -> Result<u32, String> { unreachable!("the handle is cached, so nothing opens") },
+(F) LINE crates/api/src/detail.rs:2438  |_| -> Result<(), String> { unreachable!("the first call never refreshes") },
+(F) LINE crates/api/src/detail.rs:2450  || -> Result<u32, String> { unreachable!("the second call reuses the handle") },
+(F) LINE crates/api/src/detail.rs:2485  |_| -> Result<(), String> { unreachable!("another root opens, it does not refresh") },
+(F) LINE crates/api/src/detail.rs:2501  |_| -> Result<(), String> { unreachable!("a third root has nothing to refresh") },
+(F) LINE crates/api/src/detail.rs:2513  || -> Result<u32, String> { unreachable!("the prior handle refreshes, never reopens") },
 (F) BRANCH crates/api/src/detail.rs:1975:17 False  [START line 1976] pool.max() >= 1 && pool.max() <= cores.max(1),
 (F) BRANCH crates/api/src/detail.rs:1975:36 False  [START line 1976] pool.max() >= 1 && pool.max() <= cores.max(1),
 (F) BRANCH crates/api/src/detail.rs:2321:17 False  [START line 2286] why.contains(field) && why.contains("canonical"),
@@ -217,12 +263,33 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/facets_tests.rs:1785:13 False  [START line 1777] exchange.is_none() && keys.is_empty() && sums.is_empty(),
 (F) BRANCH crates/api/src/facets_tests.rs:1785:35 False  [START line 1777] exchange.is_none() && keys.is_empty() && sums.is_empty(),
 (F) BRANCH crates/api/src/facets_tests.rs:1785:54 False  [START line 1777] exchange.is_none() && keys.is_empty() && sums.is_empty(),
-(F) BRANCH crates/api/src/facets_tests.rs:1866:9 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] got.is_none() && keys.is_empty() && sums.is_empty(),
-(F) BRANCH crates/api/src/facets_tests.rs:1866:26 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] got.is_none() && keys.is_empty() && sums.is_empty(),
-(F) BRANCH crates/api/src/facets_tests.rs:1866:45 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] got.is_none() && keys.is_empty() && sums.is_empty(),
-(F) LINE crates/api/src/feed_checks_tests.rs:197  [panic/unreachable line] panic!("expected a 400 refusal, got {result:?}");
-(F) LINE crates/api/src/feed_checks_tests.rs:204  [panic/unreachable line] panic!("expected a 404, got {result:?}");
-(F) LINE crates/api/src/feed_checks_tests.rs:211  [panic/unreachable line] panic!("expected a 500 refusal, got {result:?}");
+(F) BRANCH crates/api/src/facets_tests.rs:1866:9 False  got.is_none() && keys.is_empty() && sums.is_empty(),
+(F) BRANCH crates/api/src/facets_tests.rs:1866:26 False  got.is_none() && keys.is_empty() && sums.is_empty(),
+(F) BRANCH crates/api/src/facets_tests.rs:1866:45 False  got.is_none() && keys.is_empty() && sums.is_empty(),
+(F) LINE crates/api/src/feed_checks_files_cover_tests.rs:255  panic!("a folder under a file is refused");
+(F) LINE crates/api/src/feed_checks_files_cover_tests.rs:292  panic!("a file is not a folder");
+(F) BRANCH crates/api/src/feed_checks_files_cover_tests.rs:254:9 False  let Err(Refusal::Refused(why)) = feed_listing(&file.join("under")) else {
+(F) BRANCH crates/api/src/feed_checks_files_cover_tests.rs:291:9 False  let Err(Refusal::Refused(why)) = feed_listing(&named) else {
+(U) LINE crates/api/src/feed_checks_files.rs:202  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] Refusal::Refused(format!(
+(U) LINE crates/api/src/feed_checks_files.rs:203  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] "`{}` has no modification time: {why}",
+(U) LINE crates/api/src/feed_checks_files.rs:204  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] dir.display()
+(U) LINE crates/api/src/feed_checks_files.rs:205  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] ))
+(U) LINE crates/api/src/feed_checks_files.rs:206  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] })?),
+(U) LINE crates/api/src/feed_checks_files.rs:1200  [(U) on every target: file_tick takes a slot from held.slots, which holds only slots made where stocks and members are pushed together, or makes one there and pushes both (feed_checks_files.rs:1180-1196), so both vectors hold it] return Err(format!("month {month}: a share's slot {slot} is not held"));
+(U) LINE crates/api/src/feed_checks_files.rs:1233  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] return Err(format!(
+(U) LINE crates/api/src/feed_checks_files.rs:1234  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] "month {}: a share's slot {slot} is not held",
+(U) LINE crates/api/src/feed_checks_files.rs:1235  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] held.month
+(U) LINE crates/api/src/feed_checks_files.rs:1236  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] ));
+(U) BRANCH crates/api/src/feed_checks_files.rs:119:12 False  [(U) on every target: bump resizes counts to at + 1 on the line before when it is shorter, so get_mut(at) always answers] if let Some(count) = counts.get_mut(at) {
+(U) BRANCH crates/api/src/feed_checks_files.rs:685:16 False  [(U) on every target: a row whose share differs from current pushes its stock first (lines 665-683) and the first row's current is None, so stocks.last_mut() always answers] if let Some(stock) = parsed.stocks.last_mut() {
+(U) BRANCH crates/api/src/feed_checks_files.rs:1198:9 False  [(U) on every target: file_tick takes a slot from held.slots, which holds only slots made where stocks and members are pushed together, or makes one there and pushes both (feed_checks_files.rs:1180-1196), so both vectors hold it] let (Some(stock), Some(members)) = (held.stocks.get_mut(slot), held.members.get_mut(slot))
+(U) BRANCH crates/api/src/feed_checks_files.rs:1232:17 False  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] let (Some(stock), Some(rows)) = (held.stocks.get(slot), members.get_mut(slot)) else {
+(F) LINE crates/api/src/feed_checks_tests.rs:197  panic!("expected a 400 refusal, got {result:?}");
+(F) LINE crates/api/src/feed_checks_tests.rs:204  panic!("expected a 404, got {result:?}");
+(F) LINE crates/api/src/feed_checks_tests.rs:211  panic!("expected a 500 refusal, got {result:?}");
+(F) BRANCH crates/api/src/feed_checks_tests.rs:196:9 False  let Err(Refusal::Asked(why)) = result else {
+(F) BRANCH crates/api/src/feed_checks_tests.rs:203:9 False  let Err(Refusal::Absent(why)) = result else {
+(F) BRANCH crates/api/src/feed_checks_tests.rs:210:9 False  let Err(Refusal::Refused(why)) = result else {
 (F) BRANCH crates/api/src/feed_checks_tests.rs:884:13 False  assert!(first > 1970 && last >= first, "{first}..{last}");
 (F) BRANCH crates/api/src/feed_checks_tests.rs:884:29 False  assert!(first > 1970 && last >= first, "{first}..{last}");
 (F) BRANCH crates/api/src/feed_checks_tests.rs:1085:13 False  why.contains("cut or damaged") && why.contains("held:"),
@@ -237,22 +304,47 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/feed_checks_tests.rs:1185:36 False  gap.contains("2025-02") && gap.contains("feed-reconcile"),
 (F) BRANCH crates/api/src/feed_checks_tests.rs:1418:13 False  why.contains(&format!("line {line}:")) && why.contains("(day, symbol, role) order"),
 (F) BRANCH crates/api/src/feed_checks_tests.rs:1418:55 False  why.contains(&format!("line {line}:")) && why.contains("(day, symbol, role) order"),
-(F) BRANCH crates/api/src/feed_checks_tests.rs:196:9 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Asked(why)) = result else {
-(F) BRANCH crates/api/src/feed_checks_tests.rs:203:9 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Absent(why)) = result else {
-(F) BRANCH crates/api/src/feed_checks_tests.rs:210:9 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Refused(why)) = result else {
+(U) LINE crates/api/src/feed_checks.rs:974  [(U) on every target: record_years() maps the compiled calendar record's first day to its civil year, never 0; server::feed_checks::tests::every_day_and_year_the_calendar_holds_is_said_and_a_refused_version_is_a_500 asserts first > 0, and every_year_of_the_record_is_counted_as_the_calendar_counts_it asserts first > 1970] 0
+(U) LINE crates/api/src/feed_checks.rs:994  [(U) on every target: calendar_answer reads calendar_year_json only for a year inside record_years(), and every_day_and_year_the_calendar_holds_is_said_and_a_refused_version_is_a_500 asserts calendar::year_exclusions(year).is_ok() for every such year, so no year it answers carries "refused"] return Err(Refusal::Absent(why.to_owned()));
+(U) LINE crates/api/src/feed_checks.rs:998  [(U) on every target: line 993 returns unless calendar::year_exclusions(year) is Ok, and that Ok needs the same two Day::new(year, 1, 1) and Day::new(year, 12, 31) calls to succeed (pull/src/calendar.rs:3678-3691), so this let-else cannot fail] return Err(Refusal::Asked(format!(
+(U) LINE crates/api/src/feed_checks.rs:999  [(U) on every target: line 993 returns unless calendar::year_exclusions(year) is Ok, and that Ok needs the same two Day::new(year, 1, 1) and Day::new(year, 12, 31) calls to succeed (pull/src/calendar.rs:3678-3691), so this let-else cannot fail] "{year} is not a year this calendar spells"
+(U) LINE crates/api/src/feed_checks.rs:1000  [(U) on every target: line 993 returns unless calendar::year_exclusions(year) is Ok, and that Ok needs the same two Day::new(year, 1, 1) and Day::new(year, 12, 31) calls to succeed (pull/src/calendar.rs:3678-3691), so this let-else cannot fail] )));
+(U) BRANCH crates/api/src/feed_checks.rs:973:24 True  [(U) on every target: record_years() maps the compiled calendar record's first day to its civil year, never 0; server::feed_checks::tests::every_day_and_year_the_calendar_holds_is_said_and_a_refused_version_is_a_500 asserts first > 0, and every_year_of_the_record_is_counted_as_the_calendar_counts_it asserts first > 1970] let total = if first == 0 {
+(U) BRANCH crates/api/src/feed_checks.rs:993:12 True  [(U) on every target: calendar_answer reads calendar_year_json only for a year inside record_years(), and every_day_and_year_the_calendar_holds_is_said_and_a_refused_version_is_a_500 asserts calendar::year_exclusions(year).is_ok() for every such year, so no year it answers carries "refused"] if let Some(why) = counted.get("refused").and_then(Value::as_str) {
+(U) BRANCH crates/api/src/feed_checks.rs:997:9 False  [(U) on every target: line 993 returns unless calendar::year_exclusions(year) is Ok, and that Ok needs the same two Day::new(year, 1, 1) and Day::new(year, 12, 31) calls to succeed (pull/src/calendar.rs:3678-3691), so this let-else cannot fail] let (Ok(start), Ok(end)) = (Day::new(year, 1, 1), Day::new(year, 12, 31)) else {
 (F) BRANCH crates/api/src/folder.rs:606:13 False  why.contains("INDEX") && why.contains("CASH") && why.contains("FNO"),
 (F) BRANCH crates/api/src/folder.rs:606:38 False  why.contains("INDEX") && why.contains("CASH") && why.contains("FNO"),
 (F) BRANCH crates/api/src/folder.rs:606:62 False  why.contains("INDEX") && why.contains("CASH") && why.contains("FNO"),
 (F) LINE crates/api/src/gap_peer_route_tests.rs:398  panic!("the peer vote was still building after 1,000 asks");
+(U) BRANCH crates/api/src/import_journal.rs:417:28 False  [(U) on every target: runs_by_id holds only positions taken as self.runs.len() in the step that then pushes the run (lines 427-431) and runs never shrinks, so every held position answers] && let Some(run) = self.runs.get_mut(start)
+(U) BRANCH crates/api/src/import_journal.rs:536:16 False  [(U) on every target: last is [_; 3] if let Some(last) = self.last.get_mut(slot) {
 (F) BRANCH crates/api/src/import_journal.rs:1136:28 False  [START line 1065] .all(|end| end.end_line.is_none() && end.fields.len() == 3),
 (F) BRANCH crates/api/src/import_journal.rs:1493:17 False  [START line 1374] assert!(cut && kept.len() <= MAX_VALUE_BYTES && kept.is_char_boundary(kept.len()));
 (F) BRANCH crates/api/src/import_journal.rs:1493:24 False  [START line 1374] assert!(cut && kept.len() <= MAX_VALUE_BYTES && kept.is_char_boundary(kept.len()));
 (F) BRANCH crates/api/src/import_journal.rs:1493:57 False  [START line 1374] assert!(cut && kept.len() <= MAX_VALUE_BYTES && kept.is_char_boundary(kept.len()));
 (F) BRANCH crates/api/src/imports_filter_tests.rs:136:24 False  .all(|row| row["filter"] != "*" && row["outcome_from"] == "journal"),
+(U) LINE crates/api/src/indexmap.rs:638  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] return census_refused(&format!(
+(U) LINE crates/api/src/indexmap.rs:639  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] "{}: the census read returned no row for this feed",
+(U) LINE crates/api/src/indexmap.rs:640  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] feed.as_str()
+(U) LINE crates/api/src/indexmap.rs:641  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] ));
+(U) LINE crates/api/src/indexmap.rs:671  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] return Err(format!(
+(U) LINE crates/api/src/indexmap.rs:672  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] "{}: the census read returned no row for this feed",
+(U) LINE crates/api/src/indexmap.rs:673  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] feed.as_str()
+(U) LINE crates/api/src/indexmap.rs:674  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] ));
+(U) BRANCH crates/api/src/indexmap.rs:637:9 False  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] let Some(census) = now.census() else {
+(U) BRANCH crates/api/src/indexmap.rs:670:9 False  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] let Some(census) = now.census() else {
 (F) BRANCH crates/api/src/indexmap.rs:912:17 False  assert!(banknifty.is_some() && nifty.is_some());
 (F) BRANCH crates/api/src/indexmap.rs:912:40 False  assert!(banknifty.is_some() && nifty.is_some());
 (F) BRANCH crates/api/src/indexmap.rs:1346:13 False  error.contains("gdfl") && error.contains("no manifest"),
 (F) BRANCH crates/api/src/indexmap.rs:1346:39 False  error.contains("gdfl") && error.contains("no manifest"),
+(F) BRANCH crates/api/src/merge_cover_tests.rs:74:13 False  assert!(!ambiguous(&out, Vendor::Groww) && out.conflicts.is_empty());
+(F) BRANCH crates/api/src/merge_cover_tests.rs:74:48 False  assert!(!ambiguous(&out, Vendor::Groww) && out.conflicts.is_empty());
+(F) BRANCH crates/api/src/merge_cover_tests.rs:152:13 False  assert!(ambiguous(&raw, Vendor::Dhan) && id_of(&raw, Vendor::Dhan).is_none());
+(F) BRANCH crates/api/src/merge_cover_tests.rs:152:46 False  assert!(ambiguous(&raw, Vendor::Dhan) && id_of(&raw, Vendor::Dhan).is_none());
+(U) LINE crates/api/src/merge.rs:711  [(U) on every target: the empty else of the if-let at 694; Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] }
+(U) LINE crates/api/src/merge.rs:718  [(U) on every target: the empty else of the if-let at 712; Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] }
+(U) BRANCH crates/api/src/merge.rs:694:12 False  [(U) on every target: Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] if let Some(slot) = e.ids.get_mut(vendor as usize) {
+(U) BRANCH crates/api/src/merge.rs:712:12 False  [(U) on every target: Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] if let Some(slot) = e.vendor_isins.get_mut(vendor as usize) {
 (F) BRANCH crates/api/src/merge.rs:1017:13 False  e.universe.contains(Universe::FNO) && e.universe.contains(Universe::TOTAL_MARKET),
 (F) BRANCH crates/api/src/merge.rs:1017:51 False  e.universe.contains(Universe::FNO) && e.universe.contains(Universe::TOTAL_MARKET),
 (F) BRANCH crates/api/src/merge.rs:1042:17 False  assert!(line.contains("groww") && line.contains("dhan"), "{line}");
@@ -283,25 +375,64 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/optiongreeks_route_tests.rs:627:36 False  row["tenor_s"].is_i64() && row["above_rate_tenor"] == false,
 (F) BRANCH crates/api/src/optiongreeks_route_tests.rs:810:9 False  let RateTable::Loaded(series) = &*moved else {
 (F) BRANCH crates/api/src/page_report_route_tests.rs:153:60 False  matches!((asked, read_back), (Some(a), Some(r)) if a < r),
-(F) LINE crates/api/src/pullrun.rs:4446  [panic/unreachable line] panic!("a disagreeing leg must be refused, got {answer:?}");
-(F) LINE crates/api/src/pullrun.rs:4580  [panic/unreachable line] panic!("a repeated payload field must refuse the run: {answer:?}");
-(F) LINE crates/api/src/pullrun.rs:4680  [panic/unreachable line] panic!("a four-part leg must be refused, got {answer:?}");
-(F) LINE crates/api/src/pullrun.rs:4729  [panic/unreachable line] panic!("one leg past the bound must be named, got {answer:?}");
+(F) LINE crates/api/src/pullrun_restart_tests.rs:117  panic!("expected a guessed NOT KNOWN, got {answer:?}");
+(F) LINE crates/api/src/pullrun_restart_tests.rs:376  [START line 374] run.words()
+(F) LINE crates/api/src/pullrun_restart_tests.rs:634  panic!("expected a guessed NOT KNOWN, got {answer:?}");
+(F) LINE crates/api/src/pullrun_restart_tests.rs:733  [START line 731] answer.words()
+(F) LINE crates/api/src/pullrun_restart_tests.rs:927  [START line 925] answer.words()
+(F) LINE crates/api/src/pullrun_restart_tests.rs:1024  [START line 1022] answer.words()
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:116:9 False  let Restart::Guessed(guessed) = answer else {
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:170:9 False  [START line 168] words.contains("3 runs read have no closing record")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:171:16 False  [START line 169] && words.contains("record 2 (a pull run")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:172:16 False  [START line 170] && words.contains("record 0 (a pull run")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:173:16 False  [START line 171] && words.contains("ag01-three-zerodha"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:534:9 False  [START line 532] why.contains("the closing record at record 4")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:535:16 False  [START line 533] && why.contains("a close written without its run's thread could end either run")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:536:16 False  [START line 534] && why.contains("opened at records 1, 0"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:633:9 False  let Restart::Guessed(guessed) = answer else {
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:662:13 False  [START line 660] guessed.why.contains("the closing record at record 2")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:663:20 False  [START line 661] && guessed.why.contains("opened at records 1, 0"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:681:13 False  [START line 679] words.starts_with("NOT KNOWN which pull runs were left open, though at least 1 run(s)")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:682:20 False  [START line 680] && words.contains("so 1 of them have no closing record; which is not known"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:778:9 False  [START line 776] words.starts_with("NOT KNOWN which pull runs were left open, though at least 2 run(s)")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:779:16 False  [START line 777] && words.contains("Open whichever way the guesses are read")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:780:16 False  [START line 778] && words.contains("record 0 (a pull run")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:781:16 False  [START line 779] && words.contains("ag01-p4-kite")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:782:16 False  [START line 780] && words.contains("A guess names the run(s) opened at records 2, 3"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:983:13 False  [START line 981] words.contains("named by no guess, though something read may have closed it")
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:984:20 False  [START line 982] && words.contains(&format!(
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:987:20 False  [START line 985] && words.contains(CLOSE_UNDECODED)
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:988:20 False  [START line 986] && words.contains("3 older run record(s) that the journal's index names"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1186:9 False  [START line 1184] why.contains(
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1188:14 False  [START line 1186] ) && why.contains("closing record at record 900"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1382:13 False  [START line 1380] words.contains("writes no opening record") && words.contains("never reported here"),
+(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1382:59 False  [START line 1380] words.contains("writes no opening record") && words.contains("never reported here"),
+(U) LINE crates/api/src/pullrun.rs:876  [(U) on every target: Feed::ALL holds TrueData and GDFL, whose transport kind is Folder (pull's own test asserts both, crates/pull/src/vendor.rs:6444-6445), so unjournalled_feeds is never empty] return String::new();
+(F) LINE crates/api/src/pullrun.rs:4446  panic!("a disagreeing leg must be refused, got {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:4580  panic!("a repeated payload field must refuse the run: {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:4680  panic!("a four-part leg must be refused, got {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:4729  panic!("one leg past the bound must be named, got {answer:?}");
 (F) LINE crates/api/src/pullrun.rs:4755  [START line 4757] form.len()
 (F) LINE crates/api/src/pullrun.rs:4764  [START line 4766] leg.len()
-(F) LINE crates/api/src/pullrun.rs:4791  [panic/unreachable line] panic!("a leg naming no feed must be refused, got {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:4791  panic!("a leg naming no feed must be refused, got {answer:?}");
 (F) LINE crates/api/src/pullrun.rs:5326  [START line 5327] observed(&site).feeds
 (F) LINE crates/api/src/pullrun.rs:6987  [START line 6988] restart_in(&unseen)
 (F) LINE crates/api/src/pullrun.rs:7310  [START line 7311] run.words()
 (F) LINE crates/api/src/pullrun.rs:7396  [START line 7397] panic!("with the lock held nothing is known: {held:?}");
 (F) LINE crates/api/src/pullrun.rs:7422  [START line 7423] panic!("an index that cannot be written leaves nothing known: {refused:?}");
-(F) LINE crates/api/src/pullrun.rs:7492  [panic/unreachable line] panic!("NOT KNOWN was expected, and the scan said {found:?}");
-(F) LINE crates/api/src/pullrun.rs:8597  [panic/unreachable line] &|_site, _leg| -> Answer { unreachable!("a terminal feed is never asked again") },
-(F) LINE crates/api/src/pullrun.rs:9782  [panic/unreachable line] panic!("a payload past the bound must refuse the run: {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:7492  panic!("NOT KNOWN was expected, and the scan said {found:?}");
+(F) LINE crates/api/src/pullrun.rs:8597  &|_site, _leg| -> Answer { unreachable!("a terminal feed is never asked again") },
+(F) LINE crates/api/src/pullrun.rs:9782  panic!("a payload past the bound must refuse the run: {answer:?}");
 (F) LINE crates/api/src/pullrun.rs:10879  [START line 10861] panic!("one counted pairing: {:?}", found.left_open);
 (F) LINE crates/api/src/pullrun.rs:10954  [START line 10936] panic!("one counted pairing: {:?}", found.left_open);
-(F) LINE crates/api/src/pullrun.rs:11038  [panic/unreachable line] panic!("expected a guessed answer, got {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:11038  panic!("expected a guessed answer, got {answer:?}");
 (F) LINE crates/api/src/pullrun.rs:11091  [START line 11073] panic!("one doubted run: {:?}", answer.doubted);
+(U) BRANCH crates/api/src/pullrun.rs:875:8 True  [(U) on every target: Feed::ALL holds TrueData and GDFL, whose transport kind is Folder (pull's own test asserts both, crates/pull/src/vendor.rs:6444-6445), so unjournalled_feeds is never empty] if names.is_empty() {
+(F) BRANCH crates/api/src/pullrun.rs:4445:17 False  let Err(Refusal::Disagrees { leg, why }) = answer else {
+(F) BRANCH crates/api/src/pullrun.rs:4579:13 False  let Err(Refusal::Malformed(why)) = answer else {
+(F) BRANCH crates/api/src/pullrun.rs:4679:13 False  let Err(Refusal::Malformed(named)) = answer else {
+(F) BRANCH crates/api/src/pullrun.rs:4728:13 False  let Err(Refusal::TooManyLegs(count)) = answer else {
+(F) BRANCH crates/api/src/pullrun.rs:4790:13 False  let Err(Refusal::Malformed(named)) = answer else {
 (F) BRANCH crates/api/src/pullrun.rs:5833:17 False  [START line 5834] assert!(summary.contains("INCOMPLETE") && summary.contains("zerodha"));
 (F) BRANCH crates/api/src/pullrun.rs:5833:51 False  [START line 5834] assert!(summary.contains("INCOMPLETE") && summary.contains("zerodha"));
 (F) BRANCH crates/api/src/pullrun.rs:5835:17 False  [START line 5836] assert!(!summary.contains("asked for everything") && !summary.contains("no more data"));
@@ -336,6 +467,7 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/pullrun.rs:7410:17 False  [START line 7411] words.starts_with("NOT KNOWN whether a pull run was left open")
 (F) BRANCH crates/api/src/pullrun.rs:7411:24 False  [START line 7412] && !words.contains("INTERRUPTED"),
 (F) BRANCH crates/api/src/pullrun.rs:7421:17 False  [START line 7422] let Restart::NotKnown(why) = &refused else {
+(F) BRANCH crates/api/src/pullrun.rs:7491:13 False  let Restart::NotKnown(why) = found else {
 (F) BRANCH crates/api/src/pullrun.rs:7549:13 False  [START line 7550] why.contains("leave the run opened at record 0 open")
 (F) BRANCH crates/api/src/pullrun.rs:7550:20 False  [START line 7551] && why.contains("may be its closing record"),
 (F) BRANCH crates/api/src/pullrun.rs:7619:13 False  [START line 7620] why.contains("record 2 (") && why.contains("record 4 (") && !why.contains("record 5 ("),
@@ -355,51 +487,22 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/pullrun.rs:8673:47 False  [START line 8677] assert!(progress.feeds[1].finished && progress.feeds[1].doing.is_empty());
 (F) BRANCH crates/api/src/pullrun.rs:9363:17 False  [START line 9343] assert!(!feed.store_unavailable && !feed.credential_dead);
 (F) BRANCH crates/api/src/pullrun.rs:9363:44 False  [START line 9343] assert!(!feed.store_unavailable && !feed.credential_dead);
+(F) BRANCH crates/api/src/pullrun.rs:9781:13 False  let Err(Refusal::Malformed(why)) = answer else {
 (F) BRANCH crates/api/src/pullrun.rs:10878:13 False  [START line 10860] let [counted] = found.left_open.as_slice() else {
 (F) BRANCH crates/api/src/pullrun.rs:10953:13 False  [START line 10935] let [counted] = found.left_open.as_slice() else {
+(F) BRANCH crates/api/src/pullrun.rs:11037:13 False  let Restart::Guessed(guessed) = answer else {
 (F) BRANCH crates/api/src/pullrun.rs:11061:17 False  [START line 11043] assert!(answer.sure.is_empty() && answer.doubted.is_empty());
 (F) BRANCH crates/api/src/pullrun.rs:11061:43 False  [START line 11043] assert!(answer.sure.is_empty() && answer.doubted.is_empty());
 (F) BRANCH crates/api/src/pullrun.rs:11090:13 False  [START line 11072] let [doubted] = answer.doubted.as_slice() else {
-(F) BRANCH crates/api/src/pullrun.rs:4445:17 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Disagrees { leg, why }) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:4579:13 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Malformed(why)) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:4679:13 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Malformed(named)) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:4728:13 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::TooManyLegs(count)) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:4790:13 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Malformed(named)) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:7491:13 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Restart::NotKnown(why) = found else {
-(F) BRANCH crates/api/src/pullrun.rs:9781:13 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Err(Refusal::Malformed(why)) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:11037:13 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Restart::Guessed(guessed) = answer else {
-(F) LINE crates/api/src/pullrun_restart_tests.rs:117  [panic/unreachable line] panic!("expected a guessed NOT KNOWN, got {answer:?}");
-(F) LINE crates/api/src/pullrun_restart_tests.rs:376  [START line 374] run.words()
-(F) LINE crates/api/src/pullrun_restart_tests.rs:634  [panic/unreachable line] panic!("expected a guessed NOT KNOWN, got {answer:?}");
-(F) LINE crates/api/src/pullrun_restart_tests.rs:733  [START line 731] answer.words()
-(F) LINE crates/api/src/pullrun_restart_tests.rs:927  [START line 925] answer.words()
-(F) LINE crates/api/src/pullrun_restart_tests.rs:1024  [START line 1022] answer.words()
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:170:9 False  [START line 168] words.contains("3 runs read have no closing record")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:171:16 False  [START line 169] && words.contains("record 2 (a pull run")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:172:16 False  [START line 170] && words.contains("record 0 (a pull run")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:173:16 False  [START line 171] && words.contains("ag01-three-zerodha"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:534:9 False  [START line 532] why.contains("the closing record at record 4")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:535:16 False  [START line 533] && why.contains("a close written without its run's thread could end either run")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:536:16 False  [START line 534] && why.contains("opened at records 1, 0"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:662:13 False  [START line 660] guessed.why.contains("the closing record at record 2")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:663:20 False  [START line 661] && guessed.why.contains("opened at records 1, 0"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:681:13 False  [START line 679] words.starts_with("NOT KNOWN which pull runs were left open, though at least 1 run(s)")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:682:20 False  [START line 680] && words.contains("so 1 of them have no closing record; which is not known"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:778:9 False  [START line 776] words.starts_with("NOT KNOWN which pull runs were left open, though at least 2 run(s)")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:779:16 False  [START line 777] && words.contains("Open whichever way the guesses are read")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:780:16 False  [START line 778] && words.contains("record 0 (a pull run")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:781:16 False  [START line 779] && words.contains("ag01-p4-kite")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:782:16 False  [START line 780] && words.contains("A guess names the run(s) opened at records 2, 3"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:983:13 False  [START line 981] words.contains("named by no guess, though something read may have closed it")
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:984:20 False  [START line 982] && words.contains(&format!(
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:987:20 False  [START line 985] && words.contains(CLOSE_UNDECODED)
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:988:20 False  [START line 986] && words.contains("3 older run record(s) that the journal's index names"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1186:9 False  [START line 1184] why.contains(
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1188:14 False  [START line 1186] ) && why.contains("closing record at record 900"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1382:13 False  [START line 1380] words.contains("writes no opening record") && words.contains("never reported here"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:1382:59 False  [START line 1380] words.contains("writes no opening record") && words.contains("never reported here"),
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:116:9 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Restart::Guessed(guessed) = answer else {
-(F) BRANCH crates/api/src/pullrun_restart_tests.rs:633:9 False  [the else of a let-else that panics, whose line ran] [a line of this change] let Restart::Guessed(guessed) = answer else {
+(F) LINE crates/api/src/recovery_journal_cover_tests.rs:57  panic!("a FIFO is no journal");
+(F) BRANCH crates/api/src/recovery_journal_cover_tests.rs:56:9 False  let Err(error) = Journal::open(&fifo) else {
+(U) LINE crates/api/src/recovery_journal.rs:192  [(U) on every target: put writes 8 bytes at UNVERIFIED_OFFSET 856 into a RECORD_LEN 1,024 image, so the range is always in bounds] )?;
+(U) LINE crates/api/src/recovery_journal.rs:386  [(U) on every target: self.bytes is the journal's length, at most a file length (st_size is a signed 64-bit off_t), so adding one RECORD_LEN of 1,024 cannot overflow u64] io::Error::other("recovery journal length cannot fit its next record")
+(U) LINE crates/api/src/recovery_journal.rs:387  [(U) on every target: self.bytes is the journal's length, at most a file length (st_size is a signed 64-bit off_t), so adding one RECORD_LEN of 1,024 cannot overflow u64] })?;
+(F) BRANCH crates/api/src/recovery_journal.rs:1639:17 False  assert!(journal.latest.is_empty() && journal.order.is_empty());
+(F) BRANCH crates/api/src/recovery_journal.rs:1639:46 False  assert!(journal.latest.is_empty() && journal.order.is_empty());
+(F) BRANCH crates/api/src/recovery_journal.rs:1683:21 False  error.contains("may be partial")
+(F) BRANCH crates/api/src/recovery_journal.rs:1684:28 False  && error.contains("truncation back to 1024 bytes also failed"),
 (F) LINE crates/api/src/recovery.rs:2493  panic!("a server that refuses writes resumed, or said nothing");
 (F) LINE crates/api/src/recovery.rs:2503  hex(id)
 (F) LINE crates/api/src/recovery.rs:2765  attempts
@@ -413,11 +516,12 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/recovery.rs:2506:17 False  line.starts_with(&format!("recovery not resumed: {word}"))
 (F) BRANCH crates/api/src/recovery.rs:2507:24 False  && line.contains(&format!("plan {} is IN FLIGHT", hex(id))),
 (F) BRANCH crates/api/src/recovery.rs:3323:28 False  .all(|row| row.status == Status::Queued && row.attempts == 0)
-(F) BRANCH crates/api/src/recovery_journal.rs:1639:17 False  assert!(journal.latest.is_empty() && journal.order.is_empty());
-(F) BRANCH crates/api/src/recovery_journal.rs:1639:46 False  assert!(journal.latest.is_empty() && journal.order.is_empty());
-(F) BRANCH crates/api/src/recovery_journal.rs:1683:21 False  error.contains("may be partial")
-(F) BRANCH crates/api/src/recovery_journal.rs:1684:28 False  && error.contains("truncation back to 1024 bytes also failed"),
+(F) BRANCH crates/api/src/repair_route_cover_tests.rs:289:9 False  said.starts_with("cannot read ") && said.ends_with("zerodha.repairs"),
+(F) BRANCH crates/api/src/repair_route_cover_tests.rs:289:45 False  said.starts_with("cannot read ") && said.ends_with("zerodha.repairs"),
+(U) LINE crates/api/src/repair_route.rs:167  [(U) on every target: a validated Day lies in 1970..=9999 (pull::session MIN_YEAR, MAX_YEAR), the span YearMonth::new admits (crates/store/src/path.rs:584), so year_month() of a window's day never refuses (its own doc says so, crates/pull/src/session.rs:425-433)] return refused("the window's first month is outside the store's calendar");
 (F) LINE crates/api/src/repair_route.rs:598  panic!("an HTTP descriptor");
+(U) BRANCH crates/api/src/repair_route.rs:166:9 False  [(U) on every target: a validated Day lies in 1970..=9999 (pull::session MIN_YEAR, MAX_YEAR), the span YearMonth::new admits (crates/store/src/path.rs:584), so year_month() of a window's day never refuses (its own doc says so, crates/pull/src/session.rs:425-433)] let Ok(first_month) = window.from().year_month() else {
+(U) BRANCH crates/api/src/repair_route.rs:255:20 False  [(U) on every target: every planned month is the month of a day of the window (repair_plan::plan, crates/pull/src/repair_plan.rs:450-470), so its first day is a valid Day] if let Ok(first) = Day::new(month.month.year(), month.month.month(), 1) {
 (F) BRANCH crates/api/src/repair_route.rs:597:13 False  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
 (F) LINE crates/api/src/server_cloud_mutant_tests_a.rs:392  panic!("re-armed above");
 (F) LINE crates/api/src/server_cloud_mutant_tests_a.rs:1805  answered.map(|schedule| schedule.is_some())
@@ -440,6 +544,16 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/settings_route_tests.rs:792:55 False  warning.contains("generation 2 was saved") && warning.contains("generation 3"),
 (F) BRANCH crates/api/src/settings_route_tests.rs:812:9 False  warning.contains("did not read back") && warning.contains("built on generation 1"),
 (F) BRANCH crates/api/src/settings_route_tests.rs:812:50 False  warning.contains("did not read back") && warning.contains("built on generation 1"),
+(U) LINE crates/api/src/settings_route.rs:331  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] None => Effective {
+(U) LINE crates/api/src/settings_route.rs:332  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] value: None,
+(U) LINE crates/api/src/settings_route.rs:333  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] source: format!(
+(U) LINE crates/api/src/settings_route.rs:334  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] "environment {name} holds {value:?}, which is refused ({refusal}): \
+(U) LINE crates/api/src/settings_route.rs:335  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] nothing is in force for {}",
+(U) LINE crates/api/src/settings_route.rs:336  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] key.name()
+(U) LINE crates/api/src/settings_route.rs:337  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] ),
+(U) LINE crates/api/src/settings_route.rs:338  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] origin: "environment",
+(U) LINE crates/api/src/settings_route.rs:339  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] },
+(U) BRANCH crates/api/src/settings_route.rs:733:20 False  [(U) on every target: Key::slot is 0 to 10 and the array has Key::ALL.len() = KEYS = 11 slots (crates/store/src/settings.rs:132-200), so get_mut always answers] if let Some(slot) = unset.get_mut(key.slot()) {
 (F) BRANCH crates/api/src/spot_route_tests.rs:481:9 False  fault.contains("2025-05.bin") && fault.contains(&format!("t={t0}:")),
 (F) BRANCH crates/api/src/spot_route_tests.rs:481:42 False  fault.contains("2025-05.bin") && fault.contains(&format!("t={t0}:")),
 (F) BRANCH crates/api/src/spot_route_tests.rs:531:9 False  bars_route.contains("crate::detail::Named::StoreRead")
@@ -462,6 +576,9 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/stop_tests.rs:586:9 False  let Loading::Stopped(failed) = loaded_or_stopped(|| 7_u8, &mut broken).await else {
 (F) BRANCH crates/api/src/stop_tests.rs:641:9 False  race < load && load < awaited,
 (F) BRANCH crates/api/src/stop_tests.rs:641:24 False  race < load && load < awaited,
+(U) BRANCH crates/api/src/store_route.rs:928:12 False  [(U) on every target: census_etag is a quote, 64 hex digits and a quote (store_route.rs:734-740), which HeaderValue::from_str always accepts] if let Ok(value) = axum::http::HeaderValue::from_str(etag) {
+(F) BRANCH crates/api/src/store_route.rs:1693:13 False  !body.contains(&longest) && !body.contains("tést-作者"),
+(F) BRANCH crates/api/src/store_route.rs:1693:41 False  !body.contains(&longest) && !body.contains("tést-作者"),
 (F) BRANCH crates/api/src/store_route.rs:1951:17 False  [START line 1778] why.starts_with("behind: ") && why.contains("2019-11-15"),
 (F) BRANCH crates/api/src/store_route.rs:1951:48 False  [START line 1778] why.starts_with("behind: ") && why.contains("2019-11-15"),
 (F) BRANCH crates/api/src/store_route.rs:2053:13 False  [START line 1880] parts.starts_with("INDEX=")
@@ -471,12 +588,10 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/src/store_route.rs:2075:48 False  [START line 1902] assert!(why.starts_with("capped: ") && why.contains("FNO"), "{why}");
 (F) BRANCH crates/api/src/store_route.rs:2748:13 False  [START line 2575] one.starts_with('"') && one.ends_with('"'),
 (F) BRANCH crates/api/src/store_route.rs:2748:37 False  [START line 2575] one.starts_with('"') && one.ends_with('"'),
-(F) BRANCH crates/api/src/store_route.rs:1693:13 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] !body.contains(&longest) && !body.contains("tést-作者"),
-(F) BRANCH crates/api/src/store_route.rs:1693:41 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] !body.contains(&longest) && !body.contains("tést-作者"),
-(F) BRANCH crates/api/src/store_route.rs:2807:13 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] said.starts_with("the import journal could not be read (")
-(F) BRANCH crates/api/src/store_route.rs:2808:20 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] && said.ends_with("so whether this census is behind its import is not known"),
-(F) BRANCH crates/api/src/store_route.rs:2818:13 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] said.starts_with("behind: ") && said.contains("; the import journal could not be read"),
-(F) BRANCH crates/api/src/store_route.rs:2818:45 False  [the failing side of an && operand inside an assert! whose statement ran: either operand false fails the check by itself] [a line of this change] said.starts_with("behind: ") && said.contains("; the import journal could not be read"),
+(F) BRANCH crates/api/src/store_route.rs:2807:13 False  said.starts_with("the import journal could not be read (")
+(F) BRANCH crates/api/src/store_route.rs:2808:20 False  && said.ends_with("so whether this census is behind its import is not known"),
+(F) BRANCH crates/api/src/store_route.rs:2818:13 False  said.starts_with("behind: ") && said.contains("; the import journal could not be read"),
+(F) BRANCH crates/api/src/store_route.rs:2818:45 False  said.starts_with("behind: ") && said.contains("; the import journal could not be read"),
 (F) LINE crates/api/tests/pool_load.rs:382  strange.iter().take(5).collect::<Vec<_>>()
 (F) LINE crates/api/tests/pool_load.rs:564  other
 (F) LINE crates/api/tests/pool_load.rs:565  .iter()
@@ -489,40 +604,4 @@ HOST = covered on the Mac's run of START (the kit's lists hold no row for it) an
 (F) BRANCH crates/api/tests/pool_load.rs:579:23 False  served > 0 && holds > 0,
 (F) BRANCH crates/api/tests/pool_load.rs:716:17 False  body.contains("log read not admitted") && body.contains("run at once"),
 (F) BRANCH crates/api/tests/pool_load.rs:716:59 False  body.contains("log read not admitted") && body.contains("run at once"),
-(U) LINE crates/api/src/audit_json.rs:634  [(U) on every target: last_runs asks Journal::page(first + 1, 0, 1): records >= 1, skip 0 and take 1 give wanted == 1 (audit.rs:1982-1987), so it answers one entry or an error, never an empty page] continue;
-(U) BRANCH crates/api/src/audit_json.rs:633:17 False  [(U) on every target: last_runs asks Journal::page(first + 1, 0, 1): records >= 1, skip 0 and take 1 give wanted == 1 (audit.rs:1982-1987), so it answers one entry or an error, never an empty page] let Some(entry) = record.into_iter().next() else {
-(U) LINE crates/api/src/feed_checks_files.rs:202  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] Refusal::Refused(format!(
-(U) LINE crates/api/src/feed_checks_files.rs:203  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] "`{}` has no modification time: {why}",
-(U) LINE crates/api/src/feed_checks_files.rs:204  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] dir.display()
-(U) LINE crates/api/src/feed_checks_files.rs:205  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] ))
-(U) LINE crates/api/src/feed_checks_files.rs:206  [(U) on aarch64-apple-darwin: Metadata::modified on unix (Linux and Darwin) builds the time from stat's st_mtime and st_mtime_nsec, which the kernel keeps in range, so it never refuses on aarch64-apple-darwin; the Err map is a backstop for targets without a modification time] })?),
-(U) LINE crates/api/src/feed_checks_files.rs:1200  [(U) on every target: file_tick takes a slot from held.slots, which holds only slots made where stocks and members are pushed together, or makes one there and pushes both (feed_checks_files.rs:1180-1196), so both vectors hold it] return Err(format!("month {month}: a share's slot {slot} is not held"));
-(U) LINE crates/api/src/feed_checks_files.rs:1233  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] return Err(format!(
-(U) LINE crates/api/src/feed_checks_files.rs:1234  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] "month {}: a share's slot {slot} is not held",
-(U) LINE crates/api/src/feed_checks_files.rs:1235  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] held.month
-(U) LINE crates/api/src/feed_checks_files.rs:1236  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] ));
-(U) BRANCH crates/api/src/feed_checks_files.rs:119:12 False  [(U) on every target: bump resizes counts to at + 1 on the line before when it is shorter, so get_mut(at) always answers] if let Some(count) = counts.get_mut(at) {
-(U) BRANCH crates/api/src/feed_checks_files.rs:685:16 False  [(U) on every target: a row whose share differs from current pushes its stock first (lines 665-683) and the first row's current is None, so stocks.last_mut() always answers] if let Some(stock) = parsed.stocks.last_mut() {
-(U) BRANCH crates/api/src/feed_checks_files.rs:1198:9 False  [(U) on every target: file_tick takes a slot from held.slots, which holds only slots made where stocks and members are pushed together, or makes one there and pushes both (feed_checks_files.rs:1180-1196), so both vectors hold it] let (Some(stock), Some(members)) = (held.stocks.get_mut(slot), held.members.get_mut(slot))
-(U) BRANCH crates/api/src/feed_checks_files.rs:1232:17 False  [(U) on every target: group_by_share walks order = 0..held.stocks.len() over members = held.members, which file_tick pushes in step with stocks, so both answer every slot] let (Some(stock), Some(rows)) = (held.stocks.get(slot), members.get_mut(slot)) else {
-(U) BRANCH crates/api/src/import_journal.rs:417:28 False  [(U) on every target: runs_by_id holds only positions taken as self.runs.len() in the step that then pushes the run (lines 427-431) and runs never shrinks, so every held position answers] && let Some(run) = self.runs.get_mut(start)
-(U) BRANCH crates/api/src/import_journal.rs:536:16 False  [(U) on every target: last is [_; 3] (line 294) and ImportKindOrder::of is a position in ImportKind::ALL, [Self; 3], which lists every variant (crates/pull/src/gdfl_import.rs:412-423)] if let Some(last) = self.last.get_mut(slot) {
-(U) LINE crates/api/src/merge.rs:711  [(U) on every target: the empty else of the if-let at 694; Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] }
-(U) LINE crates/api/src/merge.rs:718  [(U) on every target: the empty else of the if-let at 712; Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] }
-(U) BRANCH crates/api/src/merge.rs:694:12 False  [(U) on every target: Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] if let Some(slot) = e.ids.get_mut(vendor as usize) {
-(U) BRANCH crates/api/src/merge.rs:712:12 False  [(U) on every target: Entry::ids and Entry::vendor_isins are arrays of Vendor::ALL.len() (merge.rs:90, 92) and Vendor is a fieldless enum of exactly the five variants Vendor::ALL lists, default discriminants 0..=4 (crates/core/src/vendor.rs:52-98), so vendor as usize always indexes inside] if let Some(slot) = e.vendor_isins.get_mut(vendor as usize) {
-(U) LINE crates/api/src/pullrun.rs:876  [(U) on every target: Feed::ALL holds TrueData and GDFL, whose transport kind is Folder (pull's own test asserts both, crates/pull/src/vendor.rs:6444-6445), so unjournalled_feeds is never empty] return String::new();
-(U) BRANCH crates/api/src/pullrun.rs:875:8 True  [(U) on every target: Feed::ALL holds TrueData and GDFL, whose transport kind is Folder (pull's own test asserts both, crates/pull/src/vendor.rs:6444-6445), so unjournalled_feeds is never empty] if names.is_empty() {
-(U) LINE crates/api/src/repair_route.rs:167  [(U) on every target: a validated Day lies in 1970..=9999 (pull::session MIN_YEAR, MAX_YEAR), the span YearMonth::new admits (crates/store/src/path.rs:584), so year_month() of a window's day never refuses (its own doc says so, crates/pull/src/session.rs:425-433)] return refused("the window's first month is outside the store's calendar");
-(U) BRANCH crates/api/src/repair_route.rs:166:9 False  [(U) on every target: a validated Day lies in 1970..=9999 (pull::session MIN_YEAR, MAX_YEAR), the span YearMonth::new admits (crates/store/src/path.rs:584), so year_month() of a window's day never refuses (its own doc says so, crates/pull/src/session.rs:425-433)] let Ok(first_month) = window.from().year_month() else {
-(U) BRANCH crates/api/src/repair_route.rs:255:20 False  [(U) on every target: every planned month is the month of a day of the window (repair_plan::plan, crates/pull/src/repair_plan.rs:450-470), so its first day is a valid Day] if let Ok(first) = Day::new(month.month.year(), month.month.month(), 1) {
-(U) LINE crates/api/src/settings_route.rs:331  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] None => Effective {
-(U) LINE crates/api/src/settings_route.rs:332  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] value: None,
-(U) LINE crates/api/src/settings_route.rs:333  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] source: format!(
-(U) LINE crates/api/src/settings_route.rs:334  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] "environment {name} holds {value:?}, which is refused ({refusal}): \
-(U) LINE crates/api/src/settings_route.rs:335  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] nothing is in force for {}",
-(U) LINE crates/api/src/settings_route.rs:336  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] key.name()
-(U) LINE crates/api/src/settings_route.rs:337  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] ),
-(U) LINE crates/api/src/settings_route.rs:338  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] origin: "environment",
-(U) LINE crates/api/src/settings_route.rs:339  [(U) on every target: only Key::SourceMasters names an environment variable (crates/store/src/settings.rs:178-183) and fallback_reader_of(Key::SourceMasters) is Some (settings_route.rs:377-382), so the None arm under an environment value is never taken] },
 `````
