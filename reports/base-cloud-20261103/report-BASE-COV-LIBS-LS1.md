@@ -1,6 +1,181 @@
-STATUS: IN PROGRESS
+STATUS: BLOCKED QUESTION
 
-# BASE-COV-LIBS-LS1 (crate `store`), 3 Nov 2026 cloud wave
+# BASE-COV-LIBS-LS1 (crate `store`): continuation of 5 Nov 2026
+
+TOKEN `BASE-COV-LIBS-LS1-20261105-2` (a new account; the 3 Nov token `-20261103-1` is retired).
+Branch `cloud/cov-libs-ls1-20261103`, continued from its tip `6d18036ec12a`. Code tip
+`4b3ee558a38fbc65f6c0dfcf59893cff750568c0` (`git rev-list -1 HEAD -- . ':(exclude)reports'`).
+
+## QUESTION (for the main session)
+
+Every production row of `store` that an input, a file, a folder, a variable or a direct call
+reaches now has an asserting test, and every other one is either a (U) with its proof (81 rows)
+or one of **61 rows reached only by a host refusal or a race** (`fu-LS1.txt.md`, section
+"PRODUCTION ROWS ONLY A HOST REFUSAL OR A RACE REACHES", each with its call and why): a refused
+`fsync`, `write`, `fstat`, shared or patient `flock`, rename or read on a file the code has just
+opened and checked, or a file or directory that must change between two system calls. No seam
+reaches those calls: `file.rs`'s seam covers its own `fault()` and positional reads and writes,
+`flock.rs`'s covers `Flock::try_lock` and the unlock only. Beside them, **144 test-code rows**
+are a test's own defensive arms: timeouts waiting for a FIFO peer, skips for a host without git,
+macOS-only arms, a check module's failure-collection lines, fault-mock guards.
+
+1. For the 61 production rows, which do you want?
+   (A) LS1 adds `#[cfg(test)]` seams at those calls in `store`'s production files, in
+   `file.rs`'s pattern (a per-thread, one-shot refusal a test arms; no production behaviour
+   changes; D-6017's argument that the lift that ships is the lift every test runs), with a
+   decision entry (D-8561, below) and a test through each seam;
+   (B) LSA records them as limits in `docs/06-limits.md` and they stay owed to the Mac's check
+   as host-only rows;
+   (C) seams for the host refusals (28 rows), limits for the races (33 rows).
+   LS1 recommends (C): a race needs a second actor between two calls, and a seam that fakes it
+   tests the seam, not the code.
+2. For the 144 test-code rows: may they be (F) under recipe step 4's second clause (a test's or
+   a check module's own failing or bounding branch), or must each test be restructured so the
+   arm does not exist?
+
+## What this continuation did
+
+- Re-installed the pinned nightly (`rustc -V`: `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`;
+  `llvm-cov`/`llvm-profdata`: `LLVM version 23.1.0-rust-1.99.0-nightly`) and checked the kit
+  against `MANIFEST.md` (`d3-route-b-cloud.sh` f032b525..., `d3-covset.mjs` ecef3bdc...,
+  `d3-route-b.sh` f3d70ac2..., `replay-minus-reports.sh` f223185d...: all match).
+- Closed the report's NEXT: `quarantine.rs:2708`, the `file.rs` time-index arms, the overlap
+  diagnosis past the last record (`file.rs:4451-4452`), `sealed.rs:1504`; `sealed.rs:2352` is a
+  (U) (pure arithmetic, proof in the list).
+- Then went through **every** remaining production row of the 3 Nov list. A row a direct call
+  reaches is never (U), so each such row got a direct-call test against the function's own
+  contract (the admission or a door refuses those inputs first on every public path). Rows the
+  3 Nov list called (U) but a direct call reaches (`file_sealed.rs:460-461`, `agree`) got tests.
+- Two test seams were already in the crate and are now used for the rows they reach: `file.rs`'s
+  host-fault seam (read, measure) and `flock.rs`'s lock and unlock refusals.
+- Process-wide statics (the one telemetry sink a process may install, the lock registry) are
+  met in a **fresh child process** of the test binary that runs the one test alone (the
+  `where_permission_binds` mechanism without the uid change), so a test can install its own
+  sink and read back what a function said, and see a registry no other test touched.
+- No production line changed. The only edits to production files are `#[cfg(test)]` module
+  declarations and, in `file.rs`'s `#[cfg(test)]` test module, the seam's `arm_host_fault`,
+  `disarm_host_fault` and `host_fault_armed` made crate-visible and `directory_flushes` visible to
+  `file`'s own test children.
+
+## Tests added (36 new, 1 corrected), each red under a hand change, then restored
+
+| commit | module (declared in) | tests |
+|---|---|---|
+| `32002500` | `quarantine_tests.rs` (`quarantine.rs`) | `two_runs_killed_after_their_promotions_are_both_resumed_and_counted` |
+| `2781c032`, `12b16ec1`, `4b3ee558` | `file_index_cover_tests.rs` (new, `file.rs`) | `a_daily_month_reaching_the_threshold_with_two_bars_in_one_day_commits_unindexed`, `the_threshold_step_refuses_an_off_grid_or_outside_bar_by_its_batch_offset`, `the_index_step_refuses_an_off_grid_or_outside_bar_by_its_batch_offset`, `an_index_failure_is_refused_naming_the_index_and_its_reason`, `a_handle_that_keeps_no_index_has_no_index_step_to_take`, `a_month_with_no_ready_index_takes_no_entries`, `an_empty_month_has_no_verified_suffix`, `a_bar_past_the_last_record_but_inside_the_claimed_range_is_not_held`, `a_seal_past_every_offset_is_refused_by_the_offset_and_writes_nothing`, `a_block_the_counter_does_not_commit_is_refused_before_it_is_read`, `a_month_at_its_last_generation_answers_an_offer_as_its_append_refuses`, `every_refused_read_of_an_offer_refuses_it_by_the_bars_name`, `a_relative_store_root_confirms_every_directory_up_to_the_root`, `a_level_that_turns_up_before_its_creation_is_taken_as_made` |
+| `38ee3db3` | `sealed_fold_cover_tests.rs` (new, `sealed.rs`) | `a_fold_whose_table_slot_has_no_width_stops_at_its_last_row` |
+| `9780c55d` | `checksum_audit_cover_tests.rs` (new, `checksum_audit.rs`) | `the_audit_refuses_a_header_or_geometry_it_cannot_hold_before_reading` |
+| `9780c55d` | `flock_cover_tests.rs` (new, `flock.rs`) | `a_reader_that_outlives_a_patient_writers_turn_keeps_its_entry`, `one_side_leaving_keeps_an_entry_the_other_still_holds`, `a_hold_sentence_a_formatter_refuses_ends_at_the_refusal`, `a_note_that_cannot_be_cleared_is_said_once_per_process`, `a_turn_ended_before_any_lock_was_recorded_makes_no_registry` |
+| `9780c55d` | `generation_door_cover_tests.rs` (`generation.rs`) | `a_linked_pointer_refuses_the_read`, `a_promotion_the_pointers_path_refuses_is_refused_by_that_step` |
+| `9d118a6a` | `provenance_cover_tests.rs` (`provenance.rs`) | `a_sealed_form_whose_head_does_not_decode_refuses_the_read`, `a_landing_whose_sidecar_lock_the_host_refuses_is_refused_by_the_lock`, `a_device_the_host_will_not_measure_refuses_the_deferred_flush` |
+| `9d118a6a` | `month_summary_decode_cover_tests.rs` (`month_summary.rs`) | `a_bit_past_a_bitmaps_end_is_dropped_never_wrapped` |
+| `d081db4e` | `quarantine_tests.rs` (`quarantine.rs`) | `a_release_the_host_refuses_names_the_lock_and_keeps_the_line`, `a_directory_at_the_lock_or_the_index_name_refuses_the_act_before_any_line`, `a_slot_of_the_same_hash_and_another_month_is_passed_over`, `a_resume_whose_dropped_line_the_ledger_refuses_is_still_owed` |
+| `12b16ec1` | `file_sealed_cover_tests.rs` (`file_sealed.rs`) | `a_sealed_audit_of_another_symbol_or_timeframe_disagrees_with_the_raw_month` |
+| `4b3ee558` | `repair_door_cover_tests.rs` (`repair.rs`) | `a_refused_source_release_after_a_drop_revision_says_it_may_be_visible`, `a_restate_beside_a_drop_that_offers_none_of_its_stamps_holds_nothing_back`, `a_restate_that_restated_nothing_says_nothing` |
+| `4b3ee558` | `settings_door_cover_tests.rs` (`settings.rs`) | corrected: `a_bare_number_under_the_floor_is_told_of_percent_only_where_it_could_be_one` |
+
+The suite grew by exactly these 36: 1,064 results passed at the final run against 1,028 at the 3 Nov final.
+
+- Red checks: per batch, one hand change per test in the production file it covers (a refusal
+  mapped to another error or ignored, a guard loosened, an early return made an error or a
+  panic, a reason word, an emit added), applied together from copies; every new test FAILED;
+  each file restored from its copy and `git diff` checked empty.
+- Hand changes worth naming: `sealed.rs:1504` `<` to `<=` (the zero-width fold pushes two rows);
+  `quarantine.rs:2708` keeping only the last intent's bars (`Resumed { bars: 2 }`, not 3);
+  `file.rs` `raw_answer`'s terminal arm turned into a `Follows` answer; `flock.rs` `note_unnoted`'s
+  once-guard removed (two `store.flock` lines in the child's own sink); `repair.rs`'s
+  `note_restated` emitting for a month with nothing new.
+- **A flaw in this shard's own 3 Nov test, fixed** (`4b3ee558`): the floor test's `"95MB"` case
+  was refused as an unknown unit ("is not a floor") before the percent clause, so its
+  `!contains("percent")` passed without reaching the clause it claimed. It now asserts that
+  `1GB` is the floor itself and that `MB` is refused as no unit; `settings.rs:688:30 False` is a
+  (U) (every unit scales by at least the floor).
+- **A misfiling in the 3 Nov lists, corrected**: `verdict.rs:2278`, `:2312`, `:2478` are
+  production lines (the test modules start at `verdict.rs:4178`); the 3 Nov classifier filed them
+  under test code. Each is now a (U) with its proof.
+
+## Gates (code tip `4b3ee558`, stable `rustc 1.97.1`, this host)
+
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy -p store --all-targets --locked -- -D warnings`: exit 0 (run after the last code
+  change).
+- `cargo test -p store --locked --no-fail-fast` (as root, `TMPDIR` a mode-1777 tmpfs): exit 0, 1,064 passed, 0 failed, 8 ignored over 43 result lines (the same counts as the final Route B run on the nightly).
+- Mutants: deferred (operator 30 Oct). Benches: none run; no production line changed.
+
+## Coverage: Route B (`store`, whole crate)
+
+The kit's `d3-route-b-cloud.sh` unchanged (`D3_NIGHTLY`, `D3_LLVM_BIN`, `D3_CARGO` set to the
+pinned nightly's own tools, `D3_DIR` to the extracted `d3-covset.mjs`, `D3_W=/home/user`), tree
+`/home/user/ls1-deep` (a detached worktree at the measured tip), `K=/home/user/brutex/target`,
+a new empty profile folder per run, run under `umask 000` so the profile folder takes the
+profiles of the `nobody` re-runs and of the fresh-process children. Set file: `reading
+whole:store` plus `coverage <file> whole` for every tracked `.rs` file of the crate.
+
+| run | tip | wall (IST) | tests | store lines | store branch sides |
+|---|---|---|---|---|---|
+| 3 Nov final | `fc9b489f0e3c` | 17:06-17:34 (3 Nov) | 1,028 / 0 / 8 | 51,094/52,629 (1,535 uncovered) | 3,351/3,916 (565 uncovered) |
+| progress | `38ee3db3d2fc` | 08:15:51-08:33:56 | 1,038 / 0 / 8 | 51,474/52,972 (1,498 uncovered) | 3,364/3,924 (560 uncovered) |
+| **final** | **`4b3ee558a38f`** | **08:47:41-09:05:56 (tests 17 min)** | **1,064 / 0 / 8** | **52,295/53,771 (1,476 uncovered)** | **3,405/3,964 (559 uncovered)** |
+
+- Every run: NOT READ (exit 3) the four `benches/` files (`[[bench]] test = false`, so no object
+  holds them; L-BCL-1) and `src/lib.rs` (module declarations only). The final run read 112 files.
+- **Production rows** (non-test code): 3 Nov final 239 (169 lines + 70 sides, 44 of them (U));
+  progress 197; **final 142 (94 lines + 48 sides): 81 (U) with proofs, 61 host/race, 0 GAP.**
+- Test code at the final run: 1,108 rows of `#[ignore]`d tests and the helpers only they call,
+  641 (F) by pattern, 144 test-code GAPs. (The totals count the new tests' own failing arms, so
+  they move less than the production rows do.)
+- `settings.rs:1367-1376` (two racing savers' hard link) stays nondeterministic, as on 3 Nov.
+- Lists (this folder): `gaps-LS1.txt.md` (the final run's log lines, the per-file table with row
+  counts by class, every uncovered row tagged), `fu-LS1.txt.md` (the 81 (U) items with proofs, the
+  61 host/race rows with the call and what is needed, the ignored-test counts by file, the 144
+  test-code GAPs, the 641 (F) items by pattern). The 3 Nov proofs are carried for every row still
+  uncovered; the two that tests now cover (`file_sealed.rs:460-461`) are gone from them.
+
+## Decision drafts (for LSA; ids from my block only)
+
+- **D-8560** (draft, replaces the 3 Nov draft): BASE-COV-LIBS-LS1, crate `store` (D2 part A, D6
+  shard LS1). Route B (the kit's `d3-route-b-cloud.sh`, pinned `rustc 1.99.0-nightly (1a98b1e13
+  2026-08-07)` with its own LLVM 23.1.0 tools) on a Linux x86_64 root host. Before (START plus
+  the seven root re-runs, tip `c7ccb0f7f7e2`): lines 50,033/51,607, branch sides 3,291/3,868.
+  After (tip `4b3ee558a38f`): lines 52,295/53,771, branch sides 3,405/3,964; production rows 225
+  lines + 104 sides down to 94 + 48, every one a (U) with its proof (81) or a host refusal or race
+  no seam reaches (61). NOT READ: `benches/` (test = false) and `src/lib.rs` (no executable line).
+  Lists: `reports/base-cloud-20261103/gaps-LS1.txt.md` and `fu-LS1.txt.md`. Seven permission
+  tests that failed only as root re-run their unchanged bodies as `nobody` through
+  `crate::support::where_permission_binds` (the D-0995 pattern); tests that need a process-wide
+  static fresh (the telemetry sink, the lock registry) run in a fresh child of the test binary.
+  Under `cfg(test)` only, `file.rs`'s host-fault seam is crate-visible so another module's test
+  arms it. The bar is not met for `store` until the question above is answered; the macOS-only
+  lines and a Route B on the Mac's pin are the Mac's.
+- **D-8561**: kept for the answer to the question (the seams, if (A) or (C) is chosen).
+- docs/04: no new invariant (the tests pin documented behaviour); docs/06: none of mine beyond
+  L-BCL-1 and L-BCL-3, unless the answer is (B) or (C).
+
+## NEEDS THE MAC
+
+1. Route B of `store` on the Mac's pin (aarch64-apple-darwin): the macOS-only lines (the brief
+   names `src/file.rs:7271`, `:10466`, `src/open_flags.rs:33-122`) are not compiled here and are
+   owed to that run, never claimed; the (U) proofs in `fu-LS1.txt.md` are for that run's check.
+2. A non-root, 14-core run of the `store` suite (here: root, 4 cores; every root-sensitive test
+   re-runs as `nobody` and passes both ways by design).
+3. The `#[ignore]`d tests (L-BCL-3 and the measurements): `tests/sealed_codec_samples.rs`,
+   `tests/sealed_samples.rs`, `tests/sealed_write_door.rs`, the private-root run of
+   `tests/sealed_door.rs`, `tests/tix_latency.rs`, `file::sealed_door_tests::read_rows_at_timing`
+   and the full-volume test `file::tests::the_kernels_own_enospc_on_a_full_volume_is_disk_full_by_name`.
+4. The (F) classification (by pattern, spot-checked) and the test-code GAPs (question 2).
+5. The D1 landing; mutants (deferred, operator 30 Oct).
+
+## NOT DONE
+
+- The 61 host/race production rows and the 144 test-code rows: the question above.
+- Nothing else of this shard is open.
+
+---
+
+## 3 Nov 2026 (token `BASE-COV-LIBS-LS1-20261103-1`), kept as that session wrote it
+
+Its figures, lists and NEXT are superseded by the sections above; its line 1 was `STATUS: IN PROGRESS`.
+
 
 TOKEN `BASE-COV-LIBS-LS1-20261103-1`; branch `cloud/cov-libs-ls1-20261103`, cut from
 `origin/cloud/base-kit-libs-20261103` (`eeec369be7dc`, START `bd04fb299d23`). Code tip
@@ -15,7 +190,7 @@ covered nor proved (U), 995 rows are bodies of `#[ignore]`d tests, 213 test-code
 Line 1 is IN PROGRESS because some of those production rows are reachable and mine to close
 (NEXT, below); most of the rest need a host fault, a race, or the Mac.
 
-## Host
+### Host
 
 Linux x86_64, root, 4 cores, 15 GiB memory, 29 GiB free disk. Stable `rustc 1.97.1
 (8bab26f4f 2026-07-14)` (the repository's `rust-toolchain.toml` pin). Pinned nightly installed
@@ -27,7 +202,7 @@ Kit files checked against `MANIFEST.md` before use: `d3-route-b-cloud.sh` f032b5
 f223185d... (all match). Scratch tools of mine (node only, never committed): a row classifier
 (F? by pattern / GAP) and the two list writers.
 
-## Step 1: `cargo test -p store --lib --locked --no-fail-fast`
+### Step 1: `cargo test -p store --lib --locked --no-fail-fast`
 
 - On START (as root, `TMPDIR` mode 0755): compiles with no warning; 466 passed, 9 failed,
   2 ignored. Two of the nine already re-run themselves as `nobody` through
@@ -49,7 +224,7 @@ f223185d... (all match). Scratch tools of mine (node only, never committed): a r
   the unchanged body as `nobody` when the process is root and in the same uid otherwise (the Mac
   and CI run it as before). After: 475 passed, 0 failed, 2 ignored, as root. No host red is left.
 
-## Step 2: Route B (`store`, whole crate)
+### Step 2: Route B (`store`, whole crate)
 
 Script: the kit's `d3-route-b-cloud.sh` unchanged, with `D3_NIGHTLY`, `D3_LLVM_BIN`, `D3_CARGO`
 set to the pinned nightly's own tools and `D3_DIR` to the extracted `d3-covset.mjs`; tree
@@ -89,7 +264,7 @@ set to the pinned nightly's own tools and `D3_DIR` to the extracted `d3-covset.m
   proof from the code, 653 (F) rows by pattern, and every remaining row by category: 195
   production GAPs, 995 ignored-test rows, 213 test-code GAPs).
 
-## Step 3: tests added (36 new, 7 converted), each red under a hand change, then restored
+### Step 3: tests added (36 new, 7 converted), each red under a hand change, then restored
 
 | commit | module (declared in) | tests |
 |---|---|---|
@@ -119,7 +294,7 @@ set to the pinned nightly's own tools and `D3_DIR` to the extracted `d3-covset.m
   `read_verified`; a hand change showed it never reached that side, because every append clears
   the cache in `seal_committed` before the counter moves. That side is (U) in `fu-LS1.txt.md`.
 
-## Gates (at the code tip `fc9b489f`, stable 1.97.1, this host)
+### Gates (at the code tip `fc9b489f`, stable 1.97.1, this host)
 
 - `cargo fmt --all --check`: exit 0.
 - `cargo clippy -p store --all-targets --locked -- -D warnings`: exit 0 (two findings in my tests
@@ -132,7 +307,7 @@ set to the pinned nightly's own tools and `D3_DIR` to the extracted `d3-covset.m
   code only.
 - Benches: none run; no hot path changed (no production line changed).
 
-## Files changed (all under `crates/store/src/`, 1,893 lines added, none removed)
+### Files changed (all under `crates/store/src/`, 1,893 lines added, none removed)
 
 New: `file_cover_tests.rs`, `file_sealed_cover_tests.rs`, `generation_door_cover_tests.rs`,
 `month_summary_decode_cover_tests.rs`, `month_summary_writer_cover_tests.rs`,
@@ -142,7 +317,7 @@ New: `file_cover_tests.rs`, `file_sealed_cover_tests.rs`, `generation_door_cover
 `settings.rs`, `staging.rs`. Tests converted or added in: `catalog_cover_tests.rs`,
 `quarantine_cover_tests.rs`, `quarantine_tests.rs`, `settings_tests.rs`. Nothing outside my shard.
 
-## Decision drafts (for LSA; ids from my block only)
+### Decision drafts (for LSA; ids from my block only)
 
 - **D-8560** (draft): BASE-COV-LIBS-LS1, crate `store` (D2 part A, D6 shard LS1). Route B (the
   kit's `d3-route-b-cloud.sh`, pinned `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)` with its own
@@ -159,7 +334,7 @@ New: `file_cover_tests.rs`, `file_sealed_cover_tests.rs`, `generation_door_cover
 - docs/04: no new invariant (the tests pin documented behaviour); docs/06: none of mine beyond
   L-BCL-1 (benches) and L-BCL-3 (ignored real-data tests), which already exist.
 
-## NEEDS THE MAC
+### NEEDS THE MAC
 
 1. Route B of `store` on the Mac's pin (aarch64-apple-darwin). The macOS-only lines (the brief
    names `src/file.rs:7271`, `:10466`, `src/open_flags.rs:33-122`) are not compiled on Linux, so
@@ -175,7 +350,7 @@ New: `file_cover_tests.rs`, `file_sealed_cover_tests.rs`, `generation_door_cover
    (`BRUTEX_FULL_VOLUME`, L-PREC1-01; on Linux a small tmpfs serves, which root can mount).
 4. The D1 landing; mutants (deferred, operator 30 Oct).
 
-## NOT DONE (NEXT for a continuation of this shard)
+### NOT DONE (NEXT for a continuation of this shard)
 
 - Reachable production rows still without a test (from `fu-LS1.txt.md` PRODUCTION GAPS):
   `quarantine.rs:2708` (two killed runs' intents owed for one month), the `file.rs` time-index
