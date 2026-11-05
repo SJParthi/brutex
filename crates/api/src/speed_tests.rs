@@ -1126,3 +1126,60 @@ fn stop_asked_registers_its_signals_when_called_not_when_polled() {
         "{out}"
     );
 }
+
+/// **THE TABLE AND A ROW NAME THEMSELVES AND NOTHING THEY HOLD, A
+/// PERCENTILE NEVER PASSES ITS MAX, AND AN ACCESS WINDOW WHOSE CLOCK STEPPED
+/// BACK IS CLOSED** (BASE-COV-API-AS2). Extremes: (1) the table's `Debug`
+/// names its start and cap and no row; (2) a row's `Debug` names its route
+/// alone; (3) a count larger than its buckets hold puts the percentile past
+/// every bucket: it is the max; (4) the same at the 50th; (5) a count of
+/// zero is zero whatever the max; (6) a clock that stepped back closes the
+/// window it was in and opens one at the new time; (7) the closed window is
+/// said when it held more than its one sampled read; (8) the first read of
+/// the new window is sampled again. Combined: (9) a count past its buckets
+/// AND a max of zero: zero, never a bucket's top; (10) a clock that stepped
+/// back AND a refused read: the old window closes, the refusal is counted
+/// in the new one and nothing is sampled. Out of the box: (11) a clock that
+/// stepped back to zero from `u64::MAX`.
+#[test]
+fn the_table_names_itself_a_percentile_keeps_its_max_and_a_clock_step_back_closes() {
+    let speed = Speed::new(5, 3);
+    let _row = speed.row("/bars.json", Kind::Route, 6);
+    let said = format!("{speed:?}");
+    assert!(said.starts_with("Speed {"), "{said}");
+    assert!(
+        said.contains("started_ms: 5") && said.contains("cap: 3"),
+        "{said}"
+    );
+    assert!(!said.contains("/bars.json"), "{said}");
+    assert_eq!(
+        format!("{:?}", speed.row("/spot.json", Kind::Route, 7)),
+        "Handle(\"/spot.json\")"
+    );
+    // (3), (4), (5), (9): a count past its buckets.
+    assert_eq!(percentile(&[1, 0, 0], 5, 99, 77), 77);
+    assert_eq!(percentile(&[1, 0, 0], 5, 50, 77), 77);
+    assert_eq!(percentile(&[1, 0, 0], 0, 99, 77), 0);
+    assert_eq!(percentile(&[1, 0, 0], 5, 99, 0), 0);
+    // (6)-(8): a clock that stepped back.
+    let mut windows = AccessWindows::default();
+    assert!(windows.account("/bars.json", false, 10, 1_000).sample);
+    assert!(!windows.account("/bars.json", false, 20, 1_001).sample);
+    let back = windows.account("/bars.json", false, 30, 500);
+    let closed = back.closed.expect("the window the clock left is said");
+    assert_eq!((closed.served, closed.opened_ms), (2, 1_000));
+    assert!(back.sample, "the new window samples its first read");
+    // (10): back again, refused.
+    let refused = windows.account("/bars.json", true, 40, 100);
+    assert!(refused.closed.is_none(), "one sampled read is its own line");
+    assert!(!refused.sample);
+    assert_eq!(windows.routes["/bars.json"].refused, 1);
+    assert_eq!(windows.routes["/bars.json"].opened_ms, 100);
+    // (11): from u64::MAX back to zero.
+    let mut far = AccessWindows::default();
+    let _ = far.account("/spot.json", false, 1, u64::MAX);
+    let _ = far.account("/spot.json", false, 1, u64::MAX);
+    let zero = far.account("/spot.json", false, 1, 0);
+    assert_eq!(zero.closed.map(|window| window.served), Some(2));
+    assert_eq!(far.routes["/spot.json"].opened_ms, 0);
+}

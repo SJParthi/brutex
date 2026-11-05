@@ -115,6 +115,46 @@ fn canonical_selectors_and_pins_refuse_cross_page_fallback() {
     assert!(Asked::parse(&"x".repeat(513)).is_err());
 }
 
+/// **EVERY SELECTOR A CATALOG PAGE CANNOT TAKE IS REFUSED BY ITS OWN WORDS**
+/// (BASE-COV-API-AS2). Extremes: (1) a page kind nobody names; (2) a side
+/// that is neither long nor short; (3) a grid axis nobody names; (4) a grid
+/// page with no side; (5) a grid page with a side and no axis; (6) a
+/// coordinates page that names an axis; (7) the exact selectors a grid page
+/// takes, with its pin, are read; (8) every refusal names the selector, never
+/// a fallback page. Combined: (9) a grid page with neither side nor axis:
+/// the side is asked for first; (10) an unknown kind AND an unknown side: the
+/// kind is read first. Out of the box: (11) a side in another case, `LONG`,
+/// is no side.
+#[test]
+fn every_catalog_selector_it_cannot_take_is_refused_by_its_own_words() {
+    let selectors = "catalog page requires exact completion, selectors and limit 1..=256";
+    for (suffix, said) in [
+        ("&kind=everything", "unknown catalog page kind"),
+        ("&side=up", "side must be long or short"),
+        ("&side=LONG", "side must be long or short"),
+        ("&axis=sideways", "unknown saved grid axis"),
+        ("&kind=grid&axis=stop", selectors),
+        ("&kind=grid&side=long", selectors),
+        ("&kind=grid", selectors),
+        ("&axis=target", selectors),
+        ("&kind=everything&side=up", "unknown catalog page kind"),
+    ] {
+        assert_eq!(
+            Asked::parse(&format!("identity={ID}&completion={ID}{suffix}"))
+                .err()
+                .as_deref(),
+            Some(said),
+            "{suffix}"
+        );
+    }
+    assert!(
+        Asked::parse(&format!(
+            "identity={ID}&completion={ID}&kind=grid&side=short&axis=requested-trail"
+        ))
+        .is_ok()
+    );
+}
+
 #[test]
 fn authenticated_catalog_projects_exact_program_coordinate_trade_session_and_grid_pages() {
     let _cache = CACHE_TEST.lock().unwrap();

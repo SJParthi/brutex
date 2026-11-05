@@ -639,6 +639,114 @@ mod tests {
             .expect("parent last");
     }
 
+    /// **A PAGE PAST AN EMPTY ANSWER, A LEDGER PATH THAT IS NO FILE, A PARENT
+    /// WITH NO RECEIPT AND TRADES ON TWO DAYS ARE EACH SAID**
+    /// (BASE-COV-API-AS2). Extremes: (1) a run committed with no trade, its
+    /// child gone, asked for page 1: 416 naming the page, never an empty 200;
+    /// (2) a store with no ledger asked for page 1: the same 416; (3) a ledger
+    /// whose folder is a FILE is a 503 before anything is read; (4) a ledger
+    /// parent with no receipt for it is refused, never an empty answer;
+    /// (5) two trades entered on two IST days are two day buckets, written
+    /// with the comma between them; (6) page 0 of the committed empty run is
+    /// still its empty 200; (7) every refusal names the identity asked;
+    /// (8) nothing is created by any of these reads. Combined: (9) the absent
+    /// store AND a page AND a limit at once: the page is past, said once;
+    /// (12) a ledger path that is a FOLDER is measured, then refused by the
+    /// receipt read as no regular file;
+    /// (10) a receipt for no trade AND a child that is gone: an empty answer
+    /// on page 0, a refusal on page 1. Out of the box: (11) page
+    /// `u64::MAX`, refused as a question past the hard maximum.
+    #[test]
+    fn the_edges_of_an_empty_answer_and_trades_on_two_days_are_said() {
+        let base = std::env::temp_dir().join(format!(
+            "brutex-api-trades-as2-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        // (1), (6), (10): a committed empty run whose child is gone.
+        let zero = base.join("zero");
+        let empty = [0x51; 32];
+        cli::trades::Trades::open(&zero).expect("empty trade header");
+        commit_trade_fixture(&zero, empty, 0);
+        std::fs::remove_file(cli::trades::Trades::path(&zero)).expect("delete the child");
+        let id = "51".repeat(32);
+        let (status, _, body) = respond(Ok(zero.clone()), &format!("identity={id}"));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let (status, _, body) = respond(Ok(zero.clone()), &format!("identity={id}&page=1"));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
+            "{body}"
+        );
+        assert!(body.contains(&id), "{body}");
+        // (11): past every page there can be, refused as a question.
+        let (status, _, body) = respond(
+            Ok(zero.clone()),
+            &format!("identity={id}&page={}", u64::MAX),
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("the hard maximum is 4095"), "{body}");
+        // (2), (9): no ledger at all.
+        let absent = base.join("absent");
+        let (status, _, body) =
+            respond(Ok(absent.clone()), &format!("identity={id}&page=1&limit=3"));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
+            "{body}"
+        );
+        assert!(!absent.exists(), "nothing created");
+        // (3): the ledger's folder is a FILE: the preflight cannot measure
+        // the ledger, and nothing is read.
+        let filed = base.join("filed");
+        std::fs::create_dir_all(&filed).expect("a root");
+        std::fs::write(filed.join("results"), b"a file").expect("a file where results go");
+        let (status, _, body) = respond(Ok(filed), &format!("identity={id}"));
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        assert!(body.contains("could not be measured"), "{body}");
+        // (12): the ledger path is a FOLDER: measured, then refused by the
+        // receipt read as no regular file.
+        let folder = base.join("folder");
+        std::fs::create_dir_all(cli::results::Results::path(&folder)).expect("a folder");
+        let (status, _, body) = respond(Ok(folder), &format!("identity={id}"));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("is not a regular file"), "{body}");
+        // (4): a parent with no receipt.
+        let orphan = base.join("orphan");
+        let parent = [0x52; 32];
+        commit_trade_fixture(&orphan, parent, 1);
+        std::fs::remove_file(cli::result_set::Receipts::path(&orphan)).expect("no receipts");
+        let id = "52".repeat(32);
+        let (status, _, body) = respond(Ok(orphan), &format!("identity={id}"));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("no validated detail receipt"), "{body}");
+        // (5): two trades on two IST days.
+        let two = base.join("two");
+        let run = [0x53; 32];
+        let mut second = trade_row(run, 1);
+        second.entry_micros = 60_000_000 + 86_400_000_000;
+        second.exit_micros = 120_000_000 + 86_400_000_000;
+        cli::trades::Trades::open(&two)
+            .expect("trade store")
+            .append_all(&[trade_row(run, 0), second])
+            .expect("two rows");
+        commit_trade_fixture(&two, run, 2);
+        let (status, _, body) = respond(Ok(two), &format!("identity={}", "53".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(
+            parsed["periods"]["day"].as_array().map(Vec::len),
+            Some(2),
+            "{body}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn an_identity_must_be_sixty_four_hex_characters() {
         assert!(from_hex(&"a".repeat(64)).is_some(), "64 lowercase hex");
