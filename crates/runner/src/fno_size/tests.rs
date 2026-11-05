@@ -103,18 +103,28 @@ fn outcome(plan: &Plan, index: u16) -> Outcome {
         .unwrap()
 }
 
-fn sized(plan: &Plan, index: u16) -> Sized {
-    match outcome(plan, index) {
-        Outcome::Sized(s) => s,
-        Outcome::Refused(word) => panic!("row {index} refused {}", word.word()),
+/// The sized row of an outcome, if it was sized.
+fn as_sized(outcome: Outcome) -> Option<Sized> {
+    match outcome {
+        Outcome::Sized(s) => Some(s),
+        Outcome::Refused(_) => None,
     }
 }
 
-fn refused(plan: &Plan, index: u16) -> SizeRefusal {
-    match outcome(plan, index) {
-        Outcome::Refused(word) => word,
-        Outcome::Sized(s) => panic!("row {index} sized {s:?}"),
+/// The refusal of an outcome, if it was refused.
+fn as_refused(outcome: Outcome) -> Option<SizeRefusal> {
+    match outcome {
+        Outcome::Refused(word) => Some(word),
+        Outcome::Sized(_) => None,
     }
+}
+
+fn sized(plan: &Plan, index: u16) -> Sized {
+    as_sized(outcome(plan, index)).unwrap()
+}
+
+fn refused(plan: &Plan, index: u16) -> SizeRefusal {
+    as_refused(outcome(plan, index)).unwrap()
 }
 
 /// The (stock, recipe) of each row, in row order.
@@ -310,7 +320,8 @@ fn one_candidate_takes_the_whole_free_margin_and_at_five_x_the_whole_exposure_ro
     assert_eq!(row.bound, Bound::MarginShare);
     assert_eq!(row.value, i128::from(q) * 123_457);
     assert_eq!(row.margin, row.value * 200_000);
-    assert!(row.margin <= LAKH_20 * 1_000_000 && row.value <= CRORE);
+    assert!(row.margin <= LAKH_20 * 1_000_000);
+    assert!(row.value <= CRORE);
 }
 
 #[test]
@@ -724,7 +735,9 @@ fn the_network_order_equals_a_reference_sort() {
             "seed {seed}, {count} candidates"
         );
     }
-    assert!(sizes_seen[0] && sizes_seen[1] && sizes_seen[256]);
+    assert!(sizes_seen[0]);
+    assert!(sizes_seen[1]);
+    assert!(sizes_seen[256]);
 }
 
 #[test]
@@ -896,10 +909,7 @@ fn margin_exhausted_mid_batch_under_ranked_is_portfolios_margin_cap_in_rank_orde
     let mut admitted = Vec::new();
     let mut margin_cap = Vec::new();
     for row in &plan.rows {
-        let s = match row.outcome {
-            Outcome::Sized(s) => s,
-            Outcome::Refused(_) => panic!("every row is sized"),
-        };
+        let s = as_sized(row.outcome).unwrap();
         let key = batch[usize::from(row.index)].stock.position();
         if in_use + s.margin <= limit {
             in_use += s.margin;
@@ -1106,7 +1116,9 @@ fn risk_never_passes_the_open_risk_cap() {
             })
             .collect();
         for &r in &risks {
-            assert!(r >= 1 && r <= plan.risk_each && plan.risk_each <= per_trade);
+            assert!(r >= 1);
+            assert!(r <= plan.risk_each);
+            assert!(plan.risk_each <= per_trade);
         }
         risks.sort_unstable_by(|a, b| b.cmp(a));
         assert!(risks.iter().take(usize::from(plan.k)).sum::<i128>() <= room.max(0));
@@ -1221,7 +1233,7 @@ fn a_stop_through_the_price_is_refused() {
     );
     // The right side of the price sizes.
     short.stop = Some(short.price + 1_000);
-    assert!(matches!(risk_one(short), Outcome::Sized(_)));
+    assert!(as_sized(risk_one(short)).is_some());
 }
 
 #[test]
@@ -1234,9 +1246,7 @@ fn a_stop_less_lane_is_refused() {
 #[test]
 fn a_tie_between_risk_and_share_is_labelled_risk() {
     // Share: q_m = q_x = 10,000. Risk: b = Rs 1 lakh over d = Rs 10 = 10,000 too.
-    let Outcome::Sized(row) = risk_one(cand(1, 0)) else {
-        panic!("sized");
-    };
+    let row = as_sized(risk_one(cand(1, 0))).unwrap();
     assert_eq!(
         (row.qty, row.bound, row.risk),
         (10_000, Bound::Risk, Some(10_000_000))
@@ -1244,16 +1254,15 @@ fn a_tie_between_risk_and_share_is_labelled_risk() {
     // One paisa more of stop distance: the risk binds alone; one paisa less: the share binds.
     let mut wider = cand(1, 0);
     wider.stop = Some(98_999);
-    let Outcome::Sized(row) = risk_one(wider) else {
-        panic!("sized");
-    };
+    let row = as_sized(risk_one(wider)).unwrap();
     assert_eq!((row.qty, row.bound), (9_990, Bound::Risk));
     let mut tighter = cand(1, 0);
     tighter.stop = Some(99_001);
-    let Outcome::Sized(row) = risk_one(tighter) else {
-        panic!("sized");
-    };
+    let row = as_sized(risk_one(tighter)).unwrap();
     assert_eq!((row.qty, row.bound), (10_000, Bound::MarginShare));
+    // A refused outcome has no sized row, and a sized one no refusal.
+    assert_eq!(as_sized(Outcome::Refused(SizeRefusal::NoStop)), None);
+    assert_eq!(as_refused(Outcome::Sized(row)), None);
 }
 
 // ---------------------------------------------------- leverage, prices, overflow --
@@ -1860,7 +1869,8 @@ fn releases_in_any_order_settle_each_row_after_its_own_last_fill() {
             assert_eq!(book.open_risk(), reference, "seed {seed}");
         }
     }
-    assert!(walked_back && walked_to_head);
+    assert!(walked_back);
+    assert!(walked_to_head);
 }
 
 #[test]
@@ -1965,9 +1975,9 @@ fn capital_needed_never_passes_the_capital_under_the_margin_check() {
                 k.observe(in_use + extra, carried).unwrap();
             }
         }
-        if let Some(needed) = k.value(false, LAKH_20) {
-            assert!(needed <= LAKH_20, "seed {seed}: {needed}");
-        }
+        // Every walk admits its first entry: Rs 3 lakh at most, against Rs 20 lakh.
+        let needed = k.value(false, LAKH_20).unwrap();
+        assert!(needed <= LAKH_20, "seed {seed}: {needed}");
     }
 }
 
@@ -2030,9 +2040,8 @@ fn seeded_passes_fixed_quantities_through_untouched() {
         (Offer::AccountOrder, 0, 0)
     );
     for (row, c) in plan.rows.iter().zip(&batch) {
-        let Outcome::Sized(s) = row.outcome else {
-            panic!("nothing is busy");
-        };
+        // Nothing is busy, so every row is sized.
+        let s = as_sized(row.outcome).unwrap();
         assert_eq!(s.qty, c.fixed_qty);
         assert_eq!(s.value, i128::from(c.fixed_qty) * i128::from(c.price));
         assert_eq!(s.margin, s.value * i128::from(c.rate_ppm));
@@ -2051,8 +2060,8 @@ fn busy_stocks_are_while_open_under_every_policy() {
         assert_eq!(plan.eligible, 2);
         assert_eq!(refused(&plan, 1), SizeRefusal::WhileOpen);
         assert_eq!(refused(&plan, 2), SizeRefusal::WhileOpen);
-        assert!(matches!(outcome(&plan, 0), Outcome::Sized(_)));
-        assert!(matches!(outcome(&plan, 3), Outcome::Sized(_)));
+        assert!(as_sized(outcome(&plan, 0)).is_some());
+        assert!(as_sized(outcome(&plan, 3)).is_some());
     }
     // Every stock busy: nothing eligible, nothing divided.
     for c in &batch {
@@ -2169,7 +2178,8 @@ fn the_policy_table_answers_for_every_policy() {
 #[test]
 fn a_stock_set_holds_each_word() {
     let mut set = StockSet::default();
-    assert!(set.is_empty() && set == StockSet::EMPTY);
+    assert!(set.is_empty());
+    assert_eq!(set, StockSet::EMPTY);
     for stock in [0, 63, 64, 127, 128, 191, 192, 255] {
         let id = StockId::new(stock);
         assert!(!set.contains(id));
@@ -2302,6 +2312,8 @@ fn the_measurements_run_at_tiny_sizes() {
     assert_eq!(measure_edge_reset(376, 1, 1).refused, 1);
     assert_eq!(measure_score(0, 2).samples.len(), 2);
     // The verdict.
-    assert!(steady(100, 120) && !steady(100, 121));
-    assert!(within(5, 5) && !within(6, 5));
+    assert!(steady(100, 120));
+    assert!(!steady(100, 121));
+    assert!(within(5, 5));
+    assert!(!within(6, 5));
 }
