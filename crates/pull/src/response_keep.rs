@@ -1519,21 +1519,17 @@ fn lock_within(dir: &Path, wait: Duration) -> Result<Held, KeepError> {
     let started = Instant::now();
     let answer = match rx.recv_timeout(wait) {
         Ok(answer) => answer,
-        Err(_) => {
-            #[cfg(test)]
-            seam::at("lock.timed_out", &path);
-            match Parked::abandon(&path, &abandoned, &rx) {
-                // THE WAITER ANSWERED between the timeout and the abandon:
-                // the lock is ours, and nothing is parked.
-                Some(answer) => answer,
-                None => {
-                    return Err(KeepError::LockStalled {
-                        lock: path,
-                        waited_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    });
-                }
+        Err(_) => match Parked::abandon(&path, &abandoned, &rx) {
+            // THE WAITER ANSWERED between the timeout and the abandon: the
+            // lock is ours, and nothing is parked.
+            Some(answer) => answer,
+            None => {
+                return Err(KeepError::LockStalled {
+                    lock: path,
+                    waited_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                });
             }
-        }
+        },
     };
     match answer {
         Ok(held) => Ok(Held { _lock: held }),
@@ -1623,6 +1619,8 @@ impl Parked {
         abandoned: &std::sync::atomic::AtomicBool,
         rx: &std::sync::mpsc::Receiver<Taken>,
     ) -> Option<Taken> {
+        #[cfg(test)]
+        seam::at("lock.timed_out", lock);
         let mut parked = PARKED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
