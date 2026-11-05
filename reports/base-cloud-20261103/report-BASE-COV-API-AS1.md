@@ -18,6 +18,12 @@ paragraph is the first session's, at code tip `3f324ee8`, until this section say
   `Room::capped_reason`); `aliases.rs` (a two-hop name); `calendar_build.rs` (`Votes::keep` at its bound, a
   parked answer's time and stamp bound, a finished build re-queued); `isolated.rs` (the child's two checks
   read without `&&`).
+- `b85ecf4d` (test code only): `folder.rs` (`folder_json` end to end, its root from the environment in
+  children); `tests/state_stream_emits.rs` (the emit scanner's helpers over crafted text: now 564/564 lines,
+  168/168 sides in its own binary's run); `candidatejson.rs` (six lone test `?` steps as `.expect(..)`),
+  `backtest.rs` (a two-status assertion as one `contains`), `bars.rs` (the emptiness walk first proves it
+  finds a nested file). Interim: `folder.rs` 8 to 0, `bars.rs` test rows 9 to 0, `backtest.rs` test rows 4
+  to 0, `candidatejson.rs` test rows 6 to 0.
 - Interim figures, this host, instrumented runs of the affected modules only (listed GAP/HOST rows of
   `gaps-AS1.txt.md` still uncovered): `census.rs` 123 to 29, `feed_checks.rs` 46 to 8, `feed_checks_files.rs`
   25 to 6, `calendar_build.rs` 8 to 2, `aliases.rs` 2 to 0, `isolated.rs` 1 to 0. Most of what remains is

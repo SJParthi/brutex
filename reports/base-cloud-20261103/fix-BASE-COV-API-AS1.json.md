@@ -6,7 +6,7 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
 {
   "name": "BASE-COV-API-AS1",
   "branch": "cloud/cov-api-as1-20261105",
-  "head": "5295f342cc8def6f6071a295319e241b9a54cb0b",
+  "head": "b85ecf4deef037dfcf26ecd0979c35dc05203d08",
   "committed": true,
   "findings": [
     {
@@ -46,6 +46,8 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
     "crates/api/src/audit_json.rs",
     "crates/api/src/audit_json_cover_tests.rs",
     "crates/api/src/audit_lock_wait_measure.rs",
+    "crates/api/src/backtest.rs",
+    "crates/api/src/bars.rs",
     "crates/api/src/calendar_build.rs",
     "crates/api/src/candidatejson.rs",
     "crates/api/src/candidatejson_cover_tests.rs",
@@ -76,7 +78,8 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
     "crates/api/src/repair_route.rs",
     "crates/api/src/repair_route_cover_tests.rs",
     "crates/api/src/settings_route_tests.rs",
-    "crates/api/src/store_route.rs"
+    "crates/api/src/store_route.rs",
+    "crates/api/tests/state_stream_emits.rs"
   ],
   "files_outside_ownership": [],
   "gates": {
