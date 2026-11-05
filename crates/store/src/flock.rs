@@ -1156,6 +1156,11 @@ pub(crate) fn patiently(
 #[path = "flock_patient_tests.rs"]
 mod patient_tests;
 
+/// The lock registry's answers no other test reached (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "flock_cover_tests.rs"]
+mod cover_tests;
+
 #[cfg(test)]
 #[path = "flock_tests.rs"]
 pub(crate) mod tests;

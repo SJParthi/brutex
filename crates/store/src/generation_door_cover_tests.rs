@@ -159,3 +159,85 @@ fn a_non_directory_inside_the_pointer_tree_refuses_the_read() {
     fs::write(&file_root, b"a file").unwrap();
     assert!(matches!(served(&file_root, month()), Ok(Served::Original)));
 }
+
+/// **A LINK AT THE POINTER'S NAME REFUSES THE READ BY THE POINTER'S PATH.**
+/// The pointer is opened without following a link, so a linked pointer is
+/// refused in the host's words, never followed and never read as "no
+/// pointer".
+#[test]
+fn a_linked_pointer_refuses_the_read() {
+    let root = Root::new("linked");
+    let pointer_file = pointer_path(&root.0, month());
+    fs::create_dir_all(pointer_file.parent().unwrap()).unwrap();
+    let elsewhere = root.0.join("elsewhere.ptr");
+    fs::write(&elsewhere, b"").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &pointer_file).unwrap();
+    match served(&root.0, month()) {
+        Err(StoreError::Generation { path, reason }) => {
+            assert_eq!(path, pointer_file);
+            assert!(reason.starts_with("cannot open it:"), "{reason}");
+        }
+        other => panic!("the linked pointer is refused: {other:?}"),
+    }
+}
+
+/// **A PROMOTION THE POINTER'S OWN PATH REFUSES IS REFUSED BY THAT STEP,
+/// AND THE ORIGINAL IS STILL SERVED.** A file where the pointer's directory
+/// goes refuses the directory's creation; a directory where the pointer file
+/// goes refuses its open; a lock the host refuses (the flock test seam)
+/// refuses the lock. Each names its path and step and claims nothing
+/// visible; with the path made good the same promotion lands.
+#[test]
+fn a_promotion_the_pointers_path_refuses_is_refused_by_that_step() {
+    let root = Root::new("pointer-refusals");
+    let held = bars(0..6);
+    let original = {
+        let mut writer = BarFile::open_or_create(&root.0, month(), SYMBOL).unwrap();
+        writer.append(&held).unwrap();
+        writer.header()
+    };
+    let first = Revision::new(1).unwrap();
+    repair::publish(&root.0, month(), SYMBOL, first, original, &held).unwrap();
+    let pointer_file = pointer_path(&root.0, month());
+    let directory = pointer_file.parent().unwrap().to_path_buf();
+    fs::create_dir_all(directory.parent().unwrap()).unwrap();
+    fs::write(&directory, b"not a directory").unwrap();
+    match promote(&root.0, month(), SYMBOL, first) {
+        Err(RepairError::Io {
+            path,
+            operation: "create pointer directories",
+            publication_may_be_visible: false,
+            ..
+        }) => assert_eq!(path, directory),
+        other => panic!("the directory's creation is refused: {other:?}"),
+    }
+    fs::remove_file(&directory).unwrap();
+    fs::create_dir_all(&pointer_file).unwrap();
+    match promote(&root.0, month(), SYMBOL, first) {
+        Err(RepairError::Io {
+            path,
+            operation: "open pointer",
+            publication_may_be_visible: false,
+            ..
+        }) => assert_eq!(path, pointer_file),
+        other => panic!("the pointer's open is refused: {other:?}"),
+    }
+    fs::remove_dir(&pointer_file).unwrap();
+    crate::flock::tests::refuse_next_lock(std::io::ErrorKind::Interrupted);
+    match promote(&root.0, month(), SYMBOL, first) {
+        Err(RepairError::Io {
+            path,
+            operation: "lock pointer",
+            kind: std::io::ErrorKind::Interrupted,
+            publication_may_be_visible: false,
+        }) => assert_eq!(path, pointer_file),
+        other => panic!("the pointer's lock is refused: {other:?}"),
+    }
+    assert!(!crate::flock::tests::lock_refusal_armed());
+    assert!(matches!(served(&root.0, month()), Ok(Served::Original)));
+    assert!(matches!(
+        promote(&root.0, month(), SYMBOL, first),
+        Ok(Promoted::Promoted(_))
+    ));
+    assert_eq!(served(&root.0, month()).unwrap().ordinal(), 1);
+}
