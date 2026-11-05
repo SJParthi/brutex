@@ -1055,6 +1055,12 @@ source automatically. D-0548's seven exact allocation/guard mutation replays all
 failed their tests as intended; fresh campaign coverage remains395/412 lines and
 69/84 branches, so it does not close the whole-crate100% requirement.
 
+## PSRB-BOLL: Bollinger Bands — 2026-11-03 (D-8590 to D-8595)
+
+| Part | What | State |
+|---|---|---|
+| PSRB-BOLL | `indicators::bollinger`: Bollinger Bands over closes (basis `SMA(close, n)`, bands at plus or minus z population sigma, the current candle included), exact by squares in `i128`; a runtime period of 1 to 4,096 closes in a ring allocated once; the sample sigma a labelled reading; no vocabulary position; benches C-PSRB-BOLL-01 and -02 | Built on `cloud/psrb-boll-20261103`; not merged (D1). PSRB-STRAT is its first caller |
+
 ## Grammar search limits recorded but not changed — OPEN (D-0751 to D-0754)
 
 Three grammar-search defects were resolved by stating them, not by changing

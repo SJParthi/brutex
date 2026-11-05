@@ -86589,6 +86589,163 @@ the walk would each let the next pasted row in unseen, which is the shape
 and passes on this change; every `tick_second_check` test in `cli` passes.
 No new invariant (the guard is the invariant); no limit changes.
 
+### D-8590 — PSRB-BOLL: Bollinger Bands over closes as `indicators::bollinger`, in the published form with the current candle included, a runtime period in a ring allocated once, and no vocabulary position — 2026-11-03
+
+**Implemented by** PSRB-BOLL, built on 5 Nov 2026 by a cloud session on
+`cloud/psrb-boll-20261103` from the design `state/strategy-psrb-20261103/PARTS.md`
+section 4 (written 3 Nov 2026, repaired twice that day). D-8590 to D-8595 are
+this part's; D-8596 to D-8599 are left spare for its repairs.
+
+**Why.** The PSRB strategy family (Pivot R1, Supertrend, RSI and Bollinger
+Bands; NSE F&O stocks, cash, intraday) needs Bollinger Bands as a reading of
+its own. Nothing in `crates/indicators` computes them: `vwap.rs` has a sigma
+band around VWAP, which is a different quantity.
+
+**Decision.**
+
+1. **The reading is the published definition**, as the design states it from
+   report A of the PSRB research (its D4): `basis = SMA(close, n)`,
+   `upper = basis + z * sigma`, `lower = basis - z * sigma`, with sigma the
+   population standard deviation of the same `n` closes (D-8592), and the
+   current candle's close one of them (offset 0). It is UNVERIFIED against
+   `TradingView`'s own output: no output of theirs was compared, so parity here
+   is parity with the published formulas
+   (`parity_with_the_published_definition`).
+2. **A runtime period of 1 to 4,096 closes** (`MAX_PERIOD`, D-8591), held in a
+   ring of `i64` closes that `Bollinger::new` allocates once, at its full
+   length and filled with zeros, so the filling phase needs no branch. A fold
+   writes one slot through one `get_mut` and moves two `i128` sums, the sum
+   and the sum of squares; `window()` copies the sums and the close folded
+   last and never reads the ring (D-8594). No window exists until `n` closes
+   are held.
+3. **No vocabulary position.** The module emits no condition bit. It is a
+   reading for the F&O strategy path, whose first caller is PSRB-STRAT; the
+   table of position sources in `crates/indicators/src/lib.rs` is unchanged.
+4. **Streaming, and timestamps are not read.** `fold` takes one candle and the
+   window after candle `t` holds closes up to `t` only. A caller that wants
+   the convention "the anchor excludes the candle" keeps the previous
+   `Window`, a `Copy`, and judges the next close against it. Ordering and
+   holes are the caller's: PSRB-STRAT decides what a hole candle means.
+
+**Proof:** PSRB-BOLL-I01, PSRB-BOLL-I04 and PSRB-BOLL-I06 in
+`docs/04-invariants.md`.
+
+### D-8591 — PSRB-BOLL: the band tests are exact comparisons of squares in `i128`, and the domain is bounded so that every product fits — 2026-11-03
+
+**Decision.** A window keeps `S`, the sum of its `n` closes, and `Q`, the sum
+of their squares. With `V = n * Q - S^2`, which is `n^2 * sigma^2` and so never
+negative, and `D = n * close - S`:
+
+* `close > basis + z * sigma` exactly when `D > 0` and
+  `(1000 * D)^2 > z_milli^2 * V`, where `z_milli` is `z` in thousandths
+  (`Width`, `WIDTH_DEN` = 1,000);
+* `close < basis - z * sigma` is the same test with `-D`;
+* a close exactly on a band is not beyond it, and at width 0 both bands are
+  the basis.
+
+No square root, no rounding and no float enters a comparison (`CLAUDE.md` §7).
+
+**The domain, and why each edge.** A period of at most 4,096 (`2^12`), closes
+of 1 to `2^32` paisa (`MAX_CLOSE`, Rs 4.29 crore a share) and `z_milli` of at
+most 10,000 (below `2^14`) give `|D| <= 2^44`, `V <= (n * MAX_CLOSE)^2 / 4 <= 2^86`,
+`(1000 * D)^2 * n <= 2^120`, `z_milli^2 * n * V <= 2^125` and
+`10^6 * D^2 <= 2^108`: every product inside `i128` (`2^127`). Each bound is a
+`const _: () = assert!(...)` beside the arithmetic, computed with
+`checked_mul` chains, so a wider domain fails the build rather than wrapping
+at run time; `the_extremes_never_overflow` restates them at the edges. A
+larger period, close or width is refused by name (`PeriodAboveMax`,
+`CloseOutOfRange`, `WidthAboveMax`), never wrapped. The design reads Rs 4.29
+crore a share as far above any NSE share price; no source in
+`docs/00-charter.md` records the highest NSE price, so that reading is
+UNVERIFIED, and a close above the edge is refused by name either way
+(L-PSRB-BOLL-01).
+
+**Proof:** PSRB-BOLL-I02 and PSRB-BOLL-I05.
+
+### D-8592 — PSRB-BOLL: the population sigma is the reading; the sample sigma is a labelled reading with no value at n = 1 — 2026-11-03
+
+**Decision.** The bands use the population standard deviation, divisor `n`:
+the design states it as `TradingView`'s default from report A, which marks the
+population divisor as resting on secondary sources only, so it is UNVERIFIED
+here. The sample standard deviation `s = sqrt(V / (n * (n - 1)))`, divisor
+`n - 1`, is a second reading, labelled by name
+(`Window::above_upper_sample`, `Window::below_lower_sample`), exact by
+`(1000 * D)^2 * (n - 1) > z_milli^2 * n * V`, and `None` at `n = 1`, where it
+has no value. On BOLL-1 (sigma 200) the sample sigma is `200 * sqrt(8 / 7)`,
+213.8..., so a close can be beyond one band and inside the other; a caller
+names the reading it decides on.
+
+**Proof:** PSRB-BOLL-I03 and PSRB-BOLL-I04.
+
+### D-8593 — PSRB-BOLL: the band values and the z-score are exact through `isqrt_i128`, for records and seeds, and no decision uses them — 2026-11-03
+
+**Decision.** `Window::upper_floor` is
+`(1000 * S + isqrt(z_milli^2 * V)).div_euclid(1000 * n)` and
+`Window::lower_ceil` is `-((isqrt(z_milli^2 * V) - 1000 * S).div_euclid(1000 * n))`,
+using `crate::vwap::isqrt_i128`: exact, because
+`floor((a + y) / m) = floor((a + floor(y)) / m)` for integers `a` and `m > 0`
+and a real `y >= 0`, and `floor(z_milli * sqrt(V)) = isqrt(z_milli^2 * V)`. For
+every integer close, `above_upper` holds exactly when the close exceeds
+`upper_floor`, and `below_lower` exactly when it is under `lower_ceil`: the
+squares test and the floor band are two exact readings of one fact.
+`Window::z_milli` is `floor(1000 * D / sqrt(V))`, `None` when `V = 0`, the
+negated ceiling of the root for `D < 0`. Each costs one `isqrt_i128`, bounded
+by `ITERATION_CEILING` = 16 iterations and not uniform (`docs/06-limits.md`
+§51, C-I-03). They are for records and seeds; a decision uses the squares
+tests, which take no root (L-PSRB-BOLL-02). Their narrowing to `i64` falls
+back to `MAX_CLOSE` for the basis and to plus or minus `6 * MAX_CLOSE` for a
+band value, which no window inside the domain reaches: a population sigma is
+at most half the window's range.
+
+**Proof:** PSRB-BOLL-I02 and PSRB-BOLL-I04.
+
+### D-8594 — PSRB-BOLL: every refusal changes nothing, and `RingOutOfStep` is named although no call of the API can make it — 2026-11-03
+
+**Decision.** The refusals are `PeriodZero`, `PeriodAboveMax { period }`,
+`CloseOutOfRange { close }` (a folded close above `MAX_CLOSE`; `Close::new`
+also refuses 0 and below), `WidthAboveMax { milli }`, `RingOutOfStep` and
+`Corrupt(why)`. `fold` checks everything before it moves anything: the
+candle's own `check_evaluable` first (so a close of 0 or below through `fold`
+is the candle's `PriceNotPositive`), then `Close::new`, then the ring's one
+`get_mut`, whose `None` arm is `RingOutOfStep`. Every refusal therefore leaves
+the whole state as it was, and each test of one compares the whole state.
+
+`fold` keeps the write position inside the ring, so no call reaches
+`RingOutOfStep`; a white-box test builds that state and shows it refused by
+name with nothing changed. It is named rather than assumed because indexing is
+denied in this workspace and a `None` arm that quietly did nothing would be the
+fallback `CLAUDE.md` §4 bans. The design's second repair keeps the close
+folded last in the state, so `window()` makes no second ring access, which
+would bring a second arm no test could reach.
+
+**Proof:** PSRB-BOLL-I05.
+
+### D-8595 — PSRB-BOLL: C-PSRB-BOLL-01 and -02, their sizes, ceiling and budget, and the bench helpers each part copies — 2026-11-03
+
+**Decision.** A step is one `fold`, one `window()`, and the population tests
+`above_upper` and `below_lower` at z 2.000. C-PSRB-BOLL-01 times it at n 20
+after 2,000, 20,000 and 200,000 candles; C-PSRB-BOLL-02 at n 20, 200 and 2,000
+after 20,000 candles. Each size is 11 rounds of 20,000 steps, each step timed
+alone. The wrapper `crates/indicators/benches/ratio/psrb_boll.rs` sorts each
+round (gate 11 keeps sorting out of the crate), reads p50, p99 and max by
+nearest rank, prints for each size the best round's three with n and the p99
+of the median and of the worst round, and judges the best rounds, the
+minimum over trials as the harness takes it: each p99 within the harness's
+`CEILING_PERMILLE` (3.0x) of the first size's, and at most 2 µs. The budget
+and the design's target of 400 ns are ESTIMATES until the Mac's gate 8 run
+measures them. The rows run before the F&O rows, fold into the same check and
+are not counted in `ROWS`; their ids are string literals in
+`crates/indicators/benches/ratio.rs`, because `cost_invariants.rs` reads only
+top-level bench files.
+
+The measuring functions (`measure_step`, `measure_period`, `summarize`,
+`flat_within`, `StepCost`) live in the module, so its tests cover them at tiny
+sizes. Each PSRB part keeps its own copy of them: a shared helper would make one
+part wait on another, and the duplication is accepted. Gate 14's cover-table
+row for the two ids is the main session's to add when the family is assembled.
+
+**Proof:** C-PSRB-BOLL-01 and C-PSRB-BOLL-02 in `docs/04-invariants.md`.
+
 ### D-7310 — G3: the written series rule — a share's EQ, BE and BZ day files are filed, every other series code is refused by name as `series_not_stored:<code>` — 2026-10-24
 
 **Implemented by** R4-22. **Findings** G3 (the GDFL capital-market reader's
