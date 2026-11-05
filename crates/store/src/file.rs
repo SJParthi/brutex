@@ -10624,6 +10624,12 @@ mod file_fault_tests;
 #[path = "file_cover_tests.rs"]
 mod cover_tests;
 
+/// The write door's time-index steps and overlap diagnosis where no other
+/// test reached them (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "file_index_cover_tests.rs"]
+mod index_cover_tests;
+
 /// Mutation-survivor tests for this module's private items (cloud session
 /// 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
 #[cfg(test)]
