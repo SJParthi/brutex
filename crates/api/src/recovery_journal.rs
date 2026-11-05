@@ -1848,3 +1848,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "recovery_journal_cover_tests.rs"]
+mod cover_tests;
