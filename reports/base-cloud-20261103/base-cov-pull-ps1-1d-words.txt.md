@@ -1,6 +1,6 @@
 # base-cov-pull-ps1-1d-words.txt.md
 
-Written by BASE-COV-PULL-PS1 for PSA: CI gate 1d (`.github/gates_tree.rs` gate-1d, run with the tree's own `gates_tree.rs` and `source_scan.rs`) names 118 undeclared segment-shaped literals at the code tip `feeba59beb6a` that it did not name at the GREEN-TIP `2e7a0b6d3b56` (and none the other way), and 3 more at the code tip `6a0a2658c964` (batch 20, 5 Nov 2026: 758 undeclared there against 755 at `feeba59beb6a`), listed after the first 118. Every one is a string literal step (2)'s tests wrote: an invented scratch-folder name, label, stem or number, except `devices` and `system`, two segments of Linux's `/sys/devices/system/cpu/online`, which one Linux-only test reads as a file that states more bytes than it holds. None is a segment of a parameter path, a vendor value or a credential. Gate 1d was already red at START and at the GREEN-TIP; declaring these is `.github/gates_tree.rs`, PSA's file. Each row: the word, then where step (2) wrote it (at most three places, path under `crates/pull/`, line at the code tip). One fenced block below holds the list.
+Written by BASE-COV-PULL-PS1 for PSA: CI gate 1d (`.github/gates_tree.rs` gate-1d, run with the tree's own `gates_tree.rs` and `source_scan.rs`) names 118 undeclared segment-shaped literals at the code tip `feeba59beb6a` that it did not name at the GREEN-TIP `2e7a0b6d3b56` (and none the other way), and 4 more by batches 20 and 21 (5 Nov 2026: 758 undeclared at `6a0a2658c964`, 759 at the code tip `a6cfc9bd1815`, against 755 at `feeba59beb6a`), listed after the first 118 with their lines at the code tip `a6cfc9bd1815`. Every one is a string literal step (2)'s tests wrote: an invented scratch-folder name, label, stem or number, except `devices` and `system`, two segments of Linux's `/sys/devices/system/cpu/online`, which one Linux-only test reads as a file that states more bytes than it holds. None is a segment of a parameter path, a vendor value or a credential. Gate 1d was already red at START and at the GREEN-TIP; declaring these is `.github/gates_tree.rs`, PSA's file. Each row: the word, then where step (2) wrote it (at most three places, path under `crates/pull/`, line at the code tip). One fenced block below holds the list.
 
 `````text
 gate 1d words new in step (2): 118
@@ -122,8 +122,9 @@ unborn-month src/gdfl_import_tests.rs:4971
 zq-bare-page src/nse_ps1_tests.rs:39
 zq-open-page src/nse_ps1_tests.rs:32 src/nse_ps1_tests.rs:36
 zq-page src/nse_ps1_tests.rs:27
-gate 1d words new in batch 20 (code tip 6a0a2658c964): 3
-import-meets-a-held-census src/gdfl_import_tests.rs:6245
-import-meets-a-held-month src/gdfl_import_tests.rs:6092
-import-meets-a-held-sidecar src/gdfl_import_tests.rs:6152
+gate 1d words new in batches 20 and 21 (lines at the code tip a6cfc9bd1815): 4
+import-meets-a-held-census src/gdfl_import_tests.rs:6355
+import-meets-a-held-month src/gdfl_import_tests.rs:6202
+import-meets-a-held-sidecar src/gdfl_import_tests.rs:6262
+wp16-hook-own-root src/gdfl_import_tests.rs:5295
 `````
