@@ -685,8 +685,8 @@ fn a_month_whose_folder_was_replaced_before_its_confirm_keeps_the_day_open() {
 }
 
 /// THE TEST DOOR'S STEP BEFORE A CONFIRM (D-7336) is taken only by its own root
-/// and file, once: a step planted for another file under the same root is
-/// passed over by this file's confirm, and runs at its own.
+/// and file, once: a step planted for another file under the same root, or
+/// for the same file under another root, is passed over, and runs at its own.
 #[test]
 fn the_door_s_step_before_a_confirm_waits_for_its_own_file() {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -697,10 +697,11 @@ fn the_door_s_step_before_a_confirm_waits_for_its_own_file() {
         counted.fetch_add(1, Ordering::SeqCst);
     });
     inject::before_confirm(&root, "INVENTED.csv");
+    inject::before_confirm(&root.join("elsewhere"), "OTHER.csv");
     assert_eq!(
         ran.load(Ordering::SeqCst),
         0,
-        "another file's step is passed over"
+        "another file's step, and another root's, is passed over"
     );
     inject::before_confirm(&root, "OTHER.csv");
     inject::before_confirm(&root, "OTHER.csv");
