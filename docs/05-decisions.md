@@ -87771,3 +87771,221 @@ this part's own test files that were no failing arm (blocking 4).
    `cash_auction`, `gdfl_archive` and the socket half of `ssm::get_parameter`.
    L-BCP-3 (the `#[ignore]` bodies) still needs the operator. D-7335 to
    D-7339 are unused.
+
+### D-7335 — BASE-COV-PULL-PS1 (cloud wave of 3 Nov 2026, group G1): repair 2's tests compiled and green, 170 more tests, ten host seams, and the month-row decoder's overflow — 2026-11-05
+
+**Context.** D2 part A asks for 100% line and branch coverage of crate
+`pull`'s old code, measured by Route B (recipe v4) on the pinned nightly. On
+3 Nov 2026 the part was split by file for three cloud sessions (D6; the kit
+`reports/base-cloud-20261103/SHARDS.md`), and group G1 (66 files at START
+`f98a899398f6`, 46 stems) was session BASE-COV-PULL-PS1's, on the branch
+`cloud/cov-pull-ps1-20261103` (3 and 5 Nov). Many of G1's uncovered
+production arms run only when the host refuses a call (a write, a sync, a
+rename, a hard link, an unlink, a mkdir, a descriptor copy, a lock release,
+a truncate) or when another process wins a race between a check and an act:
+no input makes either happen on demand, and a test that retries a race until
+it wins is not deterministic. Some test arms ran only when two runs, two
+threads or two tests met, so two Route B runs of one tree differed by them.
+
+1. **Repair 2's tests compile, lint and pass.** `cargo check` gave no error;
+   `clippy -D warnings` gave three, all in repair 2's tests
+   (`manual_assert_eq` in `gdfl_dropbox_cov_tests.rs`, `single_match_else` in
+   `gdfl_run_start_cov_tests.rs` and `ssm_cov_tests.rs`), fixed with no
+   behaviour change. Repair 2's
+   `master_snapshots::cov_tests::a_root_that_will_not_list_under_the_lock_is_refused_on_both_counts`
+   chmods its root to 0o300, which root lists anyway; it now runs through
+   `support::where_permission_binds` (D-0995). The GREEN-TIP `2e7a0b6d3b56`:
+   fmt and clippy clean, the pull suite 2,940 passed, 9 failed, 54 ignored, the
+   9 failing only as root (each passed as uid 65534).
+2. **Tests.** G1's arms are driven by 170 new tests in 23 batches: modules
+   beside the file they test (`<stem>_ps1_tests.rs`, declared at the end of
+   that file with `#[cfg(test)] #[path] mod ps1_tests;`), one integration file
+   (`tests/gdfl_run_stop.rs`, through the shipped `StopControl`), and
+   additions to existing test files. Each was shown red under a hand change of
+   the line it pins, then the change was undone. Every name, share, price and
+   identity in them is invented (`ZQ...`), or an F&O share the tests already
+   name, with invented prices; no vendor row is quoted.
+3. **Seams.** Ten private functions take the one host call their caller made
+   as an argument, and the caller passes the same call it made before, so
+   production behaviour is unchanged: `capture::write_new_capture_using`
+   (write and sync), `fno_membership::publish_then_unlink` (unlink),
+   `gdfl_import::day::fresh_root_with` (mkdir), `reference_data::write_linking`
+   (hard link), `gdfl_run::locks::take_cloning` (descriptor copy) and
+   `unlock_into_with` (lock release), `ssm::stamp_at` (the clock),
+   `cash_session_cache::write_new_with` (write and sync),
+   `gdfl_cm::auction::append_with` (lock release and torn-tail cut) and
+   `master_snapshots::commit_receipt_renaming` (rename). A test hands in a call
+   the host refuses. Three drafted tests that won a race by retrying it were
+   left out: the seams reach those arms deterministically. A seam is a second
+   entry point to the same body, its production caller the only one outside
+   tests, and each seam's comment names this decision.
+4. **Defect.** `fno_membership`'s month-row check of a day with no listing
+   summed two `u32` counts read from the file (`row.names + row.refused > 0`);
+   a row with `names = u32::MAX, refused = 1` overflowed, and the decoder
+   panicked on the file's bytes (overflow checks are on in every profile; the
+   release build aborts). Each count is now asked alone: the same refusal,
+   never a panic. Red first: `attempt to add with overflow`.
+5. **Test code.** Test arms no input of their own test reaches were rewritten
+   without weakening an assertion: a call a test proves is never made is
+   `unreachable!` at the call; a dead side of an equivalent condition is
+   removed; a helper is handed the other input; two permission tests run where
+   the bits bind (D-0995). A judgement whose sides ran only when two runs or
+   two threads met is a helper, unchanged, that its race calls and that tests
+   making the meeting on purpose call too (the import race: a month, an
+   auction sidecar and the census lock held across a run; the two-builds race:
+   a second build into a sealed directory); a day-flush hook loop is driven by
+   two hooks of two roots; the kill test stops two more children on purpose
+   (one held at the journal lock before its first line, one left to finish).
+   Its kill inside a month's creation was left as it is, not rewritten to hide
+   the branch.
+6. **Figures** (Route B, the kit's `d3-route-b-cloud.sh` on the pinned nightly,
+   reading `whole:pull`, a root cloud host of 4 cores): G1 at the GREEN-TIP (66
+   files) lines 51,738/53,838, branches 3,896/4,830; at PS1's code tip
+   `3c2e0e39b08d` (run 9, 89 files) lines 57,598/59,151 (1,553 uncovered),
+   branches 4,185/4,944 (759 sides). Its 2,312 uncovered rows: (U) 138, each
+   with its proof; (F) 849; 1,306 inside the bodies of `#[ignore]` real-data
+   tests (L-BCP-3); 19 GAPs, none G1's to close: 2 of the kill test (a kill
+   inside a month's creation lands only by timing), 1 macOS-only, 3 after a
+   signed Parameter Store send that reached AWS, 13 in MSUM-BACKFILL's `upkeep`
+   files. The package's list, after the assembly, is D-7338's.
+7. **What it leaves.** A deterministic kill inside a month's creation needs a
+   test-only pause point in the store's month creation (crate `store`), and
+   `ssm::get_parameter`'s rows after a send need an endpoint argument for the
+   signed read: both are the operator's calls, and neither hook was added.
+   Invariants BCP-13 to BCP-15.
+
+### D-7336 — BASE-COV-PULL-PS2 (cloud wave of 3 Nov 2026, group G2): an arm only another writer or a failing host reaches is driven through a test seam, never excused — 2026-11-05
+
+**Context.** Recipe v4 step 4 counts a production refusal or error arm as a
+GAP until a test drives its input, and "needs a fault", "a race" or "hard to
+reach" is never a (U) proof. Some arms of group G2's files (session
+BASE-COV-PULL-PS2, branch `cloud/cov-pull-ps2-20261103`, 3 and 5 Nov) are
+reached only when another process changes the store between two host calls (a
+rename, a cut, a name made or replaced), or when the host refuses a call that
+no file, folder or name can make fail (the measure of an open descriptor, a
+read or write of a regular file, a `flock` other than contention, a thread
+spawn, a directory entry's type).
+
+**Decision.** Each such arm is driven by a test through a seam at its call
+site, in one of two forms.
+
+1. **A step between two host calls** (the pattern of
+   `ingest::census_store::seam`): `seam::plant(name, step)` and
+   `seam::at(name, path)`. A test plants one closure under a name; the next
+   pass of that name on the same thread runs it once, with the path the code
+   is at, as another writer landing between the two calls would. In
+   `census_store` (11 names), `response_keep` (`keep.missing`,
+   `lock.timed_out`), `gdfl_rekey` (`rekey.appending`), `gdfl_run_ledger`
+   (`ledger.measured`), `repair_plan` (`repair.opened`, `repair.counted`) and
+   `alerts` (`BEFORE_RENAME`). A step for a call another thread makes is keyed
+   by the test's own path, not by thread: `response_keep`'s
+   `plant_for`/`at_path` (`lock.answered`, the pack lock's waiter) and the
+   filing's test door `inject` (`plant_before_confirm`, beside its planted
+   swaps and answers).
+2. **A planted host fault**: `seam::fail(name)` and `seam::answer(name, host)`
+   (`answer_lock` for a call that answers `TryLockError`; `taken` hands the
+   fault to the thread that makes the call). The call is made, and its answer
+   is the host's error instead, once. In `census_store` (`segment.typed`,
+   `kept.measured`, `reader.read`, `stub.written`), `gdfl_run_ledger`
+   (`ledger.read`), `landing_run` (`claim.measured`), `zerodha_spool`
+   (`live.probed`, `live.taken`), `gdfl_rekey` (`ledger.locked`),
+   `response_keep` (`lock.tried`, `lock.waited`) and `gdfl_run`
+   (`claim.written`, `progress.written`); and the filing's
+   `inject::refuse_spawn` (the host's refusal of a worker thread).
+
+**Rules.** Every seam module and every call site is `#[cfg(test)]`: a build
+without tests holds no seam line and behaves exactly as before. The one
+shipped seam is `alerts`' walk seam, whose `#[cfg(not(test))]` twin does
+nothing and is run by `tests/alerts_ps2.rs`, the library as `api` and `cli`
+link it. Steps and faults are per thread, or keyed by a store path of the
+test's own, so tests running at once never meet each other's; each is taken
+once; production code never plants one. A seam changes no behaviour of the
+code it sits in: it lets a test choose what another writer or the host does at
+one point, and every test that uses one asserts the arm's own words or effects
+and then shows the same call, unplanted, answering as before.
+
+**Also.** `whole_member` compares size and CRC as one pair; two never-run
+jobs of the filing's test door panic; G2's three root-only permission tests
+run where the bits bind (D-0995); G2's own test code leaves no non-failing side
+unreached (made the failing side, or reached), no assertion weakened. 232 new
+tests (212 on 3 Nov, 20 on 5 Nov) and two edited ones that state something
+new: all 234 shown red at their own assertion under a hand change of the arm
+each drives, then undone (`red-PS2.txt.md` of the branch). No production
+behaviour changed.
+
+**Figures** (Route B, the kit's script on the pinned nightly, reading
+`whole:pull`, a root cloud host with `kernel.pid_max` raised, D-7339): G2 at
+the GREEN-TIP (77 files) lines 52,247/54,617, branches 3,800/4,622; at PS2's
+code tip `02f268e24f8b` (run 5, 93 files) lines 58,766/60,545 (1,779
+uncovered), branches 4,140/4,724 (584 sides). Its 2,363 open rows: (F) 623,
+(U) 146 (21 of them on a private-field type invariant, marked for the
+operator), inside the `#[ignore]` tests or helpers only they reach 1,594
+(L-BCP-3), GAP 0.
+
+**Consequence.** G2's fault and race rows are driven and asserted, not listed
+as exceptions; a new arm of this kind gets a seam and a test.
+
+### D-7337 — BASE-COV-PULL-PS3 (cloud wave of 3 Nov 2026, group G3): G3's seams and planted refusals, arms no input reaches removed, and three defects fixed at their cause — 2026-11-05
+
+**Context.** Group G3 of the split (session BASE-COV-PULL-PS3, branch
+`cloud/cov-pull-ps3-20261103`, 3 Nov). Some G3 refusals are reached only by a
+host fault no portable test can make on demand (a write, sync or rename
+refused after the file opened; a part's status read or final sync; a listing
+that fails part way; an fstat of an open handle); some arms no input can
+reach; and one test went red only under load.
+
+1. **Planted host refusals, in test builds only**, after
+   `gdfl_import_filing::inject` (IA-16) and `FULL_AT`: `masters::Step` and
+   `planted()` (one function in both builds; nothing planted outside tests) in
+   `replace_locked` and `remove_partial_after`;
+   `gdfl_dropbox::at_step("metadata" | "sync")` with a `cfg(test)`
+   `PART_FAULT`.
+2. **Seams that pass the live value or the host's own answer**:
+   `gdfl_dropbox::Endpoints::proxy_named_by` (a test cannot set an environment
+   variable: `set_var` is `unsafe`, and `unsafe_code` is denied);
+   `ingest::CensusLock::opened`; `zerodha_verify::lock_answer`, `note_left`;
+   `tickstore_write::{item_by, preflight_under, encode_all_under, lock_held,
+   columnar_under}`, `write_temp`'s index encoder, `Faults::refused_with`;
+   `http::HttpSource::built_with`; `gdfl_tickstore::DayTable::walk_within`;
+   `gdfl_import_journal::make_leaf_dir_with`; `archive::entry_path`.
+3. **Arms no input reaches, removed or merged**, each with its proof in PS3's
+   report: `masters::prime_now` takes the prime its callers checked;
+   `masters::holds_exactly` answers a refused status or a short read through
+   the "not held" arm and splits with `split_at_mut`; `gdfl_dropbox::status`
+   skips with `skip()`; `ingest::rows_mode` and `months_in`;
+   `gap_backfill::month_lines`; `session::whole_months`;
+   `gdfl_import_lineage::day`.
+4. **Defects fixed at their cause**, each with a test that fails first.
+   `gdfl_dropbox::lock_staging` returns `StagingLock` and
+   `tickstore_write::lock_root` returns `DayLock`, whose `Drop` calls
+   `File::unlock()`: an `flock` belongs to the open file description, and a
+   child started while a run held it kept a copy until its exec, so the next
+   run was refused (`run_busy`, `day_locked`) by a run that had ended (probes:
+   103 of 300 and 149 of 300 retakes refused while another thread spawned; 0 of
+   300 after). It is what made
+   `a_duplicate_refused_by_its_sha256_stays_refused_on_every_later_press` red
+   once under load (D1: found and made deterministic, not re-run).
+   `rolling::step_refused`: a roll past the calendar's last day says so,
+   instead of "the day is before this regime was verified from". And a test
+   that kept vendor captures under `$HOME/.brutex` (on the operator's machine,
+   the real archive root) now uses an invented base URL and asserts no feed.
+5. **Test side.** Six root-only permission tests run through
+   `where_permission_binds` (D-0995); test helpers lose branches only a
+   failing or differently scheduled run took, or are driven directly over
+   their edges. 253 new tests, each shown red under a hand change of what it
+   checks.
+
+**Rejected.** `#[coverage(off)]`, excluded files, weakened or skipped tests; a
+`cfg(not(test))` copy of production code (a region only the integration
+tests' build holds, which none drives: measured); a portable full disk (none
+exists: `/dev/full` is Linux-only); a 4 GiB member to reach a `u32` bound.
+
+**Figures** (Route B, the kit's script on the pinned nightly, the whole pull
+suite run, a root cloud host): G3 at the GREEN-TIP (61 files) lines
+49,318/51,591, branches 3,865/4,792; at PS3's code tip `98937ee2c85a` (71
+files) lines 58,793/60,041 (1,248 uncovered), branches 4,289/4,786 (497
+sides). Its open items: (F) 754, (U) 91 with proofs, inside `#[ignore]` tests
+898 (L-BCP-3), and 2 GAPs, `tenor.rs` 203-204, which needed a test in G1's
+`vendor.rs` and are closed by D-7338. Eleven of its (U) rows are lines that
+run only in a child process a test kills with SIGKILL, which Route B cannot
+count (L-BCP-5). Invariants BCP-16 to BCP-19.
