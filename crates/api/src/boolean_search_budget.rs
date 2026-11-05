@@ -32,6 +32,13 @@ impl ReplayBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Extremes (BASE-COV-API-AS2): (1) no value; (2) an empty one; (3) zero;
+    /// (4) a leading zero; (5) a sign either way; (6) a space either side;
+    /// (7) a decimal or an exponent; (8) one past `u64::MAX`; (9) past twenty
+    /// digits, refused by length before any parse; and accepted: 1 and
+    /// `u64::MAX` exactly. Combined: (10) a sign AND a leading zero AND a
+    /// space at once; (11) twenty-four nines, past both the width and the
+    /// value. Out of the box: (12) a value that is not UTF-8 (the test below).
     #[test]
     fn required_positive_exact_replay_allowance_has_no_fallback() -> Result<(), String> {
         assert!(ReplayBudget::parse(None).is_err());
@@ -46,6 +53,11 @@ mod tests {
             "1.0",
             "1e6",
             "18446744073709551616",
+            // PAST TWENTY DIGITS: refused by length before any parse
+            // (BASE-COV-API-AS2).
+            "100000000000000000000",
+            "999999999999999999999999",
+            " +01",
         ] {
             assert!(ReplayBudget::parse(Some(OsStr::new(invalid))).is_err());
         }

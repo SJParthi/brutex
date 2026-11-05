@@ -1071,16 +1071,90 @@ mod tests {
                 let _ = sent.send(load(&fifo, Vendor::Groww).map(|_| ()));
             })
         };
-        let read = answer.recv_timeout(std::time::Duration::from_secs(2));
-        if read.is_err() {
-            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
-        }
-        let _ = reader.join();
-        let why = read
+        // A load that waited on the FIFO fails the `expect` below, and its
+        // thread is left blocked on the open until the process ends: the
+        // reader opens without waiting (`census::open_without_waiting`), so
+        // nothing here has to unblock it.
+        let why = answer
+            .recv_timeout(std::time::Duration::from_secs(2))
             .expect("a FIFO at the master path must not hold the load")
             .expect_err("refused");
+        let _ = reader.join();
         assert!(why.contains("not a regular file"), "{why}");
         let _ = std::fs::remove_file(&fifo);
+    }
+
+    /// **A MASTER PATH THAT IS A DIRECTORY, OR ANY PATH THAT IS NOT ONE
+    /// REGULAR FILE, IS REFUSED BY WHAT IT IS** (BASE-COV-API-AS2). Extremes:
+    /// (1) an empty directory at the master path is named a directory;
+    /// (2) a directory holding a file of the master's own name is still a
+    /// directory; (3) a path that does not exist is refused by the
+    /// filesystem's words, not as a directory; (4) a regular file of one
+    /// header line and no row is read, never refused as a kind; (5) a file
+    /// of one byte, a newline, is read and refused for what it holds, never
+    /// for its kind or its size; (6) a directory named like a CSV
+    /// (`x.csv/`) is a directory all the same; (7) the refusal names the path
+    /// it read; (8) every mastered feed refuses a directory the same way.
+    /// Combined: (9) a directory at the master path whose name holds a space
+    /// AND a dot-dot segment: refused as a directory under its own name;
+    /// (10) a symbolic link to a directory is followed to what it is: a
+    /// directory. Out of the box: (11) the filesystem root `/` as a master.
+    #[test]
+    fn a_master_path_that_is_a_directory_is_refused_as_one() {
+        let base = crate::scratch::path(&format!("master-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("a scratch folder");
+        let refused = |path: &std::path::Path, vendor: Vendor| {
+            load(path, vendor).map(|_| ()).expect_err("refused")
+        };
+        // (1), (7), (8): an empty directory, named, for every mastered feed.
+        let empty = base.join("groww_instruments.csv");
+        std::fs::create_dir_all(&empty).expect("a directory");
+        for vendor in Vendor::MASTERED {
+            let why = refused(&empty, vendor);
+            assert!(why.contains("not a regular file (a directory)"), "{why}");
+            assert!(why.contains(&empty.display().to_string()), "{why}");
+        }
+        // (2), (6): a directory holding a file of its own name.
+        let nested = base.join("x.csv");
+        std::fs::create_dir_all(&nested).expect("a directory");
+        std::fs::write(nested.join("x.csv"), "a,b\n").expect("a file inside");
+        assert!(refused(&nested, Vendor::Dhan).contains("(a directory)"));
+        // (3): no such path.
+        let missing = base.join("absent.csv");
+        let why = refused(&missing, Vendor::Groww);
+        assert!(!why.contains("(a directory)"), "{why}");
+        assert!(why.contains(&missing.display().to_string()), "{why}");
+        // (9): a space and a dot-dot segment.
+        let odd = base.join("a b").join("..").join("c d.csv");
+        std::fs::create_dir_all(&odd).expect("a directory");
+        let why = refused(&odd, Vendor::Zerodha);
+        assert!(why.contains("(a directory)"), "{why}");
+        assert!(why.contains("c d.csv"), "{why}");
+        // (10): a link to a directory.
+        #[cfg(unix)]
+        {
+            let link = base.join("link.csv");
+            std::os::unix::fs::symlink(&empty, &link).expect("a link");
+            assert!(refused(&link, Vendor::Groww).contains("(a directory)"));
+        }
+        // (11): the root of the filesystem.
+        assert!(refused(std::path::Path::new("/"), Vendor::Groww).contains("(a directory)"));
+        // (4): one header line is a file, read and not refused as a kind.
+        let header = base.join("header.csv");
+        std::fs::write(&header, "exchange\n").expect("a header");
+        let said = load(&header, Vendor::Groww)
+            .map(|_| ())
+            .err()
+            .unwrap_or_default();
+        assert!(!said.contains("not a regular file"), "{said}");
+        // (5): one byte.
+        let one = base.join("one.csv");
+        std::fs::write(&one, "\n").expect("one byte");
+        let said = refused(&one, Vendor::Groww);
+        assert!(!said.contains("not a regular file"), "{said}");
+        assert!(!said.contains("this reader holds at most"), "{said}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

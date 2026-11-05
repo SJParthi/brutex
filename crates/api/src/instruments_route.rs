@@ -541,8 +541,8 @@ pub const MASTER_NOTE_HEADER: &str = "x-brutex-master-note";
 mod tests {
     use super::*;
     use crate::server::tests::{
-        DHAN_HEAD, agreeing, body_of, corrupt_census, get, masters, month_of, served_over, site,
-        store_root,
+        DHAN_HEAD, GROWW_HEAD, agreeing, body_of, corrupt_census, get, masters, month_of,
+        served_over, site, store_root,
     };
     use crate::server::{LEGACY_UNIVERSE_TOKENS, Site, UNIVERSE_TOKENS, universe_tokens};
 
@@ -1253,5 +1253,118 @@ mod tests {
         let (code, _, whole) = ask(other).await;
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(whole, body, "another tag is answered with the whole list");
+    }
+
+    /// **A KEPT BODY THAT CANNOT BE HAD IS A 503 THAT SAYS SO, AND A MASTER ROW
+    /// NO UNIVERSE TRACKS IS NEVER LISTED** (BASE-COV-API-AS2). Extremes:
+    /// (1) the derived body's cell poisoned by a build that panicked answers
+    /// 503, never a stale or empty list; (2) its body is one JSON object that
+    /// names the poison; (3) the census headers still go out on it; (4) a
+    /// second request over the same poisoned cell refuses the same way, never
+    /// rebuilding into a half-kept cell; (5) a master share that is in no
+    /// tracked universe (an invented symbol and ISIN) is left out of the list;
+    /// (6) the index and the share the universe does track are still listed
+    /// beside it; (7) the list is the same whether the untracked row comes
+    /// first or last in the master; (8) another feed's body is untouched by
+    /// the poisoned one: Groww answers 200. Combined: (9) the poisoned feed
+    /// AND an untracked row at once: still 503, and the untracked symbol is
+    /// nowhere in the answer; (10) an untracked row that shares the tracked
+    /// share's symbol on another exchange is not counted for it. Out of the
+    /// box: (11) a master whose only extra row is a share of a name 1 byte
+    /// long: not tracked, not listed, no refusal.
+    #[test]
+    fn a_poisoned_body_is_a_503_and_an_untracked_master_row_is_not_listed() {
+        let untracked = "NSE,E,INE000Z99999,EQUITY,ZZSYNTH,ZZSYNTH SYNTHETIC,ES,EQ,,,,1333\n\
+                         NSE,E,INE000Z99998,EQUITY,Q,Q SYNTHETIC,ES,EQ,,,,1333\n\
+                         BSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,,1333\n";
+        let listed = |rows: &[serde_json::Value]| {
+            let mut symbols: Vec<String> = rows
+                .iter()
+                .map(|row| format!("{}:{}", row["segment"], row["symbol"]))
+                .collect();
+            symbols.sort();
+            symbols
+        };
+        // (5)-(7), (10), (11): the untracked rows first, then last.
+        let mut answers = Vec::new();
+        for (name, dhan) in [
+            (
+                "instruments-untracked-first",
+                format!(
+                    "{DHAN_HEAD}{untracked}\
+                     NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n\
+                     NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,,1333\n"
+                ),
+            ),
+            (
+                "instruments-untracked-last",
+                format!(
+                    "{DHAN_HEAD}\
+                     NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n\
+                     NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,,1333\n\
+                     {untracked}"
+                ),
+            ),
+        ] {
+            let dir = masters(name, None, Some(&dhan));
+            let built = site(name, &dir);
+            let (code, _, body) = instruments_answer(&built, Vendor::Dhan);
+            assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+            assert!(!body.contains("ZZSYNTH"), "{body}");
+            assert!(!body.contains("\"Q\""), "{body}");
+            let rows = rows_of(&body);
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row["symbol"] == "RELIANCE")
+                    .count(),
+                1,
+                "{body}"
+            );
+            answers.push(listed(&rows));
+        }
+        assert_eq!(answers[0], answers[1]);
+        assert!(
+            answers[0].iter().any(|s| s.ends_with(":\"NIFTY\"")),
+            "{answers:?}"
+        );
+        assert!(
+            answers[0].iter().any(|s| s.ends_with(":\"RELIANCE\"")),
+            "{answers:?}"
+        );
+        // (1)-(4), (8), (9): poison the Dhan body's cell, then ask.
+        let dir = masters(
+            "instruments-poisoned",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}{untracked}\
+                 NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let built = site("instruments-poisoned", &dir);
+        let (_, now) = vendor_census(&built, Vendor::Dhan);
+        let generation = built.universe().generation;
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = built.census_wire.kept(
+                now.slot(),
+                Vendor::Dhan,
+                "instruments.json",
+                generation,
+                || -> Result<Tagged, String> { panic!("a build that never ends") },
+            );
+        }));
+        assert!(poisoned.is_err(), "the build panicked inside the cell");
+        for _ in 0..2 {
+            let (code, headers, body) = instruments_answer(&built, Vendor::Dhan);
+            assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            let said: serde_json::Value = serde_json::from_str(&body).expect("one JSON object");
+            assert_eq!(said["error"], "derived census cache is poisoned", "{body}");
+            assert!(!body.contains("ZZSYNTH"), "{body}");
+            assert!(headers.contains_key("x-brutex-census-state"), "{headers:?}");
+        }
+        let (code, _, groww) = instruments_answer(&built, Vendor::Groww);
+        assert_eq!(code, axum::http::StatusCode::OK, "{groww}");
+        assert!(groww.contains("NIFTY"), "{groww}");
     }
 }

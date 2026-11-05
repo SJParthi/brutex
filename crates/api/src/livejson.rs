@@ -706,4 +706,78 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A LIVE FOLDER THAT CANNOT BE LISTED REFUSES THE WHOLE CENSUS BY
+    /// NAME** (BASE-COV-API-AS2). Extremes: (1) `results/live` is a FILE: the
+    /// census refuses, 503, never an empty list; (2) the refusal is the JSON
+    /// shape every refusal here has, `listed` false and no counts; (3) it
+    /// names the listing as what failed; (4) a store with no `results` at all
+    /// is listed and empty (the other side of the same read); (5) an empty
+    /// `results` folder is listed and empty too; (6) an empty file at the live
+    /// path refuses like a full one; (7) the refusal is the same on a second
+    /// ask, nothing kept from the first; (8) the store is left as it was.
+    /// Combined: (9) the live path a file AND a stray beside it in `results`:
+    /// still the one refusal. Out of the box: (10) the live path a link to
+    /// itself, a loop: refused, never followed forever.
+    #[test]
+    fn a_live_folder_that_cannot_be_listed_refuses_the_census() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-livejson-notadir-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+        let listed_empty = r#"{"runs":[],"count":0,"skipped":0,"strays":0,"stale":0,"undated":0,"stale_after_secs":86400,"listed":true,"refusal":null}"#;
+        // (4), (5).
+        assert_eq!(respond(Ok(root.clone())).2, listed_empty);
+        std::fs::create_dir_all(root.join("results")).expect("results");
+        assert_eq!(respond(Ok(root.clone())).2, listed_empty);
+        // (1)-(3), (6), (7): the live path is an empty file, asked twice.
+        let live = root.join("results").join("live");
+        std::fs::write(&live, b"").expect("a file where the folder goes");
+        for _ in 0..2 {
+            let (status, _, body) = respond(Ok(root.clone()));
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{body}"
+            );
+            let said: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            assert_eq!(said["listed"], false, "{body}");
+            assert_eq!(said["runs"], serde_json::json!([]), "{body}");
+            assert!(said.get("count").is_none(), "no count nobody took: {body}");
+            assert!(
+                said["refusal"]
+                    .as_str()
+                    .is_some_and(|why| why.starts_with("live directory could not be listed: ")),
+                "{body}"
+            );
+        }
+        // (8), (9): a stray beside it; the file is still a file.
+        std::fs::write(root.join("results").join("stray.txt"), b"x").expect("a stray");
+        std::fs::write(&live, b"not a folder").expect("a full file");
+        assert_eq!(
+            respond(Ok(root.clone())).0,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(live.is_file(), "the store is left as it was");
+        // (10): a link to itself.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&live).expect("the file goes");
+            std::os::unix::fs::symlink(&live, &live).expect("a loop");
+            let (status, _, body) = respond(Ok(root.clone()));
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{body}"
+            );
+            assert!(
+                body.contains("live directory could not be listed"),
+                "{body}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

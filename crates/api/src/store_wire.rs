@@ -545,6 +545,151 @@ mod tests {
         );
     }
 
+    /// **A KEPT ANSWER IS SERVED ONLY FOR ITS OWN SLOT, EXTRA KEY AND TYPE,
+    /// AND A ROW THE CENSUS DOES NOT HOLD IS NO ROW** (BASE-COV-API-AS2).
+    /// Extremes: (1) the same slot asked under another extra key derives
+    /// again; (2) the same name asked for another TYPE derives again rather
+    /// than answering a value it cannot be; (3) the first answer asked again
+    /// after both is derived again, because the cell keeps one answer;
+    /// (4) a key `0` and a key `u64::MAX` are two keys; (5) a compact census
+    /// whose feed's census is absent drops a row it cannot hold; (6) a compact
+    /// census over a feed that has no census in the list holds no row; (7) a
+    /// kept cell names itself and nothing it holds; (8) an empty list of
+    /// entries over a held census is an empty body. Combined: (9) another
+    /// type AND another extra key at once derive once more; (10) a feed whose
+    /// census is unreadable AND two entries of the same series: both rows
+    /// dropped, the dictionaries left empty. Out of the box: (11) a name the
+    /// cache has never seen asked for a unit type `()`: derived and kept like
+    /// any other.
+    #[test]
+    fn a_kept_answer_is_its_own_slot_key_and_type_and_an_unheld_row_is_dropped() {
+        let cache = Cache::default();
+        let source = slot();
+        let built = AtomicUsize::new(0);
+        let count = |value: u64| {
+            built.fetch_add(1, Ordering::SeqCst);
+            Ok::<u64, String>(value)
+        };
+        // (1) another extra key on the same slot.
+        assert_eq!(
+            *cache
+                .kept(&source, Vendor::Gdfl, "n", 0, || count(1))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            *cache
+                .kept(&source, Vendor::Gdfl, "n", 1, || count(2))
+                .unwrap(),
+            2
+        );
+        assert_eq!(built.load(Ordering::SeqCst), 2);
+        // (2) another type under the same name and key.
+        let text = cache
+            .kept(&source, Vendor::Gdfl, "n", 1, || {
+                Ok::<String, String>("two".to_owned())
+            })
+            .unwrap();
+        assert_eq!(text.as_str(), "two");
+        // (3) the first type again: derived again, the cell held the other.
+        assert_eq!(
+            *cache
+                .kept(&source, Vendor::Gdfl, "n", 1, || count(3))
+                .unwrap(),
+            3
+        );
+        assert_eq!(built.load(Ordering::SeqCst), 3);
+        // (4) key 0 and key u64::MAX are two keys.
+        assert_eq!(
+            *cache
+                .kept(&source, Vendor::Gdfl, "m", 0, || count(4))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            *cache
+                .kept(&source, Vendor::Gdfl, "m", u64::MAX, || count(5))
+                .unwrap(),
+            5
+        );
+        assert_eq!(built.load(Ordering::SeqCst), 5);
+        // (9) another type AND another key at once.
+        let flag = cache
+            .kept(&source, Vendor::Gdfl, "m", 7, || Ok::<bool, String>(true))
+            .unwrap();
+        assert!(*flag);
+        // (11) a unit answer under a new name.
+        let unit = cache.kept(&source, Vendor::Zerodha, "unit", 0, || Ok::<(), String>(()));
+        assert!(unit.is_ok());
+        // (7) a kept cell names itself and nothing it holds.
+        assert_eq!(format!("{:?}", KeptCell::default()), "KeptCell");
+        // (5) the feed's census is absent: the row is dropped.
+        let series = census::Series {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").unwrap(),
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let month = store::path::YearMonth::new(2024, 1).unwrap();
+        let absent = census::VendorCensus {
+            vendor: Vendor::Zerodha,
+            path: std::path::PathBuf::from("/nonexistent/store-wire/zerodha.man"),
+            state: census::Census::Absent,
+        };
+        let body: serde_json::Value = serde_json::from_str(
+            &compact(
+                std::slice::from_ref(&absent),
+                &[(series, month)],
+                Vendor::Zerodha,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["rows"], serde_json::json!([]), "{body}");
+        assert_eq!(body["instruments"], serde_json::json!([]), "{body}");
+        // (6) no census for the asked feed in the list.
+        let body: serde_json::Value = serde_json::from_str(
+            &compact(
+                std::slice::from_ref(&absent),
+                &[(series, month)],
+                Vendor::Gdfl,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["rows"], serde_json::json!([]), "{body}");
+        assert_eq!(body["feed"], "gdfl", "{body}");
+        // (8) no entries at all.
+        let body: serde_json::Value = serde_json::from_str(
+            &compact(std::slice::from_ref(&absent), &[], Vendor::Zerodha).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["rows"], serde_json::json!([]), "{body}");
+        // (10) an unreadable census and the same series twice.
+        let unreadable = census::VendorCensus {
+            vendor: Vendor::Zerodha,
+            path: std::path::PathBuf::from("/nonexistent/store-wire/zerodha.man"),
+            state: census::Census::Unreadable {
+                reason: "generated: refused".to_owned(),
+                fault: census::Fault::Refused,
+            },
+        };
+        let next = store::path::YearMonth::new(2024, 2).unwrap();
+        let body: serde_json::Value = serde_json::from_str(
+            &compact(
+                &[unreadable],
+                &[(series, month), (series, next)],
+                Vendor::Zerodha,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["rows"], serde_json::json!([]), "{body}");
+        assert_eq!(body["months"], serde_json::json!([]), "{body}");
+        assert_eq!(body["timeframes"], serde_json::json!([]), "{body}");
+    }
+
     #[test]
     fn empty_compact_census_retains_its_feed_and_version() {
         let value: serde_json::Value =

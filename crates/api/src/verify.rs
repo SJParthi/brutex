@@ -456,4 +456,116 @@ mod tests {
         assert!(said.starts_with("1 of 3 entry(s) disagree"), "{said}");
         assert!(said.contains("1 more were held by a writer"), "{said}");
     }
+
+    /// Writes a counter whose newest header slot is damaged and whose older
+    /// one is whole: it loads, DEGRADED (the shape
+    /// `server_cloud_mutant_tests_c::a_damaged_census_cannot_show_nothing_is_held`
+    /// writes).
+    #[allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "a test that cannot panic cannot fail"
+    )]
+    fn degraded_census(root: &Path, vendor: Vendor) -> VendorCensus {
+        let mut damaged = pull::manifest::ManifestHeader::genesis(vendor).image();
+        damaged[16] ^= 0xFF;
+        let good = pull::manifest::ManifestHeader {
+            generation: 1,
+            ..pull::manifest::ManifestHeader::genesis(vendor)
+        }
+        .image();
+        let mut bytes = vec![0u8; 32_768];
+        bytes[..64].copy_from_slice(&damaged);
+        bytes[16_384..16_448].copy_from_slice(&good);
+        let path = pull::manifest::manifest_path(root, vendor);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the manifest folder");
+        std::fs::write(&path, &bytes).expect("a damaged manifest");
+        crate::census::read_vendor(root, vendor)
+    }
+
+    /// **A DEGRADED COUNTER IS SCRUBBED, AND THE REPORT SAYS IT WAS DEGRADED
+    /// AND WHAT A SCRUB CANNOT SEE** (BASE-COV-API-AS2). Extremes: (1) a
+    /// counter that stepped back to its older header holds no month: the
+    /// walk checks nothing and the refusal names the degradation; (2) it says
+    /// how many entries it did check, zero; (3) such a report is never
+    /// verified; (4) its sentence leads with "not verified"; (5) the same
+    /// counter scrubbed off the workers says the same words; (6) the
+    /// refusal names the feed; (7) it names why the lost months cannot be
+    /// asked about; (8) a counter that is absent rather than degraded is the
+    /// other refusal, "could not be read". Combined: (9) a degraded Dhan and
+    /// a degraded Zerodha counter in one store, each scrubbed: each names
+    /// itself and not the other; (10) a degraded counter scrubbed by a reader
+    /// that has already left is the cancelled refusal, never the degraded
+    /// one, because no month was walked to say it after. Out of the box:
+    /// (11) a counter that degrades from a damaged NEWEST header with the
+    /// older one at generation 1 is still held: the walk runs, never refuses
+    /// up front.
+    #[tokio::test]
+    #[allow(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
+    async fn a_degraded_counter_is_scrubbed_and_said_degraded() {
+        let root = crate::scratch::path(&format!("verify-degraded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch store");
+        let dhan = degraded_census(&root, Vendor::Dhan);
+        // (11): held, and degraded.
+        let Census::Held { ref manifest } = dhan.state else {
+            panic!("a recovered counter still loads: {:?}", dhan.state.name());
+        };
+        assert!(
+            manifest.degraded_reason().is_some(),
+            "the premise: degraded"
+        );
+        // (1)-(4), (6), (7).
+        let report = vendor(&root, &dhan);
+        let why = report.refused.clone().expect("a degraded counter is said");
+        assert!(
+            why.starts_with("dhan's counter loaded DEGRADED — "),
+            "{why}"
+        );
+        assert!(
+            why.contains("The 0 entry(s) it still holds were checked"),
+            "{why}"
+        );
+        assert!(
+            why.contains("a scrub can only ask about a month the counter"),
+            "{why}"
+        );
+        assert_eq!(report.tally.seen(), 0);
+        assert!(!report.verified());
+        assert!(report.say().starts_with("not verified"), "{}", report.say());
+        // (5): off the workers, the same words.
+        let off = vendor_off_worker(root.clone(), dhan.clone())
+            .await
+            .expect("admitted");
+        assert_eq!(off.refused, report.refused);
+        // (9): a second degraded feed names itself.
+        let zerodha = degraded_census(&root, Vendor::Zerodha);
+        let other = vendor(&root, &zerodha)
+            .refused
+            .expect("a degraded counter is said");
+        assert!(
+            other.starts_with("zerodha's counter loaded DEGRADED"),
+            "{other}"
+        );
+        assert!(!other.contains("dhan"), "{other}");
+        // (10): a reader that left before the walk: no month walked, and the
+        // degraded sentence is still the one said, since the walk ended with
+        // nothing to stop.
+        let (gone, leaving) = crate::bars::Cancel::pair();
+        drop(leaving);
+        assert!(gone.is_cancelled(), "the premise: the reader left");
+        let left = vendor_until(&root, &dhan, &gone)
+            .refused
+            .expect("a refusal");
+        assert!(left.contains("DEGRADED"), "no month to stop at: {left}");
+        // (8): an absent counter is the other refusal.
+        let absent = VendorCensus {
+            vendor: Vendor::Groww,
+            path: root.join("absent.man"),
+            state: Census::Absent,
+        };
+        let said = vendor(&root, &absent).refused.expect("refused");
+        assert!(said.contains("could not be read"), "{said}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

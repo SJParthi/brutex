@@ -638,4 +638,114 @@ mod tests {
             )
         );
     }
+
+    fn lost(path: &str, sidecar: &str, block: u64) -> StoreError {
+        StoreError::ChecksumsMissing {
+            path: PathBuf::from(path),
+            sidecar: PathBuf::from(sidecar),
+            block,
+        }
+    }
+
+    /// **A LOST SIDECAR IS ONE CAUSE ONLY WHILE BOTH ITS FILES ARE THE SAME,
+    /// AND A CUT NEVER SPLITS A CHARACTER** (BASE-COV-API-AS2). Extremes:
+    /// (1) the next record of one shown file whose refusal names another bar
+    /// file starts a run of its own; (2) one whose refusal names another
+    /// sidecar starts one too; (3) two records in ONE block are a run with no
+    /// block span; (4) a sentence whose cap falls inside a two-byte character
+    /// is cut one byte early; (5) inside a four-byte one, three bytes early;
+    /// (6) a sentence of exactly the cap is kept whole, with no ellipsis;
+    /// (7) the cap plus one ASCII byte is cut at the cap; (8) a log that only
+    /// saw a run is not empty while that run is open. Combined: (9) a lost
+    /// sidecar that spans blocks 0-2 and then, on the very next record,
+    /// names another sidecar: the first run keeps its block span and the
+    /// second is its own, unspanned; (10) a record at `u64::MAX` extends a run
+    /// that ended one before it, and the record after it (row 0 of the same
+    /// file) cannot be its next, so it starts a run. Out of the box: (11) a
+    /// sentence that is ONE four-byte character after the cap's own bytes
+    /// minus one: every byte of it straddles the cap.
+    #[test]
+    fn a_lost_sidecar_is_one_cause_only_for_the_same_files_and_a_cut_keeps_characters() {
+        let file = Path::new("/s/2020-07.bin");
+        // (1) another bar file in the refusal: two runs.
+        let mut log = FaultLog::default();
+        log.record(file, 0, lost("/s/2020-07.bin", "/s/2020-07.crc", 0));
+        log.record(file, 1, lost("/s/2020-08.bin", "/s/2020-07.crc", 0));
+        let said = log.sentences();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("/s/2020-07.bin record 0: "), "{said:?}");
+        assert!(said[1].starts_with("/s/2020-07.bin record 1: "), "{said:?}");
+        // (2) another sidecar in the refusal: two runs.
+        let mut log = FaultLog::default();
+        log.record(file, 0, lost("/s/2020-07.bin", "/s/2020-07.crc", 0));
+        log.record(file, 1, lost("/s/2020-07.bin", "/s/other.crc", 0));
+        let said = log.sentences();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[1].contains("other.crc"), "{said:?}");
+        // (3) two records of one block: one run, no block span.
+        let mut log = FaultLog::default();
+        log.record(file, 5, lost("/s/2020-07.bin", "/s/2020-07.crc", 0));
+        log.record(file, 6, lost("/s/2020-07.bin", "/s/2020-07.crc", 0));
+        let said = log.sentences();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("/s/2020-07.bin records 5–6 (2): "),
+            "{said:?}"
+        );
+        assert!(!said[0].contains("blocks"), "{said:?}");
+        // (4) the cap inside a two-byte character.
+        let two = format!("{}é tail", "a".repeat(MAX_FAULT_CHARS - 1));
+        assert_eq!(capped(two), format!("{}…", "a".repeat(MAX_FAULT_CHARS - 1)));
+        // (5) the cap inside a four-byte character, at its last byte.
+        let four = format!("{}🜂 tail", "a".repeat(MAX_FAULT_CHARS - 3));
+        assert_eq!(
+            capped(four),
+            format!("{}…", "a".repeat(MAX_FAULT_CHARS - 3))
+        );
+        // (6) exactly the cap: whole.
+        let exact = "a".repeat(MAX_FAULT_CHARS);
+        assert_eq!(capped(exact.clone()), exact);
+        // (7) one byte past the cap: cut at the cap.
+        let over = "a".repeat(MAX_FAULT_CHARS + 1);
+        assert_eq!(capped(over), format!("{exact}…"));
+        // (8) an open run alone makes the log not empty.
+        let mut open = FaultLog::default();
+        assert!(open.is_empty());
+        open.record(file, 0, missing("/x"));
+        assert!(!open.is_empty());
+        // (9) a spanned lost sidecar, then the next record names another.
+        let mut log = FaultLog::default();
+        for row in 0..3_u64 {
+            log.record(file, row, lost("/s/2020-07.bin", "/s/2020-07.crc", row));
+        }
+        log.record(file, 3, lost("/s/2020-07.bin", "/s/2020-07.old", 3));
+        let said = log.sentences();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said[0].starts_with("/s/2020-07.bin records 0–2 (3), blocks 0–2: "),
+            "{said:?}"
+        );
+        assert!(said[1].starts_with("/s/2020-07.bin record 3: "), "{said:?}");
+        assert!(!said[1].contains("blocks"), "{said:?}");
+        // (10) the last row an index can name extends the run; the next
+        // record cannot follow it.
+        let mut log = FaultLog::default();
+        log.record(file, u64::MAX - 1, missing("/x"));
+        log.record(file, u64::MAX, missing("/x"));
+        log.record(file, 0, missing("/x"));
+        assert_eq!(log.records(), 3);
+        let said = log.sentences();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said[0].contains(&format!("records {}–{} (2)", u64::MAX - 1, u64::MAX)),
+            "{said:?}"
+        );
+        assert!(said[1].starts_with("/s/2020-07.bin record 0: "), "{said:?}");
+        // (11) a four-byte character whose first byte is the cap's last.
+        let straddle = format!("{}𝄞", "a".repeat(MAX_FAULT_CHARS - 1));
+        assert_eq!(
+            capped(straddle),
+            format!("{}…", "a".repeat(MAX_FAULT_CHARS - 1))
+        );
+    }
 }

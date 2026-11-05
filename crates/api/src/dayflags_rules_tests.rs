@@ -636,6 +636,83 @@ fn a_pages_cold_days_are_read_together_each_once() {
     );
 }
 
+/// **A DAY THIS REQUEST ALREADY REFUSED IS NOT READ AGAIN ON THE PAGE'S
+/// THREADS, AND A NON-SHARE READS NOTHING EVEN WITH A NAME**
+/// (BASE-COV-API-AS2). Extremes: (1) a page asked twice on ONE request: the
+/// day with no master is read once, by the first ask, and said refused by
+/// both; (2) the second ask's other cold days are read on threads; (3) its
+/// held days answer from the kept flags with no read; (4) a request with an
+/// identity but not a share reads no day at all; (5) its every day is said
+/// not required; (6) a closed day beside them reads nothing; (7) a day after
+/// today reads nothing; (8) the refusals list names the refused day once.
+/// Combined: (9) on the second ask the refused day AND two new cold days at
+/// once: the threads read only the new two. Out of the box: (10) the same
+/// refused day asked three times in one page: one read, three answers.
+#[test]
+fn a_day_this_request_refused_is_not_read_again_and_a_non_share_reads_nothing() {
+    let root = root_of("as2-cas-refused-again");
+    let dir = root.join("session-masters");
+    for on in ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"] {
+        install_flag(&root, on, "RELIANCE", 1);
+    }
+    let refused = day("2026-08-21");
+    let mut flags = CasFlags::of(&root, "RELIANCE", true);
+    let first = flags.on_sessions(&[
+        (day("2026-08-17"), true, false),
+        (day("2026-08-18"), true, false),
+        (refused, true, false),
+    ]);
+    assert!(matches!(first[2].basis, CasBasis::Unread(_)), "{first:?}");
+    assert_eq!(reads_of(&dir, refused), 1);
+    // (1), (2), (3), (9), (10): the same request asks again.
+    let again = flags.on_sessions(&[
+        (day("2026-08-17"), true, false),
+        (refused, true, false),
+        (day("2026-08-19"), true, false),
+        (day("2026-08-20"), true, false),
+        (refused, true, false),
+        (refused, true, false),
+    ]);
+    assert_eq!(reads_of(&dir, refused), 1, "refused once, read once");
+    for at in [1, 4, 5] {
+        assert!(matches!(again[at].basis, CasBasis::Unread(_)), "{again:?}");
+    }
+    for on in ["2026-08-19", "2026-08-20"] {
+        assert_eq!(reads_of(&dir, day(on)), 1, "{on}");
+        assert_ne!(
+            read_on(&dir, day(on)),
+            Some(std::thread::current().id()),
+            "{on}: read on the page's threads"
+        );
+    }
+    assert_eq!(reads_of(&dir, day("2026-08-17")), 1, "kept, not read again");
+    assert_eq!(again[0].eligibility, CasEligibility::Eligible);
+    // (8)
+    assert_eq!(flags.refusals().len(), 1, "{:?}", flags.refusals());
+    // (4)-(7): a name, and not a share.
+    let mut not_share = CasFlags {
+        identity: Some(("RELIANCE".to_owned(), "INE002A01018".to_owned())),
+        share: false,
+        dir: dir.clone(),
+        refused: HashMap::new(),
+    };
+    let cold = [day("2026-08-24"), day("2026-08-25")];
+    let none = not_share.on_sessions(&[
+        (cold[0], true, false),
+        (cold[1], true, false),
+        (day("2026-08-22"), false, false),
+        (day("2026-08-26"), true, true),
+    ]);
+    assert!(
+        none.iter().all(|flag| flag.basis == CasBasis::NotRequired),
+        "{none:?}"
+    );
+    for on in cold {
+        assert_eq!(reads_of(&dir, on), 0, "{on}");
+    }
+    assert!(not_share.refusals().is_empty());
+}
+
 /// **THE FLAG MEMO IS BOUNDED** (verify-R3-13-r1 blocking 2): past
 /// [`FLAG_CAP`] / 2 new keys the older generation is dropped whole, never
 /// more than [`FLAG_CAP`] are held, and a flag hit since the last turn

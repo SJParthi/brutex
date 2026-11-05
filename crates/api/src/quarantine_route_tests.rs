@@ -206,10 +206,11 @@ async fn a_window_names_its_quarantined_month_and_serves_the_rest() {
         !text.contains("77713"),
         "no quarantined bar is served: {text}"
     );
-    assert!(
-        text.contains(&february[0].ts_micros.to_string()) || text.contains("410"),
-        "{text}"
-    );
+    // FEBRUARY IS SERVED: its bars open at the invented level 410. (This was
+    // `stamp || 410`, and repair r2's Route B found the stamp's side never
+    // true: only the level ever answered, so only the level is asked.)
+    assert!(!february.is_empty());
+    assert!(text.contains("410"), "{text}");
 }
 
 #[test]
@@ -395,9 +396,10 @@ async fn a_press_whose_client_leaves_holds_the_press_until_its_work_ends() {
             .open(&pipe)
             .expect("the pipe opens for writing");
         let _told = opened_tx.send(());
-        if go_rx.recv().is_ok() {
-            std::io::Write::write_all(&mut file, body.as_bytes()).expect("the plan is fed");
-        }
+        // Fed when the test says go, or at once if the test ended first (its
+        // sender dropped): either way the blocked work reads a whole plan.
+        let _go = go_rx.recv();
+        std::io::Write::write_all(&mut file, body.as_bytes()).expect("the plan is fed");
     });
     let form =
         format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=left");
@@ -587,4 +589,127 @@ async fn bars_json_names_every_bar_and_every_cause_a_month_set_aside() {
         flag["causes"],
         serde_json::json!(["foreign_level", "zero_price"])
     );
+}
+
+/// **THE VERB'S OWN MISUSE IS A 400, ITS REFUSAL A 422, AND A QUESTION
+/// EITHER DOOR CANNOT READ IS A 400 BEFORE THE VERB** (BASE-COV-API-AS2).
+/// Extremes: (1) a plan whose FROM is no day is the verb's misuse, 400 with
+/// exit 2; (2) a plan whose cause nobody names is the same; (3) a plan over a
+/// store that holds no plan file is the verb's refusal, 422 with exit 1, and
+/// applies nothing; (4) the plan door asked a field it does not know is a
+/// 400 `quarantine_question` and the verb never runs; (5) the press door
+/// asked the same; (6) a press that names no reason is refused at the door;
+/// (7) an empty question names the first field it lacks; (8) a press with a
+/// reason over a store with no plan file is the verb's refusal, 422, said as
+/// applied. Combined: (9) a press with an unknown field AND no reason is
+/// refused for the unknown field, the first thing read; (10) a plan whose
+/// FROM is after its TO AND whose cause is unknown: the dates are read
+/// first, so the misuse names them. Out of the box: (11) a symbol of 300
+/// bytes: the verb refuses it as no symbol, a misuse, never a store read.
+#[tokio::test]
+async fn the_verbs_misuse_and_refusal_and_an_unread_question_are_said_apart() {
+    let _serial = PRESS_TESTS.lock().await;
+    let fixture = Fixture::new("as2-quarantine-codes");
+    let plan_of = |query: &str| format!("/pull/quarantine.json?{query}");
+    // (1), (2), (10), (11): the verb's misuse.
+    for (query, said) in [
+        (
+            format!("symbol={SYMBOL}&from=2018-13-01&to=2018-03-31&cause=foreign_level"),
+            "refused: ",
+        ),
+        (
+            format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=nobody_names_it"),
+            "refused: ",
+        ),
+        (
+            format!("symbol={SYMBOL}&from=2018-04-01&to=2018-03-31&cause=nobody_names_it"),
+            "FROM 2018-04-01 is after TO 2018-03-31",
+        ),
+        (
+            format!(
+                "symbol={}&from=2018-03-01&to=2018-03-31&cause=foreign_level",
+                "S".repeat(300)
+            ),
+            "refused: ",
+        ),
+    ] {
+        let (status, body) = get(&fixture.site, &plan_of(&query)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert_eq!(body["exit"], u64::from(cli::MISUSED), "{body}");
+        assert_eq!(body["applied"], false, "{body}");
+        assert!(body["report"].as_str().unwrap().contains(said), "{body}");
+    }
+    // (3): no plan file: the verb refuses.
+    let (status, body) = get(
+        &fixture.site,
+        &plan_of(&format!(
+            "symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["exit"], u64::from(cli::FAILED), "{body}");
+    assert!(
+        body["report"]
+            .as_str()
+            .unwrap()
+            .contains("ZERODHA QUARANTINE REFUSED"),
+        "{body}"
+    );
+    // (4), (7): the plan door's own refusals.
+    for (query, said) in [
+        (
+            format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&bogus=1"),
+            "`bogus` is not a parameter of the quarantine",
+        ),
+        (String::new(), "name `symbol`"),
+    ] {
+        let (status, body) = get(&fixture.site, &plan_of(&query)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert_eq!(body["code"], "quarantine_question", "{body}");
+        assert_eq!(body["error"], said, "{body}");
+    }
+    // (5), (6), (9): the press door's own refusals.
+    for (form, said) in [
+        (
+            format!(
+                "symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=r&bogus=1"
+            ),
+            "`bogus` is not a parameter of the quarantine",
+        ),
+        (
+            format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level"),
+            "",
+        ),
+        (
+            format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&bogus=1"),
+            "`bogus` is not a parameter of the quarantine",
+        ),
+    ] {
+        let (status, _, text) =
+            quarantine_apply(axum::extract::State(Loaded::clone(&fixture.site)), form).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        let body: Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(body["code"], "quarantine_question", "{body}");
+        assert!(body["error"].as_str().unwrap().contains(said), "{body}");
+    }
+    // (8): a press over a store with no plan file.
+    let before = files_under(&fixture.root);
+    let (status, _, text) = quarantine_apply(
+        axum::extract::State(Loaded::clone(&fixture.site)),
+        format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=r"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+    let body: Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(body["exit"], u64::from(cli::FAILED), "{body}");
+    assert_eq!(body["applied"], true, "{body}");
+    assert_eq!(
+        files_under(&fixture.root),
+        before,
+        "a refused press wrote nothing"
+    );
+    // A folder that is not there holds no file.
+    assert!(files_under(&fixture.root.join("not-there")).is_empty());
+    let _ = fs::remove_dir_all(&fixture.root);
 }

@@ -70,6 +70,15 @@ mod tests {
         Ok(())
     }
 
+    /// Extremes (BASE-COV-API-AS2): (1) an empty value; (2) zero, once and
+    /// twice; (3) a leading zero; (4) a sign either way; (5) a space either
+    /// side; (6) a decimal or an exponent; (7) `u64::MAX` and one past it,
+    /// both past what eight concurrent reads may address; (8) past twenty
+    /// digits, refused by length before any parse; and accepted: the exact
+    /// most the pool may address, one more refused. Combined: (9) a sign AND
+    /// a leading zero AND a space at once; (10) twenty-four nines, past the
+    /// width and the value. Out of the box: (11) a value that is not UTF-8
+    /// (the test below).
     #[test]
     fn malformed_or_unaddressable_values_refuse_without_default() -> Result<(), String> {
         for value in [
@@ -85,10 +94,19 @@ mod tests {
             "1e6",
             "18446744073709551615",
             "18446744073709551616",
+            // PAST TWENTY DIGITS: refused by length before any parse
+            // (BASE-COV-API-AS2).
+            "100000000000000000000",
+            "999999999999999999999999",
+            " +01",
         ] {
-            let Err(why) = BooleanObservationBudget::from_value(Some(OsStr::new(value))) else {
-                return Err(format!("invalid budget accepted: {value}"));
-            };
+            let refused = BooleanObservationBudget::from_value(Some(OsStr::new(value)))
+                .map(BooleanObservationBudget::bytes);
+            assert!(
+                refused.is_err(),
+                "invalid budget accepted: {value}: {refused:?}"
+            );
+            let why = refused.err().unwrap_or_default();
             assert!(why.contains(ENV) && why.contains("no default substituted"));
         }
         let maximum = (isize::MAX as u128 / super::super::MAX_CONCURRENT as u128).to_string();
