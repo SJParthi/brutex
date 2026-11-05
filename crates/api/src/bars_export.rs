@@ -2086,6 +2086,11 @@ mod tests {
     /// empty page whose two ends agree on nothing at once; out of the box — a
     /// symbol made of nothing a file name may hold (`&&&`: one dash).
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every refusal before a byte and every file name shape, each a short block of \
+                  its own; split, the parts would share nothing but their fixtures"
+    )]
     async fn a_refusal_before_a_byte_is_the_windows_and_a_name_is_always_a_file_name() {
         for (refusal, status, says) in [
             (

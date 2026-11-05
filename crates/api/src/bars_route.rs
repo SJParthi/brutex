@@ -2921,6 +2921,11 @@ mod tests {
     /// again"); out of the box — a month held by another writer while the
     /// page is read.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each way a window page is short, asked in turn over the fixtures it needs: \
+                  two writer threads, a damaged month and an inexact one"
+    )]
     async fn a_window_names_damaged_records_withholds_an_inexact_value_and_counts_coverage() {
         // DAMAGED RECORDS: the last record of a three-bar month zeroed.
         let (damaged, loaded) = january("cover-window-damaged", &[1, 2, 3]);

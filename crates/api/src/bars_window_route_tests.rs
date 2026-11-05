@@ -2466,26 +2466,71 @@ fn change_percent_is_ordered_by_the_server() {
 
 /// **A WINDOW REFUSED BY A FULL SCAN POOL IS ASKED AGAIN, AND ANSWERED THERE.**
 /// With every scan slot taken, a window bounded by a time of day (a scan)
-/// answers `429`; the helper every test here asks through gives the slots
-/// back after that refusal and asks again, and the same window is answered
-/// from the scan pool, whole.
+/// answers `429`; the helper every test here asks through gives a filler back
+/// after each refusal and asks again, and the same window is answered from
+/// the scan pool, whole. Two fillers are met twice; a free pool is asked once
+/// and frees nothing; a refusal that is not a full pool is the answer at
+/// once; a month read goes through the same helper.
 ///
-/// Extremes: singles — every scan slot taken (refused), the slots given back
-/// (answered); combinations — a full pool and a time-of-day bound at once;
-/// out of the box — a pool this test fills itself, met by the same helper
-/// that meets one another test fills.
+/// Extremes: singles — every scan slot taken by one filler (refused once), a
+/// free pool (asked once, nothing freed), a refusal that is not a full pool
+/// (`400` at once, never asked again), a month read through the same helper,
+/// a time of day open at its end; combinations — two fillers at once
+/// (refused twice, one given back each time), a full pool and `coverage=1`
+/// at once, a full pool and a time-of-day bound at once; out of the box — a
+/// pool this test fills itself, met by the same helper that meets one
+/// another test fills.
 #[tokio::test]
 async fn a_window_refused_by_a_full_scan_pool_is_asked_again_and_answered_there() {
     let fixture = Fixture::new("window-full-scan-pool");
-    let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
+    let mut fillers = vec![
+        crate::detail::crowd(crate::detail::Named::Scan),
+        crate::detail::crowd(crate::detail::Named::Scan),
+    ];
     let (status, body) = window_get_freeing(
         &fixture.site,
         &format!("{QUERY}&tod_from=09:15&tod_to=09:16"),
+        &mut || drop(fillers.pop()),
+    )
+    .await;
+    assert!(
+        fillers.is_empty(),
+        "refused twice, one filler given back each time"
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["admitted"], "scan", "{body}");
+    assert_eq!(body["total"], 4, "{body}");
+    // COVERAGE, and a time of day open at its end, behind one filler.
+    let mut crowd = Some(crate::detail::crowd(crate::detail::Named::Scan));
+    let (status, body) = window_get_freeing(
+        &fixture.site,
+        &format!("{QUERY}&coverage=1&tod_from=09:16"),
         &mut || drop(crowd.take()),
     )
     .await;
     assert!(crowd.is_none(), "refused once, then given back");
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["admitted"], "scan", "{body}");
-    assert_eq!(body["total"], 4, "{body}");
+    assert_eq!(
+        body["total"], 2,
+        "one bar a month at or after 09:16: {body}"
+    );
+    assert_eq!(body["coverage"].as_array().map(Vec::len), Some(2), "{body}");
+    // A FREE POOL is asked once and frees nothing; a refusal that is not a
+    // full pool is the answer at once.
+    let mut freed = 0_u32;
+    let mut free = || freed += 1;
+    let (status, body) =
+        window_get_freeing(&fixture.site, &format!("{QUERY}&limit=1"), &mut free).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) =
+        window_get_freeing(&fixture.site, &format!("{QUERY}&dir=up"), &mut free).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        freed, 0,
+        "a free pool and a refusal of another kind free nothing"
+    );
+    // A MONTH, through the same helper.
+    let (status, body) = fixture.get_month("").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().map(Vec::len), Some(2), "{body}");
 }

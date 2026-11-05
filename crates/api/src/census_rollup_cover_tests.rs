@@ -121,6 +121,11 @@ fn why_of(body: &serde_json::Value) -> &str {
 /// recorded two months after the month it is filed under (`days_held` null
 /// in its row and in its rung's total, `days_owed` still counted).
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one census and every exchange word asked of it in turn; split, each half would \
+              build the same census again"
+)]
 fn every_exchange_word_is_read_resolved_or_refused_by_name() {
     let march = (2019, 3);
     let rows = [
@@ -311,10 +316,14 @@ fn an_answer_carries_the_cell_bound_and_is_refused_one_past_it() {
     let oldest = &months[CELLS_MOST - 1];
     assert_eq!(oldest["month"], "1990-01");
     assert_eq!(oldest["timeframe"], Timeframe::DAY_1.as_str());
-    assert!(
-        pull::calendar::SOURCED_FIRST_DAY > 7_335,
-        "the premise: January 1990 is before the calendar's record"
-    );
+    // THE PREMISE, held at compile time: 1990-01-31 (epoch day 7,335) is
+    // before the first day the calendar's record answers.
+    const {
+        assert!(
+            pull::calendar::SOURCED_FIRST_DAY > 7_335,
+            "the premise: January 1990 is before the calendar's record"
+        );
+    }
     assert!(oldest["days_owed"].is_null(), "{oldest}");
     assert_eq!(body["rungs"].as_array().map(Vec::len), Some(RUNGS.len()));
 

@@ -2800,6 +2800,11 @@ mod tests {
     /// (wanted); out of the box — a journal whose last 20 bytes are a fragment
     /// of a `begin` line.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one journal and one ring read once, and every row, count and note of the \
+                  answer checked against them; split, each half would plant the same store"
+    )]
     fn a_close_a_recount_and_what_no_row_reads_are_each_what_they_are() {
         let root = crate::server::import_journal::tests::journal("imports-cover-odd", ODD_JOURNAL);
         let dir = root.join("logs").join("cli");
@@ -2966,13 +2971,13 @@ mod tests {
         // `<root>/logs/gdfl` is `want + 10`, two past it.
         let want = PATH_MAX - 8;
         let mut parent = base.clone();
-        let mut room = want - base.as_os_str().len();
-        while room > 203 {
+        let mut spare = want - base.as_os_str().len();
+        while spare > 203 {
             parent.push("p".repeat(200));
             std::fs::create_dir(&parent).expect("one level of the long chain");
-            room -= 201;
+            spare -= 201;
         }
-        let root = parent.join("r".repeat(room - 1));
+        let root = parent.join("r".repeat(spare - 1));
         let short = base.join("s");
         let logs = short.join("logs");
         std::fs::create_dir_all(logs.join("gdfl").join("indices")).expect("mkdir");
