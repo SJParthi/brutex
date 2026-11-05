@@ -721,6 +721,8 @@ impl Filing<'_> {
         // again, so it is named to the day's batch, which flushes the month's
         // files and directories for themselves (D-3353). A month that cannot
         // be named keeps the day open, by name.
+        #[cfg(test)]
+        inject::before_confirm(run.store_root, &file.name);
         if let (Some(batch), Some(held)) = (self.confirm, done.pending.as_ref()) {
             match confirm_month(run.store_root, held, batch) {
                 Ok(confirmed) => filed.confirmed = confirmed,
@@ -1654,6 +1656,41 @@ pub(super) mod inject {
         gone.push(".gone");
         if std::fs::rename(root, &gone).is_ok() {
             let _made = std::fs::create_dir(root);
+        }
+    }
+
+    /// What another writer does to a store once a named file's bars have
+    /// landed and before the day's batch confirms their month (D-7336): the
+    /// store's root, the file's name and the step.
+    type Between = (PathBuf, String, Box<dyn FnOnce() + Send>);
+
+    static BEFORE_CONFIRM: Mutex<Vec<Between>> = Mutex::new(Vec::new());
+
+    /// Plants `step` for the confirm of `file`'s month under `root`.
+    pub(in crate::gdfl_import) fn plant_before_confirm(
+        root: &Path,
+        file: &str,
+        step: impl FnOnce() + Send + 'static,
+    ) {
+        BEFORE_CONFIRM
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), file.to_owned(), Box::new(step)));
+    }
+
+    /// Runs the step planted for `file` under `root`, once.
+    pub(super) fn before_confirm(root: &Path, file: &str) {
+        let step = {
+            let mut planted = BEFORE_CONFIRM
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            planted
+                .iter()
+                .position(|(r, name, _)| r == root && name == file)
+                .map(|at| planted.remove(at).2)
+        };
+        if let Some(step) = step {
+            step();
         }
     }
 

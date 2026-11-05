@@ -613,3 +613,73 @@ fn no_member_generation() {
     );
     std::fs::remove_dir_all(&home).unwrap();
 }
+
+/// A FILE WHOSE SYMBOL NAMES NO INSTRUMENT (a byte no symbol holds) is the
+/// filing's own refusal, `filing`, never a store's: no door kind ends the
+/// day's taking, the day keeps it once, and nothing is committed.
+#[test]
+fn a_file_whose_symbol_names_no_instrument_is_the_filings_own_refusal() {
+    with_filer(false, |filer| {
+        let filing = filing_of(filer);
+        let mut handed = invented_handed();
+        handed.file.symbol = "IN.VENTED".to_owned();
+        let (filed, back_fill) = filing.file(&handed, &|| Ok(1), Door::Append);
+        assert!(!back_fill, "never handed to the back-fill door");
+        assert_eq!(filed.committed, 0, "nothing committed");
+        let [one] = filed.failures.as_slice() else {
+            panic!("{:?}", filed.failures);
+        };
+        assert_eq!(one.cause.code, "filing", "{one:?}");
+        assert!(one.failure.why.contains("IN.VENTED"), "{one:?}");
+        assert_eq!(
+            (&filed.disk_full, &filed.store_lost, &filed.not_writable),
+            (&None, &None, &None),
+            "no store fault ends the day"
+        );
+    });
+}
+
+/// A MONTH WHOSE FOLDER ANOTHER WRITER REPLACED WITH A FILE after the file's
+/// bars were found present and before the day's batch confirms them (D-7336,
+/// the door's step between the two) keeps the day open by the file's name:
+/// the confirm's refusal is the filing's own, `filing`, naming the month's
+/// folder, and nothing is confirmed. The bars an earlier run landed stand.
+#[test]
+fn a_month_whose_folder_was_replaced_before_its_confirm_keeps_the_day_open() {
+    with_filer(false, |filer| {
+        let root = filer.ctx.run.store_root.to_path_buf();
+        let (landed, _) = filing_of(filer).file(&invented_handed(), &|| Ok(1), Door::Append);
+        assert_eq!(landed.committed, 1, "an earlier run landed the bar");
+        let held = landed.held.expect("its month is held");
+        let bars = month_path(&held).unwrap().to_path_buf(&root);
+        let folder = bars.parent().unwrap().to_path_buf();
+        let replaced = folder.clone();
+        inject::plant_before_confirm(&root, "INVENTED.csv", move || {
+            std::fs::rename(&replaced, replaced.with_extension("aside")).unwrap();
+            std::fs::write(&replaced, b"invented").unwrap();
+        });
+        let batch = store::file::DurableBatch::new(store::file::BatchFlush::EveryFile);
+        let again = Filing {
+            confirm: Some(&batch),
+            ..filing_of(filer)
+        };
+        let (filed, back_fill) = again.file(&invented_handed(), &|| Ok(1), Door::Append);
+        assert!(!back_fill, "never handed to the back-fill door");
+        assert!(!filed.confirmed, "nothing confirmed");
+        let [one] = filed.failures.as_slice() else {
+            panic!("{:?}", filed.failures);
+        };
+        assert_eq!(one.cause.code, "filing", "{one:?}");
+        assert!(
+            one.failure.why.contains(&folder.display().to_string()),
+            "{one:?}"
+        );
+        assert!(
+            folder
+                .with_extension("aside")
+                .join(bars.file_name().unwrap())
+                .is_file(),
+            "the landed bars stand"
+        );
+    });
+}
