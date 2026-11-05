@@ -293,14 +293,17 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
         let saved = root
             .join(cli::index_stop_qualification::NAMESPACE)
             .join(identity);
-        let body_file = std::fs::read_dir(&saved)
+        let files: Vec<_> = std::fs::read_dir(&saved)
             .expect("the saved qualification")
             .map(|entry| entry.expect("an entry").path())
-            .find(|path| path.extension().is_some_and(|ext| ext == "bin"))
-            .expect("a saved body");
-        let copy = saved.join("copy.tmp");
-        std::fs::copy(&body_file, &copy).expect("a byte-identical copy");
-        std::fs::rename(&copy, &body_file).expect("the copy replaces the file");
+            .filter(|path| path.is_file())
+            .collect();
+        assert!(!files.is_empty(), "{}", saved.display());
+        for file in files {
+            let copy = saved.join("copy.tmp");
+            std::fs::copy(&file, &copy).expect("a byte-identical copy");
+            std::fs::rename(&copy, &file).expect("the copy replaces the file");
+        }
         let (status, stale) = page(&pinned).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{stale}");
         let (status, readmitted) = page(&pinned).await;
