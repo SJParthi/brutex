@@ -4664,6 +4664,10 @@ mod tests {
     /// then answers `Busy` without ever preparing. A refusing `prepare` leaves
     /// a finished slot exactly as it was, and a busy slot never runs `prepare`.
     #[test]
+    #[expect(
+        clippy::panic,
+        reason = "a call this test must never see made panics, failing it"
+    )]
     fn admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other() {
         let site = finisher_site("admission-unlocked");
         let running =

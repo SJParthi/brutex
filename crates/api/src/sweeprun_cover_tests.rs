@@ -395,9 +395,7 @@ fn an_admission_over_a_store_that_is_not_there_is_refused_by_name() {
             "{said}"
         );
         assert!(said.ends_with("No engine work was started."), "{said}");
-        let lease = claim_execution(site, false)
-            .err()
-            .expect("no store, no lease");
+        let lease = claim_execution(site, false).expect_err("no store, no lease");
         assert_eq!(lease.status(), StatusCode::SERVICE_UNAVAILABLE);
         let said = lease.why();
         assert!(said.contains("execution lease is unavailable"), "{said}");
@@ -593,9 +591,7 @@ async fn unseen_presses(root: &std::path::Path) {
             .with("command", "sweep-stored");
         assert_eq!(sink.emit_for_run(61, &started), telemetry::Emitted::Written);
     }
-    let elsewhere = claim_execution(&site, false)
-        .err()
-        .expect("a sweep runs elsewhere");
+    let elsewhere = claim_execution(&site, false).expect_err("a sweep runs elsewhere");
     assert_eq!(elsewhere.status(), StatusCode::SERVICE_UNAVAILABLE);
     let said = elsewhere.why();
     assert!(said.contains("still reports activity"), "{said}");
@@ -745,7 +741,7 @@ fn configured(root: &std::path::Path) {
         let _entered = runtime.enter();
         command_with_configuration(&site, &strict_body(""), Some(STAMP), || Ok(config))
     };
-    runtime.shutdown_timeout(std::time::Duration::from_secs(120));
+    runtime.shutdown_timeout(std::time::Duration::from_mins(2));
     assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
     let held = site
         .sweep

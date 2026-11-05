@@ -1,6 +1,10 @@
 #![cfg(test)]
 //! Explicit strict-command parsing, admission and terminal status regressions.
-#![allow(clippy::expect_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a call a test must never see made panics, failing it"
+)]
 use super::*;
 use cli::audited_range_command::StrictConfig;
 use std::cell::Cell;

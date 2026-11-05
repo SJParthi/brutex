@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 fn fresh(name: &str) -> std::path::PathBuf {
     // THE FIRST FREE SUFFIX, found with no arm left that a free first name
     // never takes (BASE-COV-API-AS3).
-    let dir = (0_u32..)
+    let dir = (0..u32::MAX)
         .map(|n| crate::scratch::path(&format!("{name}-{n}")))
         .find(|dir| !dir.exists())
         .expect("u32 suffixes are not exhausted by one test");

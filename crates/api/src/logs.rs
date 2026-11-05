@@ -9727,7 +9727,15 @@ mod r3_24_tests {
     /// `PROBE_FIRST_BYTES` first and two lines' ceiling only when no whole
     /// line follows the cut inside it. A line longer than the first read, a
     /// cut inside it, a cut on a line's first byte, a cut at 0 and a cut past
-    /// the last line each place exactly what the full read placed.
+    /// the last line each place exactly what the full read placed; and more
+    /// undecodable lines in a row than a probe steps past are named as damage
+    /// (BASE-COV-API-AS3).
+    ///
+    /// Extremes: singles — a line three first reads long; a cut at 0; a cut on
+    /// a line's first byte; a cut past the last line's start; combinations — a
+    /// cut inside the long line, placed whole across two reads; a cut inside it
+    /// answered by the line after it; out of the box — a file of more
+    /// undecodable lines in a row than a probe steps past.
     #[test]
     fn a_probe_reads_a_few_kib_and_still_places_a_long_line_whole() {
         let dir = crate::scratch::path("logs-r324-probe");
@@ -9815,7 +9823,14 @@ mod r3_24_tests {
     /// short. That is the file's end, so a probe past its last whole line
     /// says `Nothing`, as at the end proper; taken for a bound met first it
     /// would name damage that is not there. Also at the end proper, with a
-    /// last line no newline closes.
+    /// last line no newline closes; a file that is not there is refused, and a
+    /// run of undecodable lines past the bound is damage (BASE-COV-API-AS3).
+    ///
+    /// Extremes: singles — an end at the file's length; an end 1,000 bytes past
+    /// it; a cut inside the first line; a cut at the file's end; combinations —
+    /// an end ten first reads past a file whose last line is torn, cut on the
+    /// torn tail; out of the box — a file that is not there, and one of
+    /// undecodable lines past the bound.
     #[test]
     fn a_file_shorter_than_the_search_end_answers_no_line() {
         let dir = crate::scratch::path("logs-r324-short-file");
