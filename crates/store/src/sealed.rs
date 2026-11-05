@@ -2521,6 +2521,11 @@ impl<R: Positional> SealedMonth<R> {
 #[path = "sealed_tests.rs"]
 mod sealed_tests;
 
+/// The sealing fold's time-table bound, asked directly (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "sealed_fold_cover_tests.rs"]
+mod fold_cover_tests;
+
 /// Mutation-survivor and coverage tests for this module's private items
 /// (cloud session 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
 #[cfg(test)]
