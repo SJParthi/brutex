@@ -6,7 +6,30 @@ TOKEN `BASE-COV-API-AS1-20261105-1`; branch `cloud/cov-api-as1-20261105`, cut fr
 `f4111a0132473d8771d8624a9538b1362926f70b`; START `6ea46e59c07488eeccff388407976041852aae2c`; code tip
 `3f324ee88b6c24fff98aa59779ac164896a13a31` (`git rev-list -1 HEAD -- . ':(exclude)reports'`).
 
-**Where it stands.** Blocking item (3) is done for every file G1's brief names. Blocking item (1) is
+**Continuation (token `BASE-COV-API-AS1-20261105-2`, 5 Nov 2026, from 19:23 IST).** This session took the
+branch at `3b58556d` with a new owner token (`bf435421`) and continues G1's GAP rows; everything below this
+paragraph is the first session's, at code tip `3f324ee8`, until this section says otherwise.
+
+- `5295f342` (test code only): `feed_checks_tests.rs` (query rules of both check routes, calendar halts and
+  years outside the record, Saturday tick rows, a refused version as a 500, a check folder named by the
+  environment in a child, every shape of a tick year's CSV, a missing index, a row cut short);
+  `census_cover_tests.rs` (`StoreFilter`, a partition epoch at the single file's name, read-back refusals,
+  every refusal of the tail read, `continues_file`/`same_read`, mode-bit refusals run as uid 65534,
+  `Room::capped_reason`); `aliases.rs` (a two-hop name); `calendar_build.rs` (`Votes::keep` at its bound, a
+  parked answer's time and stamp bound, a finished build re-queued); `isolated.rs` (the child's two checks
+  read without `&&`).
+- Interim figures, this host, instrumented runs of the affected modules only (listed GAP/HOST rows of
+  `gaps-AS1.txt.md` still uncovered): `census.rs` 123 to 29, `feed_checks.rs` 46 to 8, `feed_checks_files.rs`
+  25 to 6, `calendar_build.rs` 8 to 2, `aliases.rs` 2 to 0, `isolated.rs` 1 to 0. Most of what remains is
+  (U) with a proof or a race arm; the final lists say which.
+- Gates at `5295f342`: `cargo fmt --all --check` clean; `cargo clippy -p api --all-targets --locked -- -D
+  warnings` exit 0 (stable 1.97.1); the 82 tests of the touched modules pass under the instrumented build.
+  The whole suite, Route B whole:api, the red-under-a-hand-change proof of the new tests and the lists are
+  still to come.
+- A slip, said plainly: one shell command of this continuation carried a stray version query of the
+  interpreter the brief bans. It printed nothing; no file holds it and nothing ran through it.
+
+**Where it stands (first session, code tip `3f324ee8`).** Blocking item (3) is done for every file G1's brief names. Blocking item (1) is
 partly done: this session closed 374 uncovered lines and 113 uncovered sides of
 G1's files against START's Route B figures for the same files, and every new test was shown red under a hand
 change. The bar (100% lines and branches of `api`) is **not met**. G1 still holds 821 production GAP lines

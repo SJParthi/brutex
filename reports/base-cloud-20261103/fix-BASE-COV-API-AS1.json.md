@@ -6,7 +6,7 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
 {
   "name": "BASE-COV-API-AS1",
   "branch": "cloud/cov-api-as1-20261105",
-  "head": "3f324ee88b6c24fff98aa59779ac164896a13a31",
+  "head": "5295f342cc8def6f6071a295319e241b9a54cb0b",
   "committed": true,
   "findings": [
     {
@@ -23,8 +23,8 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
     },
     {
       "id": "R3-RED every new test shown red under a hand change",
-      "status": "fixed",
-      "how": "33 production hand changes (messages, comparisons, returned values; no injected panics) applied at once in a scratch tree at 3f324ee8: all 33 gap-closing tests failed at the assertion each change targets (test result: FAILED. 0 passed; 33 failed; the sink test's child 0 passed; 1 failed); reverted (git status empty, HEAD 3f324ee8): test result: ok. 33 passed; 0 failed.",
+      "status": "partial",
+      "how": "33 production hand changes (messages, comparisons, returned values; no injected panics) applied at once in a scratch tree at 3f324ee8: all 33 gap-closing tests failed at the assertion each change targets (test result: FAILED. 0 passed; 33 failed; the sink test's child 0 passed; 1 failed); reverted (git status empty, HEAD 3f324ee8): test result: ok. 33 passed; 0 failed. CONTINUATION (token -2): the tests this continuation adds are not yet shown red; they are listed in the report and are shown red before line 1 says DONE.",
       "evidence": "report table \"Red, every new test\" (test, file:line of the hand change, the change, FAILED)"
     },
     {
@@ -41,6 +41,7 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
     }
   ],
   "files_changed": [
+    "crates/api/src/aliases.rs",
     "crates/api/src/audit.rs",
     "crates/api/src/audit_json.rs",
     "crates/api/src/audit_json_cover_tests.rs",
@@ -62,6 +63,7 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
     "crates/api/src/feed_checks_tests.rs",
     "crates/api/src/folder.rs",
     "crates/api/src/import_journal.rs",
+    "crates/api/src/isolated.rs",
     "crates/api/src/merge.rs",
     "crates/api/src/merge_cover_tests.rs",
     "crates/api/src/pullrun.rs",
@@ -99,7 +101,7 @@ Session BASE-COV-API-AS1, shard G1 of BASE-COV-API repair round 3. One fenced bl
   "coverage": "Route B (kit d3-route-b-cloud.sh unchanged; rustc 1.99.0-nightly (1a98b1e13 2026-08-07), llvm-cov and llvm-profdata LLVM 23.1.0-rust-1.99.0-nightly; RUSTFLAGS -C instrument-coverage -Z coverage-options=branch, opt-level 0, llvm-profdata merge -sparse), reading whole:api on code tip 3f324ee8, set = the kit's 205 coverage files plus this session's 11 new test files (216). Whole api: 193 files read, NOT PROVED 23 (the 22 benches and lib.rs, no object holds them, as the kit's run); lines 174,120/178,686 (4,566 uncovered), branches 12,801/15,552 (2,751 uncovered sides). G1's 76 files: lines 55,261/56,448 (1,187 uncovered), branches 4,033/4,890 (857 uncovered sides); START on this host 1,561 lines and 970 sides uncovered. Classified: GAP production 821 lines 366 sides; GAP test 116 lines 112 sides; GAP ignored 37 lines; HOST 64 lines 10 sides (covered on the Mac's run of START, reached here only by host-red or skipped tests); (F) 125 lines 357 sides; (U) 24 lines 12 sides with proofs. THE BAR IS NOT MET.",
   "mutants": "deferred (operator 30 Oct)",
   "store_writes_needed": [],
-  "notes": "STATUS IN PROGRESS: G1 GAP rows remain that a cloud session can close. Commit messages corrected in the report: c4969e7a says store_route 11 singles (it is 10); 3f324ee8 says pullrun.rs (7) rewritten match arms (it is 8, 15 in all). The edit tree checked START out once, to prove a host red, and returned to 3f324ee8; nothing of it was committed.",
+  "notes": "STATUS IN PROGRESS: G1 GAP rows remain that a cloud session can close. Commit messages corrected in the report: c4969e7a says store_route 11 singles (it is 10); 3f324ee8 says pullrun.rs (7) rewritten match arms (it is 8, 15 in all). The edit tree checked START out once, to prove a host red, and returned to 3f324ee8; nothing of it was committed. CONTINUATION (token BASE-COV-API-AS1-20261105-2, 5 Nov 2026): the code tip moved to 5295f342cc8def6f6071a295319e241b9a54cb0b (test code only: feed_checks_tests.rs, census_cover_tests.rs, aliases.rs, calendar_build.rs, isolated.rs). Interim figures from this host's instrumented runs of the new tests are in the report's continuation section; the Route B whole:api figures above are still those of 3f324ee8 until the continuation measures its own tip.",
   "held": false
 }
 ```
