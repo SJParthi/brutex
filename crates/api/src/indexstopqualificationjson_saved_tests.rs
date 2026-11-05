@@ -288,24 +288,23 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
             assert!(said.contains(why), "{query}: {refused}");
         }
 
-        // A SAVED FILE REPLACED BY A BYTE-IDENTICAL COPY is stale to the kept
-        // reader: refused once, then admitted again by a fresh open.
-        let saved = root
+        // A SAVED BODY CHANGED UNDER THE KEPT READER is stale: refused, never
+        // served from the copy it kept; the original bytes restored are
+        // admitted again by a fresh open.
+        let body = root
             .join(cli::index_stop_qualification::NAMESPACE)
-            .join(identity);
-        let files: Vec<_> = std::fs::read_dir(&saved)
-            .expect("the saved qualification")
-            .map(|entry| entry.expect("an entry").path())
-            .filter(|path| path.is_file())
-            .collect();
-        assert!(!files.is_empty(), "{}", saved.display());
-        for file in files {
-            let copy = saved.join("copy.tmp");
-            std::fs::copy(&file, &copy).expect("a byte-identical copy");
-            std::fs::rename(&copy, &file).expect("the copy replaces the file");
-        }
+            .join(identity)
+            .join("body.bin");
+        let bytes = std::fs::read(&body).expect("the saved body");
+        let swap = |with: &[u8]| {
+            let copy = body.with_extension("tmp");
+            std::fs::write(&copy, with).expect("the replacement");
+            std::fs::rename(&copy, &body).expect("the replacement lands");
+        };
+        swap(&[bytes.as_slice(), &[0]].concat());
         let (status, stale) = page(&pinned).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{stale}");
+        swap(&bytes);
         let (status, readmitted) = page(&pinned).await;
         assert_eq!(status, StatusCode::OK, "{readmitted}");
         assert_eq!(readmitted["rows"], settings["rows"], "{readmitted}");
