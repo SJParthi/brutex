@@ -62,6 +62,12 @@ use indicators::pattern::Thresholds;
 use indicators::vwap::{Availability, ITERATION_CEILING, isqrt_i128, isqrt_i128_counted};
 use indicators::{Candle, OI_NULL};
 
+// ---- PSRB second wave (state/strategy-psrb-20261103/PARTS-WILLR-CCI.md 3). One slot
+// ---- per part, in the form of the PSRB slots below.
+// slot bench-mod PSRB-WILLR
+
+// slot bench-mod PSRB-CCI
+
 // ---- PSRB indicator parts (state/strategy-psrb-20261103/PARTS.md 2.3). One slot per
 // ---- part; each part inserts its bench module (the path attribute naming
 // ---- benches/ratio/psrb_<x>.rs and its mod line) directly under its slot.
@@ -774,6 +780,12 @@ fn main() {
         the_column_costs_the_same_per_bar_however_long_it_is(),
         a_known_step_stays_within_its_budget(),
     ];
+    // PSRB second-wave rows (state/strategy-psrb-20261103/PARTS-WILLR-CCI.md 3): one
+    // statement per part directly under its slot, in the form of the PSRB rows below.
+    // slot bench-row PSRB-WILLR
+
+    // slot bench-row PSRB-CCI
+
     // PSRB rows (state/strategy-psrb-20261103/PARTS.md 2.3): each part puts one statement
     // directly under its own slot, in the form the F&O rows below take, naming its own
     // module and ids: `.chain([psrb_<x>::row(floor, &["C-PSRB-<CODE>-01", ...])])`.
