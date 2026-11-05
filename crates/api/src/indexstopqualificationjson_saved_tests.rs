@@ -343,6 +343,84 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
         ))
         .await;
         assert_eq!(status, StatusCode::OK, "{context} (catalog: {catalog})");
+        assert_eq!(context["direction"], "long", "{context}");
+
+        // The second setting is the same program read short.
+        let (status, short) = candles(&format!(
+            "identity={source}&pin={source_pin}&setting=1&kind=source"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{short}");
+        assert_eq!(short["direction"], "short", "{short}");
+        // A trade past the saved record refuses, and the kept reader stays.
+        let (status, past) = candles(&format!(
+            "identity={source}&pin={source_pin}&setting=1&kind=candles&trade=999999&before=1&after=1"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{past}");
+        // A source query that names a trade, and a candle query with no
+        // context, are refused before any read.
+        for wrong in [
+            format!("identity={source}&pin={source_pin}&setting=0&kind=source&trade=0"),
+            format!("identity={source}&pin={source_pin}&setting=0&kind=candles&trade=0"),
+        ] {
+            let (status, refused) = candles(&wrong).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{wrong}: {refused}");
+        }
+        // Another source, and the first source under a wrong pin, are not
+        // the kept reader: the first is opened, the second refused.
+        let later = &settings["later"];
+        let (later_id, later_pin) = (
+            later["identity"].as_str().expect("a later source"),
+            later["completion"].as_str().expect("its completion"),
+        );
+        let (status, other) = candles(&format!(
+            "identity={later_id}&pin={later_pin}&setting=0&kind=source"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{other}");
+        let (status, wrong_pin) = candles(&format!(
+            "identity={later_id}&pin={source_pin}&setting=0&kind=source"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{wrong_pin}");
+        // The single-stop reader keeps one source: a pinned page of the
+        // other is opened afresh.
+        let (status, later_trades) = stop(&format!(
+            "identity={later_id}&completion={later_pin}&kind=trades&setting=0"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{later_trades}");
+        // A source body changed under the kept candle reader is stale, and
+        // the original bytes restored are admitted again.
+        let (status, kept) = candles(&format!(
+            "identity={source}&pin={source_pin}&setting=0&kind=source"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kept}");
+        let source_body = root
+            .join(cli::index_stop_store::NAMESPACE)
+            .join(source)
+            .join("body.bin");
+        let source_bytes = std::fs::read(&source_body).expect("the source body");
+        let replace = |with: &[u8]| {
+            let copy = source_body.with_extension("tmp");
+            std::fs::write(&copy, with).expect("the replacement");
+            std::fs::rename(&copy, &source_body).expect("the replacement lands");
+        };
+        replace(&[source_bytes.as_slice(), &[0]].concat());
+        let (status, stale) = candles(&format!(
+            "identity={source}&pin={source_pin}&setting=0&kind=source"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{stale}");
+        replace(&source_bytes);
+        let (status, again) = candles(&format!(
+            "identity={source}&pin={source_pin}&setting=0&kind=source"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(again["source_id"], kept["source_id"], "{again}");
     });
 }
 
