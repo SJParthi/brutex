@@ -3284,3 +3284,95 @@ fn roll_said_by_its_key() {
         Some(&telemetry::OwnedValue::Str("the invented key".to_owned()))
     );
 }
+
+/// PS2 (D-7336): A PACK LOCK WHOSE `flock` THE HOST REFUSES (an error of the
+/// call, never a holder) is refused `io: lock` by the lock's name and the
+/// host's kind, at once: no waiter starts and nothing is parked. Answered,
+/// the same lock is taken.
+#[test]
+fn a_pack_lock_the_host_refuses_is_refused_at_once_by_name() {
+    let scratch = Scratch::new("ps2-lock-refused");
+    let dir = pack_dir(scratch.root(), pack(&nifty())).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let lock_file = dir.join("keep.lock");
+    seam::fail("lock.tried");
+    let started = std::time::Instant::now();
+    assert_eq!(
+        lock_within(&dir, Duration::from_secs(30)).map(|_| ()),
+        Err(KeepError::Io {
+            op: "lock",
+            path: lock_file.clone(),
+            kind: std::io::ErrorKind::Other,
+        })
+    );
+    assert!(started.elapsed() < Duration::from_secs(30), "no wait");
+    assert_eq!(parked_on(&lock_file), 0, "no waiter");
+    assert!(lock_within(&dir, Duration::from_secs(30)).is_ok());
+}
+
+/// The pack lock under `scratch`, held by this test, and its file.
+fn held_pack_lock(scratch: &Scratch) -> (PathBuf, Held, PathBuf) {
+    let dir = pack_dir(scratch.root(), pack(&nifty())).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    let held = lock(&dir).unwrap();
+    let lock_file = dir.join("keep.lock");
+    (dir, held, lock_file)
+}
+
+/// Plants the late answer: once the caller's wait has run out, its step lets
+/// the test's hold go and returns only after the waiter has answered, so the
+/// answer is in the channel before the caller would mark its waiter
+/// abandoned.
+fn answer_after_the_wait(held: Held, lock_file: &Path) {
+    let (said, heard) = std::sync::mpsc::channel();
+    seam::plant_for("lock.answered", lock_file, move || {
+        said.send(()).expect("the test listens");
+    });
+    seam::plant("lock.timed_out", move |_| {
+        drop(held);
+        heard.recv().expect("the waiter answered");
+    });
+}
+
+/// PS2 (D-7336): A WAITER THAT ANSWERS AFTER ITS CALLER'S WAIT RAN OUT, but
+/// before the caller abandons it, hands the caller the lock: the caller holds
+/// it (another open is refused as busy) and nothing is parked.
+#[test]
+fn a_waiter_that_answers_just_after_the_wait_ran_out_hands_over_the_lock() {
+    let scratch = Scratch::new("ps2-lock-late");
+    let (dir, held, lock_file) = held_pack_lock(&scratch);
+    answer_after_the_wait(held, &lock_file);
+    let taken = lock_within(&dir, Duration::from_millis(1)).expect("the late answer is the lock");
+    assert_eq!(parked_on(&lock_file), 0, "nothing parked");
+    let other = fs::File::open(&lock_file).unwrap();
+    assert!(
+        matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "the caller holds it"
+    );
+    drop(taken);
+    assert!(other.try_lock().is_ok(), "let go with its holder");
+}
+
+/// PS2 (D-7336): A WAITER WHOSE BLOCKING `flock` THE HOST REFUSES answers that
+/// refusal, and its caller is refused `io: lock` by the lock's name and the
+/// host's kind; nothing is parked and nothing holds the lock after.
+#[test]
+fn a_waiter_whose_flock_the_host_refuses_refuses_its_caller_by_name() {
+    let scratch = Scratch::new("ps2-lock-waited");
+    let (dir, held, lock_file) = held_pack_lock(&scratch);
+    answer_after_the_wait(held, &lock_file);
+    seam::fail("lock.waited");
+    assert_eq!(
+        lock_within(&dir, Duration::from_millis(1)).map(|_| ()),
+        Err(KeepError::Io {
+            op: "lock",
+            path: lock_file.clone(),
+            kind: std::io::ErrorKind::Other,
+        })
+    );
+    assert_eq!(parked_on(&lock_file), 0, "nothing parked");
+    assert!(
+        fs::File::open(&lock_file).unwrap().try_lock().is_ok(),
+        "nothing holds it"
+    );
+}

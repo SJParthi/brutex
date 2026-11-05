@@ -1467,7 +1467,10 @@ fn lock_within(dir: &Path, wait: Duration) -> Result<Held, KeepError> {
         Ok(None) => Err(KeepError::NotRegular { path: path.clone() }),
         Err(why) => Err(why),
     };
-    match store::flock::Flock::try_lock(open()?, path.clone()) {
+    let tried = store::flock::Flock::try_lock(open()?, path.clone());
+    #[cfg(test)]
+    let tried = seam::answer_lock("lock.tried", tried);
+    match tried {
         Ok(held) => return Ok(Held { _lock: held }),
         Err(std::fs::TryLockError::WouldBlock) => {}
         Err(std::fs::TryLockError::Error(why)) => return Err(KeepError::io("lock", &path, &why)),
@@ -1498,27 +1501,39 @@ fn lock_within(dir: &Path, wait: Duration) -> Result<Held, KeepError> {
         path: path.clone(),
         abandoned: std::sync::Arc::clone(&abandoned),
     };
+    #[cfg(test)]
+    let fault = seam::taken("lock.waited");
     std::thread::Builder::new()
         .name("keep-lock".to_owned())
         .spawn(move || {
             let taken = store::flock::Flock::lock(file, waiter.path.clone());
+            #[cfg(test)]
+            let taken = fault.map_or(taken, Err);
+            #[cfg(test)]
+            let answered = waiter.path.clone();
             waiter.answer(taken, &tx);
+            #[cfg(test)]
+            seam::at_path("lock.answered", &answered);
         })
         .map_err(|why| KeepError::io("lock", &path, &why))?;
     let started = Instant::now();
     let answer = match rx.recv_timeout(wait) {
         Ok(answer) => answer,
-        Err(_) => match Parked::abandon(&path, &abandoned, &rx) {
-            // THE WAITER ANSWERED between the timeout and the abandon: the
-            // lock is ours, and nothing is parked.
-            Some(answer) => answer,
-            None => {
-                return Err(KeepError::LockStalled {
-                    lock: path,
-                    waited_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                });
+        Err(_) => {
+            #[cfg(test)]
+            seam::at("lock.timed_out", &path);
+            match Parked::abandon(&path, &abandoned, &rx) {
+                // THE WAITER ANSWERED between the timeout and the abandon:
+                // the lock is ours, and nothing is parked.
+                Some(answer) => answer,
+                None => {
+                    return Err(KeepError::LockStalled {
+                        lock: path,
+                        waited_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    });
+                }
             }
-        },
+        }
     };
     match answer {
         Ok(held) => Ok(Held { _lock: held }),
@@ -2373,16 +2388,29 @@ fn place_receipt_only(
 /// once, with the path the code is at, the way another creator landing
 /// between the two calls would. Per thread, and absent from every build but
 /// this crate's own tests.
+///
+/// A host call no file, folder or name can make fail takes a planted fault
+/// instead: the call is made, and its answer is the host's error, once, as a
+/// failing host's would be; a fault for a call another thread makes is taken
+/// on this one and handed over. A pack lock's waiter runs on a thread of its
+/// own, so a step for it is keyed by the lock it waits on, never by thread.
 #[cfg(test)]
 pub(crate) mod seam {
     use std::cell::RefCell;
-    use std::path::Path;
+    use std::fs::TryLockError;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
 
     type Step = Box<dyn FnOnce(&Path)>;
+    type Sent = Box<dyn FnOnce() + Send>;
 
     thread_local! {
         static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+        static FAULTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     }
+
+    /// The steps planted by path, for whichever thread passes them first.
+    static BY_PATH: Mutex<Vec<(&'static str, PathBuf, Sent)>> = Mutex::new(Vec::new());
 
     /// Plants `step` for the next pass of `name` on this thread.
     pub(crate) fn plant(name: &'static str, step: impl FnOnce(&Path) + 'static) {
@@ -2398,6 +2426,51 @@ pub(crate) mod seam {
         if let Some(step) = step {
             step(path);
         }
+    }
+
+    /// Plants `step` for the next pass of `name` with `path`, on any thread.
+    pub(crate) fn plant_for(name: &'static str, path: &Path, step: impl FnOnce() + Send + 'static) {
+        BY_PATH
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((name, path.to_path_buf(), Box::new(step)));
+    }
+
+    /// Runs the step planted for `name` with `path`, once, on this thread.
+    pub(super) fn at_path(name: &'static str, path: &Path) {
+        let step = {
+            let mut held = BY_PATH.lock().unwrap_or_else(PoisonError::into_inner);
+            held.iter()
+                .position(|(at, on, _)| *at == name && on == path)
+                .map(|found| held.remove(found).2)
+        };
+        if let Some(step) = step {
+            step();
+        }
+    }
+
+    /// Plants a host fault for the next pass of `name` on this thread.
+    pub(crate) fn fail(name: &'static str) {
+        FAULTS.with_borrow_mut(|held| held.push(name));
+    }
+
+    /// The fault planted for `name` on this thread, taken once.
+    pub(super) fn taken(name: &'static str) -> Option<std::io::Error> {
+        FAULTS
+            .with_borrow_mut(|held| {
+                let found = held.iter().position(|at| *at == name)?;
+                Some(held.remove(found))
+            })
+            .map(|at| std::io::Error::other(format!("invented: the host fault planted at {at}")))
+    }
+
+    /// The host's answer to a lock at `name`, or the fault planted there,
+    /// once.
+    pub(super) fn answer_lock<T>(
+        name: &'static str,
+        host: Result<T, TryLockError>,
+    ) -> Result<T, TryLockError> {
+        taken(name).map_or(host, |why| Err(TryLockError::Error(why)))
     }
 }
 
