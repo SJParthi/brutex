@@ -29,7 +29,7 @@ const CHILD_PATH: &str = concat!(
 
 /// Generated NIFTY minutes and days of April to June 2025 under `zerodha`,
 /// every open session of the shared calendar, written by the store's writer.
-pub(crate) fn generated_nifty(root: &Path) {
+fn generated_nifty(root: &Path) {
     let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
     let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
     for month in [4_u8, 5, 6] {
