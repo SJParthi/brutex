@@ -238,3 +238,8 @@ NEXT: the [UNPROVEN] rows (exit_grid_policy 2398, 2924, 3789, 4138-4176; express
 - **The code is frozen at `b8a346d2`. The final Route B started at 09:21:25 IST** on it (detached worktree `/home/user/deep-ls2`, new empty profile folder `/home/user/ls2-prof/b8a346d26dce-1-B`; pins exactly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)` and LLVM 23.1.0-rust-1.99.0-nightly; build rc 0, 34 artifacts, 18 test objects). Set file `deep-BASE-COV-LIBS-LS2-b8a346d26dce-set.txt.md` in this folder: 75 coverage files whole and 880 mutants lines of this shard's diff from START, for the deferred mutants pass. Its generator (a scratch script) reproduces the earlier session's set at `2b998e4b` byte for byte (74 files, 713 lines).
 
 NEXT: the final Route B's figures; classify every row (earlier tags carried by row, this session's proofs and decisions, the recipe's (F) rule for new rows); the final lists, summary and fix json.
+
+### 2026-11-05 10:00 IST the final Route B restarted
+The first start (09:21:25 IST, profile folder `/home/user/ls2-prof/b8a346d26dce-1-B`) was stopped at 09:51 IST by the session's 30-minute limit on a background command, which I had not raised: a process slip of mine. It was in its lib-test object and had read no figure; its partial profile folder is unused. Restarted at 09:58:29 IST as a detached process on the same tip `b8a346d2` with a new empty profile folder `/home/user/ls2-prof/b8a346d26dce-2-B` and log folder `b8a346d26dce-cov2` (pins verified again; build reused the instrumented target).
+
+NEXT: as before: the figures, the classification, the final lists, summary and fix json.
