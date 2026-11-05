@@ -6032,23 +6032,8 @@ fn two_runs_into_one_store_at_once_leave_what_one_run_leaves() {
         let (a, b) = (s.spawn(race), s.spawn(race));
         (a.join().expect("run A"), b.join().expect("run B"))
     });
-    for got in [&a, &b] {
-        match got {
-            Ok(report) => {
-                for failure in &report.failures {
-                    let why = format!("{failure:?}").to_lowercase();
-                    assert!(
-                        why.contains("holds") || why.contains("lock"),
-                        "a failure that is not a named lock refusal: {failure:?}"
-                    );
-                }
-            }
-            Err(why) => assert!(
-                format!("{why:?}").to_lowercase().contains("lock"),
-                "{why:?}"
-            ),
-        }
-    }
+    a_run_beside_another_names_the_lock(&a);
+    a_run_beside_another_names_the_lock(&b);
     let settle = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &shared);
     assert!(settle.failures.is_empty(), "{:?}", settle.failures);
     for symbol in ["NIFTY", "BANKNIFTY"] {
@@ -6067,6 +6052,249 @@ fn two_runs_into_one_store_at_once_leave_what_one_run_leaves() {
         settled,
         "a rerun writes nothing"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// What a run that met another run in its store may answer, the judgement of
+/// [`two_runs_into_one_store_at_once_leave_what_one_run_leaves`]: a report
+/// whose every failure is a refusal naming a lock or its holder, or the run
+/// refused by a lock it names. Which answer the race gets depends on where
+/// its two runs meet, so each one is also made on purpose by the three tests
+/// below, each holding the lock the other run would (BASE-COV-PULL-PS1,
+/// D-7335).
+fn a_run_beside_another_names_the_lock(got: &Result<Report, ImportRefusal>) {
+    match got {
+        Ok(report) => {
+            for failure in &report.failures {
+                let why = format!("{failure:?}").to_lowercase();
+                assert!(
+                    why.contains("holds") || why.contains("lock"),
+                    "a failure that is not a named lock refusal: {failure:?}"
+                );
+            }
+        }
+        Err(why) => assert!(
+            format!("{why:?}").to_lowercase().contains("lock"),
+            "{why:?}"
+        ),
+    }
+}
+
+/// Two runs meet on a MONTH, made on purpose: the NIFTY month a reader holds
+/// open for the whole of a second run is asked again past its retry, and its
+/// file fails `month_busy` in the store's own words, which name the holder
+/// ("another writer holds"). The run goes on: BANKNIFTY lands, the day
+/// closes `incomplete`, and the report is one the race's judge accepts. Once
+/// the reader is gone the next run lands the day, and the store holds what
+/// one run over both days leaves.
+#[test]
+fn a_run_that_meets_a_month_another_holds_names_the_holder_and_goes_on() {
+    let root = scratch("import-meets-a-held-month");
+    world(&root, &[d1(), d2()]);
+    let whole = root.join("W");
+    let both = import(&root, Src::Store, ImportKind::Indices, d1(), d2(), &whole);
+    assert!(both.failures.is_empty(), "{:?}", both.failures);
+    let store = root.join("S");
+    let first = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    let nifty = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: d1().year_month().unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    let reader = BarFile::open_existing(&store, nifty, filing::symbol_id_of("NIFTY")).unwrap();
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: d2(),
+        to: d2(),
+        only: &[],
+        store_root: &store,
+    };
+    let got = run_cm(&TickStore::new(&root.join("ts")), &run);
+    drop(reader);
+    a_run_beside_another_names_the_lock(&got);
+    let report = got.unwrap();
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    let busy = &report.failures[0];
+    assert!(busy.why.contains("another writer holds"), "{busy:?}");
+    assert_eq!(busy.day, Some(d2()), "{busy:?}");
+    assert_eq!(report.closed_incomplete, vec![d2()], "{report:?}");
+    assert!(line_of(&store, "indices", "2024-04-02").contains(" reason=month_busy "));
+    let after = import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &store);
+    assert!(after.failures.is_empty(), "{:?}", after.failures);
+    for symbol in ["NIFTY", "BANKNIFTY"] {
+        assert_eq!(
+            bars(&store, "INDEX", symbol, None),
+            bars(&whole, "INDEX", symbol, None),
+            "{symbol}: a month held for a run left other bars than one run"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Two stocks runs meet on a share's AUCTION SIDECAR, made on purpose: its
+/// lock, held by another reader or writer past the sidecar's wait (2 s),
+/// refuses that share's file whole (`auction_sidecar`, an open cause) in
+/// words that name the lock and no holder: the side of the race's judge that
+/// a month's words never take. The other share lands, the day closes
+/// `incomplete` with nothing of the refused file filed, and once the lock is
+/// free the next run files the day and its print.
+#[test]
+fn a_stocks_run_that_meets_a_sidecar_another_holds_names_the_lock() {
+    use std::fmt::Write as _;
+    let on = day(2026, 9, 24);
+    let root = scratch("import-meets-a-held-sidecar");
+    let mut files = Vec::new();
+    let mut master = String::from("FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n");
+    for (n, (share, print)) in (0_u32..).zip([("RELIANCE", true), ("SBIN", false)]) {
+        let stem = format!("{share}.NSE");
+        let mut rows: Vec<String> = (0..10)
+            .map(|i| {
+                quoted_row(
+                    &stem,
+                    on,
+                    hms_at(15, 5, 0) + i * 50,
+                    &format!("{}.{i}5", 3_000 + n * 100),
+                    ("3000.00", "3999.90"),
+                    (3, 0),
+                )
+            })
+            .collect();
+        if print {
+            rows.push(quoted_row(
+                &stem,
+                on,
+                hms_at(15, 28, 7),
+                &format!("{}.65", 3_001 + n * 100),
+                ("0", "0.00"),
+                (98_765, 0),
+            ));
+        }
+        files.push((entry_of(Tree::Stocks, on, &stem), csv(&rows)));
+        let at = brutex_core::universe::FNO_INDEX.position(share).unwrap();
+        let isin = brutex_core::universe::FNO_UNDERLYINGS_ISIN[at];
+        writeln!(master, "{},{share},EQ,{isin},1", 3_000 + n).unwrap();
+    }
+    world_of(&root, &[(on, Tree::Stocks, files)]);
+    let masters = root.join("masters");
+    crate::cash_session_cache::install(&masters, on, &gzip(&master)).unwrap();
+    let scope = std::sync::Arc::new(
+        crate::gdfl_cm::CmScope::stored(std::iter::empty::<&str>())
+            .unwrap()
+            .with_masters(masters),
+    );
+    let source = TickStore::new(&root.join("ts")).with_scope(scope);
+    let store = root.join("S");
+    let key = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        "RELIANCE",
+    )
+    .unwrap();
+    let sidecar = crate::gdfl_cm::auction::path(&store, &key, on).unwrap();
+    std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    let holder = std::fs::File::create(&sidecar).unwrap();
+    holder.lock().unwrap();
+    let run = Run {
+        kind: ImportKind::Stocks,
+        from: on,
+        to: on,
+        only: &[],
+        store_root: &store,
+    };
+    let got = run_cm(&source, &run);
+    holder.unlock().unwrap();
+    drop(holder);
+    a_run_beside_another_names_the_lock(&got);
+    let report = got.unwrap();
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    let busy = &report.failures[0];
+    assert!(
+        busy.why.contains(
+            "is busy or cannot be locked: the lock is held by another reader or writer past 2000 ms"
+        ),
+        "{busy:?}"
+    );
+    assert!(
+        !format!("{busy:?}").to_lowercase().contains("holds"),
+        "{busy:?}"
+    );
+    assert_eq!(report.closed_incomplete, vec![on], "{report:?}");
+    assert_eq!(std::fs::read(&sidecar).unwrap(), b"", "nothing filed");
+    let after = run_cm(&source, &run).unwrap();
+    assert!(after.failures.is_empty(), "{:?}", after.failures);
+    let filed = crate::gdfl_cm::auction::read(&sidecar).unwrap().unwrap();
+    assert_eq!(filed.records.len(), 1, "the print, once the lock is free");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Two runs meet on the CENSUS, made on purpose: the census lock another
+/// ingest holds when the run publishes its day refuses the run by name
+/// (`census_refused`, "another ingest holds the census lock"), the answer the
+/// race's judge accepts for a refused run. The day's bars are on disk and
+/// uncounted, the day is journalled `incomplete ... stage=census`, and once
+/// the lock is free the next run counts it: the store then holds what one run
+/// over both days leaves.
+#[test]
+fn a_run_that_meets_the_census_lock_another_holds_is_refused_by_name() {
+    let root = scratch("import-meets-a-held-census");
+    world(&root, &[d1(), d2()]);
+    let whole = root.join("W");
+    let both = import(&root, Src::Store, ImportKind::Indices, d1(), d2(), &whole);
+    assert!(both.failures.is_empty(), "{:?}", both.failures);
+    let store = root.join("S");
+    let first = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    let lock_path = crate::ingest::census_store::target_for(
+        &store,
+        Vendor::Gdfl,
+        brutex_core::instrument::Segment::Index,
+    )
+    .unwrap()
+    .lock_path();
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.lock().unwrap();
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: d2(),
+        to: d2(),
+        only: &[],
+        store_root: &store,
+    };
+    let got = run_cm(&TickStore::new(&root.join("ts")), &run);
+    holder.unlock().unwrap();
+    drop(holder);
+    a_run_beside_another_names_the_lock(&got);
+    let Err(ImportRefusal::CensusRefused { day: at, why, .. }) = &got else {
+        panic!("the run is refused at the census: {got:?}")
+    };
+    assert_eq!(*at, d2());
+    assert!(
+        why.contains("another ingest holds the census lock"),
+        "{why}"
+    );
+    assert!(
+        line_of(&store, "indices", "2024-04-02").contains(" stage=census reason=census_refused ")
+    );
+    let after = import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &store);
+    assert!(after.failures.is_empty(), "{:?}", after.failures);
+    for symbol in ["NIFTY", "BANKNIFTY"] {
+        assert_eq!(
+            bars(&store, "INDEX", symbol, None),
+            bars(&whole, "INDEX", symbol, None),
+            "{symbol}: a census held for a run left other bars than one run"
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
