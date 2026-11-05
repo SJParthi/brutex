@@ -1798,3 +1798,147 @@ fn a_month_served_from_a_repair_revision_names_no_pull_run_its_writer() {
         "{body}"
     );
 }
+
+/// **EVERY STORE STATE BETWEEN "NOT HELD" AND "SERVED" IS SAID BY WHAT IT IS**
+/// (BASE-COV-API-AS2). Extremes: (1) a month path whose feed folder is a FILE
+/// is the filesystem's refusal, a 500 naming the path, never "not held";
+/// (2) a month file whose header is not a header is a 500 naming the path;
+/// (3) a month file that holds no committed bar is served with the label
+/// that says there is nothing to attribute; (4) its sidecar, absent, is said
+/// absent; (5) a sidecar of no bytes is UNBORN: its header never reached the
+/// disk, so it holds no record; (6) a sidecar path that is a FOLDER is
+/// REFUSED by the sidecar reader and named, never read as records; (7) every refusal echoes the
+/// request; (8) the unborn sidecar's answer is still a 200 over the bars.
+/// Combined: (9) a month that holds no bar AND an unborn sidecar beside it:
+/// both said at once; (10) a garbage month header AND a request for one bar
+/// by `t`: refused before any bar is looked for; (12) a recorded sidecar
+/// AND a month written again shorter beside it: the sidecar is refused for
+/// the bars it names that the month no longer holds. Out of the box: (11) a
+/// FOLDER at the month's own path is refused, never opened as a month.
+#[test]
+fn every_store_state_between_not_held_and_served_is_said_by_what_it_is() {
+    let path = path_of(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        "2019-03",
+    );
+    let relative = "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin";
+    // (1): the feed's folder is a file.
+    let root = root_of("as2-feed-file");
+    std::fs::create_dir_all(root.join("bars")).unwrap();
+    std::fs::write(root.join("bars/gdfl"), b"not a folder").unwrap();
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(
+        got.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        got.body
+    );
+    assert_eq!(got.body["path"], relative);
+    assert!(
+        got.body["error"].as_str().unwrap().starts_with(relative),
+        "{}",
+        got.body
+    );
+    assert_eq!(
+        got.body["feed"], "gdfl",
+        "the request is echoed: {}",
+        got.body
+    );
+    // (2), (10): a month file whose header is not one.
+    let root = root_of("as2-garbage-month");
+    let month = path.to_path_buf(&root);
+    std::fs::create_dir_all(month.parent().unwrap()).unwrap();
+    std::fs::write(&month, vec![0xA5_u8; 4_096]).unwrap();
+    for query in [
+        GDFL_NIFTY.to_owned(),
+        format!(
+            "{GDFL_NIFTY}&t={}",
+            ist_midnight("2019-03-01") + 9 * 3_600 + 15 * 60
+        ),
+    ] {
+        let got = get(&root, &query);
+        assert_eq!(
+            got.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{}",
+            got.body
+        );
+        assert_eq!(got.body["path"], relative);
+        assert!(got.body.get("bar").is_none(), "{}", got.body);
+    }
+    // (3), (4): a month that holds no committed bar.
+    let root = root_of("as2-empty-month");
+    drop(BarFile::open_or_create(&root, path, symbol_id("NIFTY")).unwrap());
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(
+        got.body["label"],
+        "the month file holds no committed bar, so there is nothing to attribute"
+    );
+    assert_eq!(got.body["sidecar"]["state"], "absent");
+    // (5), (8), (9): an unborn sidecar beside it.
+    let prv = path.with_file(FileKind::Provenance).to_path_buf(&root);
+    std::fs::write(&prv, b"").unwrap();
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["sidecar"]["state"], "unborn", "{}", got.body);
+    assert_eq!(got.body["sidecar"]["records"], 0);
+    assert_eq!(got.body["sidecar"]["bytes"], 0);
+    assert!(
+        got.body["label"]
+            .as_str()
+            .unwrap()
+            .contains("no committed bar")
+    );
+    // (6): a folder where the sidecar goes.
+    let root = root_of("as2-damaged-sidecar-header");
+    land(&root, path, "NIFTY", &[seconds("2019-03-01", 2)]);
+    let prv = path.with_file(FileKind::Provenance).to_path_buf(&root);
+    std::fs::create_dir_all(&prv).unwrap();
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["sidecar"]["state"], "refused", "{}", got.body);
+    assert!(!got.body["sidecar"]["error"].as_str().unwrap().is_empty());
+    assert_eq!(got.body["recorded"], serde_json::json!([]));
+    // (12): a sidecar whose records outrun the month beside it: the month
+    // was written again shorter, its old sidecar kept.
+    let root = root_of("as2-sidecar-outruns");
+    let mut bars = BarFile::open_or_create(&root, path, symbol_id("NIFTY")).unwrap();
+    for (batch, on) in [
+        (seconds("2019-03-01", 3), "2019-03-01"),
+        (seconds("2019-03-05", 2), "2019-03-05"),
+    ] {
+        let landed = bars.append(&batch).unwrap();
+        store::provenance::record(
+            &root,
+            &bars,
+            path,
+            landed,
+            &member_landing("m.zip!a.csv", on, 2),
+        )
+        .unwrap();
+    }
+    drop(bars);
+    std::fs::remove_file(path.to_path_buf(&root)).unwrap();
+    land(&root, path, "NIFTY", &[seconds("2019-03-01", 1)]);
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["sidecar"]["state"], "refused", "{}", got.body);
+    assert_eq!(got.body["recorded"], serde_json::json!([]));
+    // (11): a folder at the month's own path.
+    let root = root_of("as2-month-folder");
+    std::fs::create_dir_all(path.to_path_buf(&root)).unwrap();
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(
+        got.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        got.body
+    );
+    assert_eq!(got.body["path"], relative);
+    assert!(got.body.get("bars").is_none(), "never served: {}", got.body);
+}
