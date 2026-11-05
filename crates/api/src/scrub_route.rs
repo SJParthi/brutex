@@ -2567,4 +2567,99 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A LEDGER LINE THAT CANNOT BE READ IS SKIPPED, AN ABSENT LEDGER IS AN
+    /// EMPTY INDEX, AND THE KEPT INDEX FOLLOWS THE FILE IT WAS BUILT FROM**
+    /// (BASE-COV-API-AS2). Extremes: (1) a `run` line whose run is no number
+    /// tells no pass; (2) one whose pass is no number tells none either;
+    /// (3) a finding whose path names no month file under a series (no `/`)
+    /// is no finding; (4) the well-formed lines beside them still count;
+    /// (5) a store with no ledger at all is an empty index, never a refusal;
+    /// (6) a second store asked for the same feed answers ITS ledger, never
+    /// the first one's index; (7) a ledger replaced by another file at the
+    /// same name is indexed from its start; (8) the route answers a store
+    /// with no scrub 200 with `recorded` false. Combined: (9) a malformed run
+    /// line AND a slashless finding AND a good finding in one ledger: only
+    /// the good one stands; (10) the route asked for a feed it does not know
+    /// answers 400 naming every feed. Out of the box: (11) a `run` line whose
+    /// number is `u64::MAX` and whose pass is one past it: no pass is told;
+    /// and a ledger cut shorter IN PLACE, the same file, is indexed again
+    /// from its start, never read past its end.
+    #[tokio::test]
+    async fn unreadable_lines_absent_ledgers_and_replaced_files_are_answered_apart() {
+        let series = "bars/groww/NSE/INDEX/AS2/1min";
+        let index = Index::of(&format!(
+            "run x vendor=groww commit=c pass=1 resume=-\n\
+             run 7 vendor=groww commit=c pass=x resume=-\n\
+             run 18446744073709551615 vendor=groww commit=c pass=18446744073709551616 resume=-\n\
+             bad nosl block=1 records=1-2 run=7 why=crc\n\
+             run 8 vendor=groww commit=c pass=1 resume=-\n\
+             bad {series}/2020-01.bin block=1 records=73-145 run=8 why=crc\n"
+        ));
+        assert_eq!(index.passes.get(&8), Some(&1));
+        assert_eq!(index.passes.len(), 1, "{:?}", index.passes);
+        assert_eq!(index.newest, 1);
+        let standing: Vec<&str> = index
+            .standing(series, 1)
+            .iter()
+            .map(|finding| finding.month.as_str())
+            .collect();
+        assert_eq!(standing, ["2020-01"]);
+        assert_eq!(index.standing_count(1), 1);
+        // (5): no ledger.
+        let absent = root_of("as2-scrub-absent");
+        assert_eq!(
+            with_index(&absent, Vendor::Groww, |found| found.standing_count(0)),
+            Ok(0)
+        );
+        // (6), (7): two stores, then a replaced ledger, then one cut in place.
+        let ledger = |n: u64| {
+            let mut text = "run 9 vendor=groww commit=c pass=1 resume=-\n".to_owned();
+            for month in 1..=n {
+                let _ = writeln!(text, "missing {series}/2021-{month:02}.bin run=9");
+            }
+            text
+        };
+        let count = |root: &Path| with_index(root, Vendor::Groww, |found| found.standing_count(1));
+        let one = root_of("as2-scrub-one");
+        let two = root_of("as2-scrub-two");
+        write(&one, Vendor::Groww, "", &ledger(2));
+        write(&two, Vendor::Groww, "", &ledger(3));
+        assert_eq!(count(&one), Ok(2));
+        assert_eq!(count(&two), Ok(3));
+        // The index is the first store's again; its ledger is then replaced
+        // by another file at the name, and then cut in place.
+        assert_eq!(count(&one), Ok(2));
+        let path = one.join(cli::scrub_ledger_name(Vendor::Groww));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, ledger(3)).unwrap();
+        assert_eq!(count(&one), Ok(3));
+        let mut cut = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut cut, ledger(1).as_bytes()).unwrap();
+        drop(cut);
+        assert_eq!(count(&one), Ok(1));
+        // (8), (10): the route.
+        let site = Loaded::new(crate::server::Site::load(&absent.join("masters"), &absent));
+        let (status, _, body) = scrub_json(
+            axum::extract::State(Loaded::clone(&site)),
+            "/scrub.json?feed=gdfl".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body.contains(r#""recorded":false"#), "{body}");
+        let (status, _, body) = scrub_json(
+            axum::extract::State(site),
+            "/scrub.json?feed=nope".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("never guesses one"), "{body}");
+        for root in [absent, one, two] {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
 }

@@ -440,6 +440,137 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// **EVERY LEDGER STATE THE TOP REPORT CAN MEET IS ANSWERED BY NAME**
+    /// (BASE-COV-API-AS2). Extremes: (1) a second row of one pair that earns
+    /// less never replaces the pair's best; (2) a question whose two filters
+    /// are both empty is the "filter together" refusal, never "no filter";
+    /// (3) the route itself answers an unreadable question 400; (4) an EMPTY
+    /// ledger file is an absence, "no run has been recorded"; (5) a ledger
+    /// whose header bytes are damaged is a 503 that names it; (6) a best run
+    /// whose store holds no receipt for it is refused by name, never shown
+    /// without its children; (7) a receipt past the 4,096-row detail bound is refused before
+    /// any row is read; (8) a receipt for one frontier row that the frontier
+    /// does not hold is refused, never a partial report. Combined: (9) an
+    /// empty ledger AND a question for one pair: still the absence, never a
+    /// refusal of the pair; (10) the global best's receipt past the bound AND
+    /// a pair question that names that same run: both refuse alike, before
+    /// any row. Out of the box: (11) a feed written in a case
+    /// the ledger never keys by, `ZERODHA`, finds the pair it names.
+    #[tokio::test]
+    async fn every_ledger_state_the_top_report_meets_is_answered_by_name() {
+        let base = crate::scratch::path(&format!("top-states-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // (2), (3).
+        assert_eq!(
+            parse("feed=&underlying="),
+            Err(
+                "`feed` and `underlying` filter together: give both nonempty values or neither"
+                    .to_owned()
+            )
+        );
+        let (status, _, body) = super::top_json("/top.json?feed=zerodha".parse().unwrap()).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("filter together"), "{body}");
+        // (4), (9): an empty ledger file.
+        let empty = base.join("empty");
+        std::fs::create_dir_all(empty.join("results")).unwrap();
+        std::fs::write(cli::results::Results::path(&empty), b"").unwrap();
+        let pair = ("zerodha".to_owned(), "NIFTY".to_owned());
+        for asked in [None, Some(&pair)] {
+            let said = report(&empty, asked).unwrap();
+            assert!(said.contains("NO RUN HAS BEEN RECORDED YET"), "{said}");
+        }
+        // (5): a ledger whose header is damaged.
+        let cut = base.join("cut");
+        cli::results::Results::open(&cut)
+            .unwrap()
+            .append(&row(1, "NIFTY", 1))
+            .unwrap();
+        // THE HEADER OVERWRITTEN: bytes no ledger header holds.
+        let path = cli::results::Results::path(&cut);
+        let mut bytes = std::fs::read(&path).unwrap();
+        for byte in bytes.iter_mut().take(64) {
+            *byte = 0xAB;
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let (status, _, body) = respond(Ok(cut.clone()), None);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        assert!(body.contains(r#""report":null"#), "{body}");
+        assert!(!body.contains("NO RUN HAS BEEN RECORDED"), "{body}");
+        // (1), (6), (10), (11): a pair whose later row earns less, no receipt
+        // for it, and a global best whose receipt is past the bound.
+        let mixed = base.join("mixed");
+        cli::frontier::Frontier::open(&mixed).expect("empty frontier header");
+        let mut ledger = cli::results::Results::open(&mixed).unwrap();
+        let best_nifty = row(0x11, "NIFTY", 500);
+        ledger.append(&best_nifty).unwrap();
+        ledger.append(&row(0x12, "NIFTY", 400)).unwrap();
+        let global = row(0x13, "BANKNIFTY", 900);
+        cli::result_set::Receipts::open(&mixed)
+            .unwrap()
+            .append_exact(cli::result_set::Receipt {
+                identity: global.identity,
+                frontier_rows: crate::detail::MAX_RESULT_ROWS + 1,
+                trade_rows: 0,
+                direction: cli::trades::Direction::Long,
+                trade_policy: cli::result_set::TradePolicy::ChosenGridV1,
+            })
+            .unwrap();
+        ledger.append(&global).unwrap();
+        let mut selection = Selection::open(&mixed).unwrap();
+        selection.refresh().unwrap();
+        assert_eq!(selection.get(Some(&pair)), Some(best_nifty), "(1)");
+        let bound =
+            Err("top result exceeds the 4096-row detail bound; no prefix was read".to_owned());
+        assert_eq!(report(&mixed, None), bound);
+        let banknifty = ("zerodha".to_owned(), "BANKNIFTY".to_owned());
+        assert_eq!(report(&mixed, Some(&banknifty)), bound);
+        // (6): a store that holds no receipt file at all.
+        let bare = base.join("bare");
+        cli::results::Results::open(&bare)
+            .unwrap()
+            .append(&best_nifty)
+            .unwrap();
+        let refused = report(&bare, Some(&pair)).unwrap_err();
+        assert!(refused.contains(&best_nifty.identity_hex()), "{refused}");
+        assert!(
+            refused.contains("has a results-ledger parent but no validated detail receipt"),
+            "{refused}"
+        );
+        assert_eq!(
+            parse("feed=ZERODHA&underlying=NIFTY"),
+            Ok(Some(pair.clone()))
+        );
+        // (8): a receipt for one frontier row the frontier does not hold.
+        let short = base.join("short");
+        cli::frontier::Frontier::open(&short).expect("empty frontier header");
+        let lone = row(0x21, "NIFTY", 7);
+        cli::result_set::Receipts::open(&short)
+            .unwrap()
+            .append_exact(cli::result_set::Receipt {
+                identity: lone.identity,
+                frontier_rows: 1,
+                trade_rows: 0,
+                direction: cli::trades::Direction::Long,
+                trade_policy: cli::result_set::TradePolicy::ChosenGridV1,
+            })
+            .unwrap();
+        cli::results::Results::open(&short)
+            .unwrap()
+            .append(&lone)
+            .unwrap();
+        let refused = report(&short, None).unwrap_err();
+        assert!(
+            refused.contains("commits a receipt for 1 frontier row(s), but frontier.bin indexes 0"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// **A refusal that persists costs a cold open on every request, and
     /// that is stated.** W1-api6-3, D-1444.
     ///

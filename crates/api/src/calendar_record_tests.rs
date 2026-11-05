@@ -613,3 +613,68 @@ fn the_derivatives_row_owes_385_minutes_from_the_1540_close_and_375_before() {
         assert_eq!(table["regular"], before, "{table}");
     }
 }
+
+/// **A READING OF MONTHS GIVEN OUT OF ORDER OR TWICE KEEPS ONLY WHAT IT CAN
+/// PLACE, AND A DAY NUMBER THAT IS NO CIVIL DAY IS WRITTEN AS ITS NUMBER**
+/// (BASE-COV-API-AS2). Extremes: (1) a month given before the first month
+/// given is not placed: its days stay unread; (2) the first month's days are
+/// placed as given; (3) the same month given twice is placed twice, the
+/// second reading over the first; (4) a month that would not read (`None`)
+/// after one that did leaves the first's counts; (5) the epoch day `-1` is
+/// written `-1`; (6) one past the largest day a `u32` holds is written as
+/// its number; (7) the epoch's own day is a civil date; (8) a reading of no
+/// month holds no span. Combined: (9) an out-of-order month AND a repeat of
+/// the first at once: the repeat is placed, the earlier month is not;
+/// (10) `i64::MIN` and `i64::MAX` as day numbers: each its own number. Out
+/// of the box: (11) a month placed after a month that would not read, and
+/// then that same month read whole: the whole reading stands.
+#[test]
+fn months_out_of_order_or_twice_and_days_that_are_no_civil_day() {
+    let month = |y, m| store::path::YearMonth::new(y, m).expect("a month");
+    let held = |day: usize, count: u32| {
+        let mut counts = [0_u32; 31];
+        counts[day] = count;
+        crate::calendar_of::tests::month_days_of(counts)
+    };
+    // (1), (2), (9): March first, then February, then March again.
+    let read = Reading::from_months(
+        "NIFTY",
+        &[
+            (month(2022, 3), Some(held(2, 11))),
+            (month(2022, 2), Some(held(2, 99))),
+            (month(2022, 3), Some(held(2, 12))),
+        ],
+    );
+    assert_eq!(
+        read.at(at(2022, 2, 3)),
+        None,
+        "before the first month given"
+    );
+    assert_eq!(read.at(at(2022, 3, 3)), Some(12), "the repeat is placed");
+    assert_eq!(read.held_span(), Some((at(2022, 3, 3), at(2022, 3, 3))));
+    // (3), (4), (11): read, then unreadable, then read whole again.
+    let again = Reading::from_months(
+        "NIFTY",
+        &[
+            (month(2022, 3), Some(held(4, 7))),
+            (month(2022, 3), None),
+            (month(2022, 3), Some(held(5, 8))),
+        ],
+    );
+    assert_eq!(again.at(at(2022, 3, 5)), Some(0), "the last whole reading");
+    assert_eq!(again.at(at(2022, 3, 6)), Some(8));
+    let lost = Reading::from_months(
+        "NIFTY",
+        &[(month(2022, 3), Some(held(4, 7))), (month(2022, 3), None)],
+    );
+    assert_eq!(lost.at(at(2022, 3, 5)), None, "a month that would not read");
+    // (8)
+    assert_eq!(Reading::from_months("NONE", &[]).held_span(), None);
+    // (5), (6), (7), (10): day numbers.
+    assert_eq!(iso(-1), "-1");
+    let past = i64::from(u32::MAX) + 1;
+    assert_eq!(iso(past), past.to_string());
+    assert_eq!(iso(0), "1970-01-01");
+    assert_eq!(iso(i64::MIN), i64::MIN.to_string());
+    assert_eq!(iso(i64::MAX), i64::MAX.to_string());
+}

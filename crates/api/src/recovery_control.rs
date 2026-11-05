@@ -422,4 +422,114 @@ mod tests {
         assert_eq!(json["what"], "run", "{body}");
         assert!(!root.exists());
     }
+
+    /// **EVERY PATH A STOP CAN MEET THAT IS NOT ITS FILE IS REFUSED BY WHAT IT
+    /// IS, ON BOTH READERS** (BASE-COV-API-AS2). Extremes: (1) a FOLDER at the
+    /// STOP path is "not a regular file" to the reader that reopens it;
+    /// (2) and to the one that writes nothing; (3) a STOP path under a FILE
+    /// where its folder goes is the filesystem's own refusal on both, never
+    /// "no STOP"; (4) a store root that is a file is "not a directory", and
+    /// no replacement is made; (5) a STOP journal holding two plans' keys is
+    /// "foreign plan keys"; (6) a STOP record whose status is right but whose
+    /// counters are not the control record's is refused as invalid; (7) a
+    /// recovery folder the filesystem will not create is refused by its
+    /// words, never taken as made; (8) none of these leaves a STOP that later
+    /// reads as cleared. Combined: (9) the two-key journal read by the reader
+    /// that writes nothing AND the one that reopens: both refuse alike;
+    /// (10) a store root that is a file AND an active recovery: stop refuses
+    /// and the file is untouched. Out of the box: (11) the store root a link
+    /// to a folder the kernel owns, where no folder can be made.
+    #[test]
+    fn every_path_that_is_not_a_stop_file_is_refused_by_what_it_is() {
+        // (1), (2): a folder at the STOP path.
+        let (root, site) = fixture("as2-recovery-stop-folder");
+        let id = [0x31; 32];
+        clear_stop(&site, id).unwrap();
+        fs::remove_file(path(&site, id)).unwrap();
+        fs::create_dir(path(&site, id)).unwrap();
+        for said in [is_stopped(&site, id), is_stopped_unopened(&site, id)] {
+            assert_eq!(
+                said,
+                Err("recovery STOP path is not a regular file".to_owned())
+            );
+        }
+        fs::remove_dir_all(&root).unwrap();
+        // (3): the recovery folder is a file.
+        let (root, site) = fixture("as2-recovery-under-file");
+        fs::create_dir_all(root.join("audit")).unwrap();
+        fs::write(root.join("audit/recovery-v1"), b"a file").unwrap();
+        for said in [is_stopped(&site, id), is_stopped_unopened(&site, id)] {
+            let why = said.unwrap_err();
+            assert!(!why.contains("regular file"), "{why}");
+            assert!(!why.is_empty());
+        }
+        fs::remove_dir_all(&root).unwrap();
+        // (4), (10): the store root is a file.
+        let parent = crate::scratch::path("as2-recovery-root-file");
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).unwrap();
+        let file_root = parent.join("store");
+        fs::write(&file_root, b"not a store").unwrap();
+        let site = Site::load(&parent.join("missing-masters"), &file_root);
+        activate(&site, id);
+        for said in [stop(&site), is_stopped(&site, id).map(|_| ())] {
+            assert_eq!(
+                said,
+                Err(
+                    "configured source store is not a directory; no replacement created".to_owned()
+                )
+            );
+        }
+        assert_eq!(fs::read(&file_root).unwrap(), b"not a store");
+        idle(&site);
+        fs::remove_dir_all(&parent).unwrap();
+        // (5), (9): two plans' keys in one STOP journal.
+        let (root, site) = fixture("as2-recovery-two-keys");
+        let (one, other) = ([0x32; 32], [0x33; 32]);
+        clear_stop(&site, one).unwrap();
+        let mut journal = Journal::open(&path(&site, one)).unwrap();
+        journal.append(record(other, Status::Blocked)).unwrap();
+        drop(journal);
+        for said in [is_stopped(&site, one), is_stopped_unopened(&site, one)] {
+            assert_eq!(
+                said,
+                Err("recovery STOP journal contains foreign plan keys".to_owned())
+            );
+        }
+        // (6), (8): the right status with other counters.
+        let odd = [0x34; 32];
+        let mut journal = Journal::open(&path(&site, odd)).unwrap();
+        journal
+            .append(Record {
+                attempts: 1,
+                ..record(odd, Status::Blocked)
+            })
+            .unwrap();
+        drop(journal);
+        assert_eq!(
+            is_stopped(&site, odd),
+            Err("recovery STOP journal has invalid control state or identity".to_owned())
+        );
+        assert!(clear_stop(&site, odd).is_err(), "never cleared over it");
+        fs::remove_dir_all(&root).unwrap();
+        // (7), (11): the store's audit folder is a link to a folder the
+        // kernel owns, where `create_dir` is refused with its own words.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let (root, site) = fixture("as2-recovery-kernel-folder");
+            let owned = if cfg!(target_os = "linux") {
+                "/sys"
+            } else {
+                "/System"
+            };
+            std::os::unix::fs::symlink(owned, root.join("audit")).unwrap();
+            activate(&site, id);
+            let why = stop(&site).unwrap_err();
+            assert!(!why.contains("is not a directory"), "{why}");
+            assert!(!std::path::Path::new(owned).join("recovery-v1").exists());
+            idle(&site);
+            fs::remove_file(root.join("audit")).unwrap();
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
 }

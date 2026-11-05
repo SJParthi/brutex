@@ -1274,8 +1274,8 @@ mod tests {
     /// long: not tracked, not listed, no refusal.
     #[test]
     fn a_poisoned_body_is_a_503_and_an_untracked_master_row_is_not_listed() {
-        let untracked = "NSE,E,INE000Z99999,EQUITY,ZZSYNTH,ZZSYNTH SYNTHETIC,ES,EQ,,,,1333\n\
-                         NSE,E,INE000Z99998,EQUITY,Q,Q SYNTHETIC,ES,EQ,,,,1333\n\
+        let untracked = "NSE,E,INE000Z99997,EQUITY,ZZSYNTH,ZZSYNTH SYNTHETIC,ES,EQ,,,,1333\n\
+                         NSE,E,INE000Z99989,EQUITY,Q,Q SYNTHETIC,ES,EQ,,,,1333\n\
                          BSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,,1333\n";
         let listed = |rows: &[serde_json::Value]| {
             let mut symbols: Vec<String> = rows
