@@ -35,7 +35,7 @@ fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
     .expect("the policy file");
     let mut env: Vec<(&'static str, std::ffi::OsString)> = [
         ("BRUTEX_CHECKSUM_MAX_BYTES", "2147483648"),
-        ("BRUTEX_CHECKSUM_MAX_RECORDS", "3000000"),
+        ("BRUTEX_CHECKSUM_MAX_RECORDS", "30000000"),
         ("BRUTEX_BOOLEAN_OBSERVATION_BYTES", "8589934592"),
         ("BRUTEX_BOOLEAN_SEARCH_REPLAY_NODES", "6000000"),
         ("BRUTEX_BOOLEAN_HORIZON_BARS", "5"),
