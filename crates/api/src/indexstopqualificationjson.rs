@@ -441,6 +441,27 @@ mod tests {
                 .is_ok()
             );
         }
+        let zero = "0".repeat(64);
+        for (refused, why) in [
+            (
+                format!("identity={zero}"),
+                "native qualification continuation requires exact pin, setting, period and bounded page",
+            ),
+            (
+                format!("identity={ID}&completion={zero}"),
+                "native qualification continuation requires exact pin, setting, period and bounded page",
+            ),
+            (
+                format!("identity={ID}&completion={ID}&kind=index-days&setting=0&period=weekly"),
+                "unknown native qualification assessment period",
+            ),
+        ] {
+            assert_eq!(
+                Asked::parse(&refused).err().as_deref(),
+                Some(why),
+                "{refused}"
+            );
+        }
     }
     #[test]
     fn pessimistic_ranking_is_total_signed_and_stable_at_ties() {
@@ -574,7 +595,11 @@ mod tests {
             assert_eq!(actual, wanted);
             assert_eq!(evaluation.summary.observed_days, 10);
         }
-        let value = consistency::saved_record(
+        assert_eq!(
+            period(&record, "weekly").err().as_deref(),
+            Some("native assessment period unknown")
+        );
+        let saved = consistency::saved_record(
             [6; 32],
             [7; 32],
             0,
@@ -584,7 +609,8 @@ mod tests {
                 completion: [9; 32],
             },
             cli::boolean_evidence::AdmissionStatusV1::Admitted,
-        )?;
+        );
+        let value = saved?;
         assert_eq!(value.get("combined_qualifies"), Some(&json!(false)));
         assert_eq!(value.get("state"), Some(&json!("failed")));
         assert_eq!(
@@ -602,4 +628,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "indexstopqualificationjson_saved_tests.rs"]
-mod saved_tests;
+pub(crate) mod saved_tests;
