@@ -3003,6 +3003,153 @@ const PIT_1_LITERAL: &str = "fnm fno-membership-v1 inferred_gdfl_options known n
 // parameter path.
 const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 
+// BASE-COV-PULL (operator decision D2 part A, D-7330 to D-7339), declared by
+// its assembly, PSA, on 5 Nov 2026 (D-7338): the 648 literals gate 1d names on
+// the assembled tree and not on feat/db-fix's (f01d7a0e4), and none the other
+// way. 156 were written by the part's attempt 1 and repairs 1 and 2 (to
+// f98a899398f6), which ran no gate 1d, and 492 by its three cloud shards
+// (PS1's 124, which its report lists with their sites, and PS2's and PS3's).
+// Each was read at the literal that produces it before it was listed, in six
+// kinds. (1) Scratch folder and file names the tests make under their own
+// temporary roots: the `cov-`, `cor-cov-`, `ref-cov-`, `census-cov-`,
+// `ssm-cov-`, `ps1-`, `fnm-ps1-`, `ps2-`, `ledger-ps2-`, `ps3-`, `gap-`,
+// `db-`, `dropbox-`, `tsw-`, `merge-`, `walk-`, `window-`, `intent-`, `peer-`,
+// `kept-`, `cold-` and `import-meets-a-held-` tags and the plain ones beside
+// them (`a-dir`, `below`, `inner`, `limited`, `loop`, `notes`, `stdin`, and
+// `bse`, the tag of a test that refuses a series of another exchange).
+// (2) Values a parser or a check is handed to refuse or to accept: days and
+// months of a wrong shape (`2024-3-01`, `26-01-02`, `2026a102`, `20260230`,
+// `2024-01-255`, and `01-25` and `25`, the pieces of `2024/01-25` and
+// `2024-01/25`), numbers past their type (`99999999999`,
+// `123456789012345678901`, `1e999`, and `1152921504606846976` and
+// `1125899906842624`, stack sizes no thread can map, given to a
+// `RUST_MIN_STACK` child), invented fields of claims, ledgers, stop lines and
+// rows (`7a`, `bonds`, `imported`, `on`, `web`, `xyz`, `--`, `nobody`,
+// `rumoured`, `delisted`), and `256265`, Zerodha's public NIFTY 50 instrument
+// number, tracked in `crates/core` and `crates/api` at feat/db-fix, which a
+// path check must accept. (3) Invented credentials, each marked invented:
+// `zq-invented`, `zq-invented-token`, `zq-key-invented`, `zq-token-invented`,
+// `zq-key`, `zq-token`, `zq-secret`, `zq-invented-value` and the header
+// `x-zq-extra`, the token pair `tok-old` and `tok-new`, and `vendorthree`,
+// the invented vendor of a configuration fixture (group 3 holds `vendorone`
+// and `vendortwo`). (4) What a test's fake vendor server answers: Dropbox
+// cursors and revisions (`c0`, `c1`, `r1`, `r2`, `r3`, `r9`, `zz`,
+// `rev0000`, `leaf`), redirect hops (`hop`, `hop1`, `hop2`), a padding field
+// (`pad`) and digests (`c0ffee`, `0123456789`). (5) LOCAL filesystem paths a
+// test reads or probes, never a Parameter Store path: Linux's
+// `/sys/devices/system/cpu/online`, `/dev/shm` and `/proc/1/environ`, and
+// macOS's `/etc/master.passwd` and `/private/var/db/sudo`. (6) Words a test
+// prints or matches: `expect` messages (`appends`, `loads`, `made`,
+// `migrated`, `recounts`, `requires`, `splits`, `taken`, `zeros`), words a
+// refusal is searched for (`past`, `neither`), a code scanner's inputs
+// (`let`, `q`), and thread and child labels (`zerodha-test`, `go-crlf`,
+// `silent-zero`, `relative-home`). None names an account, an environment, a
+// vendor credential or a field of a parameter path.
+const BASE_COV_PULL_LITERAL: &str = "-- 01-25 0123456789 1-1-2 1125899906842624 1152921504606846976 1234567890123456 \
+     123456789012345678901 19-11-14 1a 1e999 2019-0 2019-01 2019-02 2019-1-14 2024-01-2 \
+     2024-01-255 2024-01-2b 2024-03-01-02 2024-03-1 2024-0a-25 2024-1-25 2024-3-01 2024-4-1 \
+     2025-03 2026-01-02-03 2026-01-2 2026-01x07 2026-1-02 20260230 2026a102 20x4-03-01 24-03-01 \
+     25 256265 26-01-02 27mar25 416 7a 9100000 99999999999 ___ a-dir a-directory a-kind \
+     a-probe-reads-no-store a-step a-stray-file a_b_c aa abcd-01-25 ag04-concurrent-window \
+     an-unknown-scope an_invented_code appends array asked_from asked_to bb below beyond-held \
+     blank-row bonds bounds brutex-no-such-relative-folder bse c0 c0ffee c1 carried-twice \
+     census-cov-perm cleanup cleanup-gone cm-day-clean cm-day-refused cold-fail cold-unread \
+     contract copied cor-cov-bad cor-cov-below cor-cov-check cor-cov-old-short cor-cov-runs-cap \
+     cor-cov-standing cov-capped cov-cash-bad cov-cash-days cov-cd-cap cov-claims cov-claims-none \
+     cov-credentials cov-dangling-year cov-dayzips cov-diff-link cov-diff-name cov-diff-partials \
+     cov-dir-file cov-expiry cov-fno cov-format-cap cov-greeks cov-held cov-held-on cov-hook-sink \
+     cov-journal-big cov-journal-big-home cov-journal-closed-root cov-journal-lock \
+     cov-journal-no-folder cov-journal-other-refusal cov-journal-own-refusal cov-journal-race \
+     cov-journal-reader cov-journal-refresh-member cov-journal-refresh-reopen \
+     cov-journal-refresh-restated cov-journal-refresh-short cov-journal-scope-twice \
+     cov-journal-whole cov-journal-write-none cov-later cov-leaf cov-ledger-dir cov-ledger-read \
+     cov-limited cov-lineage cov-lineage-lots cov-lineage-merge-keeps cov-lineage-merge-none \
+     cov-lineage-merge-refused cov-lineage-unparsed cov-lineage-unreadable cov-list cov-live \
+     cov-lock-path cov-locks-holders cov-locks-stop cov-lone cov-names-split cov-not-zip \
+     cov-probe cov-progress cov-progress-ends cov-progress-sink cov-progress-torn \
+     cov-receipt-bytes cov-ref cov-refresh cov-repair-closed cov-rescan-days cov-rescan-gone \
+     cov-rescan-ledger cov-rescan-nfo cov-rescan-refusals cov-same-file cov-scan cov-scan-unread \
+     cov-scope-empty cov-scope-indices cov-scope-lower cov-scope-old cov-scope-request \
+     cov-scope-shares cov-scope-tree-file cov-sidecar cov-sources cov-spool-cap cov-stale-catalog \
+     cov-start-go cov-start-unspawnable cov-stop-by cov-stop-file cov-stop-writing cov-sync \
+     cov-underlyings cov-underlyings-file cov-walk-bytes cov-walk-cap cov-walk-cap-misfiled \
+     cov-walk-combo cov-walk-dot cov-walk-gone cov-walk-kind cov-walk-list cov-walk-listing \
+     cov-walk-misfiled cov-walk-misfiled-gone cov-walk-strays cov-what-is-at cov-write \
+     cov-write-lock cov-write-unlisted cpu created-between cut-at-bound cut-counted cut-not-owed \
+     cut-opened d25 d26 db db-401-twice db-403 db-404 db-5xx-total db-cut-always db-deep \
+     db-full-exact db-held-nohash db-hops db-import-foreign db-journal-file db-kept-cursor \
+     db-list-404 db-list-drop db-list-first db-list-storm db-list-sub-404 db-long-body \
+     db-long-part db-lost-between db-name-taken db-names db-part-gone db-revs db-short-body \
+     db-shrink-other db-staging-file db-stop-before db-stop-send db-throttled-download \
+     db-tick-in-staging db-unplug-last db-vanish db-wide delisted devices dropbox-append-file \
+     dropbox-batch dropbox-blank dropbox-cfg-bare dropbox-cfg-foreign dropbox-cfg-shapes \
+     dropbox-lock-copy dropbox-parts dropbox-verify dropbox-writer empty-source environ etc \
+     fnm-ps1-closed-refused fnm-ps1-generation-order fnm-ps1-index-only fnm-ps1-install-corrupt \
+     fnm-ps1-install-exhausted fnm-ps1-install-io fnm-ps1-install-unreadable fnm-ps1-kill-cut \
+     fnm-ps1-kill-once fnm-ps1-not-a-dir fnm-ps1-open-moved fnm-ps1-open-unreadable \
+     fnm-ps1-publish fnm-ps1-refusals fnm-ps1-rewrite fnm-ps1-staging fnm-ps1-unlink \
+     fnm-ps1-window futures-sink futures-sink-gone futures-sink-two-tokens gap-before-epoch \
+     gap-busy gap-cash-misdated gap-census-file gap-census-moved gap-census-segment gap-daycut \
+     gap-derive-fold gap-derive-held gap-derive-overflow gap-derive-repair gap-derive-unread \
+     gap-front gap-held-empty gap-intent gap-judged gap-lack gap-lock-loop gap-lock-opened \
+     gap-nothing-new gap-offered gap-offered-bisected gap-offered-indexed gap-overlay \
+     gap-quarantine gap-reconcile gap-sink gap-sink-store gap-successor gap-successor-refused \
+     gap-unjournaled go-crlf go-unterminated gone-run hidden hop hop1 hop2 http-keep \
+     ia16-entries-under import-meets-a-held-census import-meets-a-held-month \
+     import-meets-a-held-sidecar imported in-the-way index-skip-sink inner intent-image-unread \
+     intent-other-run intent-short intent-walk-cap invented-kind invented_code invented_refusal \
+     judge kept-faults kept-receipts kept-type last-day leaf ledger-dir ledger-ps2-behind \
+     ledger-ps2-claims-ro ledger-ps2-cut ledger-ps2-damaged ledger-ps2-journal-loop \
+     ledger-ps2-journal-max ledger-ps2-long-claim ledger-ps2-no-claims ledger-ps2-read \
+     ledger-ps2-sink ledger-ps2-sink-behind ledger-ps2-sink-damaged let limited \
+     listing_unreadable loads loop made merge-empty merge-exchanges merge-live-folder \
+     merge-log-damaged merge-log-unremovable merge-log-unwritable merge-seams merge-torn \
+     merge-unlisted migrated mine neither nine-minutes no-dir no-home no-kind no-mode no-source \
+     no-such-field no-such-folder no-such-kind no-such-relative-leaf-of-a-test no-such-sidecar \
+     no-such-table no-thread nobody nolist nospace not-a-day not-a-directory not-a-rung \
+     not-a-stub not-listed not-there not-utf8 notdir notes nowrite on one-more online pad \
+     partial-dir past past-settled peer-busy peer-damaged private progress-slots ps1-append-empty \
+     ps1-auc-dev-null ps1-auc-uncut ps1-auc-unflockable ps1-auc-unreleased ps1-capture-blocked \
+     ps1-capture-long ps1-capture-unwritten ps1-cash-lock-unflockable ps1-cash-lock-vanished \
+     ps1-cash-write-refused ps1-close-ledger ps1-day-sink ps1-day-sink-bare ps1-day-sink-store \
+     ps1-day-sink-unrecorded ps1-end-line ps1-examined-refused ps1-examined-unscoped ps1-exe-gone \
+     ps1-fl-commit ps1-fl-commit-source ps1-fl-device ps1-fl-file ps1-fl-foreign \
+     ps1-fl-generation-file ps1-fl-io-after ps1-fl-log ps1-fl-record ps1-fl-sink ps1-fl-sink-root \
+     ps1-fl-still ps1-fl-top-file ps1-fl-type ps1-fl-walk ps1-flags-no-session ps1-held-unscoped \
+     ps1-lineage-unwritable ps1-locks-census-file ps1-locks-copy ps1-locks-devices \
+     ps1-locks-dotdot ps1-locks-exe-gone ps1-locks-interrupted ps1-locks-layout \
+     ps1-locks-no-descriptor ps1-locks-no-store-lock ps1-locks-read-only ps1-locks-replaced \
+     ps1-locks-root-name ps1-locks-unlock ps1-locks-unlockable ps1-member-gone ps1-no-day-word \
+     ps1-not-writable ps1-owed-pending ps1-owed-retried ps1-owed-unrecorded ps1-probe-unreadable \
+     ps1-rd-link ps1-reach-ends ps1-reach-pending ps1-ref-absent-at ps1-ref-held-unrendered \
+     ps1-ref-no-descriptor ps1-ref-unlisted ps1-ref-unread ps1-report-store ps1-rescan-warm-up \
+     ps1-root-below-file ps1-root-dangling ps1-root-dangling-slash ps1-root-raced \
+     ps1-skip-restated ps1-source-lost ps1-stop-others ps1-stop-sink ps1-stop-sink-home \
+     ps1-stop-top ps1-three-members ps1-two-lenders ps1-warm-up-no-thread ps2 ps2-accounts \
+     ps2-append-after ps2-blocked ps2-body ps2-bse-row ps2-cap ps2-census-refuses ps2-claim-ro \
+     ps2-claim-unmeasured ps2-claim-unmeasured-sink ps2-claim-unwritten ps2-copied ps2-create \
+     ps2-emptied ps2-empty-month ps2-finish-roll ps2-first-alone ps2-first-day ps2-interleaved \
+     ps2-journal ps2-kept-superseded ps2-landing-words ps2-last-segment ps2-ledger-dir \
+     ps2-ledger-ro ps2-live-busy ps2-live-dir ps2-live-refused ps2-live-take-refused ps2-lock-dir \
+     ps2-lock-late ps2-lock-readonly ps2-lock-refused ps2-lock-unsearchable ps2-lock-waited \
+     ps2-log-name ps2-log-open ps2-no-bars ps2-nocrc ps2-notdir ps2-one-second ps2-open-names \
+     ps2-open-refused ps2-order ps2-other ps2-path ps2-progress-unwritten ps2-raced-append \
+     ps2-retire-unreadable ps2-roll-huge ps2-roll-key ps2-roll-sink ps2-rsb-dir ps2-rsx-gone \
+     ps2-short ps2-spool-detail ps2-spool-eacces ps2-spool-flat ps2-spool-order ps2-spool-resume \
+     ps2-spool-unborn ps2-spool-walk ps2-strays ps2-target-spoilt ps2-tree ps2-unkept-body \
+     ps2-unreadable ps2-unsettled ps2-withdrawn-target ps2-words-claim ps2-words-ledger ps3-db \
+     pull-store q r1 r2 r2-bent-alone r3 r9 rare recounts ref-cov-generations ref-race-lost \
+     relative-home requires reused-share rev0000 rumour rumoured s1 s2 shm silent-zero \
+     split-digests-one split-digests-two splits ssm-cov-home stdin stop-inside stray- such sudo \
+     sys system taken tok-new tok-old tsw-caps tsw-differs tsw-item tsw-kind tsw-len tsw-lockcopy \
+     tsw-lockheld tsw-measure tsw-mkdirs tsw-month tsw-nolist tsw-notdir tsw-nowrite tsw-publish \
+     tsw-refused tsw-steps tsw-verify two-in-turn two-once-in-turn two-sources unattested \
+     unborn-month uncertain unspawnable untouchable upper-case-first var vendorless vendorthree \
+     walk-contracts walk-file walk-first walk-months web window-before-1970 window-daily \
+     window-faults wp16-hook-own-root x-zq-extra x2 xyz zerodha-test zeros zq zq-bare-page \
+     zq-invented zq-invented-token zq-invented-value zq-key zq-key-invented zq-open-page zq-page \
+     zq-secret zq-token zq-token-invented zqa zz zzzzz";
+
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
 /// raised 72 -> 73 for its own group, and both groups landed, so the joined
@@ -3015,7 +3162,8 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 /// 78 -> 79 with R4-26's group (repair 4, 26 Oct 2026), at its merge of
 /// feat/db-fix c53812824: both groups raised 77 -> 78 for their own, and
 /// both landed, so the joined list holds 79.
-const DECLARED: [&str; 79] = [
+/// 79 -> 80 with BASE-COV-PULL's group (its assembly, PSA, 5 Nov 2026).
+const DECLARED: [&str; 80] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3095,6 +3243,7 @@ const DECLARED: [&str; 79] = [
     IA10C_LITERAL,
     R4_19_LITERAL,
     R4_26_LITERAL,
+    BASE_COV_PULL_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
@@ -4830,6 +4979,45 @@ mod tests {
         let group: BTreeSet<&str> = R4_26_LITERAL.split_whitespace().collect();
         assert_eq!(group.len(), 122);
         assert_eq!(R4_26_LITERAL.split_whitespace().count(), 122);
+        assert!(!d.contains("acmeorg"));
+    }
+
+    #[test]
+    fn gate_1d_declares_the_base_cov_pull_words() {
+        // BASE-COV-PULL (D-7338): the 648 words gate 1d named on the
+        // assembled tree and not on feat/db-fix's, one of each kind read at
+        // its site; the group holds exactly those 648, each once, and none
+        // of them is declared by another group.
+        let d = declared();
+        for w in [
+            "cov-walk-cap",
+            "fnm-ps1-publish",
+            "ps2-lock-refused",
+            "tsw-lockcopy",
+            "2026a102",
+            "123456789012345678901",
+            "1152921504606846976",
+            "256265",
+            "zq-invented-token",
+            "vendorthree",
+            "rev0000",
+            "hop1",
+            "devices",
+            "sudo",
+            "recounts",
+            "zerodha-test",
+        ] {
+            assert!(d.contains(w), "{w}");
+        }
+        let group: BTreeSet<&str> = BASE_COV_PULL_LITERAL.split_whitespace().collect();
+        assert_eq!(group.len(), 648);
+        assert_eq!(BASE_COV_PULL_LITERAL.split_whitespace().count(), 648);
+        let others: BTreeSet<&str> = DECLARED
+            .iter()
+            .filter(|g| **g != BASE_COV_PULL_LITERAL)
+            .flat_map(|g| g.split_whitespace())
+            .collect();
+        assert!(group.is_disjoint(&others));
         assert!(!d.contains("acmeorg"));
     }
 

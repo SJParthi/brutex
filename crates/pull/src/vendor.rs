@@ -7889,6 +7889,68 @@ mod tests {
         assert_eq!(named[0].verified_from(), None);
     }
 
+    /// **A TENOR REFUSED FOR UNVERIFIED HOURS QUOTES THE REFUSAL WHOLE, AFTER
+    /// ITS OWN WORDS** (BASE-COV-PULL-PSA, D-7338).
+    ///
+    /// `tenor::TenorError::HoursUnverified` carries a refusal of this file's
+    /// dated tables, whose fields are private here, and the shipped
+    /// derivatives table holds no unverified row, so no input of the tenor's
+    /// own door builds one: its words are stated from here. Each venue, a
+    /// window with an end and one without, the first and the last day the
+    /// calendar names (together, as a combination), and two citations no
+    /// shipped row has, an empty one and one that is not ASCII.
+    #[test]
+    fn a_tenor_refused_for_unverified_hours_quotes_the_refusal() {
+        const WORDS: &str = "the expiry day's trading hours are not verified";
+        let (first, last) = (day(1970, 1, 1), day(9999, 12, 31));
+        let refusal = |venue, asked, row_start, verified_from, source| SessionRefusal {
+            venue,
+            day: asked,
+            row_start,
+            verified_from,
+            source,
+        };
+        let mut refusals = Vec::new();
+        for venue in Venue::ALL {
+            for verified_from in [None, Some(day(2031, 1, 1))] {
+                refusals.push(refusal(
+                    venue,
+                    day(2030, 1, 1),
+                    day(2029, 1, 1),
+                    verified_from,
+                    SOURCE,
+                ));
+            }
+        }
+        refusals.push(refusal(
+            Venue::NseDerivatives,
+            first,
+            first,
+            Some(last),
+            SOURCE,
+        ));
+        refusals.push(refusal(Venue::NseDerivatives, last, last, None, SOURCE));
+        refusals.push(refusal(Venue::NseDerivatives, last, first, None, ""));
+        refusals.push(refusal(
+            Venue::NseCash,
+            first,
+            first,
+            None,
+            "TEST ROW — ünïcode",
+        ));
+
+        for refused in refusals {
+            let said = crate::tenor::TenorError::HoursUnverified(refused).to_string();
+            let quoted = refused.to_string();
+            assert!(said.starts_with(WORDS), "{said}");
+            let words = said
+                .strip_suffix(&quoted)
+                .unwrap_or_else(|| panic!("the refusal is quoted last and whole: {said}"));
+            assert!(words.ends_with("rather than guessed: "), "{said}");
+            assert!(!words.contains(&quoted), "quoted once, at the end: {said}");
+        }
+    }
+
     /// The citation every row built for a test carries. Never a segment.
     const SOURCE: &str = "TEST ROW";
 
