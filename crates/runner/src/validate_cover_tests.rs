@@ -2010,3 +2010,417 @@ fn a_builder_refusing_the_out_of_sample_prefix_ends_the_walk_with_its_reason() {
     );
     assert!(walked.folds.iter().all(|fold| fold.chosen.is_none()));
 }
+
+/// BASE-COV-LIBS-LS2 (5 Nov): THE FORWARD-ONLY EXECUTION CURSOR REFUSES A PATH
+/// CUT BELOW THE PREFIX IT ALREADY TOOK, as it refuses an earlier boundary: a
+/// slice shorter than its cursor is not the path it walked, and answering from
+/// it would split past its end. A path cut exactly at the cursor still answers
+/// the same prefix, and a refused call leaves the cursor where it stood.
+#[test]
+fn an_execution_cursor_refuses_a_path_cut_below_it_or_an_earlier_boundary() {
+    let bars = crate::synthetic::sessions(1);
+    let at = bars[100].ts_micros;
+    let mut cursor = super::MonotonicExecutionPrefix::default();
+    assert_eq!(cursor.before(&bars, at).map(<[_]>::len), Some(100));
+    // The same boundary again is not an earlier one.
+    assert_eq!(cursor.through(&bars, at).map(<[_]>::len), Some(101));
+    assert_eq!(cursor.end(), 101);
+    // One bar below the cursor, the first bar only, and no bar at all.
+    assert_eq!(cursor.through(&bars[..100], at), None);
+    assert_eq!(cursor.before(&bars[..1], at), None);
+    assert_eq!(cursor.through(&[], at), None);
+    // An earlier boundary on the whole path.
+    assert_eq!(cursor.before(&bars, bars[99].ts_micros), None);
+    assert_eq!(cursor.end(), 101, "a refusal moves nothing");
+    // Cut exactly at the cursor: nothing more to take, the same prefix.
+    assert_eq!(
+        cursor
+            .through(&bars[..101], bars[150].ts_micros)
+            .map(<[_]>::len),
+        Some(101)
+    );
+    // The whole path again at that boundary advances from where it stood.
+    assert_eq!(
+        cursor.before(&bars, bars[150].ts_micros).map(<[_]>::len),
+        Some(150)
+    );
+}
+
+/// The legacy projected walk over `signal`, executed on `bars`, two anchored
+/// splits, the shared fixture's sweeper and evaluator.
+fn legacy_walk(signal: &[indicators::Candle], bars: &[indicators::Candle]) -> super::Validated {
+    super::walk_forward_projected_with_rungs(
+        signal,
+        super::ExecutionSeries {
+            bars,
+            signal_length_micros: 60_000_000,
+        },
+        super::tests::h(15),
+        2,
+        Direction::Long,
+        &super::tests::sweeper(),
+        &mut super::tests::evaluator,
+        super::Shape::Anchored,
+        super::FoldRungs::Fixed(0),
+        &|_| {},
+    )
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A LATER FOLD WHOSE TEST WINDOW OPENS BEFORE AN
+/// EARLIER ONE'S REFUSES THE LEGACY WALK by name, rather than pricing a
+/// training prefix its forward-only cursor cannot take. The signal series is
+/// not checked for order by this door, so the second fold's first test signal
+/// is stamped one minute before the first fold's; no training slice holds
+/// that bar, and the fold before it is reported.
+#[test]
+fn a_fold_whose_test_opens_before_the_last_folds_refuses_the_legacy_walk() {
+    let bars = crate::synthetic::sessions(18);
+    let windows = super::Shape::Anchored.folds(bars.len(), super::tests::h(15), 2);
+    assert_eq!(windows.len(), 2);
+    assert!(windows[1].train.0.end <= windows[1].test.start);
+    assert_eq!(windows[0].test.end, windows[1].test.start);
+    let mut signal = bars.clone();
+    signal[windows[1].test.start].ts_micros = bars[windows[0].test.start].ts_micros - 60_000_000;
+    let walked = legacy_walk(&signal, &bars);
+    assert_eq!(
+        walked.refused.as_deref(),
+        Some("walk-forward training execution boundaries are not monotonic")
+    );
+    assert_eq!(
+        walked
+            .folds
+            .iter()
+            .map(|fold| fold.index)
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A LATER FOLD WHOSE LAST TEST SIGNAL CLOSES
+/// BEFORE AN EARLIER FOLD'S REFUSES THE LEGACY OUT-OF-SAMPLE PASS by name: the
+/// series' last bar is stamped an hour before the first fold's last test
+/// signal, so the second fold's out-of-sample execution prefix would end
+/// before the first one's. The training cursor is untouched (each fold's test
+/// still opens later), both folds decide, and the first is reported.
+#[test]
+fn a_test_window_ending_before_the_last_folds_refuses_the_legacy_oos_pass() {
+    let bars = crate::synthetic::sessions(18);
+    let windows = super::Shape::Anchored.folds(bars.len(), super::tests::h(15), 2);
+    let last = windows[1].test.end - 1;
+    assert_eq!(last, bars.len() - 1);
+    let mut signal = bars.clone();
+    signal[last].ts_micros = bars[windows[0].test.end - 1].ts_micros - 3_600_000_000;
+    let walked = legacy_walk(&signal, &bars);
+    assert_eq!(
+        walked.refused.as_deref(),
+        Some("walk-forward OOS execution boundaries are not monotonic")
+    );
+    assert_eq!(walked.folds.len(), 1);
+    assert!(
+        walked.folds[0].chosen.is_some(),
+        "the first fold priced its out-of-sample window"
+    );
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A CALLER'S BUILDER THAT ANSWERS THE
+/// OUT-OF-SAMPLE PREFIX WITH A COLUMN OF OTHER BARS IS REFUSED AT THAT
+/// PROJECTION, by name, after the training projection took the fold's own
+/// column: the whole series' column names rows the prefix does not hold.
+#[test]
+fn an_oos_builder_column_of_other_bars_is_refused_at_the_oos_projection() {
+    let bars = crate::synthetic::sessions(18);
+    let windows = super::Shape::Anchored.folds(bars.len(), super::tests::h(15), 2);
+    let whole = built(&bars);
+    let oos_prefix = windows[0].test.end;
+    let mut calls = Vec::new();
+    let walked = {
+        let mut builder = |slice: &[indicators::Candle]| {
+            calls.push(slice.len());
+            Ok(if slice.len() == oos_prefix {
+                whole.clone()
+            } else {
+                built(slice)
+            })
+        };
+        super::walk_forward_projected_prepared_with_rungs(
+            &bars,
+            super::ExecutionSeries {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            super::tests::h(15),
+            2,
+            Direction::Long,
+            &super::tests::sweeper(),
+            &mut builder,
+            super::Shape::Anchored,
+            super::FoldRungs::Fixed(0),
+            &|_| {},
+        )
+    };
+    assert!(walked.folds.is_empty());
+    assert_eq!(
+        walked.refused.as_deref(),
+        Some("a walk-forward fold could not align its signal rows to exact one-minute closes")
+    );
+    assert_eq!(calls, vec![windows[0].train.0.end, oos_prefix]);
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A FOLD THE ADMISSION CAPTURE REFUSES ENDS THE
+/// WALK THERE: the first fold's search halts at a ceiling of one, the V2
+/// capture refuses it as a candidate-family mismatch, and no slice of the
+/// second fold is ever built.
+#[test]
+fn a_halted_fold_ends_the_admission_walk_at_its_capture_refusal() {
+    let bars = crate::synthetic::sessions(18);
+    let windows = super::Shape::Anchored.folds(bars.len(), super::tests::h(15), 2);
+    let mut calls = Vec::new();
+    let refused = {
+        let mut builder = |slice: &[indicators::Candle]| {
+            calls.push(slice.len());
+            Ok(built(slice))
+        };
+        super::walk_forward_projected_prepared_anchored_admission_v2(
+            &bars,
+            super::ExecutionSeries {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            super::tests::h(15),
+            2,
+            Direction::Long,
+            &crate::Sweeper::new(engine::Ladder::with_min_hits(1).with_ceiling(1)),
+            &mut builder,
+            super::DEFAULT_RUNGS,
+        )
+        .map(|_| ())
+    };
+    assert_eq!(
+        refused,
+        Err(AnchoredAdmissionValidationRefusalV2::CandidateFamilyMismatch { fold: 0 })
+    );
+    assert_eq!(calls.first(), Some(&windows[0].train.0.end));
+    assert!(
+        calls.iter().all(|&len| len <= windows[0].test.end),
+        "{calls:?}: no slice of the second fold"
+    );
+}
+
+/// The NSE NIFTY key the V4 fixtures resolve under.
+fn nifty() -> brutex_core::instrument::InstrumentKey {
+    brutex_core::instrument::InstrumentKey::index(brutex_core::instrument::Exchange::Nse, "NIFTY")
+        .expect("an allowed index")
+}
+
+/// The V4 fixture policy with an explicit ambiguity ceiling (the fixture's is
+/// `u64::MAX`); everything else as `exact_grid_policy_v4`.
+fn ceiling_policy_v4(
+    side: crate::excursion::Side,
+    max_ambiguous_bars: u64,
+) -> crate::exit_grid_policy::ExitGridPolicyV1 {
+    use crate::exit_grid_policy::{
+        ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
+        RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
+        printed_ohlcv_cost_model_id_v2,
+    };
+    let middle = RationalPercentileV1::new(1, 2).expect("one half");
+    ExitGridPolicyV1::new(
+        ExecutionResolutionV1::OneMinuteOhlcv,
+        RangeResolutionV1::PpmCeiling,
+        side,
+        RungPlanV1::new(vec![middle], vec![middle], vec![middle], 1).expect("one rung each"),
+        RatioLimitsV1::new(1, 100_000, 1).expect("a broad single pair"),
+        32,
+        ExitGridSelectorV1::PessimisticTotal,
+        printed_ohlcv_cost_model_id_v2(),
+        ForcedStopV1::Disabled,
+        max_ambiguous_bars,
+        u64::MAX,
+    )
+    .expect("a valid policy")
+}
+
+/// The pair `ceiling_policy_v4` resolves over `bars`, both sides.
+fn ceiling_pair_v4(
+    bars: &[indicators::Candle],
+    max_ambiguous_bars: u64,
+) -> (
+    crate::exit_grid_policy::ResolvedExitGridV1,
+    crate::exit_grid_policy::ResolvedExitGridV1,
+) {
+    let key = nifty();
+    let resolve = |side| {
+        ceiling_policy_v4(side, max_ambiguous_bars)
+            .resolve_attested(
+                crate::exit_grid_policy::ExecutionSeriesV1::new(
+                    &key,
+                    "test-feed",
+                    "test-commit",
+                    [0xA5; 32],
+                    bars,
+                )
+                .expect("complete identity"),
+            )
+            .expect("the grid resolves")
+    };
+    (
+        resolve(crate::excursion::Side::Long),
+        resolve(crate::excursion::Side::Short),
+    )
+}
+
+/// The V4 door over `signal` executed on `execution`, one anchored split
+/// unless `splits` says otherwise, the plain builder.
+fn v4_walk(
+    signal: &[indicators::Candle],
+    execution: &[indicators::Candle],
+    splits: usize,
+    min_hits: u64,
+    pair: &(
+        crate::exit_grid_policy::ResolvedExitGridV1,
+        crate::exit_grid_policy::ResolvedExitGridV1,
+    ),
+) -> Result<super::AnchoredSearchValidationV4, AnchoredSearchValidationRefusalV4> {
+    let key = nifty();
+    let column = built(signal);
+    let mut builder = |slice: &[indicators::Candle]| Ok(built(slice));
+    super::walk_forward_projected_prepared_anchored_search_v4(
+        signal,
+        &column,
+        crate::exit_grid_policy::ExecutionSeriesV1::new(
+            &key,
+            "test-feed",
+            "test-commit",
+            [0xA5; 32],
+            execution,
+        )
+        .expect("complete identity"),
+        60_000_000,
+        super::tests::h(15),
+        splits,
+        &crate::Sweeper::new(engine::Ladder::with_min_hits(min_hits).with_ceiling(20_000)),
+        &mut builder,
+        &pair.0,
+        &pair.1,
+    )
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A V4 FOLD THAT TRAINS INSIDE THE EVALUATOR'S
+/// WARM-UP IS AN INCOMPLETE SEARCH, refused by fold, although nothing halted:
+/// three splits of sixteen sessions give the first fold four sessions, and
+/// the evaluator answers only after five, so its sweep measured no bar.
+#[test]
+fn a_v4_fold_that_trains_inside_the_warm_up_is_an_incomplete_search() {
+    let bars = crate::synthetic::sessions(16);
+    let windows = super::Shape::Anchored.folds(bars.len(), super::tests::h(15), 3);
+    let first = built(&bars[windows[0].train.0.clone()]);
+    assert_eq!(first.first_swept(), None, "the premise: no warmed row");
+    let swept = crate::Sweeper::new(engine::Ladder::with_min_hits(2_200)).run_prepared(&first);
+    assert!(swept.sweep.halted.is_none() && !swept.is_complete());
+    let pair = ceiling_pair_v4(&bars, u64::MAX);
+    assert_eq!(
+        v4_walk(&bars, &bars, 3, 2_200, &pair).map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV4::IncompleteSearch { fold: 0 })
+    );
+}
+
+/// `sessions(count)`'s minutes with every open and close on one multiple of
+/// 50 paisa and the high and low exactly 2% of it away: every printed range
+/// is 20,000 ppm on each side, so every rung resolves to 20,000 ppm and a
+/// trade's entry bar touches its stop and its target alike.
+fn two_percent_bars(count: i64) -> Vec<indicators::Candle> {
+    crate::synthetic::sessions(count)
+        .into_iter()
+        .map(|bar| {
+            let price = bar.close / 50 * 50;
+            indicators::Candle::new(
+                bar.ts_micros,
+                price,
+                price + price / 50,
+                price - price / 50,
+                price,
+                bar.volume,
+                bar.open_interest,
+            )
+        })
+        .collect()
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A V4 FOLD WHOSE EVERY CELL BREAKS THE AMBIGUITY
+/// CEILING DECIDES NOTHING, and the walk still issues it: with every bar 2%
+/// wide each side, each trade's entry bar touches both its rungs, so under a
+/// ceiling of zero no candidate has an admitted cell. The whole population
+/// is still priced and sealed; the fold names no candidate and no choice.
+#[test]
+fn a_v4_fold_whose_every_cell_breaks_the_ambiguity_ceiling_decides_nothing() {
+    let bars = two_percent_bars(16);
+    let pair = ceiling_pair_v4(&bars, 0);
+    let cells_per_mask = pair.0.cell_count() + pair.1.cell_count();
+    let walk = v4_walk(&bars, &bars, 1, 600, &pair).expect("an undecided walk is still issued");
+    assert_eq!(walk.folds.len(), 1);
+    let (fold, visible) = (&walk.folds[0], &walk.validated().folds[0]);
+    assert!(
+        fold.considered_masks > 0,
+        "the premise: the fold priced candidates"
+    );
+    assert_eq!(
+        fold.population_cells,
+        fold.considered_masks * cells_per_mask
+    );
+    assert!(fold.candidates.is_empty() && fold.choice.is_none());
+    assert_eq!(fold.selected_candidates, 0);
+    assert_eq!((visible.chosen, visible.chosen_side), (None, None));
+    assert!(visible.in_sample_all.is_empty() && visible.out_of_sample_all.is_empty());
+    assert_eq!(visible.considered, fold.considered_masks);
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A V4 CANDIDATE WHOSE OUT-OF-SAMPLE REPLAY BREAKS
+/// THE AMBIGUITY CEILING REFUSES THE WALK with the replay's own measurement:
+/// the training bars are the plain fixture's, where a cell is admitted under
+/// a ceiling of zero, and the test window's bars are 2% wide each side, so
+/// the chosen cell's first out-of-sample trade is ambiguous.
+#[test]
+fn a_v4_replay_past_the_ambiguity_ceiling_refuses_the_walk() {
+    let mut bars = crate::synthetic::sessions(16);
+    let windows = super::Shape::Anchored.folds(bars.len(), super::tests::h(15), 1);
+    let start = windows[0].test.start;
+    for bar in &mut bars[start..] {
+        let wide = bar.open / 50;
+        bar.high = bar.open.max(bar.close) + wide;
+        bar.low = bar.open.min(bar.close) - wide;
+    }
+    let pair = ceiling_pair_v4(&bars, 0);
+    let refused = v4_walk(&bars, &bars, 1, 2_200, &pair).map(|_| ());
+    assert!(
+        matches!(
+            refused,
+            Err(AnchoredSearchValidationRefusalV4::ExitGrid(
+                ExitGridErrorV1::ReplayQualityLimitExceeded {
+                    ambiguous_bars,
+                    max_ambiguous_bars: 0,
+                    ..
+                }
+            )) if ambiguous_bars > 0
+        ),
+        "{refused:?}"
+    );
+}
+
+/// BASE-COV-LIBS-LS2 (5 Nov): A V4 CANDIDATE WITH NO OUT-OF-SAMPLE TRADE
+/// REFUSES THE WALK by fold and ordinal: the execution path ends on the first
+/// test signal's own minute, so every out-of-sample entry would be the next
+/// minute, which does not exist, and the first candidate's replay has no cell.
+#[test]
+fn a_v4_candidate_with_no_out_of_sample_trade_refuses_the_walk() {
+    let bars = crate::synthetic::sessions(16);
+    let windows = super::Shape::Anchored.folds(bars.len(), super::tests::h(15), 1);
+    let execution = &bars[..=windows[0].test.start];
+    let pair = ceiling_pair_v4(execution, u64::MAX);
+    assert_eq!(
+        v4_walk(&bars, execution, 1, 2_200, &pair).map(|_| ()),
+        Err(AnchoredSearchValidationRefusalV4::IncompleteCandidateOos {
+            fold: 0,
+            ordinal: 0
+        })
+    );
+}
