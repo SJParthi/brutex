@@ -551,3 +551,15 @@ pub(super) async fn rollup_json(
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+#[path = "census_rollup_cover_tests.rs"]
+mod cover_tests;

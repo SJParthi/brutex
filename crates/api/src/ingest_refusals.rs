@@ -588,4 +588,90 @@ mod tests {
             "another symbol's refusal is not this one's"
         );
     }
+
+    /// **A BOUND, A SHORT DAY, AN UNREADABLE JOURNAL AND THE ROUTE ITSELF
+    /// EACH ANSWER BY NAME.** A symbol one byte past the 64 a store symbol
+    /// holds is refused, and so is the whole list it is in; a `names_day` too
+    /// short to name a month is counted and folded under none; a journal
+    /// whose `audit` folder is a file names each symbol in `errors`, with no
+    /// row and no source invented; and the route answers a store with no
+    /// journal `200`, every symbol counted zero.
+    ///
+    /// Extremes: singles — a symbol of 65 bytes (refused), one of exactly 64
+    /// (read), a `names_day` of six bytes (counted, under no month), one of
+    /// exactly seven (a month of its own), a store with no journal through
+    /// the route (200, zero each); combinations — a 65-byte symbol beside a
+    /// legal one in one list (the whole list refused), two symbols over a
+    /// journal folder that is a file at once (both in `errors`, neither in
+    /// `symbols`); out of the box — the `audit` folder replaced by a file,
+    /// and a `names_day` whose seventh byte falls inside a two-byte
+    /// character.
+    #[tokio::test]
+    async fn a_bound_a_short_day_an_unreadable_journal_and_the_route_each_answer_by_name() {
+        let past = "A".repeat(65);
+        for list in [past.clone(), format!("NIFTY,{past}")] {
+            let refused = asked(&format!("feed=zerodha&symbols={list}")).unwrap_err();
+            assert!(refused.contains("not a store symbol"), "{refused}");
+            assert!(refused.contains(&past), "{refused}");
+        }
+        let most = "A".repeat(64);
+        assert_eq!(
+            asked(&format!("feed=zerodha&symbols={most}")),
+            Ok(vec![most.clone()])
+        );
+
+        // A DAY TOO SHORT TO NAME A MONTH is counted, and folded under none.
+        let short = folded(
+            "X",
+            &[
+                refusal(1, Some("2020-1"), false, "six bytes"),
+                refusal(2, Some("2020-1\u{e9}"), false, "a character across byte 7"),
+                refusal(3, Some("2020-11"), false, "seven bytes"),
+            ],
+        );
+        assert_eq!(short["count"], 3, "{short}");
+        assert_eq!(
+            short["months"].as_object().map(serde_json::Map::len),
+            Some(1)
+        );
+        assert_eq!(short["months"]["2020-11"]["count"], 1, "{short}");
+        assert_eq!(short["months"]["2020-11"]["record"], 3, "{short}");
+
+        // THE JOURNAL'S FOLDER IS A FILE: each symbol is named in `errors`.
+        let root = crate::scratch::path("ingest-refusals-unreadable");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(root.join("audit"), b"not a folder").expect("a file where audit/ is");
+        let body = answer(&root, &["NIFTY".to_owned(), "BANKNIFTY".to_owned()]);
+        assert_eq!(body["symbols"], json!([]), "{body}");
+        assert_eq!(body["errors"].as_array().map(Vec::len), Some(2), "{body}");
+        assert_eq!(body["errors"][0]["symbol"], "NIFTY", "{body}");
+        assert_eq!(body["errors"][1]["symbol"], "BANKNIFTY", "{body}");
+        let error = body["errors"][0]["error"].as_str().expect("a sentence");
+        assert!(error.contains("could not be read"), "{error}");
+        assert!(error.contains("pull.journal"), "{error}");
+        assert!(body["source"].is_null(), "no source is invented: {body}");
+
+        // THE ROUTE over a store with no journal: 200, each symbol counted.
+        let empty = crate::scratch::path("ingest-refusals-route");
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(empty.join("masters")).expect("mkdir");
+        let site: Loaded =
+            std::sync::Arc::new(crate::server::Site::load(&empty.join("masters"), &empty));
+        let (status, headers, text) = refusals_json(
+            axum::extract::State(site),
+            "/ingest/refusals.json?feed=zerodha&symbols=NIFTY,M%26M"
+                .parse::<axum::http::Uri>()
+                .expect("a uri"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{text}");
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        let got: Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(got["symbols"][0]["symbol"], "NIFTY", "{got}");
+        assert_eq!(got["symbols"][1]["symbol"], "M&M", "{got}");
+        assert_eq!(got["symbols"][1]["count"], 0, "{got}");
+        assert_eq!(got["source"]["present"], false, "{got}");
+        assert_eq!(got["errors"], json!([]), "{got}");
+    }
 }

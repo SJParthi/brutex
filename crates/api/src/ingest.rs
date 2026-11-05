@@ -3668,14 +3668,12 @@ mod tests {
                 );
                 continue;
             }
-            assert_eq!(
-                out.expect_err("every other rung is refused"),
-                Refusal::ExpiredSeriesIsOneMinuteOnly {
-                    got: rung.dir().to_owned()
-                },
-                "{} reached an expired-series request",
-                rung.dir()
-            );
+            let dir = rung.dir();
+            let refused = out.expect_err("every other rung is refused");
+            let want = Refusal::ExpiredSeriesIsOneMinuteOnly {
+                got: dir.to_owned(),
+            };
+            assert_eq!(refused, want, "{dir} reached an expired-series request");
         }
     }
 
@@ -3702,15 +3700,12 @@ mod tests {
                 continue;
             }
             let refused = out.expect_err("every other rung is refused");
-            assert_eq!(
-                refused,
-                Refusal::ExpiredFutureAtItsRouteRungOnly {
-                    got: rung.dir().to_owned(),
-                    rung: "1day",
-                },
-                "{}",
-                rung.dir()
-            );
+            let dir = rung.dir();
+            let want = Refusal::ExpiredFutureAtItsRouteRungOnly {
+                got: dir.to_owned(),
+                rung: "1day",
+            };
+            assert_eq!(refused, want, "{dir}");
             assert_eq!(refused_field(&refused), Some("granularity"));
             let said = refused.to_string();
             assert!(said.contains("at 1day only"), "{said}");
@@ -3739,14 +3734,12 @@ mod tests {
                  &granularity=1day",
                 feed.wire()
             );
-            assert_eq!(
-                parse_fno(&body, today()).expect_err("a daily future"),
-                Refusal::ExpiredSeriesIsOneMinuteOnly {
-                    got: "1day".to_owned()
-                },
-                "{}",
-                feed.wire()
-            );
+            let wire = feed.wire();
+            let refused = parse_fno(&body, today()).expect_err("a daily future");
+            let want = Refusal::ExpiredSeriesIsOneMinuteOnly {
+                got: "1day".to_owned(),
+            };
+            assert_eq!(refused, want, "{wire}");
         }
         assert_eq!(
             pull::vendor::Feed::ALL
@@ -5002,3 +4995,15 @@ pub fn matching(
         .cloned()
         .collect()
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+#[path = "ingest_cover_tests.rs"]
+mod cover_tests;

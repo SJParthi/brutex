@@ -2626,4 +2626,406 @@ mod tests {
         assert_eq!(every.next, None);
         let _ignored = std::fs::remove_dir_all(&root);
     }
+
+    // -----------------------------------------------------------------------
+    // BASE-COV-API-AS3: what the journal and the log can say that no test
+    // above made them say.
+    // -----------------------------------------------------------------------
+
+    /// **A JOURNAL THAT IS THERE AND CANNOT BE READ IS NAMED, NEVER EMPTY.**
+    /// The journal's folder is a file: the route answers `500` with the
+    /// reader's own sentence naming the journal, the audit summary answers its
+    /// error beside the route to ask, and the answer itself is the error.
+    ///
+    /// Extremes: singles — the route over that store (500), the summary over
+    /// it (an error object, never a zero count), the answer over it (an
+    /// error); combinations — the same store asked by the route and the
+    /// summary at once, each with its own shape of the one sentence; out of
+    /// the box — `imports`, the journal's folder, replaced by a file.
+    #[tokio::test]
+    async fn a_journal_that_cannot_be_read_is_named_never_empty() {
+        let root = crate::scratch::path("imports-cover-unreadable");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(root.join("imports"), b"not a folder").expect("a file where imports/ is");
+        let why = answer(&root, &ask("feed=gdfl")).expect_err("a journal that cannot be read");
+        assert!(why.contains("gdfl.journal"), "{why}");
+        let brief = summary(&root);
+        assert_eq!(brief["route"], "/imports.json?feed=gdfl", "{brief}");
+        let said = brief["error"].as_str().expect("an error sentence");
+        assert!(said.contains("gdfl.journal"), "{said}");
+        assert!(
+            brief.get("counts").is_none(),
+            "no count is invented: {brief}"
+        );
+        let dir = agreeing("imports-cover-unreadable");
+        let mut built = site("imports-cover-unreadable", &dir);
+        built.store_root = root.clone();
+        let loaded: Loaded = std::sync::Arc::new(built);
+        let (status, _, body) = imports_json(
+            axum::extract::State(loaded),
+            "/imports.json?feed=gdfl"
+                .parse::<axum::http::Uri>()
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{body}"
+        );
+        let got: Value = serde_json::from_str(&body).unwrap();
+        let error = got["error"].as_str().expect("the reader's sentence");
+        assert!(error.contains("gdfl.journal"), "{error}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// One importer refusal line of the `cli` ring, `fields` given whole.
+    fn refused_line(seq: u32, fields: &str) -> String {
+        format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{},\"level\":\"error\",\
+             \"target\":\"gdfl.import\",\"msg\":\"refused\",\"fields\":{{{fields}}}}}\n",
+            1_791_171_079_000_u64 + u64::from(seq)
+        )
+    }
+
+    /// One `day imported` line of the `cli` ring at `ms`.
+    fn imported_line(seq: u32, ms: u64, kind: &str, day: &str) -> String {
+        format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"info\",\
+             \"target\":\"gdfl.import\",\"msg\":\"day imported\",\"fields\":{{\"kind\":\"{kind}\",\
+             \"day\":\"{day}\"}}}}\n"
+        )
+    }
+
+    /// **THE LOG ALONE MOVING MOVES THE SUMMARY, AND A LOGGED STAGE SETTLES A
+    /// DAY.** Over an unchanged journal a refusal logged with `stage=census`
+    /// for the unsettled 2018-11-06 makes it a census day: the kept summary is
+    /// not answered again, the day is counted with the census's, and its row
+    /// reads the stage from the log. A census refusal in other words than the
+    /// census's own full-census sentence names no reason code. A value with
+    /// no journal object is handed back as it came, and the day band answers
+    /// through this module's door.
+    ///
+    /// Extremes: singles — a logged `stage` that is the census's (settles the
+    /// day), a census refusal whose words do not open `n_valid is` (no reason
+    /// code), a value with no `journal` object (unchanged), the day band of a
+    /// month the journal holds no day of (its days, answered); combinations —
+    /// the journal unchanged and the log moved at once (recomputed, never the
+    /// kept answer), a ticker's refusal and a census stage on the same day
+    /// (the census decides); out of the box — a census refusal that reads like
+    /// one and names no count.
+    #[test]
+    fn the_log_alone_moving_moves_the_summary_and_a_logged_stage_settles_a_day() {
+        let root = store("cover-log-moves");
+        let first = summary(&root);
+        assert_eq!(first["census_refused"]["count"], 2, "{first:#}");
+        cli_append(
+            &root,
+            &refused_line(
+                40,
+                "\"kind\":\"options\",\"day\":\"2018-11-06\",\"about\":\"ZZTEST16NOV1899900CE\",\
+                 \"stage\":\"census\",\"why\":\"line 4: the census refused this file\"",
+            ),
+        );
+        cli_append(
+            &root,
+            &refused_line(
+                41,
+                "\"kind\":\"options\",\"day\":\"2018-11-06\",\"about\":\"census\",\
+                 \"why\":\"the census file was held by another writer\"",
+            ),
+        );
+        let moved = summary(&root);
+        assert_eq!(moved["census_refused"]["count"], 3, "{moved:#}");
+        assert_eq!(
+            moved["census_refused"]["days"][0], "options 2018-11-06",
+            "{moved:#}"
+        );
+        let got = answer(&root, &ask("feed=gdfl&from=2018-11-06&to=2018-11-06")).expect("reads");
+        let row = &got["rows"][0];
+        assert_eq!(row["stage"], "census", "{row:#}");
+        assert_eq!(row["stage_from"], "log", "{row:#}");
+        assert_eq!(
+            row["reason"],
+            Value::Null,
+            "no code is read from other words"
+        );
+        assert_eq!(row["logged"].as_array().map(Vec::len), Some(3), "{row:#}");
+        // A VALUE WITH NO JOURNAL OBJECT is handed back as it came.
+        let snapshot = crate::server::import_journal::snapshot(&root).expect("reads");
+        let bare = json!({ "error": "the journal is elsewhere" });
+        assert_eq!(with_read_now(bare.clone(), &snapshot), bare);
+        // THE DAY BAND, through this module's door.
+        let band = day_band_json(
+            &root,
+            "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2022-03&to=2022-03",
+        )
+        .expect("a day band");
+        let band: Value = serde_json::from_str(&band).expect("JSON");
+        assert!(band["days"].is_array(), "{band:#}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// The journal of the test below: a run with its end line, a `done` close
+    /// that names the census, a recount with no close before it, a line no
+    /// reader names, and a last line cut before its newline. Invented.
+    const ODD_JOURNAL: &str = "\
+        run 41 source=zip started=41\n\
+        begin options 2021-01-04 *\n\
+        done options 2021-01-04 * definition=2 files=1 seconds=1 failures=1 stage=census run=41\n\
+        recounted options 2021-01-05 * definition=2 months=1\n\
+        run 41 ended=42 outcome=done definition=2\n\
+        this line is not one the journal names\n\
+        begin indices 2021-0";
+
+    /// **A CLOSE, A RECOUNT AND WHAT NO ROW READS ARE EACH WHAT THEY ARE.**
+    /// A `done` close that names the census is a census day that closed; a
+    /// recount with no close before it is neither; a logged refusal of a kind
+    /// this reader names no row for, or of a day that is not one, makes no
+    /// row; one that names no file is a day-level refusal with a row of its
+    /// own; two `day imported` lines a minute apart are a pace of sixty days
+    /// an hour; a run's end line is named on its run; a cursor that names
+    /// nothing says so as it was asked; a foreign line and a cut last line
+    /// are each named in the notes. And a row of another kind is not one a
+    /// kind's request wants.
+    ///
+    /// Extremes: singles — a `done` close naming the census, a recount with no
+    /// earlier close, a logged kind no reader names (`futures`), a logged day
+    /// that is not one (`2021-02-30`), a refusal naming no file, a run end
+    /// line, a cursor of an id's third line that names nothing, a foreign
+    /// line, a last line cut before its newline; combinations — two `day
+    /// imported` lines a minute apart (a pace measured, never projected), a
+    /// row of one kind asked under another (not wanted) and under its own
+    /// (wanted); out of the box — a journal whose last 20 bytes are a fragment
+    /// of a `begin` line.
+    #[test]
+    fn a_close_a_recount_and_what_no_row_reads_are_each_what_they_are() {
+        let root = crate::server::import_journal::tests::journal("imports-cover-odd", ODD_JOURNAL);
+        let dir = root.join("logs").join("cli");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut ring = String::new();
+        ring.push_str(&refused_line(
+            1,
+            "\"kind\":\"futures\",\"day\":\"2021-01-04\",\"about\":\"ZZ FIXTURE\",\
+             \"why\":\"a kind this reader names no row for\"",
+        ));
+        ring.push_str(&refused_line(
+            2,
+            "\"kind\":\"options\",\"day\":\"2021-02-30\",\"about\":\"ZZ FIXTURE\",\
+             \"why\":\"a day that is not one\"",
+        ));
+        ring.push_str(&refused_line(
+            3,
+            "\"kind\":\"indices\",\"day\":\"2021-03-01\",\"why\":\"the whole day was refused\"",
+        ));
+        ring.push_str(&imported_line(
+            4,
+            1_791_171_000_000,
+            "options",
+            "2021-01-04",
+        ));
+        ring.push_str(&imported_line(
+            5,
+            1_791_171_060_000,
+            "options",
+            "2021-01-05",
+        ));
+        std::fs::write(dir.join("events.ndjson"), ring).expect("the cli ring");
+
+        let got = answer(
+            &root,
+            &ask("feed=gdfl&from=2021-01-01&to=2021-03-31&order=asc"),
+        )
+        .expect("reads");
+        let days: Vec<(&str, &str)> = got["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| {
+                (
+                    row["kind"].as_str().expect("a kind"),
+                    row["day"].as_str().expect("a day"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            days,
+            [
+                ("options", "2021-01-04"),
+                ("options", "2021-01-05"),
+                ("indices", "2021-03-01")
+            ],
+            "{got:#}"
+        );
+        assert_eq!(
+            got["census_refused_then_done"]["days"],
+            json!(["options 2021-01-04"]),
+            "{got:#}"
+        );
+        assert_eq!(got["census_refused"]["count"], 0, "{got:#}");
+        assert_eq!(got["counts"]["done"], 2, "{got:#}");
+        assert_eq!(got["counts"]["refused"], 1, "{got:#}");
+        let whole_day = &got["rows"][2];
+        assert_eq!(whole_day["outcome"], "refused", "{whole_day:#}");
+        assert_eq!(whole_day["outcome_from"], "log", "{whole_day:#}");
+        assert_eq!(whole_day["failures"], 1, "{whole_day:#}");
+        assert_eq!(
+            whole_day["logged"][0]["about"],
+            Value::Null,
+            "{whole_day:#}"
+        );
+        let kinds = got["kinds"].as_array().expect("kinds");
+        let options = kinds
+            .iter()
+            .find(|kind| kind["kind"] == "options")
+            .expect("the options kind");
+        assert_eq!(options["pace"]["p50_ms_per_day"], 60_000, "{options:#}");
+        assert_eq!(options["pace"]["days_per_hour_at_p50"], 60, "{options:#}");
+        assert_eq!(got["runs"][0]["id"], 41, "{got:#}");
+        assert_eq!(got["runs"][0]["line"], 1, "{got:#}");
+        assert_eq!(got["runs"][0]["end_line"], 5, "{got:#}");
+        assert_eq!(got["journal"]["foreign"]["count"], 1, "{got:#}");
+        assert_eq!(got["journal"]["unterminated"], 20, "{got:#}");
+        let notes: Vec<&str> = got["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .map(|note| note.as_str().expect("a sentence"))
+            .collect();
+        assert!(
+            notes[0].starts_with("1 line(s) of the journal are not lines this reader names"),
+            "{notes:?}"
+        );
+        assert!(
+            notes[1].starts_with("The journal's last 20 byte(s) end without a newline"),
+            "{notes:?}"
+        );
+        // A CURSOR OF AN ID'S THIRD LINE THAT NAMES NOTHING, as it was asked.
+        let nothing = answer(&root, &ask("feed=gdfl&runs_before=999.2")).expect("reads");
+        let refused = nothing["runs_cursor_refused"]
+            .as_str()
+            .expect("the cursor is refused");
+        assert!(
+            refused.starts_with("runs_before=999.2 names no `run` line"),
+            "{refused}"
+        );
+        assert_eq!(nothing["runs"], json!([]), "{nothing:#}");
+        // A ROW OF ANOTHER KIND is not one a kind's request wants.
+        let evidence = crate::logs::import_refusals(&root);
+        let day = crate::server::import_journal::parse_day("2021-03-01").expect("a day");
+        let row = logged_only(ImportKind::Indices, day, 1);
+        assert!(!wanted(
+            &row,
+            &ask("feed=gdfl&kind=options"),
+            &[],
+            &evidence,
+            None
+        ));
+        assert!(wanted(
+            &row,
+            &ask("feed=gdfl&kind=indices"),
+            &[],
+            &evidence,
+            None
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// The longest path the platform's `open` takes, its NUL counted:
+    /// `PATH_MAX` on Linux.
+    #[cfg(target_os = "linux")]
+    const PATH_MAX: usize = 4_096;
+
+    /// The longest path the platform's `open` takes, its NUL counted:
+    /// `MAXPATHLEN` on macOS.
+    #[cfg(not(target_os = "linux"))]
+    const PATH_MAX: usize = 1_024;
+
+    /// **A RUN FOUND NOWHERE NAMES A FOLDER IT CANNOT LIST AND PASSES OVER A
+    /// FILE.** A store whose root is so long that `<root>/logs` opens and
+    /// `<root>/logs/gdfl` is two bytes past the longest path `open` takes: the
+    /// walk lists `logs`, cannot list `logs/gdfl`, and says so with the
+    /// error, never dropping it; a file beside the folders is no folder a
+    /// `cli` logs to; a folder no read covers is named as not read; and a run
+    /// the journal holds no line of says that too.
+    ///
+    /// Extremes: singles — a folder that cannot be listed below `logs`, a
+    /// file among the folders (passed over), a folder no read covers (named),
+    /// a read folder (`cli`: not named); combinations — a folder that cannot
+    /// be listed and one not read in the same walk, each said in its own
+    /// clause, beside a run with no journal line; out of the box — a store
+    /// root two bytes short of making `logs/gdfl` a path the platform will
+    /// not open.
+    #[test]
+    fn a_run_found_nowhere_names_a_folder_it_cannot_list_and_passes_over_a_file() {
+        let base = crate::scratch::path("imports-cover-long");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        // `<root>/logs` is `want + 5` bytes, inside the bound, and
+        // `<root>/logs/gdfl` is `want + 10`, two past it.
+        let want = PATH_MAX - 8;
+        let mut parent = base.clone();
+        let mut room = want - base.as_os_str().len();
+        while room > 203 {
+            parent.push("p".repeat(200));
+            std::fs::create_dir(&parent).expect("one level of the long chain");
+            room -= 201;
+        }
+        let root = parent.join("r".repeat(room - 1));
+        let short = base.join("s");
+        let logs = short.join("logs");
+        std::fs::create_dir_all(logs.join("gdfl").join("indices")).expect("mkdir");
+        std::fs::create_dir_all(logs.join("cli")).expect("mkdir");
+        std::fs::create_dir_all(logs.join("cli-batch")).expect("mkdir");
+        std::fs::write(logs.join("notes.txt"), b"a file, not a folder").expect("a file");
+        std::fs::rename(&short, &root).expect("the store moved under the long path");
+        assert_eq!(root.as_os_str().len(), want);
+        let (says, not_read, total) = where_looked(&root, &[], false);
+        assert!(says.contains("logs/gdfl ("), "{says}");
+        assert!(says.contains("could not be listed"), "{says}");
+        assert!(
+            says.contains("the import journal holds no `run` line of this id"),
+            "{says}"
+        );
+        assert!(!says.contains("notes.txt"), "{says}");
+        assert_eq!(not_read, ["logs/cli-batch"]);
+        assert_eq!(total, 1);
+        let _ignored = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A FOLDER WHOSE NAME IS NOT UTF-8 IS COUNTED, NEVER DROPPED.** One
+    /// such folder under `logs` is "1 entry", two are "2 entries", beside a
+    /// folder no read covers, which is still named.
+    ///
+    /// Extremes: singles — one name that is not UTF-8 (one entry), two (two
+    /// entries, the plural); combinations — such a name beside a folder no
+    /// read covers (both said); out of the box — a folder name holding the
+    /// byte 0xFF, which no UTF-8 text holds. Linux only: macOS refuses such a
+    /// name at `mkdir`, so no folder there can hold one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_whose_name_is_not_utf8_is_counted_never_dropped() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let root = crate::scratch::path("imports-cover-bytes");
+        let _ = std::fs::remove_dir_all(&root);
+        let logs = root.join("logs");
+        std::fs::create_dir_all(logs.join(std::ffi::OsStr::from_bytes(b"cli-\xff")))
+            .expect("a name that is not UTF-8");
+        std::fs::create_dir_all(logs.join("cli-batch")).expect("mkdir");
+        let (says, not_read, _) = where_looked(&root, &[], true);
+        assert!(
+            says.contains("1 entry under logs could not be named"),
+            "{says}"
+        );
+        assert_eq!(not_read, ["logs/cli-batch"]);
+        std::fs::create_dir_all(logs.join(std::ffi::OsStr::from_bytes(b"cli-\xfe")))
+            .expect("a second name that is not UTF-8");
+        let (says, ..) = where_looked(&root, &[], true);
+        assert!(
+            says.contains("2 entries under logs could not be named"),
+            "{says}"
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
 }
