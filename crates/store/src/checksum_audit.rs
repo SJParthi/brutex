@@ -376,3 +376,9 @@ fn debug(why: impl std::fmt::Debug) -> String {
 #[cfg(test)]
 #[path = "checksum_audit_tests.rs"]
 mod tests;
+
+/// The strict audit's refusal of a header or geometry it cannot hold, asked
+/// directly (BASE-COV-LIBS-LS1).
+#[cfg(test)]
+#[path = "checksum_audit_cover_tests.rs"]
+mod cover_tests;
