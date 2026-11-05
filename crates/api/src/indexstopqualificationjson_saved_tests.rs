@@ -297,7 +297,10 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
 
         // A SAVED BODY CHANGED UNDER THE KEPT READER is stale: refused, never
         // served from the copy it kept; the original bytes restored are
-        // admitted again by a fresh open.
+        // admitted again by a fresh open. The pinned read first keeps the
+        // reader, so the changed body is met by the kept reader's own check.
+        let (status, kept) = page(&pinned).await;
+        assert_eq!(status, StatusCode::OK, "{kept}");
         let body = root
             .join(cli::index_stop_qualification::NAMESPACE)
             .join(identity)

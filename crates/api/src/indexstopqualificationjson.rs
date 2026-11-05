@@ -486,6 +486,14 @@ mod tests {
             ]
         );
     }
+    /// `display` is every refusal's text where a conversion or a reservation fails, and no saved artifact makes one
+    /// fail, so it is asked directly: a value's own text, unchanged, at both ends of a signed width and for text.
+    #[test]
+    fn a_refusal_names_a_value_by_its_own_text() {
+        assert_eq!(display(i64::MIN), "-9223372036854775808");
+        assert_eq!(display(u64::MAX), "18446744073709551615");
+        assert_eq!(display("native rank extent"), "native rank extent");
+    }
     #[test]
     fn fold_projection_preserves_all_integer_widths_and_zero_trade_decisions() {
         let value = fold(
