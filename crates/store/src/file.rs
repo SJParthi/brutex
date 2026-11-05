@@ -6506,7 +6506,7 @@ fn len_u64(len: usize) -> u64 {
     clippy::unwrap_used,
     clippy::panic
 )]
-mod tests {
+pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
 
     thread_local! {
@@ -6545,7 +6545,7 @@ mod tests {
 
     /// Arms the host refusal: `skip` calls of `action` on `path` pass on
     /// this thread, the next one is refused with `kind`, once.
-    pub(super) fn arm_host_fault(action: Action, path: &Path, skip: u32, kind: ErrorKind) {
+    pub(crate) fn arm_host_fault(action: Action, path: &Path, skip: u32, kind: ErrorKind) {
         HOST_FAULT.with(|armed| {
             *armed.borrow_mut() = Some(HostFault {
                 action,
@@ -6557,12 +6557,12 @@ mod tests {
     }
 
     /// Disarms the host refusal, fired or not.
-    pub(super) fn disarm_host_fault() {
+    pub(crate) fn disarm_host_fault() {
         HOST_FAULT.with(|armed| *armed.borrow_mut() = None);
     }
 
     /// Whether the armed host refusal is still waiting to fire.
-    pub(super) fn host_fault_armed() -> bool {
+    pub(crate) fn host_fault_armed() -> bool {
         HOST_FAULT.with(|armed| armed.borrow().is_some())
     }
 
