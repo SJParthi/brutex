@@ -8779,6 +8779,119 @@ mod tests {
             Err(ExitGridErrorV1::InvalidChosenCoordinate)
         );
     }
+
+    /// BASE-COV-LIBS-LS2 (5 Nov): A RESEALED RESOLUTION THAT CANNOT ENUMERATE
+    /// ITS OWN GRID IS REFUSED WHEN IT PRICES ONE. The digest is recomputed, so
+    /// the runtime integrity check passes and the evaluation's own checks
+    /// refuse: a stored cell count one past what its ladders enumerate, and a
+    /// stop ladder with no rung at all.
+    #[test]
+    fn a_resealed_resolution_that_cannot_enumerate_its_grid_is_refused_at_evaluation() {
+        let training = crate::synthetic::sessions(6);
+        let resolved = policy()
+            .resolve(&nifty(), &training)
+            .expect("the fixture resolves");
+        let column = test_column(&training);
+        let evaluate = |value: &ResolvedExitGridV1| {
+            value
+                .evaluate_training_grid(
+                    &training,
+                    &column,
+                    &ConditionMask::ZERO,
+                    Horizon::DEFAULT,
+                    value.side(),
+                )
+                .map(|_| ())
+        };
+        assert_eq!(evaluate(&resolved), Ok(()));
+        let mut counted = resolved.clone();
+        counted.cell_count += 1;
+        counted.digest = digest_resolved(&counted);
+        assert!(counted.digest_is_valid());
+        assert_eq!(
+            evaluate(&counted),
+            Err(ExitGridErrorV1::ReplayCellCountMismatch {
+                expected: resolved.cell_count + 1,
+                actual: resolved.cell_count,
+            })
+        );
+        let mut stopless = resolved;
+        stopless.stop_levels_ppm.clear();
+        stopless.digest = digest_resolved(&stopless);
+        assert_eq!(
+            evaluate(&stopless),
+            Err(ExitGridErrorV1::InvalidResolvedLadder("stop"))
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2 (5 Nov): A REPLAY WHOSE CANDIDATE ENTERS ON A BAR
+    /// WITH A LOW BELOW ONE TICK IS REFUSED BY ITS PATH CLASSIFIER (finding
+    /// F-LS2-1). A Long round trip sells at its EXIT bar's printed low, so the
+    /// level-less walk prices the trade that enters on that bar; the exit grid
+    /// prices an entry against its OWN bar's extremes (a sell at one paisa, below
+    /// the tick) and refuses the path, and the replay's classifier, which knows
+    /// a block-only path, a hole and a refused crossing but not a zero entry
+    /// fill, answers that the refusal carried no refusal fact.
+    #[test]
+    fn a_replay_entering_on_a_bar_below_one_tick_is_refused_by_its_path_classifier() {
+        let (resolved, selected, execution) = replay_fixture();
+        let instrument = nifty();
+        let column = test_column(&execution);
+        let (oos, run) = oos_and_run(&instrument, &execution, resolved.side());
+        let clean = resolved
+            .replay_selected_universe(oos, &column, &selected, run)
+            .expect("the fixture replays");
+        assert_eq!(clean.pricing_refused_paths(), 0);
+        let entry = clean.candidates().first().expect("a candidate").entry_bar();
+        let mut lowered = execution;
+        lowered[entry].low = 1;
+        assert!(lowered[entry].check().is_ok());
+        let lowered_column = test_column(&lowered);
+        let (oos, run) = oos_and_run(&instrument, &lowered, resolved.side());
+        let refusal = Err(ExitGridErrorV1::ReplayEvidenceRefused(
+            "pricing-refusal branch carried no refusal fact",
+        ));
+        assert_eq!(
+            resolved
+                .replay_selected_universe(oos, &lowered_column, &selected, run)
+                .map(|_| ()),
+            refusal
+        );
+        assert_eq!(
+            resolved
+                .replay_selected(oos, &lowered_column, &selected, run)
+                .map(|_| ()),
+            refusal
+        );
+    }
+
+    /// BASE-COV-LIBS-LS2 (5 Nov): A COORDINATE ROW WIDTH THAT DOES NOT FIT IS
+    /// REFUSED BY THE TERM THAT OVERFLOWED: the trail settings, the triangular
+    /// number of armed trails, the armed trails of a target setting, and the
+    /// row itself; an ordinary row, and a row with no trail at all, are sized.
+    #[test]
+    fn a_coordinate_row_width_that_does_not_fit_is_refused_by_its_term() {
+        let overflow = |term| Err(ExitGridErrorV1::ArithmeticOverflow(term));
+        // Three trail settings, three armed trails: 3 + 3 x 3.
+        assert_eq!(coordinate_row_width(3, 2), Ok(12));
+        assert_eq!(coordinate_row_width(usize::MAX, 0), Ok(1));
+        assert_eq!(
+            coordinate_row_width(0, usize::MAX),
+            overflow("coordinate trail settings")
+        );
+        assert_eq!(
+            coordinate_row_width(0, usize::MAX - 1),
+            overflow("coordinate triangular number")
+        );
+        assert_eq!(
+            coordinate_row_width(usize::MAX, 2),
+            overflow("coordinate row armed trails")
+        );
+        assert_eq!(
+            coordinate_row_width(usize::MAX / 3, 2),
+            overflow("coordinate row width")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8823,6 +8936,15 @@ pub(crate) mod resolution_tamper {
         for level in &mut copy.stop_levels_ppm {
             *level += 1;
         }
+        copy.digest = digest_resolved(&copy);
+        copy
+    }
+
+    /// A resealed copy whose stored cell count is one past what its ladders
+    /// enumerate (BASE-COV-LIBS-LS2, 5 Nov).
+    pub(crate) fn with_one_more_cell(value: &ResolvedExitGridV1) -> ResolvedExitGridV1 {
+        let mut copy = value.clone();
+        copy.cell_count += 1;
         copy.digest = digest_resolved(&copy);
         copy
     }

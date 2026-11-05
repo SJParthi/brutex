@@ -578,3 +578,53 @@ fn every_expression_door_refuses_an_evaluation_that_is_not_its_own() -> Result<(
     }
     Ok(())
 }
+
+/// BASE-COV-LIBS-LS2 (5 Nov): AN EXPRESSION PRICED OVER A RESEALED RESOLUTION
+/// THAT CANNOT ENUMERATE ITS OWN GRID IS REFUSED BY THE GRID'S POPULATION
+/// CHECK, as the mask door refuses it: the digest is recomputed, so the
+/// runtime integrity check passes, and the stored cell count is one past what
+/// the resolution's ladders enumerate.
+#[test]
+fn an_expression_over_a_resolution_that_cannot_enumerate_its_grid_is_refused() -> Result<(), String>
+{
+    let (bars, column) = fixture()?;
+    let key = key()?;
+    let program = expression("30 & 44")?;
+    let honest = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let resolved = crate::exit_grid_policy::resolution_tamper::with_one_more_cell(&honest);
+    let horizon = Horizon::bars(5).ok_or("horizon")?;
+    let attested = resolved
+        .attest_training(series(&key, &bars)?, &column, horizon)
+        .map_err(display)?;
+    let run = run(&key, &bars, &program, Direction::Long);
+    let expression_run = ExpressionExecutionRunV1::new(&run, &program, &bars, None)?;
+    let refusal = crate::exit_grid_policy::ExitGridErrorV1::ReplayCellCountMismatch {
+        expected: honest.cell_count() + 1,
+        actual: honest.cell_count(),
+    };
+    assert_eq!(
+        resolved
+            .evaluate_expression_with_attested(&attested, &expression_run)
+            .map(|_| ()),
+        Err(refusal.to_string())
+    );
+    let mask_run = ExecutionRunV1::new(&run, &bars, None).map_err(display)?;
+    assert_eq!(
+        resolved
+            .evaluate_with_attested(&attested, mask_run)
+            .map(|_| ()),
+        Err(refusal)
+    );
+    // The honest resolution prices the same program over the same bars.
+    let attested = honest
+        .attest_training(series(&key, &bars)?, &column, horizon)
+        .map_err(display)?;
+    assert!(
+        honest
+            .evaluate_expression_with_attested(&attested, &expression_run)
+            .is_ok()
+    );
+    Ok(())
+}
