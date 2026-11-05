@@ -198,6 +198,7 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
         assert_eq!(status, StatusCode::OK, "{preview}");
         let preview: Value = serde_json::from_str(&preview).expect("JSON");
         assert_eq!(preview["ready"], true, "{preview}");
+        telemetry::install(&telemetry::Config::new(root.join("logs"))).expect("a log sink");
         let body = launch_body(preview["policy"]["digest"].as_str().expect("a digest"));
         let (code, _, reply) = crate::sweeprun::command_with(&site, &body, cli::commit_stamp());
         let Some(_stamp) = cli::commit_stamp() else {
