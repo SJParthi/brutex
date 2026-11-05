@@ -45,36 +45,58 @@ fn measure_append_latency_under_contention() {
 /// refused. Extremes (repair 3, D-8660): eight samples, the fewest that give
 /// each of eight writers one; nine, which two and eight writers cannot share
 /// evenly; sixteen; seven, which leaves the eight writers none, an empty
-/// spread printed as none; one, which only the lone writer runs; a journal
-/// that already holds what an earlier measurement wrote; a root whose audit
-/// folder cannot be made (a file stands there), every operation refused and
-/// counted; and, at once, one sample over that root, and seven over a journal
-/// that already holds records; out of the box, no sample at all: nothing
-/// asked, nothing refused, nothing written.
+/// spread printed as none; two, which leaves them none and the two writers
+/// one each; one, which only the lone writer runs; a journal that already
+/// holds what an earlier measurement wrote; a root whose audit folder cannot
+/// be made (a file stands there), every operation refused and counted; and,
+/// at once, one sample over that root, and seven over a journal that already
+/// holds records; out of the box, no sample at all: nothing asked, nothing
+/// refused, nothing written.
 #[test]
 fn the_lock_wait_measurement_runs_at_a_small_size() {
     let root = crate::scratch::path("ag06-measure-small");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch root");
     let mut written = 0;
-    // (samples, operations asked): 3 a sample, each writer count running
-    // `samples / writers` samples on each of its writers. FOUR RECORDS A
-    // SAMPLE: the opening, the member failure, and the close, which writes the
-    // opening record again before it because the member stands between them.
-    for (samples, asked) in [(8, 72), (9, 75), (16, 144), (7, 39), (1, 3)] {
-        let measured = latency_over(&root, samples);
+    // (samples, operations asked, over the shared journal): 3 a sample, each
+    // writer count running `samples / writers` samples on each of its
+    // writers. The shared journal is new at the first row and holds every
+    // shared row's records after it; every other row has a journal of its
+    // own. FOUR RECORDS A SAMPLE: the opening, the member failure, and the
+    // close, which writes the opening record again before it because the
+    // member stands between them.
+    for (at, (samples, asked, shared)) in [
+        (8, 72, true),
+        (9, 75, true),
+        (16, 144, false),
+        (7, 39, false),
+        (2, 12, false),
+        (1, 3, false),
+        (7, 39, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let own = crate::scratch::path(&format!("ag06-measure-small-{at}"));
+        let _ = std::fs::remove_dir_all(&own);
+        std::fs::create_dir_all(&own).expect("a scratch root");
+        let measured = latency_over(if shared { &root } else { &own }, samples);
+        let before = if shared { written } else { 0 };
         assert_eq!(measured.asked, asked, "{samples} samples");
         assert_eq!(measured.refused, 0, "{samples} samples");
         assert_eq!(
-            measured.before, written,
+            measured.before, before,
             "{samples}: what was written before"
         );
         assert_eq!(
             measured.after,
-            written + 4 * u64::try_from(asked / 3).unwrap(),
+            before + 4 * u64::try_from(asked / 3).unwrap(),
             "{samples}: four records a sample"
         );
-        written = measured.after;
+        if shared {
+            written = measured.after;
+        }
+        let _ = std::fs::remove_dir_all(&own);
     }
     let blocked = crate::scratch::path("ag06-measure-blocked");
     let _ = std::fs::remove_dir_all(&blocked);

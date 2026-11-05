@@ -1162,13 +1162,13 @@ pub(crate) mod tests {
     }
 
     /// The field-count timing's own path at small sizes (D-7344). Extremes
-    /// (BASE-COV-API repair 3, D-8660): two runs at 8, 64 and 512 fields, each
-    /// end field kept beside the start's as `end_<name>`; one run; no start
-    /// field at all, the end's `ended` alone; one field; 4,096 fields, eight
-    /// times the hand-run's widest; end values equal to the start's, none of
-    /// them repeated; and, at once, 4,096 fields whose end values equal the
-    /// start's, and one run with no field; out of the box, no run at all:
-    /// nothing folded, the spread printed as none.
+    /// (BASE-COV-API repair 3, D-8660): two runs at 8 fields, each end field
+    /// kept beside the start's as `end_<name>`; at 64; at 512; one run; five;
+    /// no start field at all, the end's `ended` alone; one field; 4,096
+    /// fields, eight times the hand-run's widest; end values equal to the
+    /// start's, none of them repeated; and, at once, 4,096 fields whose end
+    /// values equal the start's, and one run with no field; out of the box,
+    /// no run at all: nothing folded, the spread printed as none.
     #[test]
     fn the_field_count_timing_runs_at_a_small_size() {
         end_line_fold_at_widths(2);
@@ -1178,6 +1178,7 @@ pub(crate) mod tests {
             (2, 64, 'e', 129),
             (2, 512, 'e', 1_025),
             (1, 8, 'e', 17),
+            (5, 8, 'e', 17),
             (2, 0, 'e', 1),
             (2, 1, 'e', 3),
             (2, 4_096, 'e', 8_193),
