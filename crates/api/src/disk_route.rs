@@ -2044,12 +2044,63 @@ mod tests {
         );
     }
 
-    /// `(p50, p99, max)` of `ns` by nearest rank, in nanoseconds.
+    /// `(p50, p99, max)` of `ns` by nearest rank, in nanoseconds. No sample
+    /// is refused by name: a timing of nothing has no p50, and the index it
+    /// would take underflows.
     fn ranks(mut ns: Vec<u128>) -> (u128, u128, u128) {
+        assert!(!ns.is_empty(), "no sample to rank: a timing of nothing");
         ns.sort_unstable();
         let n = ns.len();
         let rank = |p: usize| ns[(n * p).div_ceil(100) - 1];
         (rank(50), rank(99), ns[n - 1])
+    }
+
+    /// **THE DISK TIMING HOLDS AT ITS EXTREMES** (BASE-COV-API-AS2; verify r3
+    /// blocking item 3). Of its ranks: (1) no sample is refused by name,
+    /// never an index that underflows; (2) one sample is its own p50, p99
+    /// and max; (3) two put p50 on the first and p99 on the second; (4) a
+    /// hundred put p50 on the 50th and p99 on the 99th; (5) every sample
+    /// equal, a clock that did not move. Of what it measures: (6) the
+    /// filesystem's own top, `/`, is its own mount; (7) a root thirty-two
+    /// directories down climbs to the mount its top is on; combined: (8) the
+    /// whole timing at one sample, the child, the call, the uncached answer
+    /// and the route missed and hit, at once; and (9) a root spelt through a
+    /// symbolic link, `..` and `.` at once measures the filesystem of the
+    /// directory they name; out of the box: (10) a root whose name holds a
+    /// newline and a quote is measured, and the answer is still one JSON
+    /// object that names it byte for byte.
+    #[test]
+    fn the_disk_timing_holds_at_its_extremes() {
+        let refused = std::panic::catch_unwind(|| ranks(Vec::new())).expect_err("(1)");
+        assert!(
+            refused
+                .downcast_ref::<&str>()
+                .is_some_and(|why| why.contains("no sample to rank")),
+            "(1) refused by name"
+        );
+        assert_eq!(ranks(vec![9]), (9, 9, 9), "(2)");
+        assert_eq!(ranks(vec![20, 10]), (10, 20, 20), "(3)");
+        assert_eq!(ranks((1..=100).rev().collect()), (50, 99, 100), "(4)");
+        assert_eq!(ranks(vec![5; 7]), (5, 5, 5), "(5)");
+        assert_eq!(measure(Path::new("/")).expect("(6)").mount, "/", "(6)");
+        let tmp = crate::scratch::path("disk-route-extremes");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let deep = (0..32).fold(tmp.clone(), |at, n| at.join(format!("d{n}")));
+        std::fs::create_dir_all(&deep).unwrap();
+        let top = measure(&tmp).expect("the top is measured");
+        assert_eq!(measure(&deep).expect("(7)").mount, top.mount, "(7)");
+        timed_against_the_child("disk-route-timing-one", 1, u128::MAX);
+        std::os::unix::fs::symlink(tmp.join("d0"), tmp.join("link")).unwrap();
+        let spelt = tmp.join("link").join("..").join("d0").join(".");
+        let named = measure(&spelt).expect("(9)");
+        assert_eq!((named.mount, named.total), (top.mount, top.total), "(9)");
+        let odd = tmp.join("a \"root\"\nwith a newline");
+        std::fs::create_dir_all(&odd).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&measured(&odd, None)).expect("(10) one JSON object");
+        assert_eq!(body["store"], odd.display().to_string(), "(10)");
+        assert!(body["filesystem"]["free_bytes"].is_u64(), "(10) {body}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// **THE CALL AT ITS p99 COSTS LESS THAN THE `df` CHILD IT REPLACED AT

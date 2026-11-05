@@ -2630,29 +2630,106 @@ fn timed(root: &Path, n: usize) -> Vec<u128> {
 #[test]
 #[ignore = "the measured target: builds three stores and times 3,000+ answers; run with --ignored"]
 fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
-    day_band_timed([1, 10, 100], [20, 200, 60], 300);
+    let _ = day_band_timed(&[1, 10, 100], [20, 200, 60], 300);
 }
 
 /// The target's own path at a tenth of its history with two samples and two
 /// clients, its growth gate lifted: every page still answers its 92 days, the
 /// cold copy reads, and the writer and the clients run together (BASE-COV-API,
-/// D-7344).
+/// D-7344); each history took exactly the samples it was asked for.
 #[test]
 fn the_day_band_timing_runs_at_a_small_size() {
-    day_band_timed([1, 2, 3], [2, 2, 2], u128::MAX);
+    assert_eq!(
+        day_band_timed(&[1, 2, 3], [2, 2, 2], u128::MAX),
+        [
+            BandRun::of(1, [2, 10, 10, 40]),
+            BandRun::of(2, [2, 10, 0, 0]),
+            BandRun::of(3, [2, 10, 0, 0]),
+        ]
+    );
+}
+
+/// **THE DAY-BAND TIMING HOLDS AT ITS EXTREMES** (BASE-COV-API-AS2; verify r3
+/// blocking item 3). Of its arithmetic: (1) no sample is n 0 with figures of
+/// 0 beside it, never a panic; (2) one sample is its own p50, p99 and max;
+/// (3) a hundred put p50 on the 51st and p99 on the largest; (4) a first warm
+/// p50 of 0 is divided as 1, never by 0; (5) a run of one history reads its
+/// missing ratios as 0. Of the stores it times: (6) a history of no line,
+/// the smallest store, still answers every page its 92 days; (7) one cold
+/// copy and one warm sample a page are each taken once; combined: (8) no
+/// cold sample, no warm sample and one client at once, with the import
+/// writing beside it, and (9) a 0x and a 3x store in one run, each with one
+/// sample of each kind; out of the box: (10) a history of 3,000 lines over a
+/// ring of 2,000 earlier days, so a thousand of them are closed twice under
+/// other filters: every page still answers its 92 days.
+#[test]
+fn the_day_band_timing_holds_at_its_extremes() {
+    assert_eq!(spread(Vec::new()), (0, 0, 0, 0), "(1)");
+    assert_eq!(spread(vec![8]), (8, 8, 8, 1), "(2)");
+    assert_eq!(
+        spread((1..=100).rev().collect()),
+        (51, 100, 100, 100),
+        "(3)"
+    );
+    assert_eq!(growth(&[0, 5, 7]), (500, 700), "(4)");
+    assert_eq!(growth(&[300]), (0, 0), "(5)");
+    assert_eq!(
+        day_band_timed(&[1], [0, 0, 1], u128::MAX),
+        [BandRun::of(1, [0, 0, 0, 20])],
+        "(8)"
+    );
+    assert_eq!(
+        day_band_timed(&[0, 3], [1, 1, 0], u128::MAX),
+        [BandRun::of(0, [1, 5, 0, 0]), BandRun::of(3, [1, 5, 0, 0])],
+        "(6), (7), (9), (10)"
+    );
+}
+
+/// What one history's timing took, by kind: the cold copies, the warm
+/// answers, the answers while an import wrote, and the clients' answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BandRun {
+    history: u32,
+    cold: usize,
+    warm: usize,
+    writing: usize,
+    clients: usize,
+}
+
+impl BandRun {
+    const fn of(history: u32, [cold, warm, writing, clients]: [usize; 4]) -> Self {
+        Self {
+            history,
+            cold,
+            warm,
+            writing,
+            clients,
+        }
+    }
+}
+
+/// The warm p50 at the second and third history in hundredths of the
+/// first's: integer arithmetic, no float cast. A first p50 of 0 is divided
+/// as 1, and a history the run did not take reads as 0.
+fn growth(warm_p50: &[u128]) -> (u128, u128) {
+    let base = warm_p50.first().copied().unwrap_or(1).max(1);
+    let ratio = |at: usize| warm_p50.get(at).copied().unwrap_or(0).saturating_mul(100) / base;
+    (ratio(1), ratio(2))
 }
 
 /// `histories` x 1,000 lines no page reads, one store each; `counts` is the
 /// cold samples, the warm samples a page and the clients at once; the warm
 /// p50 at the last history stays within `ceiling` hundredths of the first's.
+/// Returns what each history's timing took.
 #[expect(
     clippy::too_many_lines,
     reason = "one timing of one store per history: cold, warm, per page and at once, each answer checked beside its sample"
 )]
-fn day_band_timed(histories: [u32; 3], counts: [usize; 3], ceiling: u128) {
+fn day_band_timed(histories: &[u32], counts: [usize; 3], ceiling: u128) -> Vec<BandRun> {
     let [cold_samples, warm_samples, client_count] = counts;
     let mut warm_p50 = Vec::new();
-    for history in histories {
+    let mut runs = Vec::with_capacity(histories.len());
+    for &history in histories {
         let root = root_of(&format!("r3-13-timing-{history}-{warm_samples}"));
         timing_store(&root, history);
         // COLD: a fresh copy of the store per sample, so no memo holds it.
@@ -2708,6 +2785,7 @@ fn day_band_timed(histories: [u32; 3], counts: [usize; 3], ceiling: u128) {
             "R3-13 timing history={history}x cold (fresh path, zerodha NIFTY): p50 {} us, p99 {} us, max {} us, n {}",
             cold.0, cold.1, cold.2, cold.3
         );
+        let mut run = BandRun::of(history, [cold.3, warm.3, 0, 0]);
         if history == 1 {
             // 60 CLIENTS AT ONCE, and AN IMPORT WRITING beside them.
             let shared = std::sync::Arc::new(root.clone());
@@ -2751,21 +2829,19 @@ fn day_band_timed(histories: [u32; 3], counts: [usize; 3], ceiling: u128) {
                 "R3-13 timing history=1x {client_count} clients, import writing ({lines} lines appended): p50 {} us, p99 {} us, max {} us, n {}",
                 sixty.0, sixty.1, sixty.2, sixty.3
             );
+            (run.writing, run.clients) = (writing.3, sixty.3);
         }
+        runs.push(run);
         let _ = std::fs::remove_dir_all(&root);
     }
     // THE RATIO, IN HUNDREDTHS: integer arithmetic, no float cast.
-    let base = warm_p50.first().copied().unwrap_or(1).max(1);
-    let ratio = |at: usize| warm_p50.get(at).copied().unwrap_or(0).saturating_mul(100) / base;
-    eprintln!(
-        "R3-13 timing growth: warm p50 10x/1x {}/100, 100x/1x {}/100",
-        ratio(1),
-        ratio(2)
-    );
+    let (tenfold, hundredfold) = growth(&warm_p50);
+    eprintln!("R3-13 timing growth: warm p50 10x/1x {tenfold}/100, 100x/1x {hundredfold}/100");
     assert!(
-        ratio(2) <= ceiling,
+        hundredfold <= ceiling,
         "the warm answer grew with history no page reads: {warm_p50:?}"
     );
+    runs
 }
 
 /// Copies a directory tree (the timing's cold samples).
@@ -2922,25 +2998,113 @@ fn the_cold_auction_era_share_page_is_timed() {
 fn the_cold_share_page_timing_runs_at_a_small_size() {
     let root = root_of("r3-13-cold-share-small");
     timing_store(&root, 1);
-    cold_share_pages_timed(
-        &root,
-        &[("NSE-CASH-RELIANCE", "2024-07-01", "2024-09-30")],
-        2,
-        [2, 2],
+    assert_eq!(
+        cold_share_pages_timed(
+            &root,
+            &[("NSE-CASH-RELIANCE", "2024-07-01", "2024-09-30")],
+            2,
+            [2, 2],
+        ),
+        [SharePage {
+            days: 92,
+            open: 64,
+            taken: [2, 2, 2, 4]
+        }],
+        "the whole span, and every sample asked for"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **THE COLD SHARE-PAGE TIMING HOLDS AT ITS EXTREMES** (BASE-COV-API-AS2;
+/// verify r3 blocking item 3), over one invented store. Extremes: (1) no
+/// sample of any kind times nothing and still answers and compares the page;
+/// (2) one sample of each kind; (3) no round of concurrent readers spawns
+/// none; (4) one round of one reader, a barrier of one; (5) a page of one
+/// session; (6) a page of one day no session falls on, a Sunday, still a page
+/// of one day and no open session; (7) a page across a month's end; (8) a
+/// page of the market's own holiday, Independence Day; combined: (9) no
+/// sample and no round at once over two pages in one call, each answered
+/// and compared; and (10) the Sunday page with one round of four readers at
+/// once, every one agreeing; out of the box: (11) the SHARE page's timing
+/// asked of an index, whose key carries no `NSE-CASH-` to strip, so its
+/// flags are asked of a symbol that is no share: the page still answers its
+/// days and its readers agree.
+#[test]
+fn the_cold_share_page_timing_holds_at_its_extremes() {
+    let root = root_of("r3-13-cold-share-extremes");
+    timing_store(&root, 1);
+    let page = |days, open, taken| SharePage { days, open, taken };
+    let cases: [(&[(&str, &str, &str)], usize, [usize; 2], Vec<SharePage>); 6] = [
+        (
+            &[("NSE-CASH-RELIANCE", "2024-07-01", "2024-07-01")],
+            0,
+            [0, 4],
+            vec![page(1, 1, [0, 0, 0, 0])],
+        ),
+        (
+            &[("NSE-CASH-RELIANCE", "2024-07-31", "2024-08-01")],
+            1,
+            [1, 1],
+            vec![page(2, 2, [1, 1, 1, 1])],
+        ),
+        (
+            &[("NSE-CASH-RELIANCE", "2024-08-15", "2024-08-15")],
+            1,
+            [0, 1],
+            vec![page(1, 0, [1, 1, 1, 0])],
+        ),
+        (
+            &[
+                ("NSE-CASH-RELIANCE", "2024-07-01", "2024-07-01"),
+                ("NSE-CASH-RELIANCE", "2024-07-07", "2024-07-07"),
+            ],
+            0,
+            [0, 0],
+            vec![page(1, 1, [0, 0, 0, 0]), page(1, 0, [0, 0, 0, 0])],
+        ),
+        (
+            &[("NSE-CASH-RELIANCE", "2024-07-07", "2024-07-07")],
+            1,
+            [1, 4],
+            vec![page(1, 0, [1, 1, 1, 4])],
+        ),
+        (
+            &[("NSE-INDEX-NIFTY", "2024-07-05", "2024-07-08")],
+            1,
+            [1, 2],
+            vec![page(4, 2, [1, 1, 1, 2])],
+        ),
+    ];
+    for (pages, samples, concurrent, expected) in cases {
+        assert_eq!(
+            cold_share_pages_timed(&root, pages, samples, concurrent),
+            expected,
+            "{pages:?} at {samples} sample(s), {concurrent:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// One page of the share-page timing: its days, the open sessions among
+/// them, and the samples taken: cold, warm, flags-only and concurrent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SharePage {
+    days: usize,
+    open: usize,
+    taken: [usize; 4],
+}
+
 /// Each of `pages` `(instrument, from, to)` over `root`: `samples` cold,
 /// warm and flags-only answers, then `concurrent` `[rounds, readers]` of
-/// cold readers at once.
+/// cold readers at once. Returns what each page was and what it took.
 fn cold_share_pages_timed(
     root: &Path,
     pages: &[(&str, &str, &str)],
     samples: usize,
     concurrent: [usize; 2],
-) {
+) -> Vec<SharePage> {
     let [rounds, readers] = concurrent;
+    let mut out = Vec::with_capacity(pages.len());
     for &(instrument, from, to) in pages {
         let query = format!("feed=zerodha&instrument={instrument}&from={from}&to={to}");
         let asked = ask(&query);
@@ -3010,6 +3174,7 @@ fn cold_share_pages_timed(
             warmed["days"],
             "cold, warm and concurrent answers agree"
         );
+        let taken = [cold.len(), warm.len(), flags_only.len(), concurrent.len()];
         println!(
             "{query}: {read} open sessions; cold {:?}; warm {:?}; flags-only cold {:?}; {readers} concurrent cold {:?} (p50, p99, max, n; us)",
             spread(cold),
@@ -3017,7 +3182,13 @@ fn cold_share_pages_timed(
             spread(flags_only),
             spread(concurrent)
         );
+        out.push(SharePage {
+            days: days.len(),
+            open: read,
+            taken,
+        });
     }
+    out
 }
 
 /// The timing's pages, answered ten times each over the 1x store, and nothing
@@ -3025,27 +3196,89 @@ fn cold_share_pages_timed(
 #[test]
 #[ignore = "a profiler's target: run with --ignored under valgrind"]
 fn the_day_band_pages_for_a_profiler() {
-    profiled_pages("r3-13-profile", 10);
+    let _ = profiled_pages("r3-13-profile", 10, &TIMED);
 }
 
-/// The profiler's target at one answer a page (BASE-COV-API, D-7344).
+/// The profiler's target at one answer a page (BASE-COV-API, D-7344): each
+/// page answered once, its whole 92 days.
 #[test]
 fn the_profilers_pages_run_at_a_small_size() {
-    profiled_pages("r3-13-profile-small", 1);
+    assert_eq!(
+        profiled_pages("r3-13-profile-small", 1, &TIMED),
+        vec![vec![92]; 5]
+    );
 }
 
-/// Every timed page, `rounds` answers each, over the 1x store.
-fn profiled_pages(tag: &str, rounds: usize) {
-    let root = root_of(tag);
+/// **THE PROFILER'S PAGES HOLD AT THEIR EXTREMES** (BASE-COV-API-AS2; verify
+/// r3 blocking item 3). Extremes: (1) no round answers nothing, and the
+/// store is still built and released; (2) one round of every timed page,
+/// each its 92 days; (3) three rounds, every answer of a page the same as
+/// its first; (4) no page at all; (5) a page of one session; (6) a page of
+/// one day no session falls on; (7) a page of the contract only past its
+/// own expiry; (8) a share's page on GDFL alone; combined: (9) no round over
+/// no page at once, nothing asked; and (10) two rounds of the one-day page
+/// and of a whole timed page together; out of the box: (11) one page named
+/// twice in one list, answered twice and the same both times.
+#[test]
+fn the_profilers_pages_hold_at_their_extremes() {
+    let one_day = "feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-07-01&to=2024-07-01";
+    let sunday = "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2024-07-07&to=2024-07-07";
+    let expired =
+        "feed=gdfl&instrument=NSE-FNO-NIFTY-2024-09-26-2500000-CE&from=2024-09-27&to=2024-09-30";
+    assert_eq!(
+        profiled_pages("r3-13-profile-none", 0, &[]),
+        Vec::<Vec<usize>>::new(),
+        "(9) no round over no page: the store built and released, nothing asked"
+    );
+    let root = root_of("r3-13-profile-extremes");
     timing_store(&root, 1);
-    for query in TIMED {
-        let asked = ask(query);
-        for _ in 0..rounds {
-            let body = answer(&root, &asked);
-            assert_eq!(body["days"].as_array().map(Vec::len), Some(92));
-        }
+    let cases: [(usize, Vec<&str>, Vec<Vec<usize>>); 8] = [
+        (0, TIMED.to_vec(), vec![Vec::new(); 5]),
+        (1, TIMED.to_vec(), vec![vec![92]; 5]),
+        (3, vec![TIMED[2]], vec![vec![92; 3]]),
+        (1, Vec::new(), Vec::new()),
+        (1, vec![one_day, sunday], vec![vec![1], vec![1]]),
+        (1, vec![expired, TIMED[3]], vec![vec![4], vec![92]]),
+        (2, vec![one_day, TIMED[0]], vec![vec![1; 2], vec![92; 2]]),
+        (1, vec![sunday, sunday], vec![vec![1], vec![1]]),
+    ];
+    for (rounds, pages, days) in cases {
+        assert_eq!(
+            answered_pages(&root, rounds, &pages),
+            days,
+            "{rounds} round(s) of {pages:?}"
+        );
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Each of `pages`, `rounds` answers each, over a 1x store of its own: each
+/// answer's day count, by page.
+fn profiled_pages(tag: &str, rounds: usize, pages: &[&str]) -> Vec<Vec<usize>> {
+    let root = root_of(tag);
+    timing_store(&root, 1);
+    let out = answered_pages(&root, rounds, pages);
+    let _ = std::fs::remove_dir_all(&root);
+    out
+}
+
+/// Each of `pages`, `rounds` answers each, over `root`: each answer's day
+/// count, by page. Every answer of a page is the same as its first.
+fn answered_pages(root: &Path, rounds: usize, pages: &[&str]) -> Vec<Vec<usize>> {
+    let mut out = Vec::with_capacity(pages.len());
+    for query in pages {
+        let asked = ask(query);
+        let mut kept: Option<Value> = None;
+        let mut days = Vec::with_capacity(rounds);
+        for _ in 0..rounds {
+            let body = answer(root, &asked);
+            days.push(body["days"].as_array().map_or(0, Vec::len));
+            let first = kept.get_or_insert_with(|| body["days"].clone());
+            assert_eq!(&body["days"], first, "{query}: an answer moved");
+        }
+        out.push(days);
+    }
+    out
 }
 
 // ══ Reads that fail, and months that will not open ═══════════════════════════

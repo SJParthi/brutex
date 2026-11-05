@@ -22125,28 +22125,111 @@ mod tests {
     /// the index (BASE-COV-API, D-7344).
     #[test]
     fn the_pull_runtime_measurement_runs_at_a_small_size() {
-        costs_of_the_pull_runtime(
+        let figures = costs_of_the_pull_runtime(
             "pull-runtime-costs-small",
             2,
             2,
             crate::pullrun::INTERRUPTED_SCAN + 10,
         );
+        assert_eq!(
+            figures.iter().map(|f| f.n).collect::<Vec<_>>(),
+            [2, 2, 2, 2, 2],
+            "every figure is the samples it was asked for"
+        );
+    }
+
+    /// **THE PULL RUNTIME'S MEASUREMENT HOLDS AT ITS EXTREMES**
+    /// (BASE-COV-API-AS2; verify r3 blocking item 3). Extremes: (1) no slow
+    /// sample and (2) no quick sample are each said as `n=0` with no figure,
+    /// never an index that underflows; (3) one sample is its own p50, p99 and
+    /// max; (4) a hundred samples put p50 on the 51st and p99 on the
+    /// largest; (5) a journal of no failure behind the open run, (6) one
+    /// failure, (7) one failure short of the scan's bound, so the opening
+    /// record is the oldest one the scan reads and the count is whole, and
+    /// (8) exactly the bound, so the opening record is the first one the scan
+    /// does not read and the count is a floor; combined: (9) no sample of
+    /// either kind over a journal of no failure, and (10) one sample of each
+    /// over a journal exactly at the bound; out of the box: (11) a clock that
+    /// did not move, every sample the same: p50, p99 and max are that value.
+    #[test]
+    fn the_pull_runtime_measurement_holds_at_its_extremes() {
+        let scan = crate::pullrun::INTERRUPTED_SCAN;
+        let empty = runtime_spread("empty", Vec::new());
+        assert_eq!(
+            (empty.n, empty.figures),
+            (0, None),
+            "(1)-(2) n=0, no figure"
+        );
+        let one = runtime_spread("one", vec![7]);
+        assert_eq!((one.n, one.figures), (1, Some((7, 7, 7))), "(3)");
+        let hundred = runtime_spread("hundred", (1..=100).rev().collect());
+        assert_eq!(
+            (hundred.n, hundred.figures),
+            (100, Some((51, 100, 100))),
+            "(4)"
+        );
+        let still = runtime_spread("still", vec![42; 9]);
+        assert_eq!(still.figures, Some((42, 42, 42)), "(11) a still clock");
+        for (failures, slow, quick) in [(0, 0, 0), (1, 1, 0), (scan - 1, 0, 1), (scan, 1, 1)] {
+            let figures = costs_of_the_pull_runtime(
+                &format!("pull-runtime-extremes-{failures}"),
+                slow,
+                quick,
+                failures,
+            );
+            assert_eq!(
+                figures.iter().map(|f| f.n).collect::<Vec<_>>(),
+                [slow, quick, quick, slow, quick],
+                "{failures} failures: every figure is the samples asked for"
+            );
+            assert!(
+                figures.iter().all(|f| f.figures.is_some() == (f.n > 0)),
+                "{failures} failures: a figure exactly where a sample was taken"
+            );
+        }
+    }
+
+    /// What one figure of the measurement measured: n, and p50, p99 and
+    /// max in nanoseconds when there was a sample to rank.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RuntimeSpread {
+        n: usize,
+        figures: Option<(u128, u128, u128)>,
+    }
+
+    /// p50, p99 and max of `nanos`, printed under `label`; `n=0` and no
+    /// figure when nothing was timed.
+    fn runtime_spread(label: &str, mut nanos: Vec<u128>) -> RuntimeSpread {
+        nanos.sort_unstable();
+        let n = nanos.len();
+        let figures = nanos.last().map(|&max| {
+            let at = |q: usize| {
+                nanos
+                    .get((n * q / 100).min(n.saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(max)
+            };
+            (at(50), at(99), max)
+        });
+        let said = figures.map_or_else(
+            || "nothing timed".to_owned(),
+            |(p50, p99, max)| format!("p50={p50}ns p99={p99}ns max={max}ns"),
+        );
+        println!("{label}: n={n} {said}");
+        RuntimeSpread { n, figures }
     }
 
     /// `slow` samples of the paths that touch the disk, `quick` of those
-    /// that do not, and a journal of `failures` failures behind one open run.
-    fn costs_of_the_pull_runtime(tag: &str, slow: usize, quick: usize, failures: u64) {
-        fn spread(label: &str, mut nanos: Vec<u128>) {
-            nanos.sort_unstable();
-            let at = |q: usize| nanos[(nanos.len() * q / 100).min(nanos.len() - 1)];
-            println!(
-                "{label}: n={} p50={}ns p99={}ns max={}ns",
-                nanos.len(),
-                at(50),
-                at(99),
-                nanos[nanos.len() - 1]
-            );
-        }
+    /// that do not, and a journal of `failures` failures behind one open run:
+    /// each figure, in the order printed.
+    fn costs_of_the_pull_runtime(
+        tag: &str,
+        slow: usize,
+        quick: usize,
+        failures: u64,
+    ) -> Vec<RuntimeSpread> {
+        let mut out = Vec::with_capacity(5);
+        let mut spread = |label: &str, nanos: Vec<u128>| out.push(runtime_spread(label, nanos));
         let timed = |n: usize, work: &mut dyn FnMut()| -> Vec<u128> {
             (0..n)
                 .map(|_| {
@@ -22207,13 +22290,18 @@ mod tests {
         }
         let found = crate::pullrun::restart_scan(&journal);
         let run = found.interrupted().expect("the run is open");
+        // INSIDE THE SCAN'S BOUND the opening record is read with its
+        // failures, and their count is whole; AT OR PAST IT the opening
+        // record lies before the scan and is read through the index, and the
+        // count is the scan's own, a floor.
+        let scan = crate::pullrun::INTERRUPTED_SCAN;
         assert_eq!(
             (run.ordinal, run.failures, run.failures_whole),
-            (0, crate::pullrun::INTERRUPTED_SCAN, false),
-            "the opening record lies before the scan and is read through the index"
+            (0, failures.min(scan), failures < scan),
+            "{failures} failures behind the open run"
         );
         spread(
-            "restart_scan (8,001-record journal: 800 read, the run record by its index)",
+            "restart_scan (the newest 800 records read, the run record by its index past them)",
             timed(slow, &mut || {
                 assert!(
                     crate::pullrun::restart_scan(&journal)
@@ -22233,6 +22321,8 @@ mod tests {
                 ));
             }),
         );
+        let _ = std::fs::remove_dir_all(&root);
+        out
     }
 
     /// What the pull order withholds on a real store, read only (DB-B27).
