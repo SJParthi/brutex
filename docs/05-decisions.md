@@ -87980,9 +87980,9 @@ limits). So:
 2. **`ratio_bitmap_of`'s refusal needs no seam**: it takes its counts, so a
    direct call with a length of `isize::MAX + 1` is refused for capacity
    before any allocator is asked, on every host.
-3. **`canonical_coordinate_ordinal`'s slot overflow is reached by a direct
-   call** with a stop rung of `usize::MAX`; LS2 had filed it with the
-   address-space rows.
+3. **`canonical_coordinate_ordinal`'s row-slot overflow**, which no list
+   carried, is asserted as well now, by a direct call with a stop rung of
+   `usize::MAX`: a caller's coordinate is never wrapped onto another row.
 4. **Three checked additions are (U)**, with this proof: in
    `coordinate_row_offsets` and `canonical_coordinate_ordinal` the operand of
    each `len().checked_add(1)` is the length of a `Vec<Ppm>` (`Ppm` is `i64`),
@@ -87990,12 +87990,16 @@ limits). So:
    `usize::MAX` on any target.
 5. **Left for the operator's ruling**: the product `(S + 1)(T + 1)` of
    `coordinate_row_offsets` passes `usize::MAX` only with a stop and a target
-   ladder of more than 2^32 rungs each (32 GiB per ladder); no test can build
-   that input, and a seam would fake the input rather than refuse a real
-   request. And the five [HASH] rows: both digests hash the side, and each is
-   checked against its preimage first, so equal digests need a blake3
-   collision; a seam that faked a digest would test nothing real. Both are in
-   `docs/06-limits.md` L-BCL-6.
+   ladder of more than 2^32 rungs each (32 GiB per ladder); and the `?` after
+   `coordinate_row_width` in that function's loop refuses only a row wider
+   than `usize::MAX` cells, which a resolution whose cell count fits `u64`
+   (`checked_policy_cell_count`) cannot hold, so only a resolution resealed
+   over real ladders of hundreds of MiB, with a gibibyte of row offsets,
+   reaches it. No test can build either input, and a seam would fake the
+   input rather than refuse a real request. And the five [HASH] rows: both
+   digests hash the side, and each is checked against its preimage first, so
+   equal digests need a blake3 collision; a seam that faked a digest would
+   test nothing real. All are in `docs/06-limits.md` L-BCL-6.
 
 **F-LS2-1, a finding for the operator.** `grid::entry_fills` prices a Long
 entry against its own bar's printed extremes (its sell leg reads the ENTRY
@@ -88132,6 +88136,104 @@ fail for any `i64`. The three `#[ignore]`d tests of these crates stand in
 L-BCL-3, and their timing helpers are now checked where the gate runs.
 `telemetry/tests/global_absent.rs`'s two macro-argument lines are uncovered
 by design: the test asserts that argument never runs (L-BCL-6).
+
+### D-8568 — BASE-COV-LIBS attempt 5, the assembly: four crate shards stacked, their open needs settled, and the ten crates measured whole by Route B; the bar is NOT met, so D-7250's narrow reading still holds for them — 2026-11-05
+
+**Status: IN PROGRESS, not a landing record.** Operator decision D2 part A asks
+for line and branch coverage 100% on the old code of `core`, `costs`,
+`engine`, `greeks`, `indicators`, `lake`, `runner`, `store`, `telemetry` and
+`vocab`, so that `CLAUDE.md` §9's whole-crate rule applies to them again
+(D-7320). Attempt 5 split the work by crate (D6) over four cloud shards on
+3-5 Nov 2026: LS1 `store` (D-8560, D-8561), LS2 `runner` (D-8562, D-8563),
+LS3 `lake`, `indicators`, `vocab` (D-8564, D-8565), LS4 `core`, `costs`,
+`engine`, `greeks`, `telemetry` (D-8566, D-8567). This entry is the
+assembly's (session BASE-COV-LIBS-LSA, branch `cloud/cov-libs-lsa-20261103`).
+`Merge BASE-COV-LIBS:` must still not land: what is left below is the
+operator's and the Mac's.
+
+**The assembly.** The kit's `replay-minus-reports.sh` replayed each shard's
+code commits (its `reports/` left out) onto START `bd04fb299d23`, in the order
+LS1, LS2, LS3, LS4, each onto the last; every call's proofs P1-P4 held (each
+shard's files equal its tip's, nothing else moved, no report reached the
+branch), and the four shards touch disjoint files. ASSEMBLED:
+`bbacf363b5d2`. Then:
+
+1. LS4's two `crates/engine/src/lib.rs` patches, as D-8566 records.
+2. LS4's four `lib.rs` rows left for judgment, all test code. The block
+   arithmetic of `the_join_emits_exactly_one_candidate_per_pair` was checked
+   on an empty level (every union lacked a 2-subset), so its "no pair repeats
+   a candidate" assertion held over nothing: the frontier now holds every
+   2-subset of 0..=3 and `{4,5} {4,6} {5,6}`, five candidates survive, the
+   block arithmetic is restated for five blocks (3 + 1 + 0 + 1 + 0) and a new
+   assertion states that all five survive. The observer of
+   `a_checkpoint_observer_gets_one_terminal_boundary_and_no_later_level`
+   rejected a call after its terminal boundary with an `Err` whose only effect
+   was the test's failure; it is an `assert!` now. Each was shown failing
+   under a hand change (a survivor appended twice; a survivor given its
+   neighbour's mask; the retained sink calling its reporter twice).
+3. LS2's 41 rows for a ruling: the allocator rows by `runner`'s reservation
+   door (D-8569), the rest as D-8563 records.
+
+**Instrument.** The kit's `d3-route-b-cloud.sh`, unchanged: the pinned nightly
+`rustc 1.99.0-nightly (1a98b1e13 2026-08-07)` with its own `llvm-profdata` and
+`llvm-cov` (LLVM 23.1.0-rust-1.99.0-nightly), `-C instrument-coverage -Z
+coverage-options=branch`, opt-level 0, set `reading whole:<the ten crates>`
+(every tracked `.rs` file under them), its test binaries run as an
+unprivileged user as CI and the Mac run them, on a Linux x86_64 cloud host. A
+cloud figure: the Mac re-measures on aarch64-apple-darwin, its pin.
+
+**Figures, as measured (lines covered/counted, branch sides covered/counted,
+files read).** Nine crates at `3069f0c9d23c` (`core` again at ``0b7aa0d6d801``,
+after these entries, since its citation gate reads them), `runner` at
+`d096f65942d4`; no later commit changes their code.
+
+| crate | lines | branches | uncovered lines | uncovered sides | files |
+|---|---|---|---|---|---|
+| `core` | 7,746/7,774 | 602/640 | 28 | 38 | 21 |
+| `costs` | 11,568/11,670 | 480/502 | 102 | 22 | 26 |
+| `engine` | 5,484/5,494 | 528/560 | 10 | 32 | 11 |
+| `greeks` | 1,918/1,921 | 93/96 | 3 | 3 | 7 |
+| `indicators` | 16,909/16,914 | 1,892/2,078 | 5 | 186 | 39 |
+| `lake` | 5,678/6,135 | 305/364 | 457 | 59 | 17 |
+| `runner` | 52,070/52,264 | 3,671/4,022 | 194 | 351 | 75 |
+| `store` | 53,276/54,692 | 3,449/3,990 | 1,416 | 541 | 112 |
+| `telemetry` | 9,370/9,397 | 636/678 | 27 | 42 | 16 |
+| `vocab` | 8,185/8,205 | 1,240/1,298 | 20 | 58 | 19 |
+| **all ten** | **172,204/174,466** | **12,896/14,228** | **2,262** | **1,332** | **343** |
+
+**What is left, every row classed** in
+`reports/base-cloud-20261103/base-cov-libs-gaps-a5.txt.md` and
+`base-cov-libs-fu.txt.md` on the assembly's branch (rows keep the shard's
+class wherever the shard's list has them; the few new rows are classed by
+hand there):
+
+- **(F), 1,677 rows**: 1,581 by the recipe's first clause (the failing side
+  of an assertion or a `panic!` in test code), and 96 of LS1's step-4 rows (the
+  failing, bounding, skip, failure-collection and fault-mock-guard arms of a
+  test's own checks, under the reading LS1 records as the main session's
+  answer of 5 Nov 2026), each with its proof.
+- **(U), 362 rows**, each with its proof from the code: `store` 95, `runner`
+  261, `lake` 2, `costs` 2, `indicators` 1, `vocab` 1.
+- **1,536 rows inside `#[ignore]`d tests** and the helpers only they call
+  (`store` 1,108, `lake` 353, `costs` 70, `telemetry` 5): L-BCL-3.
+- **10 rows only macOS takes** (`store`'s `tests/catalog.rs`, APFS refusing a
+  name that is not UTF-8): owed to the Mac's run. And `safe_open::Found::of`'s
+  last arm, covered here, is (U) there (D-8561 item 4).
+- **9 rows for the operator's ruling** (L-BCL-6): `runner`'s
+  `coordinate_row_offsets` product and row width (inputs of a gibibyte and
+  more, D-8563 item 5), the
+  five blake3-collision rows of `validate::authenticate_grid_pair_v4`, and
+  `telemetry/tests/global_absent.rs`'s two lines.
+- **No GAP.** No production or test row is left open.
+- **NOT PROVED, never counted covered:** the 14 `benches/` files (L-BCL-1)
+  and the five `lib.rs` files with no executable line (L-BCL-2).
+
+**So the bar is NOT met and D-7250's narrow reading does NOT end for these
+crates at this part's merge.** Nothing left is a GAP the assembly could close
+by a test in its files: the ignored tests wait for the operator's choice
+(L-BCL-3), the benches for the operator's route (L-BCL-1), the rows of L-BCL-6
+for a ruling, and the macOS rows and every figure for the Mac's Route B on its
+pin. Mutants are deferred (operator 30 Oct).
 
 ### D-8569 — `runner`: a test-only door refuses the n-th seamed reservation, so every buffer only a refusing allocator fails is reached by its real path (BASE-COV-LIBS assembly) — 2026-11-05
 
