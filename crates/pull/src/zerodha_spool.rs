@@ -169,7 +169,10 @@ pub enum Live {
 pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
     let path = live_lock_path(root, run);
     let file = open_live(root, &path)?;
-    match store::flock::Flock::try_lock(file, path.clone()) {
+    let locked = store::flock::Flock::try_lock(file, path.clone());
+    #[cfg(test)]
+    let locked = seam::answer_lock("live.probed", locked);
+    match locked {
         Ok(lock) => Ok(Live::Taken(lock)),
         Err(std::fs::TryLockError::WouldBlock) => {
             Ok(Live::Spooling(store::flock::holder_note(&path)))
@@ -817,7 +820,10 @@ impl SpoolWriter {
         let started = std::time::Instant::now();
         loop {
             let file = open_live(&self.root, &path)?;
-            match store::flock::Flock::try_lock_noted(file, path.clone()) {
+            let locked = store::flock::Flock::try_lock_noted(file, path.clone());
+            #[cfg(test)]
+            let locked = seam::answer_lock("live.taken", locked);
+            match locked {
                 Ok(lock) => return Ok(lock),
                 Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LIVE_WAIT => {
                     std::thread::sleep(LIVE_STEP);
@@ -1594,6 +1600,46 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
 
 fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(take::<8>(bytes, at))
+}
+
+/// The test seam of a host call no file, folder or name can make fail
+/// (D-7336, the planted fault of `ingest::census_store::seam`): a test plants
+/// a fault under a name, and the next pass of that name on this thread makes
+/// the call and answers the host's refusal of it instead, once (an error of
+/// the call, never contention), as a failing host's would be. Per thread, so
+/// tests running at once never meet each other's faults; and absent from
+/// every build but this crate's own tests.
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::cell::RefCell;
+    use std::fs::TryLockError;
+
+    thread_local! {
+        static FAULTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Plants a host fault for the next pass of `name` on this thread.
+    pub(crate) fn fail(name: &'static str) {
+        FAULTS.with_borrow_mut(|held| held.push(name));
+    }
+
+    /// The host's answer to a lock at `name`, or the fault planted there,
+    /// once.
+    pub(super) fn answer_lock<T>(
+        name: &'static str,
+        host: Result<T, TryLockError>,
+    ) -> Result<T, TryLockError> {
+        let planted = FAULTS.with_borrow_mut(|held| {
+            let found = held.iter().position(|at| *at == name)?;
+            Some(held.remove(found))
+        });
+        match planted {
+            Some(at) => Err(TryLockError::Error(std::io::Error::other(format!(
+                "invented: the host fault planted at {at}"
+            )))),
+            None => host,
+        }
+    }
 }
 
 #[cfg(test)]

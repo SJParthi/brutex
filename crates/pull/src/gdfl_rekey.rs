@@ -2203,7 +2203,10 @@ fn apply_within(
     // with a second account the reader refuses whole.
     let lock_at = ledger_lock_path(root);
     let lock_file = open_ledger_lock(&lock_at)?;
-    let lock = match Flock::try_lock(&lock_file, lock_at.as_path()) {
+    let locked = Flock::try_lock(&lock_file, lock_at.as_path());
+    #[cfg(test)]
+    let locked = seam::answer_lock("ledger.locked", locked);
+    let lock = match locked {
         Ok(lock) => lock,
         Err(TryLockError::WouldBlock) => {
             return Err(format!(
@@ -2519,15 +2522,21 @@ fn note_applied(out: &Applied, plan: &Plan) {
 /// once, with the path the code is at, the way another writer filling the month landing between the
 /// two calls would. Per thread, so tests running at once never meet each
 /// other's steps; and absent from every build but this crate's own tests.
+///
+/// A host call no file, folder or name can make fail takes a planted fault
+/// instead: the call is made, and its answer is the host's refusal of the
+/// call, once (an error, never contention), as a failing host's would be.
 #[cfg(test)]
 pub(crate) mod seam {
     use std::cell::RefCell;
+    use std::fs::TryLockError;
     use std::path::Path;
 
     type Step = Box<dyn FnOnce(&Path)>;
 
     thread_local! {
         static STEPS: RefCell<Vec<(&'static str, Step)>> = const { RefCell::new(Vec::new()) };
+        static FAULTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     }
 
     /// Plants `step` for the next pass of `name` on this thread.
@@ -2543,6 +2552,29 @@ pub(crate) mod seam {
         });
         if let Some(step) = step {
             step(path);
+        }
+    }
+
+    /// Plants a host fault for the next pass of `name` on this thread.
+    pub(crate) fn fail(name: &'static str) {
+        FAULTS.with_borrow_mut(|held| held.push(name));
+    }
+
+    /// The host's answer to a lock at `name`, or the fault planted there,
+    /// once.
+    pub(super) fn answer_lock<T>(
+        name: &'static str,
+        host: Result<T, TryLockError>,
+    ) -> Result<T, TryLockError> {
+        let planted = FAULTS.with_borrow_mut(|held| {
+            let found = held.iter().position(|at| *at == name)?;
+            Some(held.remove(found))
+        });
+        match planted {
+            Some(at) => Err(TryLockError::Error(std::io::Error::other(format!(
+                "invented: the host fault planted at {at}"
+            )))),
+            None => host,
         }
     }
 }

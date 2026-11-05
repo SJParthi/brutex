@@ -586,3 +586,67 @@ fn a_log_or_spool_the_host_refuses_to_open_keeps_its_words() {
     assert_eq!((absent.next, absent.records.len()), (0, 0));
     fs::remove_dir_all(root).unwrap();
 }
+
+/// PS2 (D-7336): A PROBE WHOSE `flock` THE HOST REFUSES (an error of the call,
+/// not another holder) is refused `io: lock` naming the live lock, in the
+/// host's words, never read as a run that is spooling or as one that is free;
+/// the next probe, answered, takes the free lock.
+#[test]
+fn a_live_probe_whose_lock_the_host_refuses_is_refused_by_name() {
+    let root = scratch("ps2-live-refused");
+    let path = live_lock_path(&root, 7);
+    seam::fail("live.probed");
+    let probed = live_probe(&root, 7);
+    let Err(SpoolError::Io {
+        path: named,
+        action,
+        source,
+    }) = probed
+    else {
+        panic!("{probed:?}");
+    };
+    assert_eq!((named, action), (path, "lock"));
+    assert_eq!(
+        source.to_string(),
+        "invented: the host fault planted at live.probed"
+    );
+    assert!(
+        matches!(live_probe(&root, 7), Ok(Live::Taken(_))),
+        "answered, the free lock is taken"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// PS2 (D-7336): A WRITER WHOSE LIVE LOCK THE HOST REFUSES to take is refused
+/// `io: lock` at once, without the wait a holder earns, and appends nothing;
+/// the same writer then appends.
+#[test]
+fn a_writer_whose_live_lock_the_host_refuses_appends_nothing() {
+    let root = scratch("ps2-live-take-refused");
+    let path = live_lock_path(&root, 7);
+    let spool = writer(&root);
+    seam::fail("live.taken");
+    let started = std::time::Instant::now();
+    let refused = spool.append(Segment::Cash, Timeframe::MINUTE_1, &[spooled(KEY_A, 0)]);
+    assert!(started.elapsed() < LIVE_WAIT, "no wait for a refusal");
+    let Err(SpoolError::Io {
+        path: named,
+        action,
+        source,
+    }) = refused
+    else {
+        panic!("{refused:?}");
+    };
+    assert_eq!((named, action), (path, "lock"));
+    assert_eq!(
+        source.to_string(),
+        "invented: the host fault planted at live.taken"
+    );
+    assert!(!id().path(&root).exists(), "nothing appended");
+    let done = spool
+        .append(Segment::Cash, Timeframe::MINUTE_1, &[spooled(KEY_A, 0)])
+        .unwrap();
+    assert_eq!((done.records, done.born), (1, 1));
+    drop(spool);
+    fs::remove_dir_all(root).unwrap();
+}
