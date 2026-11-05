@@ -457,6 +457,10 @@ mod tests {
     /// any row. Out of the box: (11) a feed written in a case
     /// the ledger never keys by, `ZERODHA`, finds the pair it names.
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test walks every ledger state its Extremes: line names, in order"
+    )]
     async fn every_ledger_state_the_top_report_meets_is_answered_by_name() {
         let base = crate::scratch::path(&format!("top-states-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -530,12 +534,12 @@ mod tests {
         let banknifty = ("zerodha".to_owned(), "BANKNIFTY".to_owned());
         assert_eq!(report(&mixed, Some(&banknifty)), bound);
         // (6): a store that holds no receipt file at all.
-        let bare = base.join("bare");
-        cli::results::Results::open(&bare)
+        let no_receipts = base.join("no_receipts");
+        cli::results::Results::open(&no_receipts)
             .unwrap()
             .append(&best_nifty)
             .unwrap();
-        let refused = report(&bare, Some(&pair)).unwrap_err();
+        let refused = report(&no_receipts, Some(&pair)).unwrap_err();
         assert!(refused.contains(&best_nifty.identity_hex()), "{refused}");
         assert!(
             refused.contains("has a results-ledger parent but no validated detail receipt"),

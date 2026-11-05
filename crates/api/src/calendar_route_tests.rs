@@ -935,3 +935,138 @@ fn a_full_build_map_is_refused_by_name() {
         "{why}"
     );
 }
+
+/// **THE RECORD SPAN WIDENS A HELD ANSWER AND MARKS ONE IT CANNOT, ONE RUNG
+/// NAMED TWICE ALIKE IS ONE RUNG, AND A CONTRACT OR ANOTHER EXCHANGE'S
+/// LISTING IS NO SERIES OF THE CALENDAR** (BASE-COV-API-AS2). Extremes:
+/// (1) `span=record` over a held answer widens it past the days the feed
+/// holds; (2) the widened answer still says it is ok; (3) `span=record` over
+/// a WITHHELD rung is marked as not widened, never widened; (4) `span=held`
+/// is the held answer byte for byte; (5) `rung` and `timeframe` naming the
+/// same rung are one rung; (6) naming two rungs is refused by name; (7) an
+/// option contract's month in the census is no series of the calendar;
+/// (8) a BSE listing of a reference index's name is no reference. Combined:
+/// (9) `span=record` AND `rung=1s&timeframe=1s` at once: widened; (10) a
+/// contract AND a BSE listing beside the held references: the answer is the
+/// references' alone, unchanged; (12) a feed nobody names AND the record
+/// span: the 400 stands, never widened, marked as no finished answer. Out
+/// of the box:
+/// (11) `span=RECORD` in
+/// capitals is no span this route answers.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every span and rung its Extremes: line names, in order"
+)]
+async fn the_record_span_widens_or_marks_and_a_rung_named_twice_alike_is_one() {
+    let fixture = Fixture::new("as2-calendar-record-span");
+    let (fri, tue) = (epoch(2022, 3, 4), epoch(2022, 3, 8));
+    for symbol in ["NIFTY", "BANKNIFTY"] {
+        let stamps: Vec<i64> = [fri, tue]
+            .iter()
+            .flat_map(|day| (0..30).map(move |second| at(*day, second)))
+            .collect();
+        fixture.series(
+            Vendor::Gdfl,
+            Segment::Index,
+            symbol,
+            Timeframe::SECOND_1,
+            &stamps,
+        );
+    }
+    let (status, held) = fixture.get("feed=gdfl").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{held}");
+    // (7), (8), (10): a contract's month and a BSE NIFTY in the census.
+    let path = manifest_path(&fixture.root, Vendor::Gdfl);
+    let mut manifest =
+        Manifest::open_image(Vendor::Gdfl, &fs::read(&path).expect("the census")).expect("read");
+    let month = YearMonth::new(2022, 3).expect("a month");
+    for (exchange, segment, contract) in [
+        (
+            Exchange::Nse,
+            Segment::Fno,
+            Some(
+                brutex_core::instrument::Contract::parse("2022-03-31-1700000-CE")
+                    .expect("a contract"),
+            ),
+        ),
+        (Exchange::Bse, Segment::Index, None),
+    ] {
+        manifest
+            .record(Entry {
+                key: EntryKey {
+                    contract,
+                    exchange,
+                    segment,
+                    symbol: Symbol::new("NIFTY").expect("symbol"),
+                    timeframe: Timeframe::SECOND_1,
+                    month,
+                },
+                rows: 9,
+                first_ts_micros: at(fri, 0),
+                last_ts_micros: at(fri, 8),
+            })
+            .expect("one more month");
+    }
+    fs::write(&path, manifest.image()).expect("publish");
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("the census")
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_hours(500_000))
+        .expect("a stamp");
+    let (status, again) = fixture.get("feed=gdfl").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{again}");
+    for field in ["days", "held", "fromDate", "toDate"] {
+        assert_eq!(again[field], held[field], "{field}: {again}");
+    }
+    assert_eq!(names(&again["derivedFrom"]), ["BANKNIFTY", "NIFTY"]);
+    // (4)
+    let (_, by_held) = fixture.get("feed=gdfl&span=held").await;
+    assert_eq!(by_held["days"], held["days"]);
+    // (1), (2), (9)
+    for query in [
+        "feed=gdfl&span=record",
+        "feed=gdfl&span=record&rung=1s&timeframe=1s",
+    ] {
+        let (status, record) = fixture.get(query).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{query}: {record}");
+        assert_eq!(record["status"], "ok", "{record}");
+        assert!(
+            record["days"].as_str().map_or(0, str::len) > held["days"].as_str().map_or(0, str::len),
+            "{query}: widened past the held days: {record}"
+        );
+    }
+    // (3): a withheld rung is marked, not widened.
+    let (status, marked) = fixture.get("feed=gdfl&rung=1day&span=record").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{marked}");
+    assert_eq!(marked["status"], "withheld", "{marked}");
+    assert_eq!(marked["span"], "held", "{marked}");
+    assert!(
+        marked["spanNote"].as_str().is_some_and(
+            |note| note.starts_with("span=record was asked and this answer is NOT widened")
+        ),
+        "{marked}"
+    );
+    assert_eq!(marked["days"], "", "never widened: {marked}");
+    // (5), (6), (11)
+    let (_, one) = fixture.get("feed=gdfl&rung=1s&timeframe=1s").await;
+    assert_eq!(one["days"], held["days"]);
+    let (status, two) = fixture.get("feed=gdfl&rung=1s&timeframe=1min").await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{two}");
+    let (status, capital) = fixture.get("feed=gdfl&span=RECORD").await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{capital}");
+    // (12): a question refused before any calendar, asked with the record
+    // span: the 400 stands, never widened, and is marked as the held span
+    // with the note that it is no finished answer.
+    let (status, refused) = fixture.get("feed=nobody&span=record").await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["span"], "held", "{refused}");
+    assert!(
+        refused["spanNote"]
+            .as_str()
+            .is_some_and(|note| note.contains("and this one is \"no status\"")),
+        "{refused}"
+    );
+    assert!(refused.get("days").is_none(), "never widened: {refused}");
+}

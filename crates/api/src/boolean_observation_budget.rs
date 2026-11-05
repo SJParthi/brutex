@@ -80,7 +80,7 @@ mod tests {
     /// width and the value. Out of the box: (11) a value that is not UTF-8
     /// (the test below).
     #[test]
-    fn malformed_or_unaddressable_values_refuse_without_default() -> Result<(), String> {
+    fn malformed_or_unaddressable_values_refuse_without_default() {
         for value in [
             "",
             "0",
@@ -113,7 +113,6 @@ mod tests {
         assert!(BooleanObservationBudget::from_value(Some(OsStr::new(&maximum))).is_ok());
         let exceeded = (isize::MAX as u128 / super::super::MAX_CONCURRENT as u128 + 1).to_string();
         assert!(BooleanObservationBudget::from_value(Some(OsStr::new(&exceeded))).is_err());
-        Ok(())
     }
 
     #[cfg(unix)]

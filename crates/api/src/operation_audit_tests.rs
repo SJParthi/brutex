@@ -1001,6 +1001,10 @@ async fn an_unreadable_question_is_a_400_and_a_panicking_handler_is_said_as_run(
 }
 
 /// A write route's handler that panics before it answers.
+#[allow(
+    clippy::unused_async,
+    reason = "the handler argument is a future, and this one panics before it would await"
+)]
 async fn panics() -> axum::response::Response {
     panic!("a handler that never returns its answer")
 }

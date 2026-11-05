@@ -501,7 +501,11 @@ mod tests {
     /// older one at generation 1 is still held: the walk runs, never refuses
     /// up front.
     #[tokio::test]
-    #[allow(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
+    #[allow(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "a test that cannot panic cannot fail"
+    )]
     async fn a_degraded_counter_is_scrubbed_and_said_degraded() {
         let root = crate::scratch::path(&format!("verify-degraded-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

@@ -740,7 +740,11 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
         assert_eq!(
-            parsed["periods"]["day"].as_array().map(Vec::len),
+            parsed
+                .get("periods")
+                .and_then(|periods| periods.get("day"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
             Some(2),
             "{body}"
         );

@@ -1816,6 +1816,10 @@ fn a_month_served_from_a_repair_revision_names_no_pull_run_its_writer() {
 /// the bars it names that the month no longer holds. Out of the box: (11) a
 /// FOLDER at the month's own path is refused, never opened as a month.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every store state its Extremes: line names, in order"
+)]
 fn every_store_state_between_not_held_and_served_is_said_by_what_it_is() {
     let path = path_of(
         Vendor::Gdfl,

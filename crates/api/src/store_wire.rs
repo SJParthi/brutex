@@ -562,6 +562,10 @@ mod tests {
     /// cache has never seen asked for a unit type `()`: derived and kept like
     /// any other.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test walks every case its Extremes: line names, in order"
+    )]
     fn a_kept_answer_is_its_own_slot_key_and_type_and_an_unheld_row_is_dropped() {
         let cache = Cache::default();
         let source = slot();
