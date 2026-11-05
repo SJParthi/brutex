@@ -281,6 +281,24 @@ mod spot_rs {
     /// waits on this test; the handler is then refused at admission. Runs
     /// `spot_json`'s refusal arm, which no test reached: the route's own test
     /// called `not_admitted` directly.
+    ///
+    /// THE POOL HAS AS MANY SLOTS AS THIS HOST HAS CORES, at most
+    /// [`api::detail::MAX_STORE_READ_CONCURRENT`] (`detail::slots_under`), so
+    /// the holders park on a gate this test opens, never on a barrier of
+    /// `MAX + 1` parties: on a host with fewer cores than the ceiling the
+    /// holders past its slots are refused at admission and never reach a
+    /// barrier, and its last party (this test) waited for them forever. A
+    /// 4-core cloud host hung here for over an hour (BASE-COV-API-AS2).
+    /// Extremes: (1) every slot held; (2) a probe refused proves the pool
+    /// full; (3) the route's `429` names the read; (4) with `Retry-After: 1`;
+    /// (5) the holders admitted are exactly this host's slots; (6) the ones
+    /// past them are refused at admission, never left waiting; (7) every
+    /// admitted holder ends `Ok` once the gate opens; (8) every holder is
+    /// joined. Combined: (9) a host with fewer cores than the ceiling AND
+    /// every slot held at once: no deadlock, the same `429`; (10) the gate
+    /// opened only after the route answered: the refusal came while the
+    /// pool was full. Out of the box: (11) a holder refused at admission
+    /// never runs its body, so it never reaches the gate.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spot_json_is_refused_by_name_when_every_store_read_slot_is_held() {
         let scratch = spot_store("spot-saturated");
@@ -288,14 +306,22 @@ mod spot_rs {
         std::fs::create_dir_all(&masters).expect("an empty master root");
         let site: api::server::Loaded =
             std::sync::Arc::new(api::server::Site::load(&masters, scratch.root()));
-        let release = std::sync::Arc::new(std::sync::Barrier::new(
-            api::detail::MAX_STORE_READ_CONCURRENT + 1,
-        ));
+        let slots = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .clamp(1, api::detail::MAX_STORE_READ_CONCURRENT);
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let holders: Vec<_> = (0..api::detail::MAX_STORE_READ_CONCURRENT)
             .map(|_| {
-                let release = std::sync::Arc::clone(&release);
+                let gate = std::sync::Arc::clone(&gate);
+                let reached = std::sync::Arc::clone(&reached);
                 tokio::spawn(api::detail::run_store_read(move || {
-                    let _ = release.wait();
+                    reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let (open, opened) = &*gate;
+                    let mut is_open = open.lock().expect("the gate");
+                    while !*is_open {
+                        is_open = opened.wait(is_open).expect("the gate");
+                    }
                 }))
             })
             .collect();
@@ -313,11 +339,32 @@ mod spot_rs {
             .parse()
             .expect("a URI");
         let (status, headers, body) = spot::spot_json(axum::extract::State(site), uri).await;
-        let _ = release.wait();
-        for holder in holders {
-            assert_eq!(holder.await.expect("joined"), Ok(()));
+        {
+            let (open, opened) = &*gate;
+            *open.lock().expect("the gate") = true;
+            opened.notify_all();
         }
+        let mut outcomes = Vec::with_capacity(holders.len());
+        for holder in holders {
+            outcomes.push(holder.await.expect("joined"));
+        }
+        let admitted = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+        let refused = outcomes
+            .iter()
+            .filter(|outcome| **outcome == Err(api::detail::RunError::Saturated))
+            .count();
         assert!(full, "the holders never filled the pool");
+        assert_eq!(admitted, slots, "every slot this host has was held");
+        assert_eq!(
+            refused,
+            api::detail::MAX_STORE_READ_CONCURRENT - slots,
+            "{outcomes:?}"
+        );
+        assert_eq!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            slots,
+            "a holder refused at admission never runs its body"
+        );
         assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
         assert_eq!(headers[axum::http::header::RETRY_AFTER], "1");
         assert!(body.contains("a spot read"), "{body}");
