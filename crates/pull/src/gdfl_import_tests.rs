@@ -5219,6 +5219,54 @@ impl Drop for HookedFlushes {
     }
 }
 
+/// A day-flush hook answers the flushes of its own store root and no other
+/// (this binary's tests run in parallel, so a hook one test sets must never
+/// answer another's): with a hook set for a root first and one for a second
+/// root after it, a run into the second root is answered by its own hook for
+/// every flush and never by the first, and a run into the first is answered
+/// by the first. Each flush of the second run passes the first hook, which
+/// before this test happened only when two of this binary's tests overlapped
+/// (BASE-COV-PULL-PS1).
+#[test]
+fn a_day_flush_hook_answers_only_the_flushes_of_its_own_root() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let root = scratch("wp16-hook-own-root");
+    world(&root, &[d1()]);
+    let counting = |asked: &std::sync::Arc<AtomicUsize>| -> DayFlushHook {
+        let asked = std::sync::Arc::clone(asked);
+        Box::new(move |_path| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    };
+    let (first, second) = (root.join("first"), root.join("second"));
+    let (by_first, by_second) = (
+        std::sync::Arc::new(AtomicUsize::new(0)),
+        std::sync::Arc::new(AtomicUsize::new(0)),
+    );
+    let hooks = (
+        HookedFlushes::new(&first, counting(&by_first)),
+        HookedFlushes::new(&second, counting(&by_second)),
+    );
+    let into_second = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &second);
+    assert_eq!(into_second.days_imported, 1, "{into_second:?}");
+    assert!(
+        by_second.load(Ordering::SeqCst) > 0,
+        "its own hook was asked"
+    );
+    assert_eq!(by_first.load(Ordering::SeqCst), 0, "another root's hook");
+    let asked_by_second = by_second.load(Ordering::SeqCst);
+    let into_first = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &first);
+    assert_eq!(into_first.days_imported, 1, "{into_first:?}");
+    assert!(
+        by_first.load(Ordering::SeqCst) > 0,
+        "its own hook was asked"
+    );
+    assert_eq!(by_second.load(Ordering::SeqCst), asked_by_second);
+    drop(hooks);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// WP-16 (DB-N25, D-3353): THE DURABILITY UNIT CHANGES NO BYTE A RUN LEAVES.
 /// Three options days imported with every write flushed as it is written
 /// (one worker, as before WP-16), with each day made durable through `O_SYNC`
