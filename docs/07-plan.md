@@ -1107,6 +1107,12 @@ the first was closed in code afterwards.
 | A tick-store `CmSource` over `BRTXTS01` day files (D-2801, 2026-10-04): the format v1 recorded in the charter by path, version and sha256; `TickStore` reads §3 and §4 exactly with `ruzstd`; every rebuilt file held to the zip's size and CRC-32; 21 August 2026 index days probed byte-identical to the zip | **Done**, D-2801, CM-17 |
 | Viewing GDFL ticks in the app (api and web) from the tick store | Next, D-2802 to D-2807 (reserved) |
 
+## PSRB-STV: the two-band Supertrend — 2026-11-03 (D-8600 to D-8605)
+
+| Part | What | State |
+|---|---|---|
+| PSRB-STV | `indicators::dual_band_supertrend`: the standard two-band Supertrend as a second, labelled reading beside the latch `trend::SuperTrend`, which is untouched (D-8600 to D-8605; `docs/04-invariants.md` PSRB-STV-I01 to I06, C-PSRB-STV-01 and C-PSRB-STV-02; `docs/06-limits.md` L-PSRB-STV-01 to 04) | Built on `cloud/psrb-stv-20261103` on 2026-11-05; not merged (D1). PSRB-STRAT is its first caller; gate 14's cover-table row for the two C-PSRB-STV ids is the main session's at the family assembly |
+
 ## GDFL import at one second — 2026-10-05 (D-2802 to D-2806)
 
 | Item | State |
