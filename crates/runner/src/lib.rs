@@ -60,6 +60,7 @@ pub mod excursion;
 pub mod exit_grid_policy;
 pub mod expression;
 pub mod family_allocation_v1;
+pub mod fno_size;
 pub mod grid;
 pub mod identity;
 pub mod outcome;
