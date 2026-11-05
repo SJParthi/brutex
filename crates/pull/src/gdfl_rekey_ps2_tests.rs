@@ -1330,3 +1330,31 @@ fn a_lock_path_with_no_parent_is_refused_by_name() {
         "/ is not a regular file; nothing was written"
     );
 }
+
+/// PS2 (D-7336): AN APPLY WHOSE LEDGER LOCK THE HOST REFUSES (an error of the
+/// `flock` call, not another apply holding it) is refused by the lock's name
+/// in the host's words and writes nothing: no month, no line, no epoch. The
+/// same plan then applies.
+#[test]
+fn an_apply_whose_lock_the_host_refuses_writes_nothing() {
+    let fixture = Fixture::new("ps2-lock-refused");
+    fixture.counted();
+    let root = fixture.root();
+    let (found, ledger, decided) = view(root);
+    let census_before = census_keys(root);
+    crate::gdfl_rekey::seam::fail("ledger.locked");
+    let why = apply(root, &found, &decided, &ledger).unwrap_err();
+    assert_eq!(
+        why,
+        format!(
+            "{} could not be locked: invented: the host fault planted at ledger.locked; \
+             nothing was written",
+            ledger_lock_path(root).display()
+        )
+    );
+    assert!(!lineage_path(root).exists());
+    assert!(!key_dir(root, "NIFTY", SETTLED).exists());
+    assert_eq!(census_keys(root), census_before);
+    let done = apply(root, &found, &decided, &ledger).unwrap();
+    assert_eq!((done.moved.len(), done.lines_written), (1, 4));
+}
