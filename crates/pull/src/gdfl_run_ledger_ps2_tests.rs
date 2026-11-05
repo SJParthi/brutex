@@ -360,3 +360,24 @@ fn a_ledger_cut_after_it_was_measured_never_gives_an_id_twice() {
     assert_eq!(allocate(&store, &entry()), Ok(NOW + 2));
     assert_eq!(std::fs::metadata(&ledger).unwrap().len(), 2 * RECORD);
 }
+
+/// A LEDGER THE HOST CANNOT READ under the lock (a fault other than its end,
+/// planted on the read of the last record) refuses the allocation in the
+/// host's words: no id is given and no byte is written. The next allocation
+/// reads the ledger as it was and goes on from its last id.
+#[test]
+fn a_ledger_the_host_cannot_read_gives_no_id_and_writes_nothing() {
+    let store = scratch("ledger-ps2-read");
+    assert_eq!(allocate(&store, &entry()), Ok(NOW));
+    let ledger = store.join(LEDGER);
+    let before = std::fs::read(&ledger).unwrap();
+    seam::fail("ledger.read");
+    assert_eq!(
+        allocate(&store, &entry()),
+        Err(RunsLedgerFault::Io {
+            why: "invented: the host fault planted at ledger.read".to_owned(),
+        })
+    );
+    assert_eq!(std::fs::read(&ledger).unwrap(), before, "nothing written");
+    assert_eq!(allocate(&store, &entry()), Ok(NOW + 1));
+}

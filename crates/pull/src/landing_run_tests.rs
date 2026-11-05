@@ -2677,3 +2677,63 @@ fn the_regular_days_leave_out_a_recorded_short_session() {
     assert!(!february.contains(&day(2021, 2, 24)), "{february:?}");
     assert!(february.contains(&day(2021, 2, 23)) && february.contains(&day(2021, 2, 25)));
 }
+
+/// PS2 (D-7336): A CLAIM WHOSE HELD FILE THE HOST CANNOT MEASURE is still
+/// taken and noted, but not remembered by its file (no identity, so no other
+/// holder's note is ever written back for it), and it says so at `warn`, by
+/// its lock and the host's words. Run in a child of its own, the one install
+/// of its process (D-0995).
+#[test]
+fn a_claim_the_host_cannot_measure_is_taken_but_not_remembered() {
+    crate::support::where_permission_binds(
+        "ingest::landing_run::tests::a_claim_the_host_cannot_measure_is_taken_but_not_remembered",
+        unmeasured_claim_body,
+    );
+}
+
+fn unmeasured_claim_body() {
+    use telemetry::{Config, Level, MAX_LIMIT, OwnedValue, Query};
+    let home = scratch("ps2-claim-unmeasured-sink");
+    let sink = telemetry::install(&Config::new(&home).with_min_level(Level::Trace))
+        .expect("the one install of this child");
+    let root = scratch("ps2-claim-unmeasured");
+    seam::fail("claim.measured");
+    let held = claim(
+        &root,
+        Vendor::Zerodha,
+        crate::gdfl_run::locks::Hold::Exclusive,
+        "ps2 invented holder",
+    )
+    .expect("taken");
+    assert_eq!(held.file, None, "not remembered");
+    let said: Vec<_> = telemetry::tail(
+        &home,
+        sink.keep_files(),
+        &Query::last(MAX_LIMIT).from_target(TARGET),
+    )
+    .records
+    .into_iter()
+    .filter(|record| record.message == "landing claim not remembered")
+    .collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert_eq!(said[0].level, Level::Warn);
+    assert_eq!(
+        said[0].field("lock"),
+        Some(&OwnedValue::Str("imports/zerodha.landing.lock".to_owned()))
+    );
+    assert_eq!(
+        said[0].field("why"),
+        Some(&OwnedValue::Str(
+            "invented: the host fault planted at claim.measured".to_owned()
+        ))
+    );
+    drop(held);
+    let again = claim(
+        &root,
+        Vendor::Zerodha,
+        crate::gdfl_run::locks::Hold::Exclusive,
+        "ps2 invented holder",
+    )
+    .expect("taken again");
+    assert!(again.file.is_some(), "measured, it is remembered");
+}
