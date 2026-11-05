@@ -1,12 +1,29 @@
 STATUS: IN PROGRESS
 GREEN-TIP: 2e7a0b6d3b568190024e2e9b405e803805f3fdca
 
-# report-BASE-COV-PULL-PS1 (TOKEN BASE-COV-PULL-PS1-20261103-1)
+# report-BASE-COV-PULL-PS1 (TOKEN BASE-COV-PULL-PS1-20261105-2, continuing TOKEN BASE-COV-PULL-PS1-20261103-1)
 
 Session BASE-COV-PULL-PS1 of the 3 Nov 2026 cloud wave. Branch `cloud/cov-pull-ps1-20261103`, cut from
 `origin/cloud/base-kit-pull-20261103` (kit commit `5789f435`, START `f98a899398f6`). Owner file
-`reports/base-cloud-20261103/OWNER-BASE-COV-PULL-PS1.md` (commit `79a5eb68`). Code tip
-`feeba59beb6a8fcdff030685c3e31eadb7d600f3` (the fix json's `head`).
+`reports/base-cloud-20261103/OWNER-BASE-COV-PULL-PS1.md` (commit `79a5eb68`; token `-2` from commit `6ff33c54`, a
+continuation on a new account from the tip `28d65ef1`). Code tip `6a0a2658c96428eb8263ae514f24e0ff9f059909` (the fix
+json's `head`).
+
+## Continuation of 5 Nov 2026 (TOKEN BASE-COV-PULL-PS1-20261105-2): interim
+
+- **Batch 20** (`6021a488`, `6a0a2658`): NEXT 1 of the 3 Nov report. The race test's judgement, unchanged, is the
+  helper `a_run_beside_another_names_the_lock` (`gdfl_import_tests.rs`), which
+  `two_runs_into_one_store_at_once_leave_what_one_run_leaves` calls for each of its two runs; three new tests make
+  each collision on purpose by holding the lock the other run would, with no production hook:
+  `a_run_that_meets_a_month_another_holds_names_the_holder_and_goes_on` (a reader holds the NIFTY month: its file
+  fails `month_busy` in the store's words "another writer holds", the judge's first side),
+  `a_stocks_run_that_meets_a_sidecar_another_holds_names_the_lock` (a share's auction sidecar held past its 2 s wait:
+  `auction_sidecar`, words that name the lock and no holder, the judge's second side) and
+  `a_run_that_meets_the_census_lock_another_holds_is_refused_by_name` (the census lock held: the run is refused
+  `census_refused`, the judge's refused-run arm). Each also asserts the day's close and that the next run lands
+  what one run leaves. Red check 3/3, each at its own assertion (an open cause made closing, twice, and the census
+  publish's refusal swallowed). fmt and clippy `-D warnings` clean.
+- **Now:** the whole pull suite on stable, then Route B run 6 on `6a0a2658`; this report is rewritten from them.
 
 ## Outcome
 
