@@ -6200,7 +6200,7 @@ test('a --writer the sheet had to kill fails the sheet whatever the list of its 
   assert.deepEqual(writerNotes(plain), []);
 });
 
-test('a capped settle is the machine\'s only for requests asked of its stand-in that it answers in full at once: one asked of another origin, held open, dropped or answered late is refused by name (BASE-REDS-1023 repair 10)', async () => {
+test('a capped settle is the machine\'s only for requests asked of its own stand-in that it answers in full within STAND_IN_AT_ONCE_MS: one asked of another origin, held open, dropped or answered later is refused by name (BASE-REDS-1023 repair 10)', async () => {
   // Before (check r10, B2): the in-flight name dropped the origin
   // (`GET /feeds.json`), so a request a page sent to another host, on a path
   // the stand-in answers at once, was excused; and `/slow.css?ms=29999`, which

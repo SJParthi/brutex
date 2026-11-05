@@ -1431,6 +1431,28 @@ confirmed by two skeptics; their corrections are applied.
   on X). FIXED (D-7152 addendum 27): the test waits, bounded at 30 s in the
   page, for the paint and for the line drawn after the fetch past the load,
   then compares exactly as before.
+- **BRED23-F66: a `--writer` the sheet killed passed the sheet when the list
+  of its group failed or answered late** (check r10 of 4 Nov 2026, B1, a
+  regression of repair 9). Repair 9's stop said a kill as `KILLED` followed
+  by why the group could not be listed, and the sheet failed a writer only on
+  the words being `KILLED` exactly, so under a `ps` that exits 1 the kill
+  was a note and `ok` was true; a `ps` slower than `LIST_WAIT_MS` did the
+  same at 7,038 ms. Reproduced on the tip's code by the new test: both lists
+  gave no failure, `ok` true, the kill in the notes. FIXED (D-7152 addendum
+  28): the stop answers `{said, killed}`, and the sheet fails a writer on
+  `killed` whatever the words say, keeping the list's reason in its line
+  (BRED-64; L-BRED23-24).
+- **BRED23-F67: a real browser's row excused a capped settle for a request
+  its stand-in never saw or answers late** (check r10 of 4 Nov 2026, B2).
+  The harness named a request in flight as `METHOD /path?query`, so a
+  request a page sent to another host, on a path the stand-in serves, read
+  as the stand-in's own and was excused; and the stand-in counted
+  `/slow.css?ms=29999` as answered at once, against its own doc. Reproduced
+  on the tip's code by the new test: both excused. FIXED (D-7152 addendum
+  29): the name keeps the origin, and the stand-in's word covers only an
+  `http:` request to its own origin, on a route it neither holds open nor
+  drops, answered in full within `STAND_IN_AT_ONCE_MS` (1,000 ms); the row
+  check names each request it refuses (BRED-65; L-BRED23-25).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

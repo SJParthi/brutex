@@ -85129,6 +85129,55 @@ to the entry it extends; nothing above is edited.
     never paints or never draws its line fails at the wait by name. No bound
     of the harness is changed (BRED-63).
 
+**Addenda, 5 Nov 2026 (BASE-REDS-1023 repair 10; check r10 of 4 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r10.json`, verdict fail on two items,
+both brought in by repair 9).** The block is still used, so each is an
+addendum to the entry it extends; nothing above is edited.
+
+28. **D-7152: a writer the speed sheet had to kill fails the sheet whatever
+    the list of its group said (check r10, B1).** Addendum 25's stop says a
+    kill as `KILLED` followed by why the group could not be listed, when it
+    could not; the sheet still failed a writer only when the stop's words
+    were `KILLED` exactly, so a kill under a `ps` that failed, or that did
+    not answer within `LIST_WAIT_MS`, was only a note, and the sheet passed.
+    Reproduced on the tip's code with a test that puts a `ps` first on the
+    test process's `PATH`: one that exits 1, and one that sleeps 3 s; under
+    each, the writer `trap '' TERM; while :; do sleep 1; done` was killed
+    and the sheet gave no failure, `ok` true, the kill only in its notes.
+    Chosen: `run().stop()` answers `{said, killed}` (`Stopped`), `killed`
+    true exactly when the group had to be sent SIGKILL, and the sheet fails
+    a writer on `killed`, its failure keeping the stop's words with the
+    list's reason; a stop that did not kill is a note as before, and the
+    `--restart` bound says the same words. The fact is kept apart from its
+    wording, so no reason added to the words can turn a kill into a pass
+    again. Every bound and word is unchanged (BRED-64; L-BRED23-24, which
+    now also states a process that leaves the group with `setpgid` or
+    `setsid`, check r10's follow-up E5). Refused: reading the kill from the
+    start of the words, which the next change of wording can break again.
+29. **D-7152: a real browser's row takes the settle cap as the machine's
+    only for requests asked of its own stand-in that it answers in full
+    within `STAND_IN_AT_ONCE_MS` (check r10, B2).** Addendum 26's name of a
+    request in flight was `METHOD /path?query`: a request a page sent to
+    another host, on a path the stand-in serves, read as one to the stand-in
+    and was excused; and the stand-in counted `/slow.css` asked to wait any
+    number of ms under 30,000 as answered at once, while its own doc left
+    `/slow.css` out. Reproduced on the tip's code with the new test: both
+    excused. Chosen: the harness names a request `METHOD
+    origin/path?query`, never its fragment or a user name and password
+    (`askedAs`), which the operator's sheet says too; `browserStandIn`'s
+    `answers` takes only an `http:` request to its own origin, on a route it
+    neither holds open (`/stall`, `/hang`, the never-loading entry,
+    `/later`, `/sources.json` under `hangSources`) nor drops (`/broken`,
+    never answered in full), and `/slow.css` only when asked to wait a
+    number of ms no more than `STAND_IN_AT_ONCE_MS`, 1,000 ms, a thirtieth
+    of the cap, so every request it excuses had been answered at least 29 s
+    before the cap ran out; `measuredRow` refuses every other cap and names
+    after the failure each request not answered so. A request to another
+    origin, a `blob:` or a websocket never reached the stand-in, so nothing
+    it knows can excuse it. The 30 s cap and every other judgement are
+    unchanged (BRED-65; L-BRED23-25). Refused: comparing paths only; a
+    larger margin, which would excuse a request answered late in the cap.
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store
