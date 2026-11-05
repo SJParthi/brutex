@@ -2724,12 +2724,20 @@ mod tests {
         assert_eq!(LOG_READ.active.load(Ordering::Acquire), 0);
     }
 
+    /// The refusal names its pool's slots ON THIS MACHINE: a ceiling of eight
+    /// is eight on a host of eight cores or more and the cores below it
+    /// (R3-08), so this asks for what the host has rather than for eight,
+    /// which a four-core host never says (BASE-COV-API repair 3, D-8661).
     #[test]
     fn a_refused_admission_names_what_its_bound_and_why() {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let slots = cores.clamp(1, 8);
         let (status, body) = admission_refused("folder read", 8, &RunError::Saturated);
         assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
         assert!(
-            body.contains("folder read not admitted (Saturated): at most 8"),
+            body.contains(&format!(
+                "folder read not admitted (Saturated): at most {slots} run at once"
+            )),
             "{body}"
         );
         let (status, body) =

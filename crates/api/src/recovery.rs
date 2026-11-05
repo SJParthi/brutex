@@ -3615,3 +3615,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "recovery_cover_tests.rs"]
+mod cover_tests;
