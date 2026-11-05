@@ -587,14 +587,25 @@ fn two_segments_are_two_kept_censuses() {
 /// day (a day that finds it held is refused by name and offered again) and
 /// sees the other's appends as a moved length, so neither trusts a stale
 /// memory; every row of both lands and the census loads clean.
+///
+/// PS2 (D-7336): the test holds the partition's lock until each run has met
+/// it on its first day, so the refusal and the offer again are driven every
+/// time, not only when the two runs happen to collide: each run tells the
+/// test of every refusal on a channel of its own, and the test lets go once
+/// both have told it.
 #[test]
 fn two_runs_at_once_each_see_the_others_days() {
     let scratch = Scratch::new("TWORUNS");
     let root = scratch.root().to_path_buf();
     let _ = partition_of(&root, 100);
+    let held = Target::partition(&root, Vendor::Gdfl, Segment::Fno)
+        .lock()
+        .expect("the test holds the census lock first");
+    let (tells, hears): (Vec<_>, Vec<_>) = (0..2).map(|_| std::sync::mpsc::channel()).unzip();
     let runs: Vec<_> = [0_u32, 1]
         .into_iter()
-        .map(|run| {
+        .zip(tells)
+        .map(|(run, told)| {
             let root = root.clone();
             std::thread::spawn(move || {
                 let mut kept = Kept::new();
@@ -610,6 +621,8 @@ fn two_runs_at_once_each_see_the_others_days() {
                                     why.contains("another ingest holds the census lock"),
                                     "{why}"
                                 );
+                                // Nobody listens once the test let go.
+                                let _told = told.send(());
                                 tries += 1;
                                 assert!(tries < 10_000, "{why}");
                                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -622,6 +635,13 @@ fn two_runs_at_once_each_see_the_others_days() {
             })
         })
         .collect();
+    for heard in &hears {
+        heard
+            .recv()
+            .expect("each run meets the held lock on its first day");
+    }
+    drop(held);
+    drop(hears);
     let moved: u32 = runs
         .into_iter()
         .map(|run| run.join().expect("a run ends"))

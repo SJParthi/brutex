@@ -2353,20 +2353,37 @@ fn an_apply_while_another_holds_the_lock_writes_nothing() {
 /// round with the day's ladder changed between their surveys. Whatever the
 /// interleaving, the ledger reads whole after both, and every round ends
 /// with nothing pending after one more run.
+///
+/// PS2: a seventh round runs the two one after the other, so the second
+/// meets the ledger the first changed (refused by that, never by the lock),
+/// which the rounds at once reach only when one ends before the other starts.
 #[test]
 fn two_applies_at_once_leave_a_ledger_that_reads() {
-    for round in 0..6 {
+    for round in 0..7 {
         let fixture = Fixture::new(&format!("atonce{round}"));
         fixture.counted();
         let root = fixture.root();
         let older = view(root);
         between_surveys(root, true);
         let newer = view(root);
-        let results: Vec<Result<Applied, String>> = std::thread::scope(|scope| {
-            let a = scope.spawn(|| apply(root, &older.0, &older.2, &older.1));
-            let b = scope.spawn(|| apply(root, &newer.0, &newer.2, &newer.1));
-            vec![a.join().unwrap(), b.join().unwrap()]
-        });
+        let results: Vec<Result<Applied, String>> = if round < 6 {
+            std::thread::scope(|scope| {
+                let a = scope.spawn(|| apply(root, &older.0, &older.2, &older.1));
+                let b = scope.spawn(|| apply(root, &newer.0, &newer.2, &newer.1));
+                vec![a.join().unwrap(), b.join().unwrap()]
+            })
+        } else {
+            let first = apply(root, &older.0, &older.2, &older.1);
+            let second = apply(root, &newer.0, &newer.2, &newer.1);
+            let refused = second
+                .as_ref()
+                .expect_err("the second meets a changed ledger");
+            assert!(
+                refused.contains("the ledger changed since this plan"),
+                "{refused}"
+            );
+            vec![first, second]
+        };
         let wrote = results
             .iter()
             .filter(|done| done.as_ref().is_ok_and(|done| done.lines_written > 0))
@@ -2444,10 +2461,8 @@ fn a_superseded_line_into_a_retired_key_or_a_cycle_is_refused_by_line() {
     let back = pointer(SETTLED, STATED).line();
     let why = Withdrawn::parse(&format!("{there}\n{back}\n")).unwrap_err();
     assert!(why.contains("in a cycle back to itself"), "{why}");
-    assert!(
-        why.contains("lines 1, 2") || why.contains("lines 2, 1"),
-        "{why}"
-    );
+    // Named from its earliest line, as the three-key cycle below is.
+    assert!(why.contains("lines 1, 2"), "{why}");
     // A THREE-KEY CYCLE written out of order is named from its earliest
     // line, and a chain of 2,000 keys reads (one walk, no quadratic path).
     let third = "2023-06-27-1000000-PE";

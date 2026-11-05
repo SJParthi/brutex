@@ -184,6 +184,23 @@ impl Drop for Emptied {
     }
 }
 
+/// A REPLAY'S SCRATCH GOES WHEN IT IS DROPPED, whatever its replay wrote:
+/// the cleanup every real-data replay below relies on (PS2), run without a
+/// store on an invented scratch.
+#[test]
+fn a_dropped_replay_removes_its_scratch() {
+    let scratch =
+        std::env::temp_dir().join(format!("brutex-EVIDENCE-DROPPED-{}", std::process::id()));
+    fs::create_dir_all(scratch.join("audit")).unwrap();
+    fs::write(scratch.join("audit").join("zerodha.gaps"), "invented\n").unwrap();
+    drop(Replay {
+        scratch: scratch.clone(),
+        done: pull::ingest::Ingested::default(),
+        ledger: String::new(),
+    });
+    assert!(!scratch.exists(), "{} is gone", scratch.display());
+}
+
 /// What the gap ledger owes one day of a replayed month.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Owed {
