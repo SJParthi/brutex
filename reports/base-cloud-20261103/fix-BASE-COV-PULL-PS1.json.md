@@ -2,7 +2,7 @@
 {
   "name": "BASE-COV-PULL-PS1",
   "branch": "cloud/cov-pull-ps1-20261103",
-  "head": "6a0a2658c96428eb8263ae514f24e0ff9f059909",
+  "head": "3c2e0e39b08d0ef1a465d7630f19beda3e1c22c2",
   "committed": true,
   "findings": [
     {
@@ -20,20 +20,26 @@
     {
       "id": "PS1-green-tip",
       "status": "fixed",
-      "how": "GREEN-TIP 2e7a0b6d3b568190024e2e9b405e803805f3fdca: fmt, clippy -D warnings and the whole pull suite green apart from 9 proved root-only host reds. The code tip is green the same way.",
+      "how": "GREEN-TIP 2e7a0b6d3b568190024e2e9b405e803805f3fdca: fmt, clippy -D warnings and the whole pull suite green apart from 9 proved root-only host reds. The code tip 3c2e0e39b08d is green the same way.",
       "evidence": "report line 2; report sections Step (1) and Gates on the code tip"
     },
     {
       "id": "PS1-step2-G1-coverage",
       "status": "not_fixed",
-      "how": "G1 by Route B on the pinned nightly at the code tip: lines 57,329/58,887 (1,558 uncovered), branches 4,170/4,924 (754 uncovered sides). Of its 2,312 uncovered rows, 138 are (U) with proofs, 841 (820 by pattern, 21 by role) (F), 1,306 inside #[ignore] real-data test bodies (L-BCP-3), and 27 GAP rows left to others: 6 rows of the two-runs race test's collision arms (NEXT 1, this group's), 2 of the kill test's timing sides (a test-only kill-point hook, the operator's), 2 that only run 5 left (its instrumented build missed one test's own timing bound; covered in runs 2 to 4, and the test passes on stable), 1 macOS-only (the Mac's), 3 after a send that reached AWS (the operator's) and 13 in MS1's `upkeep` files. 19 batches, 165 new tests (each red under a hand change), ten seams handing one host call to a private function (behaviour unchanged).",
-      "evidence": "reports/base-cloud-20261103/base-cov-pull-ps1-fu.txt.md; deep-BASE-COV-PULL-PS1-feeba59beb6a-gaps.txt.md; report section Step (2)"
+      "how": "G1 by Route B run 9 on the pinned nightly at the code tip 3c2e0e39b08d: lines 57,598/59,151 (1,553 uncovered), branches 4,185/4,944 (759 uncovered sides). Every one of its 2,312 uncovered rows is listed: 138 (U) with proofs, 849 (F) (828 by pattern, 21 by role), 1,306 inside #[ignore] real-data test bodies (L-BCP-3), and 19 GAP rows, none this group's: 2 of the kill test's sides when no timed kill lands inside a month's creation (the operator's kill point), 1 macOS-only (the Mac's), 3 after a send that reached AWS (the operator's) and 13 in MS1's upkeep files. 23 batches, 170 new tests (each red under a hand change) and batch 22's two new stops of an existing test (2/2), ten seams handing one host call to a private function (behaviour unchanged). The bar is not held on this host for those 19 rows and the L-BCP-3 bodies; the rest is closed.",
+      "evidence": "reports/base-cloud-20261103/base-cov-pull-ps1-fu.txt.md (run 9); deep-BASE-COV-PULL-PS1-3c2e0e39b08d-gaps.txt.md; report sections Step (2) and Exact changes outside G1"
     },
     {
       "id": "PS1-race-collision-arms",
       "status": "fixed",
-      "how": "NEXT 1 of the 3 Nov report: the two-runs race test judgement, unchanged, is the helper a_run_beside_another_names_the_lock (gdfl_import_tests.rs), called for each run; three tests make each collision on purpose by holding the lock the other run would, with no production hook: a month a reader holds (month_busy, the store words another writer holds), an auction sidecar held past its 2 s wait (auction_sidecar, words naming the lock and no holder), and the census lock held (the run refused census_refused). Each asserts the day close and that the next run lands what one run leaves.",
-      "evidence": "commits 6021a488, 6a0a2658; gdfl_import::tests::a_run_that_meets_a_month_another_holds_names_the_holder_and_goes_on, gdfl_import::tests::a_stocks_run_that_meets_a_sidecar_another_holds_names_the_lock, gdfl_import::tests::a_run_that_meets_the_census_lock_another_holds_is_refused_by_name; red check 3/3 at their own assertions; Route B run 6 on 6a0a2658 in progress (interim)"
+      "how": "NEXT 1 of the 3 Nov report: the two-runs race test judgement, unchanged, is the helper a_run_beside_another_names_the_lock, called for each run; three tests make each collision on purpose by holding the lock the other run would, with no production hook (a month a reader holds: month_busy in the store words another writer holds; an auction sidecar held past its 2 s wait: auction_sidecar, words naming the lock and no holder; the census lock held: the run refused census_refused). Each asserts the day close and that the next run lands what one run leaves.",
+      "evidence": "commits 6021a488, 6a0a2658; the three gdfl_import::tests named in the report; red check 3/3 at their own assertions; Route B runs 6 to 9: the race rows are covered"
+    },
+    {
+      "id": "PS1-chance-arms",
+      "status": "fixed",
+      "how": "Three more pieces of G1 test code took a side only when two tests, two children or two threads met by chance, so Route B runs 5 to 8 each left a different set: the day-flush hook loop (batch 21: two hooks of two roots, a_day_flush_hook_answers_only_the_flushes_of_its_own_root), the kill test's outcomes (batch 22: one child held at the journal lock before its first line, one left to finish; the kill inside a month's creation stays timing, the operator's), and the two-builds race judgement (batch 23: the judgement unchanged in one_of_two_builds_won, and a_build_into_a_directory_another_sealed_is_judged_as_the_race_s_loser with a second build refused Overlap). Runs 5 to 9 compared row by row over G1 after re-anchoring: no other G1 row flips but the p99 bound of calendar_tradable_tests.rs:1234 (host timing under instrumentation, passing in runs 6 to 9) and the kill test's unborn pair.",
+      "evidence": "commits b5f8279e, a6cfc9bd, 3c2e0e39; red checks 1/1, 2/2, 1/1 (report, continuation section); Route B run 9"
     },
     {
       "id": "PS1-defect-fno-membership-overflow",
@@ -131,6 +137,7 @@
     "reports/base-cloud-20261103/d3-route-b-cloud.sh.md",
     "reports/base-cloud-20261103/d3-route-b.sh.md",
     "reports/base-cloud-20261103/deep-BASE-COV-LIBS-ee65c9f6fcbd-set.txt.md",
+    "reports/base-cloud-20261103/deep-BASE-COV-PULL-PS1-3c2e0e39b08d-gaps.txt.md",
     "reports/base-cloud-20261103/deep-BASE-COV-PULL-PS1-feeba59beb6a-gaps.txt.md",
     "reports/base-cloud-20261103/deep-BASE-COV-PULL-c9d653d5f914-gaps.txt.md",
     "reports/base-cloud-20261103/deep-BASE-COV-PULL-f98a899398f6-set.txt.md",
@@ -151,18 +158,18 @@
     "crates/pull/src/gdfl_run_start_cov_tests.rs (G3's; one of the 34 files step (1) may edit)"
   ],
   "gates": {
-    "fmt": "cargo fmt --all --check rc 0 on 6a0a2658",
-    "clippy": "cargo clippy -p pull --all-targets --locked -- -D warnings rc 0 on 6a0a2658",
-    "tests": "cargo test -p pull --locked --no-fail-fast on 6a0a2658 (stable, root, 4 cores, TMPDIR a 1777 tmpfs): 33 binaries, 3108 passed, 9 failed, 54 ignored; the 9 are root-only and pass as uid 65534 on the same binary (ok. 9 passed)",
-    "gate_1d": "red at START, at the GREEN-TIP (637 undeclared) and at feeba59beb6a (755): step (2) adds 118 invented segment-shaped test literals, listed in base-cov-pull-ps1-1d-words.txt.md for PSA to declare in .github/gates_tree.rs",
+    "fmt": "cargo fmt --all --check rc 0 on 3c2e0e39b08d",
+    "clippy": "cargo clippy -p pull --all-targets --locked -- -D warnings rc 0 on 3c2e0e39b08d",
+    "tests": "cargo test -p pull --locked --no-fail-fast on 3c2e0e39b08d (stable, root, 4 cores, TMPDIR a 1777 tmpfs): 33 binaries, 3110 passed, 9 failed, 54 ignored; the 9 are root-only and pass as uid 65534 on the same binary (ok. 9 passed); the same at 6a0a2658 (3108 passed), b5f8279e and a6cfc9bd (3109)",
+    "gate_1d": "red at START, at the GREEN-TIP (637 undeclared) and at the code tip (761; 755 at feeba59beb6a): step (2) adds 124 invented segment-shaped test literals (118 on 3 Nov, 6 on 5 Nov), listed in base-cov-pull-ps1-1d-words.txt.md for PSA to declare in .github/gates_tree.rs",
     "web_build": "not applicable (web/ unchanged)",
     "web_test": "not applicable (web/ unchanged)"
   },
-  "p50_p99": "none: no bench or timed step in this change",
-  "coverage": "Route B run 5 (kit d3-route-b-cloud.sh, pinned nightly 1.99.0 2026-08-07, LLVM 23.1.0) on feeba59beb6a, 229 files (instrumented tests 3104 passed, 10 failed: the 9 host reds and one timing bound the opt-level 0 build missed, which passes on stable; 54 ignored): whole:pull lines 158,973/165,167 (6,194 uncovered), branches 11,838/14,338 (2,500 sides); G1 (89 files) lines 57,329/58,887 (1,558 uncovered), branches 4,170/4,924 (754 uncovered sides); G1's rows: (U) 138, (F) 841 (820 by pattern, 21 by role), L-BCP-3 1,306, GAP 27 (all others')",
+  "p50_p99": "none: no bench or timed step in this change (the new tests wait on purpose: a 2 s month retry, a 2 s sidecar lock wait, a child held for an unkilled run's time; none is a timing bound)",
+  "coverage": "Route B run 9 (kit d3-route-b-cloud.sh, pinned nightly 1.99.0 2026-08-07, LLVM 23.1.0) on 3c2e0e39b08d, 229 files (instrumented tests 3110 passed, 9 failed: the 9 host reds; 54 ignored; ROUTE-B DONE 2026-11-05 11:00:55 IST, EXIT 0): whole:pull lines 159,248/165,431 (6,183 uncovered), branches 11,857/14,358 (2,501 sides); G1 (89 files) lines 57,598/59,151 (1,553 uncovered), branches 4,185/4,944 (759 uncovered sides); G1 rows: (U) 138, (F) 849 (828 by pattern, 21 by role), L-BCP-3 1,306, GAP 19 (all others': operator, Mac, MS1). Runs 6 to 8 on 6a0a2658, b5f8279e, a6cfc9bd in the report.",
   "mutants": "deferred (operator 30 Oct)",
   "store_writes_needed": [],
-  "notes": "INTERIM (5 Nov 2026, TOKEN BASE-COV-PULL-PS1-20261105-2): batch 20 pushed, Route B run 6 on 6a0a2658 in progress; coverage below is still run 5 of feeba59beb6a. Host reds (root only; proof: the same test passes as uid 65534 on the same binary): alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it; gdfl_dropbox::tests::repair_r1::a_journal_that_cannot_be_written_stops_the_press_before_any_byte; gdfl_dropbox::tests::repair_r1::a_read_only_store_root_is_not_writable_not_lost; gdfl_import::tests::ia16::an_immutable_month_stops_the_run_by_name; gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice; ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words; ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing; zerodha_verify::tests::a_refused_open_keeps_the_hosts_words; zerodha_verify::tests::a_write_beside_a_merge_that_fails_is_named. Decision draft D-7335 is in the report. On a root host TMPDIR must be mode 1777 and the Route B profile folder writable by uid 65534. NEEDS THE MAC: Route B whole:pull on its pin, the shadow GET re-check, macOS rows (listing_tests.rs:490 and the Linux-only tests), non-root 14-core tests, the 54 ignored real-data tests (L-BCP-3), the D1 landing. For the operator: a park hook for two race tests, an endpoint argument for the signed SSM read, MS1's upkeep files. Twice a shell command of this session invoked the Py-language's interpreter (a version probe and a no-op, output discarded, nothing written); reported in the report.",
+  "notes": "5 Nov 2026 continuation (TOKEN BASE-COV-PULL-PS1-20261105-2): batches 20 to 23, Route B runs 6 to 9; line 1 BLOCKED OUTSIDE: what is left of G1 is the Mac's (L-BCP-3, listing_tests.rs:490, Route B whole:pull on its pin) and the operator's or MS1's (a kill point inside a month's creation, crate store; an endpoint argument for the signed SSM read; upkeep.rs and upkeep_tests.rs), each with its exact change in the report. Host reds (root only; proof: the same test passes as uid 65534 on the same binary): alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it; gdfl_dropbox::tests::repair_r1::a_journal_that_cannot_be_written_stops_the_press_before_any_byte; gdfl_dropbox::tests::repair_r1::a_read_only_store_root_is_not_writable_not_lost; gdfl_import::tests::ia16::an_immutable_month_stops_the_run_by_name; gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice; ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words; ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing; zerodha_verify::tests::a_refused_open_keeps_the_hosts_words; zerodha_verify::tests::a_write_beside_a_merge_that_fails_is_named. Decision draft D-7335 and three invariant rows are in the report, for PSA. On a root host TMPDIR must be mode 1777 and the Route B profile folder writable by uid 65534. NEEDS THE MAC: Route B whole:pull on its pin, the shadow GET re-check, macOS rows (listing_tests.rs:490 and the Linux-only tests), non-root 14-core tests, the 54 ignored real-data tests (L-BCP-3), the D1 landing. The 3 Nov session twice invoked the Py-language interpreter in a shell command (output discarded, nothing written); the 5 Nov continuation did not.",
   "held": false
 }
 ```

@@ -1,12 +1,12 @@
 # base-cov-pull-ps1-fu.txt.md
 
-Written by BASE-COV-PULL-PS1 (recipe v4 step 4) from Route B run 5 on the code tip `feeba59beb6a8fcdff030685c3e31eadb7d600f3`: G1's (F)/(U) list, with every other uncovered row of G1 named and why it is left. One fenced block below holds the list.
+Written by BASE-COV-PULL-PS1 (recipe v4 step 4) from Route B run 9 on the code tip `3c2e0e39b08d0ef1a465d7630f19beda3e1c22c2` (5 Nov 2026; the 3 Nov list was of run 5 on `feeba59beb6a`): G1's (F)/(U) list, with every other uncovered row of G1 named and why it is left. One fenced block below holds the list.
 
 `````text
-BASE-COV-PULL-PS1 (F)/(U) list for G1 (recipe v4 step 4), from Route B run 5 on the code tip feeba59beb6a8fcdff030685c3e31eadb7d600f3 (kit d3-route-b-cloud.sh, pinned nightly), reading whole:pull, set = the kit f98a899398f6 set plus the 23 files step (2) added; every line number is of that tip.
+BASE-COV-PULL-PS1 (F)/(U) list for G1 (recipe v4 step 4), from Route B run 9 on the code tip 3c2e0e39b08d0ef1a465d7630f19beda3e1c22c2 (kit d3-route-b-cloud.sh, pinned nightly), reading whole:pull, set = the kit f98a899398f6 set plus the 23 files step (2) added; every line number is of that tip.
 G1 = SHARDS.md 64 files, repair 2 fno_membership_cov_tests.rs and manifest_cov_tests.rs, and the 23 new files: 89 files.
-Method: (F) by pattern = a node classifier (read-only over the tree): an uncovered row of test code inside a panic!/unreachable! invocation, a message row of an assert whose first row ran, the failing side of an assert condition (decided by enumerating every truth assignment under short-circuit evaluation), or the else block of a let-else whose block panics; the sides it left open (in matches! guards and in closures inside an assert condition) were checked by hand. (F) by role = a test body that runs only when the property under test fails, each named with its role. (U) = a production row no input reaches, each with its proof from the code, re-anchored to this tip by its text and by the diff of every later commit. L-BCP-3 = rows inside the bodies of G1 #[ignore] real-data tests. GAP = every other row, each with why it is left.
-Counts: 2312 uncovered rows; (U) 138; (F) 841 (820 by pattern, 21 by role); L-BCP-3 1306; GAP 27.
+Method: (F) by pattern = a node classifier (read-only over the tree): an uncovered row of test code inside a panic!/unreachable! invocation, a message row of an assert whose first row ran, the failing side of an assert condition (decided by enumerating every truth assignment under short-circuit evaluation), or the else block of a let-else whose block panics; the sides it left open (in matches! guards and in closures inside an assert condition) were checked by hand. (F) by role = a test body that runs only when the property under test fails, each named with its role. (U) = a production row no input reaches, each with its proof from the code, re-anchored to this tip by its text and by the diff of every later commit. L-BCP-3 = rows inside the bodies of G1 #[ignore] real-data tests. GAP = every other row, each with why it is left. 5 Nov: the 3 Nov list (run 5 on feeba59beb6a) re-anchored to this tip through git diff -U0 feeba59beb6a 3c2e0e39b08d; the 13 rows run 9 no longer leaves are dropped (the race test's 9, run 5's 2 timing rows, and the two-builds judgement's 2, which moved into its helper and are listed again at their new lines); each of the 13 rows run 9 leaves that run 5 did not is the failing side of an assert or a let-else of a test, (F) by pattern, checked by hand.
+Counts: 2312 uncovered rows; (U) 138; (F) 849 (828 by pattern, 21 by role); L-BCP-3 1306; GAP 19.
 
 (U) items, each with its proof:
 crates/pull/src/cash_auction.rs:713 (U) None => break, -- proof: the body runs only when input.peek() answered Some(c), and Peekable::next returns the item peek stored, with nothing touching input between the two calls, so next() is Some
@@ -156,11 +156,11 @@ crates/pull/src/fno_membership_ps1_tests.rs:166 (F) fn fetch(&self, _file: &List
 crates/pull/src/fno_membership_tests.rs:78 (F) fn fetch(&self, _file: &ListedFile<()>) -> Result<Vec<u8>, CmRefusal> { -- role: the header of a trait method whose whole body is unreachable!: membership reads no tick file
 crates/pull/src/gdfl_cm_auction_v2_tests.rs:418:25 False (F) Err(refusal) if *seen == 0 && refusal.why.contains("holds no header") => {} -- role: a match guard whose False side falls to the next arm, `Err(refusal) => panic!(..)`
 crates/pull/src/gdfl_cm_auction_v2_tests.rs:418:39 False (F) Err(refusal) if *seen == 0 && refusal.why.contains("holds no header") => {} -- role: a match guard whose False side falls to the next arm, `Err(refusal) => panic!(..)`
-crates/pull/src/gdfl_import_tests.rs:5866 (F) Err(std::io::Error::other(format!( -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
-crates/pull/src/gdfl_import_tests.rs:5867 (F) "{word}: the back-fill day's batch flushed {}", -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
-crates/pull/src/gdfl_import_tests.rs:5868 (F) path.display() -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
-crates/pull/src/gdfl_import_tests.rs:5869 (F) ))) -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
-crates/pull/src/gdfl_import_tests.rs:5870 (F) }), -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
+crates/pull/src/gdfl_import_tests.rs:5976 (F) Err(std::io::Error::other(format!( -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
+crates/pull/src/gdfl_import_tests.rs:5977 (F) "{word}: the back-fill day's batch flushed {}", -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
+crates/pull/src/gdfl_import_tests.rs:5978 (F) path.display() -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
+crates/pull/src/gdfl_import_tests.rs:5979 (F) ))) -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
+crates/pull/src/gdfl_import_tests.rs:5980 (F) }), -- role: the body of a flush hook that refuses the run: the back-fill day's batch is handed nothing to flush, and the run's unwrap fails the test if it ever is
 crates/pull/src/gdfl_nfo_tests.rs:314 (F) fn day(&self, _: Day) -> Result<Option<NfoDay<u8>>, CmRefusal> { -- role: the header of NoFetch::day, whose whole body is unreachable!: read_file is handed the listing and never lists the day
 crates/pull/src/gdfl_nfo_tests.rs:2589 (F) _ => None, -- role: a false answer of D-4816's relation (definition_5_differs_only_where_4_refused), which every caller asserts true
 crates/pull/src/gdfl_nfo_tests.rs:2607 (F) (Err(_), Ok(_)) => false, -- role: a false answer of D-4816's relation (definition_5_differs_only_where_4_refused), which every caller asserts true
@@ -185,6 +185,7 @@ crates/pull/src/calendar_tradable_tests.rs:1204:37 False (F) assert!(buckets.len
 crates/pull/src/calendar_tradable_tests.rs:1219:13 False (F) assert!(years.len() >= 200 && p99 < 100_000, "p99 {p99} ns");
 crates/pull/src/calendar_tradable_tests.rs:1219:35 False (F) assert!(years.len() >= 200 && p99 < 100_000, "p99 {p99} ns");
 crates/pull/src/calendar_tradable_tests.rs:1234:13 False (F) assert!(records.len() >= 200 && p99 < 100_000, "p99 {p99} ns");
+crates/pull/src/calendar_tradable_tests.rs:1234:37 False (F) assert!(records.len() >= 200 && p99 < 100_000, "p99 {p99} ns");
 crates/pull/src/capture.rs:598:13 False (F) !text.to_ascii_lowercase().contains("authorization")
 crates/pull/src/capture.rs:599:20 False (F) && !text.to_ascii_lowercase().contains("access-token"),
 crates/pull/src/cash_auction.rs:971 (F) matches!(
@@ -254,7 +255,7 @@ crates/pull/src/fno_membership_ps1_tests.rs:1131:62 False (F) matches!(&alone, M
 crates/pull/src/fno_membership_tests.rs:79 (F) unreachable!("membership is read from listed names: no tick file is fetched")
 crates/pull/src/fno_membership_tests.rs:265 (F) panic!("one handover: {:?}", held.handovers());
 crates/pull/src/fno_membership_tests.rs:1204 (F) panic!("{reported:?}")
-crates/pull/src/fno_membership_tests.rs:1457 (F) matches!(
+crates/pull/src/fno_membership_tests.rs:1473 (F) matches!(
 crates/pull/src/fno_membership_tests.rs:264:9 False (F) let [handover] = held.handovers() else {
 crates/pull/src/fno_membership_tests.rs:728:16 False (F) if *path == second && why.contains("BLAKE3")), -- checked by hand: a side of a matches! guard, of an .all() or of an .is_some_and()/.is_err_and() on one value, or of an .any() over a list of one entry, inside the assert's condition: that side makes the condition false and the assert fail
 crates/pull/src/fno_membership_tests.rs:728:35 False (F) if *path == second && why.contains("BLAKE3")), -- checked by hand: a side of a matches! guard, of an .all() or of an .is_some_and()/.is_err_and() on one value, or of an .any() over a list of one entry, inside the assert's condition: that side makes the condition false and the assert fail
@@ -271,7 +272,7 @@ crates/pull/src/fno_membership_tests.rs:1286:16 False (F) if *day == d(2024, 3, 
 crates/pull/src/fno_membership_tests.rs:1286:41 False (F) if *day == d(2024, 3, 6) && !why.is_empty()), -- checked by hand: a side of a matches! guard, of an .all() or of an .is_some_and()/.is_err_and() on one value, or of an .any() over a list of one entry, inside the assert's condition: that side makes the condition false and the assert fail
 crates/pull/src/fno_membership_tests.rs:1342:16 False (F) if *path == missing && why.contains("no such membership directory")), -- checked by hand: a side of a matches! guard, of an .all() or of an .is_some_and()/.is_err_and() on one value, or of an .any() over a list of one entry, inside the assert's condition: that side makes the condition false and the assert fail
 crates/pull/src/fno_membership_tests.rs:1342:36 False (F) if *path == missing && why.contains("no such membership directory")), -- checked by hand: a side of a matches! guard, of an .all() or of an .is_some_and()/.is_err_and() on one value, or of an .any() over a list of one entry, inside the assert's condition: that side makes the condition false and the assert fail
-crates/pull/src/fno_membership_tests.rs:1451:30 False (F) assert!(a.is_ok() || b.is_ok(), "round {round}: {a:?} | {b:?}");
+crates/pull/src/fno_membership_tests.rs:1467:26 False (F) assert!(a.is_ok() || b.is_ok(), "round {round}: {a:?} | {b:?}");
 crates/pull/src/folder.rs:638:13 False (F) !derived.starts_with("/Users") && !derived.starts_with("/home/y"),
 crates/pull/src/folder.rs:638:47 False (F) !derived.starts_with("/Users") && !derived.starts_with("/home/y"),
 crates/pull/src/folder.rs:669:13 False (F) said.contains(ROOT_ENV) && said.contains("HOME"),
@@ -387,18 +388,17 @@ crates/pull/src/gdfl_import_tests.rs:4440 (F) panic!("{rel}: not a bar month of 
 crates/pull/src/gdfl_import_tests.rs:4707 (F) rel.display()
 crates/pull/src/gdfl_import_tests.rs:4898 (F) indices[0].0
 crates/pull/src/gdfl_import_tests.rs:4948 (F) bytes.len()
-crates/pull/src/gdfl_import_tests.rs:5124 (F) rel.display()
-crates/pull/src/gdfl_import_tests.rs:5272 (F) durability.as_str()
-crates/pull/src/gdfl_import_tests.rs:5278 (F) durability.as_str()
-crates/pull/src/gdfl_import_tests.rs:5284 (F) durability.as_str(),
-crates/pull/src/gdfl_import_tests.rs:5285 (F) rel.display()
-crates/pull/src/gdfl_import_tests.rs:5411 (F) panic!("the run stopped at the day's flush: {refused:?}");
-crates/pull/src/gdfl_import_tests.rs:5565 (F) rel.display()
-crates/pull/src/gdfl_import_tests.rs:5575 (F) one.display()
-crates/pull/src/gdfl_import_tests.rs:5727 (F) rel.display()
-crates/pull/src/gdfl_import_tests.rs:5926 (F) rel.display()
-crates/pull/src/gdfl_import_tests.rs:6041 (F) why.contains("holds") || why.contains("lock"),
-crates/pull/src/gdfl_import_tests.rs:6047 (F) format!("{why:?}").to_lowercase().contains("lock"),
+crates/pull/src/gdfl_import_tests.rs:5186 (F) rel.display()
+crates/pull/src/gdfl_import_tests.rs:5382 (F) durability.as_str()
+crates/pull/src/gdfl_import_tests.rs:5388 (F) durability.as_str()
+crates/pull/src/gdfl_import_tests.rs:5394 (F) durability.as_str(),
+crates/pull/src/gdfl_import_tests.rs:5395 (F) rel.display()
+crates/pull/src/gdfl_import_tests.rs:5521 (F) panic!("the run stopped at the day's flush: {refused:?}");
+crates/pull/src/gdfl_import_tests.rs:5675 (F) rel.display()
+crates/pull/src/gdfl_import_tests.rs:5685 (F) one.display()
+crates/pull/src/gdfl_import_tests.rs:5837 (F) rel.display()
+crates/pull/src/gdfl_import_tests.rs:6036 (F) rel.display()
+crates/pull/src/gdfl_import_tests.rs:6389 (F) panic!("the run is refused at the census: {got:?}")
 crates/pull/src/gdfl_import_tests.rs:247:40 False (F) assert!(got.seconds.iter().all(|b| b.open == 100 && b.close == 100)); -- checked by hand: a side of a matches! guard, of an .all() or of an .is_some_and()/.is_err_and() on one value, or of an .any() over a list of one entry, inside the assert's condition: that side makes the condition false and the assert fail
 crates/pull/src/gdfl_import_tests.rs:380:9 False (F) texts[8].contains("although the day's batch fits") && texts[8].contains("free=2097142"),
 crates/pull/src/gdfl_import_tests.rs:380:63 False (F) texts[8].contains("although the day's batch fits") && texts[8].contains("free=2097142"),
@@ -471,17 +471,25 @@ crates/pull/src/gdfl_import_tests.rs:4896:36 False (F) indices[0].0.files == 2 &
 crates/pull/src/gdfl_import_tests.rs:4944:21 False (F) u64::try_from(bytes.len()).unwrap() <= store::format::HEADER_LEN
 crates/pull/src/gdfl_import_tests.rs:4945:28 False (F) && rest.iter().all(|&byte| byte == 0)
 crates/pull/src/gdfl_import_tests.rs:4946:28 False (F) && store::header::Header::decode(slot).is_err(),
-crates/pull/src/gdfl_import_tests.rs:5078:28 False (F) unborn == 0 || open_day,
-crates/pull/src/gdfl_import_tests.rs:5264:13 False (F) assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
-crates/pull/src/gdfl_import_tests.rs:5264:50 False (F) assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
-crates/pull/src/gdfl_import_tests.rs:5404:9 False (F) let Err(ImportRefusal::Durability {
-crates/pull/src/gdfl_import_tests.rs:5415:9 False (F) why.contains("syncing") && why.contains(&store.display().to_string()),
-crates/pull/src/gdfl_import_tests.rs:5415:36 False (F) why.contains("syncing") && why.contains(&store.display().to_string()),
-crates/pull/src/gdfl_import_tests.rs:5710:13 False (F) last.starts_with(&format!("incomplete options {}", d2()))
-crates/pull/src/gdfl_import_tests.rs:5711:20 False (F) && last.contains(&format!(" failures={} ", refused + 1)),
-crates/pull/src/gdfl_import_tests.rs:5798:13 False (F) assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
-crates/pull/src/gdfl_import_tests.rs:5798:41 False (F) assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
-crates/pull/src/gdfl_import_tests.rs:6041:50 False (F) why.contains("holds") || why.contains("lock"),
+crates/pull/src/gdfl_import_tests.rs:5128:17 False (F) !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+crates/pull/src/gdfl_import_tests.rs:5128:38 False (F) !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+crates/pull/src/gdfl_import_tests.rs:5128:60 False (F) !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+crates/pull/src/gdfl_import_tests.rs:5128:75 False (F) !status.success() && journal.is_empty() && months == 0 && unborn == 0,
+crates/pull/src/gdfl_import_tests.rs:5133:17 False (F) status.success() && !open_day && unborn == 0,
+crates/pull/src/gdfl_import_tests.rs:5133:37 False (F) status.success() && !open_day && unborn == 0,
+crates/pull/src/gdfl_import_tests.rs:5133:50 False (F) status.success() && !open_day && unborn == 0,
+crates/pull/src/gdfl_import_tests.rs:5140:28 False (F) unborn == 0 || open_day,
+crates/pull/src/gdfl_import_tests.rs:5374:13 False (F) assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
+crates/pull/src/gdfl_import_tests.rs:5374:50 False (F) assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
+crates/pull/src/gdfl_import_tests.rs:5514:9 False (F) let Err(ImportRefusal::Durability {
+crates/pull/src/gdfl_import_tests.rs:5525:9 False (F) why.contains("syncing") && why.contains(&store.display().to_string()),
+crates/pull/src/gdfl_import_tests.rs:5525:36 False (F) why.contains("syncing") && why.contains(&store.display().to_string()),
+crates/pull/src/gdfl_import_tests.rs:5820:13 False (F) last.starts_with(&format!("incomplete options {}", d2()))
+crates/pull/src/gdfl_import_tests.rs:5821:20 False (F) && last.contains(&format!(" failures={} ", refused + 1)),
+crates/pull/src/gdfl_import_tests.rs:5908:13 False (F) assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
+crates/pull/src/gdfl_import_tests.rs:5908:41 False (F) assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
+crates/pull/src/gdfl_import_tests.rs:6181:46 False (F) why.contains("holds") || why.contains("lock"),
+crates/pull/src/gdfl_import_tests.rs:6388:9 False (F) let Err(ImportRefusal::CensusRefused { day: at, why, .. }) = &got else {
 crates/pull/src/gdfl_nfo_tests.rs:295 (F) matches!(
 crates/pull/src/gdfl_nfo_tests.rs:315 (F) unreachable!("read_file is handed its listing: it never asks the source for a day")
 crates/pull/src/gdfl_nfo_tests.rs:358 (F) panic!("{name}: {got:?}")
@@ -1001,16 +1009,8 @@ crates/pull/src/master_snapshots_tests.rs 127
 crates/pull/src/reference_data_tests.rs 44
 
 GAP rows, each with why it is left:
-crates/pull/src/calendar_tradable_tests.rs:1235 GAP } -- why: run 5 only: under the instrumented build (opt-level 0) tradable_day_and_every_bucket_are_bounded missed its own timing bound (year_record p99 100,222 ns against 100,000 at line 1234), so the passing side of that bound and the test close did not run; they ran in runs 2 to 4, and the test passes on stable at the code tip
-crates/pull/src/calendar_tradable_tests.rs:1234:37 True GAP assert!(records.len() >= 200 && p99 < 100_000, "p99 {p99} ns"); -- why: run 5 only: under the instrumented build (opt-level 0) tradable_day_and_every_bucket_are_bounded missed its own timing bound (year_record p99 100,222 ns against 100,000 at line 1234), so the passing side of that bound and the test close did not run; they ran in runs 2 to 4, and the test passes on stable at the code tip
-crates/pull/src/gdfl_import_tests.rs:6039 GAP let why = format!("{failure:?}").to_lowercase(); -- why: race: the arms of two_runs_into_one_store_at_once_leave_what_one_run_leaves that run only when its two concurrent runs collide on a lock (which arms run differs from run to run); open in G1: a test that makes the collision on purpose through a shared judge (report NEXT 1)
-crates/pull/src/gdfl_import_tests.rs:6040 GAP assert!( -- why: race: the arms of two_runs_into_one_store_at_once_leave_what_one_run_leaves that run only when its two concurrent runs collide on a lock (which arms run differs from run to run); open in G1: a test that makes the collision on purpose through a shared judge (report NEXT 1)
-crates/pull/src/gdfl_import_tests.rs:6046 GAP Err(why) => assert!( -- why: race: the arms of two_runs_into_one_store_at_once_leave_what_one_run_leaves that run only when its two concurrent runs collide on a lock (which arms run differs from run to run); open in G1: a test that makes the collision on purpose through a shared judge (report NEXT 1)
-crates/pull/src/gdfl_import_tests.rs:5078:13 False GAP unborn == 0 || open_day, -- why: timing: which side the kill test takes depends on where its SIGKILL lands (a child that finished, or a kill inside a month creation); a deterministic test needs a kill-point hook in the import (an operator call)
-crates/pull/src/gdfl_import_tests.rs:5078:28 True GAP unborn == 0 || open_day, -- why: timing: which side the kill test takes depends on where its SIGKILL lands (a child that finished, or a kill inside a month creation); a deterministic test needs a kill-point hook in the import (an operator call)
-crates/pull/src/gdfl_import_tests.rs:6041:25 True GAP why.contains("holds") || why.contains("lock"), -- why: race: the arms of two_runs_into_one_store_at_once_leave_what_one_run_leaves that run only when its two concurrent runs collide on a lock (which arms run differs from run to run); open in G1: a test that makes the collision on purpose through a shared judge (report NEXT 1)
-crates/pull/src/gdfl_import_tests.rs:6041:25 False GAP why.contains("holds") || why.contains("lock"), -- why: race: the arms of two_runs_into_one_store_at_once_leave_what_one_run_leaves that run only when its two concurrent runs collide on a lock (which arms run differs from run to run); open in G1: a test that makes the collision on purpose through a shared judge (report NEXT 1)
-crates/pull/src/gdfl_import_tests.rs:6041:50 True GAP why.contains("holds") || why.contains("lock"), -- why: race: the arms of two_runs_into_one_store_at_once_leave_what_one_run_leaves that run only when its two concurrent runs collide on a lock (which arms run differs from run to run); open in G1: a test that makes the collision on purpose through a shared judge (report NEXT 1)
+crates/pull/src/gdfl_import_tests.rs:5140:13 False GAP unborn == 0 || open_day, -- why: timing: the kill test meets an unborn month with its day open only when one of its timed SIGKILLs lands inside a month creation (covered in runs 6 and 8, not in runs 5, 7 and 9); its other sides are stopped on purpose since batch 22; a deterministic test needs a kill point inside a month creation (an operator call: the report, Exact changes outside G1, item 1)
+crates/pull/src/gdfl_import_tests.rs:5140:28 True GAP unborn == 0 || open_day, -- why: timing: the kill test meets an unborn month with its day open only when one of its timed SIGKILLs lands inside a month creation (covered in runs 6 and 8, not in runs 5, 7 and 9); its other sides are stopped on purpose since batch 22; a deterministic test needs a kill point inside a month creation (an operator call: the report, Exact changes outside G1, item 1)
 crates/pull/src/listing_tests.rs:490 GAP Err(why) if cfg!(target_os = "macos") && why.raw_os_error() == Some(92) => {} -- why: macOS only (cfg!(target_os = "macos")): owed to the Mac, never claimed
 crates/pull/src/ssm.rs:966 GAP let status = answer.status(); -- why: after a send that reached AWS: no test can answer a signed read without AWS, a trusted TLS root or a second endpoint for the read, and adding one to a credential read is an operator call
 crates/pull/src/ssm.rs:970 GAP let text = answer_within(&mut answer).await?; -- why: after a send that reached AWS: no test can answer a signed read without AWS, a trusted TLS root or a second endpoint for the read, and adding one to a credential read is an operator call
