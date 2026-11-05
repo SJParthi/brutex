@@ -1,6 +1,6 @@
 # fix-BASE-COV-LIBS-LS1.json.md
 
-The session's structured report in the launcher's FIX shape, one json block (crate `store`; second continuation of 5 Nov 2026).
+The session's structured report in the launcher's FIX shape, one json block (crate `store`; third continuation of 5 Nov 2026, the shard's final report).
 
 ```json
 {
@@ -13,7 +13,7 @@ The session's structured report in the launcher's FIX shape, one json block (cra
       "id": "LS1-ROOT-REDS",
       "status": "fixed",
       "how": "Seven store lib tests failed only as root (two from attempts 2-4, five base tests); each runs its unchanged body through crate::support::where_permission_binds, which re-runs it as nobody under root and in the same uid otherwise (the D-0995 pattern). (3 Nov, unchanged.)",
-      "evidence": "Commit c7ccb0f7; at the code tip 24bd3a62, cargo test -p store --locked --no-fail-fast as root: exit 0, 1104 passed, 0 failed, 8 ignored."
+      "evidence": "Commit c7ccb0f7; at the code tip 24bd3a62, cargo test -p store --locked --no-fail-fast as root: exit 0, 1104 passed, 0 failed, 8 ignored (second continuation's run, and again in the third continuation's final gate run)."
     },
     {
       "id": "LS1-HOST-RACE",
@@ -43,13 +43,13 @@ The session's structured report in the launcher's FIX shape, one json block (cra
       "id": "LS1-COV-STORE",
       "status": "fixed",
       "how": "Route B on this host: every uncovered row is a (U) with its proof, an ignored-test body, an (F) item or a macOS row owed to the Mac.",
-      "evidence": "Route B, pinned nightly, reading whole:store, tip 24bd3a62: lines 53276/54692 (1416 uncovered), sides 3448/3990 (542 uncovered), 112 files read; production 81 rows, all (U); test code 1877 rows: ignored 1108, (F) by pattern 648, step-4 arms 97, (U) 14, macOS 10, GAP 0. Lists: gaps-LS1.txt.md, fu-LS1.txt.md."
+      "evidence": "Route B, pinned nightly, reading whole:store, tip 24bd3a62 (no code changed after it): lines 53276/54692 (1416 uncovered), sides 3448/3990 (542 uncovered), 112 files read; production 81 rows, all (U); test code 1877 rows: ignored 1108, (F) by pattern 648, step-4 arms 97, (U) 14, macOS 10, GAP 0. Lists: gaps-LS1.txt.md, fu-LS1.txt.md."
     },
     {
       "id": "LS1-SAFE-OPEN-MAC",
-      "status": "not_fixed",
-      "how": "safe_open.rs:104:19 False and :107 (Found::of's last arm, a file of none of the seven kinds) is covered on Linux by a real anonymous inode (safe_open::tests::a_file_of_none_of_the_seven_kinds_is_unknown) and cannot be reached by any test on aarch64-apple-darwin (no FileType constructor; the only such kind there, a union mount's whiteout, cannot be made; shm_open needs unsafe code). STATUS: BLOCKED QUESTION: (A) (U) on the Mac's target with that proof (recommended), or (B) restructure Found::of over the mode bits (rejected by D-6017).",
-      "evidence": "report-BASE-COV-LIBS-LS1.md, QUESTION."
+      "status": "fixed",
+      "how": "The main session's answer (A) of 5 Nov 2026: safe_open.rs:104:19 False and :107 (Found::of's last arm, a file of none of the seven kinds) are (U) on aarch64-apple-darwin with their proof. This is a proof, not coverage there: std::fs::FileType has no constructor; macOS's one kind of none of the seven, a union mount's whiteout (S_IFWHT), cannot be made by a test; a kqueue reports S_IFIFO; shm_open needs unsafe code (store is forbid(unsafe_code), lib.rs:61, under the workspace's unsafe_code = deny); a seam or race hook cannot fake a FileType. On Linux the arm is covered by a real anonymous inode (safe_open::tests::a_file_of_none_of_the_seven_kinds_is_unknown, kept). Restructuring Found::of over the mode bits (B) is rejected (D-6017). Listed under NEEDS THE MAC so the Mac's Route B records it the same way.",
+      "evidence": "Commit 0365592d: fu-LS1.txt.md, section '(U) ON THE MAC'S TARGET ONLY' (line numbers checked at 24bd3a62: Found::of is safe_open.rs:90-109); report-BASE-COV-LIBS-LS1.md, 'The main session's answer, recorded' and NEEDS THE MAC item 1. The Linux test ran and passed in the third continuation's final gate run."
     }
   ],
   "files_changed": [
@@ -104,17 +104,17 @@ The session's structured report in the launcher's FIX shape, one json block (cra
   ],
   "files_outside_ownership": [],
   "gates": {
-    "fmt": "pass (cargo fmt --all --check exit 0 at 24bd3a62)",
-    "clippy": "pass (cargo clippy -p store --all-targets --locked -- -D warnings exit 0 at 24bd3a62)",
-    "tests": "pass (cargo test -p store --locked --no-fail-fast exit 0 at 24bd3a62: 1104 passed, 0 failed, 8 ignored, 43 result lines, 145 s; Linux x86_64 root host, 4 cores, TMPDIR a mode-1777 tmpfs)",
+    "fmt": "pass (cargo fmt --all --check exit 0 at 24bd3a62; third continuation's final gate run, 11:26 IST)",
+    "clippy": "pass (cargo clippy -p store --all-targets --locked -- -D warnings exit 0 at 24bd3a62; third continuation's final gate run)",
+    "tests": "pass (cargo test -p store --locked --no-fail-fast exit 0 at 24bd3a62, 11:28:39-11:29:33 IST: 1104 passed, 0 failed, 8 ignored, 43 result lines, 54 s, no warning; the same counts as the second continuation's run; Linux x86_64 root host, 4 cores, stable rustc 1.97.1, TMPDIR a mode-1777 tmpfs)",
     "web_build": "not applicable",
     "web_test": "not applicable"
   },
-  "p50_p99": "none measured: no production behaviour changed (cfg(test) seams and hooks; four shipped statements reshaped with the same calls in the same order), no bench run. Route B wall at the final tip: tests 22 min (this host).",
-  "coverage": "Route B (kit d3-route-b-cloud.sh unchanged, rustc 1.99.0-nightly (1a98b1e13 2026-08-07), LLVM 23.1.0), reading whole:store, tip 24bd3a62cd51: lines 53276/54692 (1416 uncovered), branch sides 3448/3990 (542 uncovered), 112 files read; NOT READ: benches/ratio.rs, benches/ratio/{months,quarantine,safe_files}.rs (test = false) and src/lib.rs (no executable line). Production rows: 81, all (U) with proofs, 0 GAP; test code: 0 GAP. Lists: reports/base-cloud-20261103/gaps-LS1.txt.md, fu-LS1.txt.md. macOS-only lines owed to the Mac's Route B; safe_open.rs:104/107 on the Mac is the question.",
+  "p50_p99": "none measured: no production behaviour changed (cfg(test) seams and hooks; four shipped statements reshaped with the same calls in the same order: flock's fstat and note clear, provenance's write_fully, quarantine's audit_dir arm), no bench run; the third continuation changed no code. Gate 8 and every p99 claim are re-run on the Mac. Route B wall at the final tip: tests 22 min (this host).",
+  "coverage": "Route B (kit d3-route-b-cloud.sh unchanged, rustc 1.99.0-nightly (1a98b1e13 2026-08-07), LLVM 23.1.0), reading whole:store, tip 24bd3a62cd51 (the code tip; no code changed after it): lines 53276/54692 (1416 uncovered), branch sides 3448/3990 (542 uncovered), 112 files read; NOT READ: benches/ratio.rs, benches/ratio/{months,quarantine,safe_files}.rs (test = false) and src/lib.rs (no executable line). Production rows: 81, all (U) with proofs, 0 GAP; test code: 0 GAP. safe_open.rs:104:19 False and :107: covered here, (U) on aarch64-apple-darwin with their proof (the main session's answer (A)). Before (tip c7ccb0f7f7e2): lines 50033/51607, sides 3291/3868. Lists: reports/base-cloud-20261103/gaps-LS1.txt.md, fu-LS1.txt.md. macOS-only lines owed to the Mac's Route B.",
   "mutants": "deferred (operator 30 Oct)",
   "store_writes_needed": [],
-  "notes": "Second continuation of 5 Nov 2026 (token BASE-COV-LIBS-LS1-20261105-3), with the main session's answer to the first continuation's question. Line 1 of the report: STATUS: BLOCKED QUESTION, for one row only: safe_open.rs:104:19 False and :107 on aarch64-apple-darwin ((A) (U) with its proof, recommended; (B) restructure, rejected by D-6017). Decision drafts: D-8560 (figures, lists, root re-runs, fresh-process children), D-8561 (the seams and race hooks, the reclassified rows, the test-code classes, two test fixes). NEEDS THE MAC: Route B on aarch64-apple-darwin (macOS-only lines: file.rs:7414 and :10609 at this tip, open_flags.rs:33-122, tests/catalog.rs's 10 APFS rows), a non-root 14-core run, the ignored real-data, timing and full-volume tests (L-BCL-3, L-PREC1-01), the D1 landing.",
+  "notes": "Third continuation of 5 Nov 2026 (token BASE-COV-LIBS-LS1-20261105-4), with the main session's answer (A) to the second continuation's question; no code changed. Line 1 of the report: STATUS: DONE. safe_open.rs:104/107 is recorded in fu-LS1.txt.md as (U) on aarch64-apple-darwin with its proof; the Linux test stays; (B) rejected (D-6017). Final decision drafts in the report: D-8560 (figures, lists, root re-runs, fresh-process children, 112 new tests) and D-8561 (the seams and race hooks, the reclassified rows, Found::of's last arm with the answer (A), the test-code classes, two test fixes). NEEDS THE MAC: Route B on aarch64-apple-darwin (macOS-only lines: file.rs:7414 and :10609 at this tip, open_flags.rs:33-122, tests/catalog.rs's 10 APFS rows; record safe_open.rs:104:19 False and :107 as (U) with the proof in fu-LS1.txt.md), a non-root 14-core run, the ignored real-data, timing and full-volume tests (L-BCL-3, L-PREC1-01), the D1 landing. No pull request opened (the brief forbids one).",
   "held": false
 }
 ```

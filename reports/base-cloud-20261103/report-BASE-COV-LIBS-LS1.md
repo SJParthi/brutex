@@ -1,12 +1,228 @@
-STATUS: IN PROGRESS
+STATUS: DONE
 
-# BASE-COV-LIBS-LS1 (crate `store`): third continuation of 5 Nov 2026 (in progress)
+# BASE-COV-LIBS-LS1 (crate `store`): third continuation of 5 Nov 2026
 
 TOKEN `BASE-COV-LIBS-LS1-20261105-4` (a new account; the tokens `-20261103-1`, `-20261105-2` and
 `-20261105-3` are retired). Branch `cloud/cov-libs-ls1-20261103`, continued from its tip
-`eb84ea6ee280` with the main session's answer (A) to the question below. `fu-LS1.txt.md` now records
-`safe_open.rs:104:19 False` and `:107` as (U) on aarch64-apple-darwin with the proof. The one final
-gate run at the unchanged code tip `24bd3a62` is running; the final report and fix json follow.
+`eb84ea6ee280` with the main session's answer (A) to the second continuation's question. Code tip
+`24bd3a62cd51abb1c7471d5e2edf64b5ca677d8d` (`git rev-list -1 HEAD -- . ':(exclude)reports'`),
+unchanged: this continuation changed no code.
+
+## Outcome
+
+The shard is finished. On this host (Linux x86_64), Route B leaves no production row of `store`
+uncovered without a proof: 81 rows are (U) with their proofs and none is a GAP. Every uncovered
+test-code row is an ignored test's body, an (F) item, a step-4 arm with its proof, a (U) with its
+proof or a macOS row owed to the Mac; none is a GAP. The one row the second continuation asked
+about, `safe_open.rs:104:19 False` and `:107`, is covered here and is (U) on aarch64-apple-darwin
+with its proof, by the main session's answer. What is left is the Mac's (NEEDS THE MAC).
+
+## The main session's answer, recorded
+
+(A): `crates/store/src/safe_open.rs:104:19 False` and `:107`, the last arm of
+`safe_open::Found::of` (a file of none of the seven kinds), are (U) on aarch64-apple-darwin.
+
+- **The proof** (`fu-LS1.txt.md`, section "(U) ON THE MAC'S TARGET ONLY"):
+  - `std::fs::FileType` has no constructor, so the arm needs a real file whose `st_mode` carries
+    none of the seven types.
+  - macOS's one such kind is a union mount's whiteout (`S_IFWHT`), which no test can make.
+  - A kqueue descriptor reports `S_IFIFO`, a pipe.
+  - POSIX shared memory needs `shm_open`, which std does not offer and which needs unsafe code:
+    `store` is `#![forbid(unsafe_code)]` (`lib.rs:61`), under the workspace's
+    `unsafe_code = "deny"`.
+  - A refusal seam or a race hook cannot fake a `FileType`, and a seam answering `Unknown` early
+    would not run line 107 at all.
+- **The Linux test stays**: `safe_open::tests::a_file_of_none_of_the_seven_kinds_is_unknown`. It
+  ran and passed in this continuation's gate run.
+- **Not (B)**: D-6017 rejects restructuring a production path so a test can reach it. `Found::of` is
+  unchanged.
+- **The row is listed under NEEDS THE MAC**, so the Mac's Route B records it the same way.
+
+## What this continuation did
+
+1. Checked out the branch at `eb84ea6ee280` and committed the OWNER file with the new token
+   (`e43adc39`).
+2. **`fu-LS1.txt.md`** (`0365592d`): the question's row left the section "COVERED HERE, NOT REACHABLE
+   ON THE MAC'S TARGET (the report's question)" for a new section, "(U) ON THE MAC'S TARGET ONLY
+   (2 rows, covered here)", with the proof above. The driven-rows entry for `safe_open.rs` now
+   points there.
+   - The line numbers were checked at the code tip: `Found::of` is `safe_open.rs:90-109`, the side
+     is `:104:19` and the arm's body is `:107`. The Linux test is `safe_open_tests.rs:496-523`.
+   - `gaps-LS1.txt.md` is unchanged. It is the measurement of `24bd3a62`, where the row is covered.
+3. **Checked the second continuation's claim** that its production-file edits are `cfg(test)` lines
+   plus four reshaped statements. Over the nine production files, `git diff 3ad11482..24bd3a62`
+   deletes 11 lines. They are exactly flock's `fstat` and note clear, provenance's `write_fully`,
+   quarantine's `audit_dir` arm, and two comment lines (one in flock, one in settings).
+4. **Looked for other rows the Mac's target could lose.** The crate has two `cfg(target_os =
+   "linux")` tests.
+   - One is `safe_open`'s, above.
+   - The other is `file::tests::the_kernels_own_enospc_from_dev_full_is_disk_full_by_name`. It
+     drives `write_fully`'s refusal arm and `classify`'s `StorageFull` arm. The scripted-host test
+     `file::tests::a_full_disk_mid_write_is_returned_and_never_signalled` reaches both arms on every
+     host, so no row is expected to fall there. The Mac's Route B is the measurement.
+5. **Re-ran the gates once** at the unchanged code tip (the Mac's rule: "If the branch is committed
+   and nothing is open, re-run the gates once"). Route B was not re-run: no code changed since the
+   final one at `24bd3a62`, so that run stands.
+
+**Files changed** by this continuation, all under `reports/base-cloud-20261103/`:
+`OWNER-BASE-COV-LIBS-LS1.md`, `fu-LS1.txt.md`, `report-BASE-COV-LIBS-LS1.md` and
+`fix-BASE-COV-LIBS-LS1.json.md`.
+
+**Tests added:** none. The shard's 112 new tests are named in the sections below: 36 on 3 Nov, 36 in
+the first 5 Nov continuation and 40 in the second.
+
+## Gates (code tip `24bd3a62`, stable `rustc 1.97.1 (8bab26f4f 2026-07-14)`, this host)
+
+This continuation's one final gate run ran 11:26:38-11:29:33 IST. The host was Linux x86_64 with
+4 cores and 15 GiB memory; it ran as root, with `TMPDIR=/dev/shm/ls1tmp-4` (a tmpfs, mode 1777).
+
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy -p store --all-targets --locked -- -D warnings`: exit 0.
+- `cargo test -p store --locked --no-fail-fast`: exit 0, with no warning.
+  - 1,104 passed, 0 failed and 8 ignored, over 43 result lines; 54 s wall (build not counted).
+  - These are the same counts as the second continuation's run at this tip.
+  - Both Linux-only tests ran and passed.
+- **Mutants:** deferred (operator 30 Oct).
+- **Benches:** none run. No code changed in this continuation. The shard's only shipped edits are
+  the four reshaped statements above, which make the same calls in the same order. Gate 8 and every
+  p99 claim are re-run on the Mac (`CONTEXT.md`).
+
+## Coverage: Route B (`store`, whole crate)
+
+The shard's final Route B is the second continuation's, at the code tip `24bd3a62` (10:27:33-10:51:30
+IST). It stands, since no code changed after it.
+
+- **Instrument:** the kit's `d3-route-b-cloud.sh` (unchanged) on the pinned `rustc 1.99.0-nightly
+  (1a98b1e13 2026-08-07)` with its own LLVM 23.1.0 tools. Set `reading whole:store`, 117 tracked
+  `.rs` files.
+- **Figures:** lines 53,276/54,692 (1,416 uncovered); branch sides 3,448/3,990 (542 uncovered).
+- **Files:** 112 read. The four `benches/` files and `src/lib.rs` were NOT READ (exit 3): the
+  benches are `test = false` (L-BCL-1), and `lib.rs` has no executable line.
+- **Before** (START plus the seven root re-runs, tip `c7ccb0f7f7e2`): lines 50,033/51,607, branch
+  sides 3,291/3,868. Production rows: 225 lines + 104 sides.
+
+The 1,958 uncovered rows of the final run (1,416 lines + 542 sides), by class:
+
+| class | rows |
+|---|---|
+| production: (U) with its proof | 81 |
+| production: GAP | **0** |
+| test code: bodies of `#[ignore]`d tests, and helpers only they call | 1,108 |
+| test code: (F) by pattern | 648 |
+| test code: step-4 arms with proofs (26 bounding, 28 skip, 30 failure-collection, 7 fault-mock guard, 6 failing) | 97 |
+| test code: (U) with its proof | 14 |
+| test code: macOS-only rows, owed to the Mac | 10 |
+| test code: GAP | **0** |
+
+Two more rows are covered here and are (U) on aarch64-apple-darwin by the answer (A):
+`safe_open.rs:104:19 False` and `:107`.
+
+Every run's table is in the section below. The class of every uncovered row is in
+`gaps-LS1.txt.md`, and the proofs are in `fu-LS1.txt.md`.
+
+## Decision drafts (for LSA; ids from my block only)
+
+These are the final drafts. They replace every earlier draft of the two ids.
+
+- **D-8560**: BASE-COV-LIBS-LS1, crate `store` (D2 part A, D6 shard LS1). Route B, measured with the
+  kit's `d3-route-b-cloud.sh` on the pinned `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)` and its
+  own LLVM 23.1.0 tools, on a Linux x86_64 root host.
+  - Before (START plus the seven root re-runs, tip `c7ccb0f7f7e2`): lines 50,033/51,607, branch
+    sides 3,291/3,868.
+  - After (tip `24bd3a62cd51`): lines 53,276/54,692, branch sides 3,448/3,990.
+  - Production rows went from 225 lines + 104 sides to 81, each a (U) with its proof, and 0 GAP.
+    Two more, `safe_open.rs:104:19 False` and `:107`, are covered on Linux and are (U) on
+    aarch64-apple-darwin with their proof (D-8561 item 4).
+  - Test code: 0 GAP. The rest is ignored-test bodies, (F) by pattern, step-4 arms with proofs,
+    (U) with proofs and the macOS rows.
+  - NOT READ: `benches/` (test = false) and `src/lib.rs` (no executable line).
+  - Lists: `reports/base-cloud-20261103/gaps-LS1.txt.md` and `fu-LS1.txt.md`.
+  - Root and fresh processes: eight permission tests run their bodies as `nobody` through
+    `crate::support::where_permission_binds` (the D-0995 pattern). Tests that need a process-wide
+    static fresh run in a fresh child of the test binary.
+  - 112 new tests. At the final tip, `cargo test -p store`: 1,104 passed, 0 failed, 8 ignored.
+  - The macOS-only lines and a Route B on the Mac's pin are the Mac's.
+- **D-8561**: BASE-COV-LIBS-LS1, the main session's answers of 5 Nov 2026 to the first and second
+  continuations' questions. Every production row of `store` that only a host refusal or a race
+  reaches gets an asserting test that runs the real code, and none becomes a limit in `docs/06`.
+  1. **Host refusals** (a refused write, flush, `fstat`, shared or patient `flock`, read): one-shot,
+     per-thread refusals a test arms, in `file.rs`'s pattern (D-6017). They exist only under
+     `cfg(test)`, so the call that ships is the call every test runs.
+     - `file::tests::refusal(operation, path)` is matched by the operation word a module's own lift
+       names the call by, and by the path. `generation`'s, `quarantine`'s and `repair`'s `io_at`,
+       `provenance`'s `write_fully` and `settings`' staged write of its temporary consult it in
+       `file::fault`'s shape: the host's answer is replaced after the call ran.
+     - `flock::tests::take_host_refusal(HostCall)` refuses, with a skip count, the registered
+       `flock` attempt (`take_held`: the noted, patient shared and patient exclusive locks) and
+       `Flock::try_lock_shared`, each before the call; and `try_lock_noted`'s `fstat` and the clear
+       of a holder's note, each after it ran.
+  2. **Races** (a file or directory that changes between two system calls):
+     `file::tests::race(point, path)` is a hook at the moment between the two calls. Through it
+     the test makes the REAL change on disk, so the second call meets a real race and the code's
+     own handling runs; no result is faked. Fourteen points: the quarantine index measured, opened,
+     header read; the audit directory looked for; the index image staged; a revision appended and
+     published; a sealed month audited; a settings file measured; a temporary named and written; a
+     directory listed; a save read back; a staging leftover looked at.
+  3. **Rows reclassified.** Three rows filed as host refusals on 5 Nov (`quarantine.rs:831`,
+     `:861`, `:2224`) are reached by a real race instead. Two rows the 5 Nov list mislabeled as
+     flushes (`repair.rs:1342`, `:1392`: the reservation's and the receipt's `create_new`) are
+     reached by a real refusal (a directory that takes no new name, where the mode bits bind) and
+     by a real race.
+  4. **Found::of's last arm.** `safe_open::Found::of`'s last arm (`safe_open.rs:104:19 False` and
+     `:107`, a file of none of the seven kinds) is driven on Linux by a real anonymous inode, the
+     `inotify` instance a child GNU `tail -f` holds
+     (`safe_open::tests::a_file_of_none_of_the_seven_kinds_is_unknown`).
+     - On aarch64-apple-darwin it is (U) with its proof, by the main session's answer (A) of
+       5 Nov 2026. `std::fs::FileType` has no constructor, and macOS's one kind of none of the
+       seven, a union mount's whiteout, cannot be made by a test. A kqueue reports `S_IFIFO`.
+       `shm_open` needs unsafe code, which the workspace denies. A seam cannot fake a `FileType`.
+     - The Mac's Route B records it the same way.
+  5. **Test-code rows.** (F) by recipe step 4's second clause for a test's or a check module's own
+     failing, bounding or skip arm, failure-collection lines and fault-mock guards, each listed
+     with its proof in `fu-LS1.txt.md`. macOS-only arms are owed to the Mac's Route B. Every other
+     test-code arm is covered by a direct test of its helper. Two test fixes ride with it: the
+     D-0790 docs check runs on every run (D-1448 corrected the sentence it was gated on, so it had
+     stopped checking anything), and `safe_open`'s denied-file test runs where the mode bits bind
+     (D-0995); as root it asserted nothing.
+
+  Rejected: recording the rows as limits (the main session's first answer), and restructuring
+  production paths so data could reach them, `Found::of` included (D-6017's rejection; the main
+  session's second answer).
+- **docs/04 and docs/06:** no new invariant in docs/04, since the tests pin documented behaviour
+  and the seams and hooks are test machinery. In docs/06, none of mine beyond L-BCL-1 and L-BCL-3;
+  no row becomes a limit.
+
+## NEEDS THE MAC
+
+1. **Route B of `store` on the Mac's pin** (aarch64-apple-darwin). Owed to that run, never claimed
+   here:
+   - **The macOS-only lines**, which are not compiled here. The brief names `src/file.rs:7271` and
+     `:10466`, numbered at its own tip. At this tip the same two `cfg(target_os = "macos")` items
+     are `file.rs:7414` (an assert in a test) and `:10609` (`let flags = 0x4`). The brief also
+     names `src/open_flags.rs:33-122`.
+   - **The 10 macOS-only test rows** of `tests/catalog.rs` (APFS refusing a non-UTF-8 name with os
+     error 92).
+   - **`safe_open.rs:104:19 False` and `:107` will be uncovered there.** Record them as (U) on
+     aarch64-apple-darwin with the proof in `fu-LS1.txt.md`, section "(U) ON THE MAC'S TARGET
+     ONLY": the main session's answer (A).
+   - **The (U) proofs** in `fu-LS1.txt.md` are for that run's check.
+   - **The `/dev/full` test** (`file::tests::the_kernels_own_enospc_from_dev_full_is_disk_full_by_name`)
+     is Linux-only. Its arms are reached on every host by
+     `file::tests::a_full_disk_mid_write_is_returned_and_never_signalled`, so no row is expected to
+     fall there; that run is the measurement.
+2. **A non-root, 14-core run of the `store` suite.** Here: root, 4 cores. Every root-sensitive test
+   re-runs as `nobody` and passes both ways by design. The socket helpers' fall-back to `/tmp` is
+   expected to be taken there, where the temp path is long.
+3. **The `#[ignore]`d tests** (L-BCL-3 and the measurements):
+   - `tests/sealed_codec_samples.rs`, `tests/sealed_samples.rs`, `tests/sealed_write_door.rs` and
+     the private-root run of `tests/sealed_door.rs`;
+   - `tests/tix_latency.rs` and `file::sealed_door_tests::read_rows_at_timing`;
+   - the full-volume test `file::tests::the_kernels_own_enospc_on_a_full_volume_is_disk_full_by_name`.
+4. **The D1 landing.** Mutants are deferred (operator 30 Oct).
+
+## NOT DONE
+
+Nothing of this shard is open. The items above are the Mac's.
 
 ---
 
