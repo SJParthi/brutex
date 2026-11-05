@@ -87,3 +87,15 @@ commit but its own); run 2: `runner` at `d096f659`.
 One shell command of mine began with a version probe of the interpreter CLAUDE.md section 2 forbids (the language is not
 named here). It was a stray guard in a `perl` substitution command; nothing ran on it, nothing was written to a file
 and nothing tracked contains it. Every other command used shell, git, cargo, perl and node only.
+
+## Interim figures (17:10 IST 5 Nov; the final section replaces them)
+
+- Route B run 1 at `3069f0c9` (nine crates; `ROUTE-B DONE 2026-11-05 16:39:55 IST WITH NOT PROVED lines above`, exit 3 for
+  the bench and no-code `lib.rs` files only), `core` again at `0b7aa0d6` (its citation gate needs the docs entries):
+  `core` lines 7746/7774 branches 602/640; `costs` 11568/11670, 480/502; `engine` 5484/5494, 528/560; `greeks`
+  1918/1921, 93/96; `indicators` 16909/16914, 1892/2078; `lake` 5678/6135, 305/364; `store` 53276/54692, 3449/3990;
+  `telemetry` 9370/9397, 636/678; `vocab` 8185/8205, 1240/1298. Every uncovered row carries its shard's class but one
+  (the engine distinctness guard's failing side, now (F)); no row is a GAP. Run 2 (`runner` at `d096f659`) is running.
+- Gates at `62535479` on the pinned stable: `cargo fmt --all --check` rc 0; `cargo clippy -p <ten> --all-targets --locked
+  -- -D warnings` rc 0; `cargo test -p <ten> --locked --no-fail-fast` as `nobody`: rc 0, 135 result lines, 4075 passed,
+  0 failed, 17 ignored. The root run and gate 20 (CI's command, on this host) are running.
