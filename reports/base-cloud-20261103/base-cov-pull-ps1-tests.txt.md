@@ -1,9 +1,9 @@
 # base-cov-pull-ps1-tests.txt.md
 
-Written by BASE-COV-PULL-PS1: every test step (2) added (batches 1-19, GREEN-TIP `2e7a0b6d3b56` to code tip `feeba59beb6a`, 165 tests; batches 20 and 21, 5 Nov 2026, to `b5f8279ee5ca`, 4 tests; batch 22, to the code tip `a6cfc9bd1815`, changed an existing test and added none), by the name `cargo test` gives it, with its result in `cargo test -p pull --locked --no-fail-fast` (stable) at the code tip `a6cfc9bd1815`. A name in an integration file is prefixed with that file. Each was shown red under a hand change (report, Red checks). One fenced block below holds the list.
+Written by BASE-COV-PULL-PS1: every test step (2) added (batches 1-19, GREEN-TIP `2e7a0b6d3b56` to code tip `feeba59beb6a`, 165 tests; batches 20 to 23, 5 Nov 2026, to the code tip `3c2e0e39b08d`, 5 tests: batch 22 changed an existing test and added none), by the name `cargo test` gives it, with its result in `cargo test -p pull --locked --no-fail-fast` (stable) at the code tip `3c2e0e39b08d`. A name in an integration file is prefixed with that file. Each was shown red under a hand change (report, Red checks). One fenced block below holds the list.
 
 `````text
-BASE-COV-PULL-PS1 new tests: 169 (result, then name)
+BASE-COV-PULL-PS1 new tests: 170 (result, then name)
 ok capture::ps1_tests::a_name_the_host_will_not_make_is_refused_in_its_words
 ok capture::ps1_tests::an_unreadable_body_whose_folder_cannot_be_made_is_noted_and_not_kept
 ok capture::ps1_tests::a_capture_the_host_will_not_write_is_removed_and_named
@@ -173,4 +173,5 @@ ok gdfl_import::tests::a_run_that_meets_a_month_another_holds_names_the_holder_a
 ok gdfl_import::tests::a_stocks_run_that_meets_a_sidecar_another_holds_names_the_lock
 ok gdfl_import::tests::a_run_that_meets_the_census_lock_another_holds_is_refused_by_name
 ok gdfl_import::tests::a_day_flush_hook_answers_only_the_flushes_of_its_own_root
+ok fno_membership::tests::a_build_into_a_directory_another_sealed_is_judged_as_the_race_s_loser
 `````
