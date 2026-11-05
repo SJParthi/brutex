@@ -1342,15 +1342,21 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
 }
 
 /**
- * A request as the in-flight failure names it: `METHOD /path?query` on an
- * http or https address, else its whole address cut to 200 characters.
+ * A request as the in-flight failure names it: `METHOD origin/path?query` on
+ * an http or https address, else its whole address cut to 200 characters.
+ *
+ * THE ORIGIN IS KEPT (BASE-REDS-1023 repair 10; check r10, B2): named
+ * `METHOD /path?query`, a request a page sent to another host read as one to
+ * the page's own server, so a check that excuses only what its own server
+ * answered excused it too. What is never sent is never named: the fragment,
+ * and a user name and password written in the address.
  *
  * @param {{method: string, url: string}} r
  */
 export function askedAs(r) {
   try {
     const u = new URL(r.url);
-    if (u.protocol === 'http:' || u.protocol === 'https:') return `${r.method} ${u.pathname}${u.search}`;
+    if (u.protocol === 'http:' || u.protocol === 'https:') return `${r.method} ${u.origin}${u.pathname}${u.search}`;
   } catch {
     // not an address: said as written, below
   }

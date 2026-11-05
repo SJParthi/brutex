@@ -1043,13 +1043,14 @@ test('a page is judged against the four targets, each miss by name and figure', 
   assert.deepEqual(harness.judge('/x', 'cold', [load({ status: 300 })]).failures, ['/x cold: 1 of 1 loads were not the page (HTTP 300)'], 'a redirect is not the page');
   assert.deepEqual(harness.judge('/x', 'cold', [load({ status: 299, longest: 50, fcp: 299.9 })]).failures, [], 'a pause of exactly 50 ms is no pause over 50 ms; 299 is 2xx');
   // BASE-REDS-1023 repair 9: a load that did not settle names what was still in flight at its cap, each request once,
-  // in order, as METHOD /path?query; an address that is not http is said as written, cut to 200 characters.
+  // in order, as METHOD origin/path?query (repair 10: the origin kept); an address that is not http is said as written,
+  // cut to 200 characters.
   const held = harness.judge('/x', 'warm', [
     load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json?a=1' }, { method: 'POST', url: 'https://h:1/page-report' }] }),
-    load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json?a=1' }] }),
+    load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json?a=1' }, { method: 'GET', url: 'http://elsewhere:2/feeds.json?a=1' }] }),
     load({ settled: true, pending: [{ method: 'GET', url: 'http://h:1/never-counted' }] })
   ]);
-  assert.deepEqual(held.failures, ['/x warm: 2 loads still had a request in flight after 30 s: GET /feeds.json?a=1, POST /page-report'], 'a settled load\'s requests are not named');
+  assert.deepEqual(held.failures, ['/x warm: 2 loads still had a request in flight after 30 s: GET http://elsewhere:2/feeds.json?a=1, GET http://h:1/feeds.json?a=1, POST https://h:1/page-report'], 'a settled load\'s requests are not named; one path at two origins is two requests');
   assert.equal(harness.askedAs({ method: 'GET', url: `data:text/plain,${'x'.repeat(300)}` }), `GET data:text/plain,${'x'.repeat(184)}`);
   assert.equal(harness.askedAs({ method: 'GET', url: 'not an address' }), 'GET not an address');
   assert.deepEqual(harness.inFlightNames([{ pending: undefined }, { pending: [] }]), [], 'a load that names nothing adds nothing');
@@ -1096,18 +1097,19 @@ test('a real browser\'s row is checked for what does not depend on the machine: 
   assert.deepEqual(measuredRow(run('/a', [load({ settled: false })]), '/a', 'cold', 1, { polls: true }), ['/a cold: 1 loads still had a request in flight after 30 s']);
   // BASE-REDS-1023 repair 9 (the D1 landing gate, 3 Nov 2026): a cap that names only requests the stand-in answers at
   // once is the clock of a browser that had not reported an answer: the machine's. One that names a request the
-  // stand-in holds open, or names none, is the page's, and refused. Before, every one of these was refused.
-  const atOnce = (/** @type {string} */ asked) => asked !== 'GET /hang';
+  // stand-in holds open, or names none, is the page's, and refused. Before, every one of these was refused. (Repair 10:
+  // each request is named with its origin; the stand-in's own word, origin and all, is the repair-10 test's.)
+  const atOnce = (/** @type {string} */ asked) => asked !== 'GET http://h:1/hang';
   const fed = run('/a', [load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }] })]);
-  assert.deepEqual(measuredRow(fed, '/a', 'cold', 1, { answers: atOnce }), ['/a cold: 1 loads still had a request in flight after 30 s: GET /feeds.json']);
+  assert.deepEqual(measuredRow(fed, '/a', 'cold', 1, { answers: atOnce }), ['/a cold: 1 loads still had a request in flight after 30 s: GET http://h:1/feeds.json']);
   const two = run('/a', [load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }, { method: 'POST', url: 'http://h:1/page-report' }] })]);
-  assert.deepEqual(measuredRow(two, '/a', 'cold', 1, { answers: atOnce }), ['/a cold: 1 loads still had a request in flight after 30 s: GET /feeds.json, POST /page-report'], 'every request it names, answered at once');
+  assert.deepEqual(measuredRow(two, '/a', 'cold', 1, { answers: atOnce }), ['/a cold: 1 loads still had a request in flight after 30 s: GET http://h:1/feeds.json, POST http://h:1/page-report'], 'every request it names, answered at once');
   const hung = run('/a', [load({ settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }, { method: 'GET', url: 'http://h:1/hang' }] })]);
-  assert.throws(() => measuredRow(hung, '/a', 'cold', 1, { answers: atOnce }), /never on: \/a cold: 1 loads still had a request in flight after 30 s: GET \/feeds\.json, GET \/hang/, 'one request the stand-in holds open is the page\'s');
+  assert.throws(() => measuredRow(hung, '/a', 'cold', 1, { answers: atOnce }), new RegExp(`never on: /a cold: 1 loads still had a request in flight after 30 s: GET http://h:1/feeds\\.json, GET http://h:1/hang \\(its stand-in does not answer in full within ${STAND_IN_AT_ONCE_MS} ms of being asked: GET http://h:1/hang\\)$`), 'one request the stand-in holds open is the page\'s, and is named');
   assert.throws(() => measuredRow(run('/a', [load({ settled: false })]), '/a', 'cold', 1, { answers: atOnce }), /never on: \/a cold: 1 loads still had a request in flight after 30 s$/, 'a cap that names nothing is the page\'s');
-  assert.throws(() => measuredRow(fed, '/a', 'cold', 1), /never on: \/a cold: 1 loads still had a request in flight after 30 s: GET \/feeds\.json/, 'without the stand-in\'s word, refused');
+  assert.throws(() => measuredRow(fed, '/a', 'cold', 1), /never on: \/a cold: 1 loads still had a request in flight after 30 s: GET http:\/\/h:1\/feeds\.json$/, 'without the stand-in\'s word, refused');
   assert.throws(() => measuredRow(run('/a', [load({ status: 404, settled: false, pending: [{ method: 'GET', url: 'http://h:1/feeds.json' }] })]), '/a', 'cold', 1, { answers: atOnce }), /never on: \/a cold: 1 of 1 loads were not the page/, 'the stand-in\'s word excuses the settle cap only');
-  assert.deepEqual(measuredRow(fed, '/a', 'cold', 1, { polls: true }), ['/a cold: 1 loads still had a request in flight after 30 s: GET /feeds.json'], 'a polling page\'s cap, named or not');
+  assert.deepEqual(measuredRow(fed, '/a', 'cold', 1, { polls: true }), ['/a cold: 1 loads still had a request in flight after 30 s: GET http://h:1/feeds.json'], 'a polling page\'s cap, named or not');
   assert.throws(() => measuredRow(run('/a', [load({ status: 404 })]), '/a', 'cold', 1, { polls: true }), /never on: \/a cold: 1 of 1 loads were not the page/, 'polling excuses the settle cap only');
   // An interaction: each click timed or named by the clock's two outcomes, a pause only as its judgement, never NOT MEASURED.
   const rowOf = (/** @type {string} */ line, /** @type {string[]} */ failures = []) => ({ lines: ['| interaction | n | ...', line], failures });
@@ -2221,26 +2223,60 @@ async function browserStandIn(o) {
     server.closeAllConnections();
     server.close();
   };
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  const own = new URL(base).origin;
   /**
-   * Whether this stand-in answers a request, named as the harness names one
-   * in flight (`METHOD /path?query`), in full and inside its own fixed time,
-   * well within the 30 s settle cap (repair 9): every route above but those
-   * it holds open — `/stall`, `/hang`, the never-loading entry, `/later`
-   * past its first asks, `/sources.json` under `hangSources` — and
-   * `/slow.css`, whose answer comes its `ms` late.
+   * Whether this stand-in answers a request in full within
+   * {@link STAND_IN_AT_ONCE_MS} of being asked, the request named as the
+   * harness names one in flight (`METHOD origin/path?query`,
+   * `harness.askedAs`): what a capped settle may be excused for
+   * ({@link measuredRow}; repair 9, narrowed by repair 10).
+   *
+   * ONLY A REQUEST TO THIS STAND-IN'S OWN ORIGIN (`http:`, its address and
+   * port; check r10, B2: named without its origin, a request a page sent to
+   * another host, on a path this stand-in serves, was excused). A request to
+   * any other origin, a browser's own `blob:`, a websocket, or a name that is
+   * no address never reached this server, so nothing here can say it was
+   * answered.
+   *
+   * Of its routes, every one but those it holds open — `/stall`, `/hang`, the
+   * never-loading entry, `/later` (it stalls past its first asks),
+   * `/sources.json` under `hangSources` — the one whose connection it drops
+   * (`/broken`, never answered in full), and `/slow.css` asked to wait longer
+   * than STAND_IN_AT_ONCE_MS, or by a delay that is not a number of ms (check
+   * r10, B2: one asked to wait 29,999 ms was excused).
    *
    * @param {string} asked
    */
   const answers = (asked) => {
-    const m = /^[A-Z]+ (\/\S*)$/.exec(asked);
+    const m = /^[A-Z]+ (\S+)$/.exec(asked);
     if (m === null) return false;
-    const u = new URL(m[1], 'http://x');
-    if (['/stall', '/hang', '/_app/immutable/entry/app.HANG.js', '/later'].includes(u.pathname)) return false;
+    /** @type {URL} */
+    let u;
+    try {
+      u = new URL(m[1]);
+    } catch {
+      return false;
+    }
+    if (u.protocol !== 'http:' || u.origin !== own) return false;
+    if (['/stall', '/hang', '/_app/immutable/entry/app.HANG.js', '/later', '/broken'].includes(u.pathname)) return false;
     if (o.hangSources && u.pathname === '/sources.json') return false;
-    return u.pathname !== '/slow.css' || Number(u.searchParams.get('ms')) < 30_000;
+    if (u.pathname !== '/slow.css') return true;
+    const ms = Number(u.searchParams.get('ms'));
+    return Number.isFinite(ms) && ms <= STAND_IN_AT_ONCE_MS;
   };
-  return { server, log, requests, stop, answers, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
+  return { server, log, requests, stop, answers, base };
 }
+
+/**
+ * The longest a stand-in route takes to answer in full that a real browser's
+ * row may still take the 30 s settle cap on as the machine's clock, ms
+ * (BASE-REDS-1023 repair 10; check r10, B2): a thirtieth of the cap, so a
+ * request its stand-in answers this fast and that was still in flight when
+ * the cap ran out had been answered at least 29 s before. `/later?paint=400`'s
+ * stylesheet, 400 ms late, is inside it.
+ */
+const STAND_IN_AT_ONCE_MS = 1_000;
 
 /**
  * THE JUDGEMENTS OF A REAL BROWSER'S ROW THAT HOW BUSY THE MACHINE IS CAN
@@ -2293,16 +2329,22 @@ function timedJudgement(failure, page) {
  * throttled Chrome bunched its timers: 2 of 5 runs); on any other page it
  * is the page's own fault, and refused.
  *
- * A REQUEST ITS SERVER ANSWERED AT ONCE (`answers`, BASE-REDS-1023 repair 9;
- * the D1 landing gate of 3 Nov 2026 at load 36/58/54: "/speed/ warm: 1 loads
- * still had a request in flight after 30 s", on a page whose every request
- * this stand-in answers in full the moment it is asked, while the test
- * before it took 30 s more than on the tree without the repair): the
- * harness names what was in flight at the cap, and when the stand-in
- * answers each one it names at once, nothing of the page or of its server
- * held the load, so the cap is the clock of a browser that had not reported
- * an answer, and it is taken as the machine's. A cap that names a request
- * the stand-in holds open, or names none, is the page's, and refused.
+ * A REQUEST ITS SERVER ANSWERED AT ONCE (`answers`, BASE-REDS-1023 repair 9,
+ * narrowed by repair 10; the D1 landing gate of 3 Nov 2026 at load 36/58/54:
+ * "/speed/ warm: 1 loads still had a request in flight after 30 s", on a page
+ * whose every request this stand-in answers in full the moment it is asked,
+ * while the test before it took 30 s more than on the tree without the
+ * repair): the harness names what was in flight at the cap, origin and all,
+ * and the cap is taken as the machine's clock, a browser that had not
+ * reported an answer, only when every request it names was asked of the
+ * stand-in's own origin and is one the stand-in answers in full within
+ * {@link STAND_IN_AT_ONCE_MS} of being asked (`browserStandIn`'s `answers`):
+ * then nothing of the page or of its server held the load. A cap that names
+ * a request to any other origin (check r10, B2: one sent to another host was
+ * excused), one the stand-in holds open or drops, one it answers later than
+ * that (check r10, B2: `/slow.css` asked to wait 29,999 ms was excused), or
+ * that names none, is the page's and refused, the requests not answered at
+ * once named after the failure.
  *
  * @param {{lines: string[], failures: string[]}} r
  * @param {string} page
@@ -2318,14 +2360,17 @@ function measuredRow(r, page, phase, n, o = {}) {
   const m = new RegExp(`^\\| [^|]+ \\| ${phase} \\| ${n} \\| (?:${figure}|not painted) \\| ${figure} \\| ${figure} \\| ${figure} \\| (holds|FAILS) \\|$`).exec(rows[0]);
   assert.ok(m, `${page} ${phase} is measured over ${n} loads, each figure a reading: ${rows[0]}`);
   const own = r.failures.filter((f) => f.startsWith(`${page} ${phase}: `));
-  const capped = (/** @type {string} */ f) => {
+  for (const f of own) {
+    if (timedJudgement(f, page)) continue;
     const said = /^\d+ loads still had a request in flight after 30 s(?:: (.+))?$/.exec(f.slice(`${page} ${phase}: `.length));
-    if (said === null) return false;
-    if (o.polls === true) return true;
+    // On a page that polls, a capped settle is the machine's clock whatever it names.
+    if (said !== null && o.polls === true) continue;
     const answers = o.answers;
-    return said[1] !== undefined && answers !== undefined && said[1].split(', ').every((asked) => answers(asked));
-  };
-  for (const f of own) assert.ok(timedJudgement(f, page) || capped(f), `${page} ${phase} fails only on how fast the machine drew it, never on: ${f}`);
+    // Of the requests the cap names, those its stand-in does not answer in full within STAND_IN_AT_ONCE_MS (none: the machine's).
+    const late = said === null || said[1] === undefined || answers === undefined ? null : said[1].split(', ').filter((asked) => !answers(asked));
+    const named = late === null || late.length === 0 ? '' : ` (its stand-in does not answer in full within ${STAND_IN_AT_ONCE_MS} ms of being asked: ${late.join(', ')})`;
+    assert.ok(late !== null && late.length === 0, `${page} ${phase} fails only on how fast the machine drew it, never on: ${f}${named}`);
+  }
   assert.equal(m[1], own.length === 0 ? 'holds' : 'FAILS', `the targets cell agrees with the row's failures (${own.join('; ') || 'none'})`);
   return own;
 }
@@ -3871,16 +3916,16 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   const stubborn = sheet.run("trap '' TERM; sleep 1000", logFd);
   await nap(300);
   const t1 = Date.now();
-  assert.equal(await stubborn.stop(), `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
+  assert.deepEqual(await stubborn.stop(), { said: `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`, killed: true });
   assert.ok(Date.now() - t1 >= sheet.COMMAND_STOP_MS - 50);
   assert.equal(sheet.groupRunning(stubborn.child.pid), false, 'no process of its group is left');
-  assert.equal(await stubborn.stop(), 'had already left', 'a second stop signals nothing');
+  assert.deepEqual(await stubborn.stop(), { said: 'had already left', killed: false }, 'a second stop signals nothing');
   // A process of the group that outlives the command and ignores SIGTERM is waited for, bounded, then killed with the group.
   const orphan = join(dir, 'orphan.pid');
   const outlived = sheet.run(`(trap '' TERM; exec sleep 1000) & echo $! > '${orphan}'; sleep 1000`, logFd);
   const left = await pidIn(orphan);
   const t2 = Date.now();
-  assert.equal(await outlived.stop(), `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
+  assert.deepEqual(await outlived.stop(), { said: `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`, killed: true });
   assert.ok(Date.now() - t2 >= sheet.COMMAND_STOP_MS - 50, 'its group was given the wait after the command itself left');
   assert.ok(await endsWithin(left), 'and the process that outlived it was killed with the group');
   // A command that exited with a process of its group still running: the stop ends that process too.
@@ -3889,7 +3934,7 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   assert.equal(await quick.wait, 0);
   const straggler = await pidIn(behind);
   assert.ok(running(straggler));
-  assert.equal(await quick.stop(), 'was sent SIGTERM and left');
+  assert.deepEqual(await quick.stop(), { said: 'was sent SIGTERM and left', killed: false });
   assert.ok(await endsWithin(straggler), 'what the command left behind ended with its group');
   // In a run: the restart pass ends by name, and the sheet is still made.
   const r = await sheet.runSheet({ ...argsFor(), restart: 'sleep 1000', restarts: 2, restartWaitMs: 300, commandLog: join(dir, 'commands.log') }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
@@ -4111,7 +4156,7 @@ test('a process that joins a command\'s group after its SIGTERM went out, as a f
   try {
     await pidIn(ready);
     const t0 = Date.now();
-    assert.equal(await leaves.stop(), 'was sent SIGTERM and left', 'the process that joined after the signal was asked, and left');
+    assert.deepEqual(await leaves.stop(), { said: 'was sent SIGTERM and left', killed: false }, 'the process that joined after the signal was asked, and left');
     assert.ok(Date.now() - t0 < sheet.COMMAND_STOP_MS, `well inside the wait (took ${Date.now() - t0} ms)`);
     assert.equal(sheet.groupRunning(leaves.child.pid), false, 'no process of its group is left');
   } finally {
@@ -4131,7 +4176,7 @@ test('a process that joins a command\'s group after its SIGTERM went out, as a f
   const graceful = sheet.run(`sh '${counted}' '${got}' '${up}'`, logFd);
   try {
     await pidIn(up);
-    assert.equal(await graceful.stop(), 'was sent SIGTERM and left');
+    assert.deepEqual(await graceful.stop(), { said: 'was sent SIGTERM and left', killed: false });
     assert.equal(readFileSync(got, 'utf8'), 'got\n', 'its trap ran once');
   } finally {
     try {
@@ -4144,7 +4189,7 @@ test('a process that joins a command\'s group after its SIGTERM went out, as a f
   const unread = sheet.run('exec sleep 1000', logFd, { list: async () => ({ why: 'this test reads no table' }) });
   try {
     await nap(100);
-    assert.equal(await unread.stop(), 'was sent SIGTERM and left (its processes could not be listed (this test reads no table), so the group was sent SIGTERM as one, which misses a process forked at that instant)');
+    assert.deepEqual(await unread.stop(), { said: 'was sent SIGTERM and left (its processes could not be listed (this test reads no table), so the group was sent SIGTERM as one, which misses a process forked at that instant)', killed: false });
     assert.equal(sheet.groupRunning(unread.child.pid), false);
   } finally {
     try {
@@ -6096,4 +6141,127 @@ test('a request asked no more this run is not its route\'s first after a restart
   assert.ok(!r.notMeasured.some((l) => l.includes(' is not timed as a first after ')), r.notMeasured.join('\n'));
   assert.ok(r.notMeasured.some((l) => l.startsWith(`first after restart: GET ${grid.url} was not asked: it had no whole answer within --timeout-ms 60000 in `)), r.notMeasured.join('\n'));
   assert.equal(gridAfter, 0, 'the grid is asked no more after a restart');
+});
+
+// ---------------------------------------------------------------------------
+// BASE-REDS-1023 repair 10 (5 Nov 2026): check r10's two blocking findings,
+// each failing on 9bad41ad4 by name. B1: a --writer the sheet killed passed
+// the sheet when the list of its group failed or answered late. B2: a real
+// browser's row took the 30 s settle cap as the machine's for a request asked
+// of another origin, and for a stylesheet its stand-in answers 29,999 ms late.
+// ---------------------------------------------------------------------------
+
+test('a --writer the sheet had to kill fails the sheet whatever the list of its group said: a list that failed, and one slower than LIST_WAIT_MS, each said in that failure (BASE-REDS-1023 repair 10)', { timeout: 120_000 }, async () => {
+  // Before (check r10, B1): repair 9's stop said a kill as KILLED followed by
+  // why its list failed, and the sheet failed a writer only on a stop that
+  // said KILLED and nothing more, so the same kill under a `ps` that failed,
+  // or answered past LIST_WAIT_MS, was a note, and the sheet passed.
+  const dir = mkdtempSync(join(tmpdir(), 'bred1023-r10-killed-'));
+  const stubborn = "trap '' TERM; while :; do sleep 1; done";
+  // A `ps` that cannot read the table, and one that answers no sooner than 3 s, past LIST_WAIT_MS.
+  const failing = join(dir, 'failing');
+  const slow = join(dir, 'slow');
+  mkdirSync(failing);
+  mkdirSync(slow);
+  writeFileSync(join(failing, 'ps'), '#!/bin/sh\necho "no process table here" >&2\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(slow, 'ps'), '#!/bin/sh\nexec sleep 3\n', { mode: 0o755 });
+  assert.equal(sheet.LIST_WAIT_MS, 2_000);
+  const path = process.env.PATH;
+  /** @param {string | null} bin a folder whose `ps` the stop finds first, or null for the system's @param {string} tag */
+  const sheetWith = async (bin, tag) => {
+    // This test process's own PATH, put back at once: the tests of this file run one at a time.
+    if (bin !== null) process.env.PATH = `${bin}:${path}`;
+    try {
+      return await sheet.runSheet({ ...argsFor(), clients: [1], writer: stubborn, commandLog: join(dir, `commands-${tag.replaceAll(' ', '-')}.log`) }, { send: standIn({ ignore: new Set(), delayMs: 5 }).send, log: () => {} });
+    } finally {
+      process.env.PATH = path;
+    }
+  };
+  const killed = (/** @type {string} */ why) => `the --writer command's process group ${sheet.KILLED}${why}: what it was writing was ended by force, not asked to stop`;
+  const writerNotes = (/** @type {{notes: string[]}} */ r) => r.notes.filter((n) => n.startsWith("the --writer command's process group "));
+  /** @type {[string, string, boolean, string[]][]} each list's tag, its writer's failure, whether the sheet passed, its writer's notes */
+  const seen = [];
+  for (const [bin, tag, why] of /** @type {[string, string, string][]} */ ([
+    [failing, 'a list that failed', 'ps failed: Command failed: ps -A -o pid= -o pgid='],
+    [slow, 'a list slower than LIST_WAIT_MS', `ps did not answer within ${sheet.LIST_WAIT_MS} ms`]
+  ])) {
+    const r = await sheetWith(bin, tag);
+    // The kill fails the sheet, and its line still says how the list degraded; the sheet does not pass; no note says it.
+    const line = killed(` (its processes could not be listed (${why}), so the group was sent SIGTERM as one, which misses a process forked at that instant)`);
+    seen.push([tag, r.failures.includes(line) ? 'failed by name' : r.failures.join(' | '), r.ok, writerNotes(r)]);
+  }
+  assert.deepEqual(seen, [
+    ['a list that failed', 'failed by name', false, []],
+    ['a list slower than LIST_WAIT_MS', 'failed by name', false, []]
+  ]);
+  // With the system's `ps`, as before: the same failure, and its list said nothing.
+  const plain = await sheetWith(null, 'plain');
+  assert.ok(plain.failures.includes(killed('')), plain.failures.join('\n'));
+  assert.deepEqual(writerNotes(plain), []);
+});
+
+test('a capped settle is the machine\'s only for requests asked of its stand-in that it answers in full at once: one asked of another origin, held open, dropped or answered late is refused by name (BASE-REDS-1023 repair 10)', async () => {
+  // Before (check r10, B2): the in-flight name dropped the origin
+  // (`GET /feeds.json`), so a request a page sent to another host, on a path
+  // the stand-in answers at once, was excused; and `/slow.css?ms=29999`, which
+  // the stand-in answers 29,999 ms after it is asked, was counted as answered
+  // at once.
+  const load = (/** @type {object} */ o) => ({ fcp: 100, longest: 10, heap: 10e6, wire: 300e3, settled: true, status: 200, drew: true, ...o });
+  /** @param {{method: string, url: string}[]} pending */
+  const cappedRun = (pending) => {
+    const j = harness.judge('/a', 'cold', /** @type {any} */ ([load({ settled: false, pending })]));
+    return { lines: ['| page | ...', j.row], failures: [...j.failures] };
+  };
+  const site = await browserStandIn({});
+  const other = await browserStandIn({ hangSources: true });
+  try {
+    const cap = '/a cold: 1 loads still had a request in flight after 30 s: ';
+    /** @param {{method: string, url: string}[]} pending @param {{answers: (asked: string) => boolean}} [s] */
+    const row = (pending, s = site) => measuredRow(cappedRun(pending), '/a', 'cold', 1, { answers: s.answers });
+    const get = (/** @type {string} */ url) => ({ method: 'GET', url });
+    /** Refused, the failure named in full, and after it the requests the stand-in does not answer at once. @param {{method: string, url: string}[]} pending @param {string} named @param {string} late */
+    const refused = (pending, named, late, s = site) =>
+      assert.throws(() => row(pending, s), (/** @type {Error} */ e) => e.message.includes(`never on: ${cap}${named} (its stand-in does not answer in full within ${STAND_IN_AT_ONCE_MS} ms of being asked: ${late})`), `${named}: refused, naming ${late}`);
+    // THE FINDING'S TWO CASES, neither excused: another origin, on a path the stand-in answers at once, and a
+    // stylesheet the stand-in answers 29,999 ms after it is asked.
+    const finding = ['http://198.51.100.7:9/feeds.json', `${site.base}/slow.css?ms=29999`];
+    const excused = finding.filter((url) => {
+      try {
+        row([get(url)]);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    assert.deepEqual(excused, [], 'a cap is the machine\'s only for its own stand-in\'s at-once answers');
+    for (const url of finding) refused([get(url)], `GET ${url}`, `GET ${url}`);
+    // Every other origin: another stand-in's port, https on this one's address, a browser's own blob, a websocket.
+    const https = site.base.replace(/^http:/, 'https:');
+    const ws = site.base.replace(/^http:/, 'ws:');
+    for (const url of [`${other.base}/feeds.json`, `${https}/feeds.json`, `blob:${site.base}/feeds.json`, `${ws}/feeds.json`]) refused([get(url)], `GET ${url}`, `GET ${url}`);
+    // A route the stand-in holds open, drops, or answers past STAND_IN_AT_ONCE_MS; a delay that is not a number of ms.
+    for (const p of ['/hang', '/stall', '/later', '/later?after=2', '/_app/immutable/entry/app.HANG.js', '/broken', `/slow.css?ms=${STAND_IN_AT_ONCE_MS + 1}`, '/slow.css?ms=soon']) refused([get(`${site.base}${p}`)], `GET ${site.base}${p}`, `GET ${site.base}${p}`);
+    refused([get(`${other.base}/sources.json`)], `GET ${other.base}/sources.json`, `GET ${other.base}/sources.json`, other);
+    // A name that is no address; and of two names, only the one not answered at once is named after the failure.
+    refused([get('not an address')], 'GET not an address', 'GET not an address');
+    refused([get(`${site.base}/feeds.json`), get('http://198.51.100.7:9/feeds.json')], `GET ${site.base}/feeds.json, GET http://198.51.100.7:9/feeds.json`, 'GET http://198.51.100.7:9/feeds.json');
+    // ANSWERED IN FULL AT ONCE, the stand-in's own origin: the cap is the machine's, and the row says it in full.
+    assert.deepEqual(row([get(`${site.base}/feeds.json`)]), [`${cap}GET ${site.base}/feeds.json`]);
+    assert.deepEqual(row([get(`${site.base}/feeds.json`), { method: 'POST', url: `${site.base}/page-report` }]), [`${cap}GET ${site.base}/feeds.json, POST ${site.base}/page-report`]);
+    // A path it does not hold, whatever it looks like (`/HANG` is answered 404 at once), and a stylesheet within the bound.
+    for (const p of ['/HANG', '/hang/', '/sources.json', `/slow.css?ms=${STAND_IN_AT_ONCE_MS}`, '/slow.css?ms=400', '/slow.css']) assert.deepEqual(row([get(`${site.base}${p}`)]), [`${cap}GET ${site.base}${p}`], p);
+    // A user name and password in the address are never named; the fragment is never sent, so never named.
+    assert.deepEqual(row([get(site.base.replace('http://', 'http://who:secret@') + '/feeds.json#part')]), [`${cap}GET ${site.base}/feeds.json`]);
+    // Two hundred at once, every one checked.
+    const many = Array.from({ length: 200 }, (_, i) => get(`${site.base}/feeds.json?i=${i}`));
+    assert.equal(row(many)[0].split(', ').length, 200);
+    refused([...many, get(`${site.base}/hang`)], harness.inFlightNames([{ pending: [...many, get(`${site.base}/hang`)] }]).join(', '), `GET ${site.base}/hang`);
+  } finally {
+    site.stop();
+    other.stop();
+  }
+  // The name keeps the origin, drops what is never sent; an address that is not http is said as written.
+  assert.equal(harness.askedAs({ method: 'GET', url: 'http://198.51.100.7:9/feeds.json?a=1#x' }), 'GET http://198.51.100.7:9/feeds.json?a=1');
+  assert.equal(harness.askedAs({ method: 'HEAD', url: 'https://who:secret@h:1/x' }), 'HEAD https://h:1/x');
+  assert.equal(harness.askedAs({ method: 'GET', url: 'ws://h:1/x' }), 'GET ws://h:1/x');
 });
