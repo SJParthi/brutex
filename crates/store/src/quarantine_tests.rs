@@ -2277,3 +2277,199 @@ fn two_runs_killed_after_their_promotions_are_both_resumed_and_counted() {
         }
     );
 }
+
+/// An act on `path`'s month by `who`, setting aside every bar of `rows`.
+fn whole_act<'a>(path: StorePath<'a>, rows: &'a [Bar], who: &'a str) -> Record<'a> {
+    Record {
+        path,
+        scope: Scope::WholeMonth,
+        cause: Cause::BeforeListing,
+        stamps: &[],
+        bars: rows.len() as u64,
+        revision: 0,
+        source_digest: digest_of(rows),
+        who,
+        reason: "invented fixture: a month recorded whole",
+    }
+}
+
+/// **A RELEASE THE HOST REFUSES IS THE ACT'S REFUSAL, NAMING THE LOCK; THE
+/// LINE ALREADY WRITTEN STAYS** (the flock test seam: no lock file refuses an
+/// unlock on request). Closing the handle let the lock go, so the next act
+/// records beside it.
+#[test]
+fn a_release_the_host_refuses_names_the_lock_and_keeps_the_line() {
+    let store = Store::new("release-refused");
+    let path = minute("QFIXU", march());
+    let rows: Vec<Bar> = (0..3).map(|i| bar(i, 6_101)).collect();
+    store.month(path, &rows);
+    crate::flock::tests::refuse_next_unlock();
+    assert_eq!(
+        record(&store.root, &whole_act(path, &rows, "released-refused")),
+        Err(QuarantineError::Io {
+            path: super::lock_path(&store.root, Vendor::Zerodha),
+            operation: "release the quarantine lock",
+            kind: std::io::ErrorKind::Other,
+        })
+    );
+    assert!(
+        matches!(probe(&store.root, path), Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth),
+        "the line and the index were written before the release"
+    );
+    let other = minute("QFIXV", march());
+    store.month(other, &rows);
+    assert!(record(&store.root, &whole_act(other, &rows, "next")).is_ok());
+    assert_eq!(
+        read_ledger(&store.root, Vendor::Zerodha)
+            .unwrap()
+            .lines
+            .len(),
+        2
+    );
+}
+
+/// **A DIRECTORY AT THE LOCK'S NAME REFUSES THE ACT BY THE LOCK'S OPEN, AND
+/// A DIRECTORY AT THE INDEX'S NAME REFUSES IT BY THE INDEX'S OPEN, BEFORE
+/// ANY LINE IS WRITTEN.**
+#[test]
+fn a_directory_at_the_lock_or_the_index_name_refuses_the_act_before_any_line() {
+    let rows: Vec<Bar> = (0..3).map(|i| bar(i, 6_203)).collect();
+    let path = minute("QFIXW", march());
+    let store = Store::new("lock-dir");
+    store.month(path, &rows);
+    let lock = super::lock_path(&store.root, Vendor::Zerodha);
+    fs::create_dir_all(&lock).unwrap();
+    match record(&store.root, &whole_act(path, &rows, "lock-dir")) {
+        Err(QuarantineError::Io {
+            path: at,
+            operation: "open the quarantine lock",
+            ..
+        }) => assert_eq!(at, lock),
+        other => panic!("the lock's open refuses the act: {other:?}"),
+    }
+    assert!(
+        !ledger_path(&store.root, Vendor::Zerodha).exists(),
+        "no line"
+    );
+
+    let store = Store::new("index-dir");
+    store.month(path, &rows);
+    let index = index_path(&store.root, Vendor::Zerodha);
+    fs::create_dir_all(&index).unwrap();
+    match record(&store.root, &whole_act(path, &rows, "index-dir")) {
+        Err(QuarantineError::Io {
+            path: at,
+            operation: "open the quarantine index",
+            ..
+        }) => assert_eq!(at, index),
+        other => panic!("the index's open refuses the act: {other:?}"),
+    }
+    assert!(
+        read_ledger(&store.root, Vendor::Zerodha)
+            .unwrap()
+            .lines
+            .is_empty(),
+        "no line"
+    );
+}
+
+/// **A SLOT OF THE SAME HASH AND ANOTHER MONTH IS PASSED OVER, NEVER TAKEN
+/// AS THIS MONTH'S** (the probe's own contract, asked directly of an image:
+/// the hash folds the month in, so only a forged slot holds both).
+#[test]
+fn a_slot_of_the_same_hash_and_another_month_is_passed_over() {
+    let key = series_key(minute("QFIXH2", march()));
+    let hash = super::hash_of(&key, march());
+    let home = super::home_of(&hash);
+    let april = YearMonth::new(2018, 4).unwrap();
+    let entry = Entry {
+        scope: Scope::WholeMonth,
+        cause: Cause::BeforeListing,
+        causes: Causes::of(Cause::BeforeListing),
+        bars: 3,
+        ledger_at: 64,
+        revision: 0,
+        written_at: 1,
+    };
+    let mut image = super::empty_image();
+    super::put(
+        &mut image,
+        home,
+        &hash,
+        super::month_code(april),
+        None,
+        entry,
+    );
+    let index = Path::new("/brutex-ls1/quarantine.idx");
+    assert_eq!(
+        super::find_slot(&image, &hash, super::month_code(march()), index),
+        Ok((home + 1, None)),
+        "the next free slot of the bucket"
+    );
+    assert_eq!(
+        super::find_slot(&image, &hash, super::month_code(april), index),
+        Ok((home, Some(entry))),
+        "the slot's own month finds it"
+    );
+}
+
+/// **A RESUME WHOSE `dropped` LINE THE LEDGER WILL NOT TAKE IS REFUSED BY
+/// THE LEDGER'S OPEN, AND THE INTENT IS STILL OWED**: a killed run's intent
+/// and promotion, then a ledger closed to writes. The apply reads and
+/// judges, takes the lock, and the dropped line's open is refused with the
+/// host's kind; the ledger opened again, the next apply finishes it.
+///
+/// The ledger closes by its mode bits, so the body runs where they bind:
+/// re-run as `nobody` when this process is root (D-0995).
+#[test]
+fn a_resume_whose_dropped_line_the_ledger_refuses_is_still_owed() {
+    crate::support::where_permission_binds(
+        "quarantine::tests::a_resume_whose_dropped_line_the_ledger_refuses_is_still_owed",
+        a_resume_whose_dropped_line_the_ledger_refuses_is_still_owed_body,
+    );
+}
+
+fn a_resume_whose_dropped_line_the_ledger_refuses_is_still_owed_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let store = Store::new("resume-ledger-closed");
+    let path = minute("QFIXY", march());
+    let rows: Vec<Bar> = (0..5).map(|i| bar(i, 7_303)).collect();
+    store.month(path, &rows);
+    let named = [rows[1].ts_micros];
+    record(
+        &store.root,
+        &Record {
+            path,
+            scope: Scope::Dropping,
+            cause: Cause::ForeignLevel,
+            stamps: &named,
+            bars: 1,
+            revision: 0,
+            source_digest: digest_of(&rows[1..2]),
+            who: "killed",
+            reason: "a run that died after its promotion",
+        },
+    )
+    .unwrap();
+    repair::drop_month(&store.root, path, SYMBOL, &named, "a run that died").unwrap();
+    let ledger = ledger_path(&store.root, Vendor::Zerodha);
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o444)).unwrap();
+    let refused = apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel));
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        refused,
+        Err(ApplyError::Quarantine(QuarantineError::Io {
+            path: ledger.clone(),
+            operation: "open the quarantine ledger",
+            kind: std::io::ErrorKind::PermissionDenied,
+        }))
+    );
+    assert!(
+        ledger_stamps(&store.root, path).unwrap().is_empty(),
+        "still owed"
+    );
+    assert!(matches!(
+        apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)),
+        Ok(Applied::Resumed { bars: 1, .. })
+    ));
+}
