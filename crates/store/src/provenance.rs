@@ -1550,9 +1550,16 @@ fn whole(file: &File, at: &Path) -> Result<Vec<u8>, ProvenanceError> {
 /// Writes every byte at `offset`. A partial write is resumed and a write
 /// that accepts nothing is refused (`WriteZero`) by `write_all_at`; what did
 /// reach the file is tail, which the next landing writes over.
+///
+/// Under `cfg(test)` a refusal armed on this thread for `"write"` on `at`
+/// replaces the host's answer, once, after the write has run: the shape of
+/// `crate::file`'s `fault`, for a write no test can have refused on a
+/// sidecar this landing has just opened and locked (D-6017, D-8561).
 fn write_fully(file: &File, at: &Path, offset: u64, bytes: &[u8]) -> Result<(), ProvenanceError> {
-    file.write_all_at(bytes, offset)
-        .map_err(|why| io_error(at, "write", why))
+    let written = file.write_all_at(bytes, offset);
+    #[cfg(test)]
+    let written = crate::file::tests::refusal("write", at).map_or(written, Err);
+    written.map_err(|why| io_error(at, "write", why))
 }
 
 /// Makes what was written to the sidecar durable, or leaves it to `batch`

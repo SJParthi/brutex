@@ -421,6 +421,10 @@ pub(super) fn audit_sealed(
         .audit()
         .map_err(|why| refusal(&file.bars_path, &why).to_string())?;
     let raw = path.to_path_buf(root);
+    // Under `cfg(test)` another actor may change the month's directory here,
+    // between the sealed form's audit and the raw form's look (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("sealed month audited", &raw);
     match std::fs::symlink_metadata(&raw) {
         Err(why) if why.kind() == ErrorKind::NotFound => Err(format!(
             "{}: the sealed month passed its full audit ({} rows in {} frames, {} bytes) and its \

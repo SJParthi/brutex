@@ -879,6 +879,10 @@ fn read_one(root: &Path, number: u64) -> Result<Generation, Fault> {
         )));
     }
     let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    // Under `cfg(test)` another actor may grow the file here, between its
+    // `fstat` and its read: the race the bound below answers (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("settings file measured", &path);
     file.take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|why| fault(why.to_string()))?;
@@ -1220,6 +1224,10 @@ fn write_temp(dir: &Path, number: u64, bytes: &[u8]) -> Result<(PathBuf, Option<
         std::process::id(),
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    // Under `cfg(test)` another actor may make that very name here, before
+    // the staging door opens it (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("settings temporary named", &temp);
     let staged = crate::staging::create(&temp).map_err(|refusal| Refusal::Io {
         path: temp.clone(),
         kind: match &refusal {
@@ -1230,6 +1238,11 @@ fn write_temp(dir: &Path, number: u64, bytes: &[u8]) -> Result<(PathBuf, Option<
     })?;
     let mut file = staged.file;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    // Under `cfg(test)` a refusal armed on this thread for the write of a
+    // temporary in `dir` replaces the host's answer, once, after the write
+    // and its flush ran: the shape of `crate::file`'s `fault` (D-8561).
+    #[cfg(test)]
+    let written = crate::file::tests::refusal("write the temporary", dir).map_or(written, Err);
     drop(file);
     if let Err(why) = written {
         let _ = std::fs::remove_file(&temp);
@@ -1317,6 +1330,10 @@ pub fn save(
     })?;
     if listed.last().is_some_and(|&top| top > reader.highest()) {
         reader.listed = false;
+        // Under `cfg(test)` another actor may change the directory here,
+        // between the save's listing and the reader's (D-8561).
+        #[cfg(test)]
+        crate::file::tests::race("settings listed", reader.root());
         reader.refresh().map_err(|fault| Refusal::Io {
             path: fault.path,
             kind: ErrorKind::Other,
@@ -1360,6 +1377,10 @@ pub fn save(
     // A HARD LINK REFUSES A NAME THAT EXISTS: of two writers that both saw
     // generation `n`, exactly one lands `n + 1`.
     let target = path_of(reader.root(), number);
+    // Under `cfg(test)` another actor may land the same number, or take the
+    // temporary away, here, between the listing and the link (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("settings temporary written", &temp);
     let linked = std::fs::hard_link(&temp, &target);
     // THE TEMPORARY NAME IS NEVER READ; removing it is tidiness, and a
     // failure to remove it leaves a file no reader opens.
@@ -1439,7 +1460,11 @@ fn landed(reader: &mut Reader, dir: &Path, generation: Generation) -> Saved {
     let superseded_by = in_force.filter(|&newest| newest > number);
     if read_back.is_none() && in_force.is_none_or(|newest| newest < number) {
         // WHY IT DID NOT READ is this generation's own file read once more,
-        // never a search of the reader's fault list: one read, O(1).
+        // never a search of the reader's fault list: one read, O(1). Under
+        // `cfg(test)` another actor may change it here, between the refresh
+        // and this read (D-8561).
+        #[cfg(test)]
+        crate::file::tests::race("settings read back", target);
         let why = match read_one(reader.root(), number) {
             Err(fault) => fault.why,
             Ok(_) => "it reads when read again, and the refresh did not step to it".to_owned(),

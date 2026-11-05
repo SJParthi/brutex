@@ -1176,6 +1176,13 @@ pub fn restate_month(
         let revision = Revision::new(ordinal)?;
         match publish(root, path, symbol_id, revision, header, &merged) {
             Ok(published) => {
+                // Under `cfg(test)` another actor may change the published
+                // revision here, before it is read back (D-8561).
+                #[cfg(test)]
+                crate::file::tests::race(
+                    "revision published",
+                    &path.to_path_buf(&revision.root(root)),
+                );
                 // READ BACK BEFORE THE FLIP: every record of the revision as
                 // a reader would open it, against what was published.
                 let reader = RevisionReader::open(root, path, symbol_id, revision)?;
@@ -1368,6 +1375,10 @@ fn write_revision(
     for batch in merged.chunks(WRITE_BATCH) {
         writer.append(batch)?;
     }
+    // Under `cfg(test)` another actor may write the revision's files here,
+    // past its lock, between the appends and their read-back (D-8561).
+    #[cfg(test)]
+    crate::file::tests::race("revision appended", &path.to_path_buf(&revision_root));
     // Verify every written block before publishing its receipt.
     for (index, offered) in merged.iter().enumerate() {
         if writer.read_record(index as u64)? != *offered {
@@ -1507,12 +1518,20 @@ fn sync_file(path: &Path, visible: bool) -> Result<(), RepairError> {
     io_at(file.sync_all(), path, "sync", visible)
 }
 
+/// Lifts a host answer into [`RepairError::Io`], naming the step.
+///
+/// Under `cfg(test)` a refusal armed on this thread for `operation` on
+/// `path` replaces the host's answer, once, after the call has run: the
+/// shape of `crate::file`'s `fault`, for the calls whose refusal no test can
+/// stage on a file this publisher has just created (D-6017, D-8561).
 fn io_at<T>(
     result: io::Result<T>,
     path: &Path,
     operation: &'static str,
     visible: bool,
 ) -> Result<T, RepairError> {
+    #[cfg(test)]
+    let result = crate::file::tests::refusal(operation, path).map_or(result, Err);
     result.map_err(|error| RepairError::Io {
         path: path.to_path_buf(),
         operation,

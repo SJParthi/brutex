@@ -597,12 +597,21 @@ fn now_micros() -> i64 {
         })
 }
 
+/// Lifts a host answer into [`RepairError::Io`], naming the step.
+///
+/// Under `cfg(test)` a refusal armed on this thread for `operation` on
+/// `path` replaces the host's answer, once, after the call has run: the
+/// shape of `crate::file`'s `fault`, for the calls whose refusal no test can
+/// stage on the pointer file this promoter has just opened and locked
+/// (D-6017, D-8561).
 fn io_at<T>(
     result: io::Result<T>,
     path: &Path,
     operation: &'static str,
     visible: bool,
 ) -> Result<T, RepairError> {
+    #[cfg(test)]
+    let result = crate::file::tests::refusal(operation, path).map_or(result, Err);
     result.map_err(|error| RepairError::Io {
         path: path.to_path_buf(),
         operation,

@@ -265,6 +265,13 @@ fn take_held(
     // covers only the attempt and the record.
     let thread = (side == Side::Writer).then(this_thread);
     let mut held = registry();
+    // Under `cfg(test)` a one-shot, per-thread refusal can be armed first,
+    // because no lock file refuses a `flock` other than `EWOULDBLOCK` on
+    // request and the callers' arms for it must still be driven (D-8561).
+    #[cfg(test)]
+    if let Some(refusal) = tests::take_host_refusal(tests::HostCall::Registered) {
+        return Err(TryLockError::Error(refusal));
+    }
     attempt()?;
     let entry = held
         .get_or_insert_with(HashMap::new)
@@ -552,8 +559,12 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
         let key = key_of(path.as_ref());
         take_held(key, Side::Writer, None, || file.borrow().try_lock())?;
         // THE TIMES FROM BEFORE THE NOTE, to put back as it is cleared; a
-        // file whose times do not read keeps whatever the clear leaves.
-        let times = file.borrow().metadata().map_or_else(
+        // file whose times do not read keeps whatever the clear leaves. Under
+        // `cfg(test)` the `fstat` can be refused once after it ran (D-8561).
+        let measured = file.borrow().metadata();
+        #[cfg(test)]
+        let measured = tests::take_host_refusal(tests::HostCall::Measure).map_or(measured, Err);
+        let times = measured.map_or_else(
             |_| std::fs::FileTimes::new(),
             |meta| {
                 let mut times = std::fs::FileTimes::new();
@@ -592,6 +603,12 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     /// exclusively, or the host's refusal, exactly as `File::try_lock_shared`
     /// returns them.
     pub fn try_lock_shared(file: F, path: P) -> Result<Self, TryLockError> {
+        // Under `cfg(test)` a one-shot, per-thread refusal can be armed
+        // first, as for [`Self::try_lock`] (D-8561).
+        #[cfg(test)]
+        if let Some(refusal) = tests::take_host_refusal(tests::HostCall::Shared) {
+            return Err(TryLockError::Error(refusal));
+        }
         file.borrow().try_lock_shared()?;
         Ok(Self::taken(file, path))
     }
@@ -678,7 +695,12 @@ impl<F: Borrow<File>, P: AsRef<Path>> Flock<F, P> {
     fn end(&mut self) -> Option<io::Result<()>> {
         if let Some(times) = self.noted.take() {
             let file = self.file.borrow();
-            if let Err(why) = file.set_len(0).and_then(|()| file.set_times(times)) {
+            let cleared = file.set_len(0).and_then(|()| file.set_times(times));
+            // Under `cfg(test)` the clear can be refused once after it ran,
+            // the shape of `crate::file`'s `fault` (D-8561).
+            #[cfg(test)]
+            let cleared = tests::take_host_refusal(tests::HostCall::Clear).map_or(cleared, Err);
+            if let Err(why) = cleared {
                 note_unnoted(self.path.as_ref(), &why);
             }
         }

@@ -471,3 +471,42 @@ fn an_absent_name_is_refused_without_a_look_and_a_link_with_one() {
     assert_eq!(looks(), 0, "an open costs none");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// **A FILE OF NONE OF THE SEVEN KINDS IS `Unknown`, NEVER A REGULAR FILE**
+/// (BASE-COV-LIBS-LS1, D-8561). On Linux an anonymous inode carries no
+/// file-type bits: the `inotify` instance GNU `tail -f` makes is none of a
+/// regular file, a link, a directory, a pipe, a socket or a device. `tail`
+/// flushes what it read only after its `inotify_init`, so the instance
+/// exists once a byte of that output has arrived. Asked of the instance's
+/// real type, followed through `/proc/<pid>/fd`, `Found::of` answers
+/// `Unknown`. No test can make such a file on macOS (its one kind there, a
+/// union mount's whiteout, cannot be made), so on the Mac this arm is the
+/// Mac's to answer.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_of_none_of_the_seven_kinds_is_unknown() {
+    use std::io::Read as _;
+    let dir = dir("unknown");
+    let watched = dir.join("watched");
+    fs::write(&watched, b"invented\n").unwrap();
+    let mut tail = std::process::Command::new("tail")
+        .arg("-f")
+        .arg(&watched)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("GNU tail starts");
+    let mut first = [0u8; 1];
+    let read = tail.stdout.as_mut().unwrap().read(&mut first).unwrap();
+    assert_eq!(read, 1, "tail printed what it read, after its inotify_init");
+    let instance = fs::read_dir(format!("/proc/{}/fd", tail.id()))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|fd| fs::read_link(fd).is_ok_and(|to| to == Path::new("anon_inode:inotify")))
+        .expect("tail -f watches through an inotify instance");
+    let kind = fs::metadata(&instance).unwrap().file_type();
+    tail.kill().unwrap();
+    tail.wait().unwrap();
+    assert_eq!(Found::of(kind), Some(Found::Unknown));
+    assert_eq!(Found::Unknown.word(), "unknown");
+    let _ = fs::remove_dir_all(&dir);
+}

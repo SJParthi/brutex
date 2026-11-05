@@ -8,8 +8,10 @@
 )]
 //! BASE-COV-LIBS-LS1: the audited door's comparison of a month's two forms,
 //! one header fact at a time. Each case puts the sealed form of a raw month
-//! written another way beside the raw month and asks the audited door; every
-//! bar is invented (the sealed door tests' own one-second month).
+//! written another way beside the raw month and asks the audited door; and
+//! (D-8561) a raw form's look that fails otherwise than "not found" (the race
+//! hook, making that change on disk). Every bar is invented (the sealed door
+//! tests' own one-second month).
 
 use std::fs;
 
@@ -167,4 +169,46 @@ fn a_sealed_audit_of_another_symbol_or_timeframe_disagrees_with_the_raw_month() 
             "{case}: {refused}"
         );
     }
+}
+
+/// **A RAW FORM'S LOOK THAT FAILS OTHERWISE THAN "NOT FOUND" NEVER SAYS THE
+/// RAW FORM IS MISSING** (D-8561): both forms of a month are on disk and
+/// agree; after the sealed form passed its audit, another actor puts a FILE
+/// where the month's directory was (a real change, the race hook's), so the
+/// raw form's look fails "not a directory". The sealed audit is passed on,
+/// never answered "its raw form is not beside it", and the raw form's own
+/// open refuses the door in the host's words. With the directory put back
+/// the same door audits both forms (the control).
+#[test]
+fn a_raw_form_look_that_fails_otherwise_is_no_missing_raw_form() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("ls1-raw-look");
+    let path = month_path(None);
+    write_raw(&root.0, path, &seconds(300));
+    let sbar = path.with_file(FileKind::SealedBars).to_path_buf(&root.0);
+    fs::write(&sbar, sealed_bytes(&root.0, path)).unwrap();
+    let month_dir = sbar.parent().unwrap().to_path_buf();
+    let aside = month_dir.with_extension("aside");
+    let lock = path.with_file(FileKind::Lock).to_path_buf(&root.0);
+    let (moved, kept) = (month_dir.clone(), aside.clone());
+    crate::file::tests::arm_race("sealed month audited", move |_raw| {
+        fs::rename(&moved, &kept).unwrap();
+        fs::write(&moved, b"not a directory").unwrap();
+    });
+    let refused = BarFile::open_existing_audited(&root.0, path, SYMBOL, u64::MAX)
+        .err()
+        .expect("a month whose directory went is not audited");
+    assert!(!crate::file::tests::race_armed(), "the race ran");
+    assert!(!refused.contains("is not beside it"), "{refused}");
+    assert_eq!(
+        refused,
+        fs::File::open(&lock).unwrap_err().to_string(),
+        "the raw form's own open refuses, in the host's words"
+    );
+    fs::remove_file(&month_dir).unwrap();
+    fs::rename(&aside, &month_dir).unwrap();
+    assert!(
+        BarFile::open_existing_audited(&root.0, path, SYMBOL, u64::MAX).is_ok(),
+        "the control audits both forms"
+    );
 }

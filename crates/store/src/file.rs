@@ -6602,6 +6602,110 @@ pub(crate) mod tests {
         })
     }
 
+    /// A host refusal armed on this thread for ANOTHER module's own lift of
+    /// a host call, matched by the operation word that lift names the call
+    /// by and the path it names (`generation`, `quarantine` and `repair`'s
+    /// `io_at`, `provenance`'s `write_fully`, `settings`' staged write;
+    /// BASE-COV-LIBS-LS1, D-8561). The shape of [`super::fault`]: the
+    /// refusal replaces the host's answer, once, AFTER the call has run, for
+    /// the calls whose refusal no test can stage on a file the caller has
+    /// just opened, locked or measured (a write, a flush, a read). The lift
+    /// that ships is the lift every test runs (D-6017).
+    struct Refusal {
+        /// The operation word it refuses.
+        operation: &'static str,
+        /// The one path it refuses on, exactly as the lift names it.
+        path: PathBuf,
+        /// How many matching lifts pass first.
+        skip: u32,
+        /// The kind it answers with.
+        kind: ErrorKind,
+    }
+
+    thread_local! {
+        static REFUSAL: RefCell<Option<Refusal>> = const { RefCell::new(None) };
+    }
+
+    /// Arms the refusal: `skip` lifts of `operation` on `path` pass on this
+    /// thread, the next one answers `kind` in place of the host, once.
+    pub(crate) fn arm_refusal(operation: &'static str, path: &Path, skip: u32, kind: ErrorKind) {
+        REFUSAL.with(|armed| {
+            *armed.borrow_mut() = Some(Refusal {
+                operation,
+                path: path.to_path_buf(),
+                skip,
+                kind,
+            });
+        });
+    }
+
+    /// Whether the armed refusal is still waiting to fire.
+    pub(crate) fn refusal_armed() -> bool {
+        REFUSAL.with(|armed| armed.borrow().is_some())
+    }
+
+    /// The armed refusal, when it fires now for `operation` on `path`.
+    pub(crate) fn refusal(operation: &str, path: &Path) -> Option<io::Error> {
+        REFUSAL.with(|armed| {
+            let mut armed = armed.borrow_mut();
+            let fault = armed.as_mut()?;
+            if fault.operation != operation || fault.path != path {
+                return None;
+            }
+            if fault.skip > 0 {
+                fault.skip -= 1;
+                return None;
+            }
+            let kind = fault.kind;
+            *armed = None;
+            Some(io::Error::new(
+                kind,
+                "refused by the store's host refusal seam",
+            ))
+        })
+    }
+
+    /// What a race armed on this thread does at its point: the REAL change
+    /// another actor makes on disk between two of a module's host calls,
+    /// handed the path the module is about to call on (BASE-COV-LIBS-LS1,
+    /// D-8561; the shape of `verdict`'s interference seam, D-6017).
+    type RaceActor = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        /// The armed race: the point it runs at and what it does, once.
+        static RACE: RefCell<Option<(&'static str, RaceActor)>> = const { RefCell::new(None) };
+    }
+
+    /// Arms `actor` to run once at `point`, on this thread.
+    pub(crate) fn arm_race(point: &'static str, actor: impl FnOnce(&Path) + 'static) {
+        RACE.with(|armed| *armed.borrow_mut() = Some((point, Box::new(actor))));
+    }
+
+    /// Whether the armed race is still waiting for its point.
+    pub(crate) fn race_armed() -> bool {
+        RACE.with(|armed| armed.borrow().is_some())
+    }
+
+    /// The seam a module calls at `point`, between two host calls: a race
+    /// armed there on this thread is taken out and run, as another actor
+    /// would act between the two calls, and the module then makes its second
+    /// call on whatever is on disk. A race armed at another point waits.
+    pub(crate) fn race(point: &'static str, path: &Path) {
+        let actor = RACE.with(|armed| {
+            let mut armed = armed.borrow_mut();
+            match armed.take() {
+                Some((at, actor)) if at == point => Some(actor),
+                waiting => {
+                    *armed = waiting;
+                    None
+                }
+            }
+        });
+        if let Some(actor) = actor {
+            actor(path);
+        }
+    }
+
     /// Arms the threshold write's fault for the next one on this thread.
     pub(super) fn arm_threshold_fault() {
         THRESHOLD_FAULT.with(|armed| armed.set(true));

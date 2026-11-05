@@ -11,7 +11,10 @@
 //! leaves while the other still holds it, an absent registry, the
 //! refusal sentence a formatter will not take, and two answers only a FRESH
 //! process can show: a note-clearing failure said once per process, and a
-//! turn that ends before this process recorded any lock.
+//! turn that ends before this process recorded any lock. And (D-8561) the
+//! host refusals no lock file makes on request, through the flock test
+//! seam: a noted lock's refused `fstat`, a patient shared or exclusive lock
+//! the host refuses, and a holder's note the host will not clear.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
@@ -22,9 +25,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use super::tests::{HostCall, host_refusal_armed, refuse_next_host};
 use super::{
     Flock, Held, Holder, Impatient, Side, Turn, TurnState, Turns, forget_in, key_of, note_unnoted,
-    registry, whole,
+    registry, whole, with_patience,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -276,6 +280,178 @@ fn a_turn_ended_before_any_lock_was_recorded_makes_no_registry() {
                 (1, 1),
                 "the ticket was handed on"
             );
+        },
+    );
+}
+
+/// The lock file opened to read and write, as a month's writer opens it.
+fn writable(path: &Path) -> File {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap()
+}
+
+/// Whether this process records no writer of `key` (an absent registry or
+/// entry records none).
+fn no_writer_recorded(key: u64) -> bool {
+    registry()
+        .as_ref()
+        .is_none_or(|holders| holders.get(&key).is_none_or(|entry| entry.writer.is_none()))
+}
+
+/// **A NOTED LOCK WHOSE `fstat` THE HOST REFUSES IS STILL TAKEN AND NOTED,
+/// AND ITS END PUTS BACK NO TIME** (D-8561): the times a holder's note is
+/// cleared back to are the ones the `fstat` read before the note. Refused
+/// (the flock test seam, after the call ran), there are none, so the clear
+/// leaves the modification time where its truncate put it. The control: an
+/// `fstat` that answers puts the old time back.
+#[test]
+fn a_noted_lock_whose_fstat_is_refused_puts_back_no_time() {
+    let path = scratch("noted-fstat");
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let make_old = || writable(&path).set_modified(old).unwrap();
+    let modified = || std::fs::metadata(&path).unwrap().modified().unwrap();
+    make_old();
+    let held = Flock::try_lock_noted(writable(&path), path.clone()).expect("nobody holds it");
+    assert!(
+        std::fs::metadata(&path).unwrap().len() > 0,
+        "the note is left"
+    );
+    held.release().unwrap();
+    assert_eq!(modified(), old, "the answered fstat's time is put back");
+    make_old();
+    refuse_next_host(HostCall::Measure, io::ErrorKind::PermissionDenied);
+    let held = Flock::try_lock_noted(writable(&path), path.clone())
+        .expect("a refused fstat leaves the lock taken");
+    assert!(!host_refusal_armed(), "the fstat asked the seam");
+    assert!(
+        std::fs::metadata(&path).unwrap().len() > 0,
+        "the note is left all the same"
+    );
+    held.release().unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "and cleared");
+    assert_ne!(modified(), old, "no time was read, so none is put back");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// **A PATIENT SHARED LOCK THE HOST REFUSES IS REFUSED IN THE HOST'S KIND,
+/// AT ONCE, RECORDING NOTHING** (D-8561): the refusal (the flock test seam,
+/// before the call) is no holder, so it is never waited out, even with
+/// patience to spend, and no reader is registered. The control: the next
+/// attempt takes the lock.
+#[test]
+fn a_patient_shared_lock_the_host_refuses_is_the_hosts_error_at_once() {
+    let path = scratch("shared-host");
+    let key = key_of(&path);
+    refuse_next_host(HostCall::Registered, io::ErrorKind::Unsupported);
+    let refused = with_patience(Duration::from_secs(5), || {
+        Flock::try_lock_shared_patiently(File::open(&path).unwrap(), path.clone())
+    });
+    match refused {
+        Err(std::fs::TryLockError::Error(why)) => {
+            assert_eq!(why.kind(), io::ErrorKind::Unsupported, "{why}");
+        }
+        other => panic!("the host's refusal, not a wait or a lock: {other:?}"),
+    }
+    assert!(!host_refusal_armed());
+    assert!(
+        registry()
+            .as_ref()
+            .is_none_or(|holders| holders.get(&key).is_none_or(|entry| entry.readers == 0)),
+        "a refused attempt records no reader"
+    );
+    let held = Flock::try_lock_shared_patiently(File::open(&path).unwrap(), path.clone())
+        .expect("the control takes it");
+    held.release().unwrap();
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// **A PATIENT EXCLUSIVE LOCK THE HOST REFUSES IS `Impatient::Host`, AT
+/// ONCE, RECORDING NO WRITER** (D-8561): within a five-second bound the
+/// refusal (the flock test seam, before the call) is answered as the host's,
+/// never as a hold waited out, and no holder is named. The control: the
+/// next attempt takes the lock.
+#[test]
+fn a_patient_exclusive_lock_the_host_refuses_is_impatient_host() {
+    let path = scratch("patient-host");
+    let key = key_of(&path);
+    refuse_next_host(HostCall::Registered, io::ErrorKind::Unsupported);
+    let refused = Flock::try_lock_patiently(
+        writable(&path),
+        path.clone(),
+        Duration::from_secs(5),
+        "an LS1 test writer",
+    );
+    match refused {
+        Err(Impatient::Host(why)) => assert_eq!(why.kind(), io::ErrorKind::Unsupported, "{why}"),
+        other => panic!("the host's refusal, not a hold: {other:?}"),
+    }
+    assert!(!host_refusal_armed());
+    assert!(no_writer_recorded(key), "a refused attempt records none");
+    let held = Flock::try_lock_patiently(
+        writable(&path),
+        path.clone(),
+        Duration::ZERO,
+        "an LS1 test writer",
+    )
+    .expect("the control takes it");
+    assert!(!no_writer_recorded(key), "the control is recorded");
+    held.release().unwrap();
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// **A HOLDER'S NOTE WHOSE CLEAR THE HOST REFUSES IS SAID, AND THE LOCK IS
+/// STILL LET GO** (D-8561): in a fresh process with its own sink, a noted
+/// lock whose truncate-and-restore is refused as it ends (the flock test
+/// seam, after the calls ran) says so once on `store.flock`, naming the lock
+/// file and the refusal, and its release still answers `Ok`: the same file
+/// locks again at once.
+#[test]
+fn a_note_the_host_will_not_clear_is_said_and_the_lock_still_let_go() {
+    in_a_fresh_process(
+        "flock::cover_tests::a_note_the_host_will_not_clear_is_said_and_the_lock_still_let_go",
+        || {
+            let path = scratch("note-clear");
+            let log = path.with_file_name("log");
+            std::fs::create_dir_all(&log).unwrap();
+            let sink = telemetry::install(
+                &telemetry::Config::new(&log).with_min_level(telemetry::Level::Trace),
+            )
+            .expect("a fresh process has no sink");
+            let held =
+                Flock::try_lock_noted(writable(&path), path.clone()).expect("nobody holds it");
+            refuse_next_host(HostCall::Clear, io::ErrorKind::StorageFull);
+            held.release()
+                .expect("a refused clear is no refused unlock");
+            assert!(!host_refusal_armed(), "the clear asked the seam");
+            let found = telemetry::tail(
+                &log,
+                sink.keep_files(),
+                &telemetry::Query::last(64).from_target("store.flock"),
+            );
+            assert_eq!(found.records.len(), 1, "{:?}", found.records);
+            let line = &found.records[0];
+            let field = |key: &str| {
+                line.fields
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            };
+            assert_eq!(
+                field("file"),
+                Some(telemetry::OwnedValue::Str(path.display().to_string()))
+            );
+            assert_eq!(
+                field("why"),
+                Some(telemetry::OwnedValue::Str(
+                    "refused by the flock test seam".to_owned()
+                ))
+            );
+            let again = Flock::try_lock(writable(&path), path.clone()).expect("it was let go");
+            again.release().unwrap();
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
         },
     );
 }

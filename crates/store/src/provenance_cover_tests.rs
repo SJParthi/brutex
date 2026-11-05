@@ -10,8 +10,9 @@
 //! a sidecar of another month of the same series, a sidecar name that holds
 //! no regular file, a served generation that cannot be resolved, a sealed
 //! form that cannot be opened, a sealed month's own records, a sidecar the
-//! host will not open, and a landing recorded inside a durable batch. Every
-//! bar, landing and name is invented.
+//! host will not open, and a landing recorded inside a durable batch. And
+//! (D-8561) a new sidecar whose header write the host refuses, through the
+//! host refusal seam. Every bar, landing and name is invented.
 
 use std::fs;
 use std::path::PathBuf;
@@ -395,4 +396,40 @@ fn a_device_the_host_will_not_measure_refuses_the_deferred_flush() {
     }
     let made = batch.make_durable(1).unwrap();
     assert_eq!(made.files, 0, "the batch holds no flush of it: {made:?}");
+}
+
+/// **A NEW SIDECAR WHOSE HEADER WRITE THE HOST REFUSES REFUSES THE LANDING
+/// BY THE SIDECAR'S NAME** (D-8561): the header's write on the sidecar this
+/// landing has just opened read-write and locked is refused (the host
+/// refusal seam, after the call ran, in `write_fully`'s shape), and the
+/// landing answers `Io` naming the sidecar, the write and the host's kind,
+/// never a record claimed. The control: the next landing of the same commit
+/// is written.
+#[test]
+fn a_new_sidecar_whose_header_write_is_refused_refuses_the_landing() {
+    let root = Root::new("header-write");
+    let june = month(2024, 6);
+    let mut file = BarFile::open_or_create(&root.0, june, SYMBOL).unwrap();
+    let appended = file.append(&bars(june, 4)).unwrap();
+    let at = root.file(june, FileKind::Provenance);
+    crate::file::tests::arm_refusal("write", &at, 0, std::io::ErrorKind::StorageFull);
+    match record(&root.0, &file, june, appended, &landing(june, 12)) {
+        Err(ProvenanceError::Io {
+            path,
+            action: "write",
+            source,
+        }) => {
+            assert_eq!(path, at);
+            assert_eq!(source.kind(), std::io::ErrorKind::StorageFull);
+        }
+        other => panic!("the header's write refuses the landing: {other:?}"),
+    }
+    assert!(
+        !crate::file::tests::refusal_armed(),
+        "the write asked the seam"
+    );
+    assert!(matches!(
+        record(&root.0, &file, june, appended, &landing(june, 12)),
+        Ok(Recorded::Written(_))
+    ));
 }
