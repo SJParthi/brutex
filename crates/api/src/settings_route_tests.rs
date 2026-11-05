@@ -1069,3 +1069,34 @@ fn the_check_is_bounded_by_the_value_cap() {
         );
     }
 }
+
+/// **THE SETTINGS READ OFF THE WORKER IS THE SETTINGS READ** (BASE-COV-API
+/// repair 3, D-8661): `snapshot_off_worker`, which nothing in the workspace
+/// called (L-BCA-7), answers what `snapshot` answers for the same store: a
+/// store with no settings, and a store root that does not exist.
+#[tokio::test]
+async fn the_settings_read_off_the_worker_is_the_settings_read() {
+    for name in [
+        "settings-cover-off-worker",
+        "settings-cover-off-worker-absent",
+    ] {
+        let root = crate::scratch::path(name);
+        let _ = std::fs::remove_dir_all(&root);
+        if name.ends_with("worker") {
+            std::fs::create_dir_all(&root).expect("a scratch store");
+        }
+        let off = snapshot_off_worker(root.clone()).await;
+        let on = snapshot(&root);
+        assert_eq!(
+            (
+                off.highest,
+                off.newest.is_some(),
+                off.faults.len(),
+                off.stopped.clone()
+            ),
+            (on.highest, on.newest.is_some(), on.faults.len(), on.stopped),
+            "{name}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

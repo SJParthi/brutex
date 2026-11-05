@@ -846,3 +846,34 @@ async fn a_spot_run_keeps_up_to_three_instruments_on_the_wire_and_never_more() {
     assert!(run.touched_wire);
     assert_eq!(run.credential_stop, None);
 }
+
+/// **A PARAMETER STORE ANSWER IS CLASSED BY WHAT IT SAYS** (BASE-COV-API
+/// repair 3, D-8661): `Unreadable::of_secret`, which no test reached. An
+/// unreachable store is transport, worth retrying; a denied, missing or empty
+/// parameter is configuration, which a retry cannot fix. The reason is kept
+/// as given, whatever it holds.
+#[test]
+fn a_parameter_store_answer_is_classed_by_what_it_says() {
+    use pull::secret::SecretError;
+    for (kind, class, why) in [
+        (
+            SecretError::Unreachable,
+            Unread::Transport,
+            "a socket that did not answer",
+        ),
+        (
+            SecretError::AccessDenied,
+            Unread::Configuration,
+            "the role may not read it",
+        ),
+        (
+            SecretError::NotFound,
+            Unread::Configuration,
+            "no parameter at that path",
+        ),
+        (SecretError::Empty, Unread::Configuration, ""),
+    ] {
+        let read = Unreadable::of_secret(kind, why.to_owned());
+        assert_eq!((read.class, read.why.as_str()), (class, why), "{kind:?}");
+    }
+}

@@ -1474,3 +1474,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "merge_cover_tests.rs"]
+mod cover_tests;
