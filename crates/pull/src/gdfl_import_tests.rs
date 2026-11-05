@@ -4992,6 +4992,32 @@ fn a_month_cut_off_in_its_creation_is_counted_unborn() {
     std::fs::remove_dir_all(store).unwrap();
 }
 
+/// What a kill inside a run's first month creation leaves in `store`, made
+/// on purpose (BASE-COV-PULL-PSA, D-7338): the journal the clean run wrote,
+/// up to and including its first `begin` line, so that day is open; and, at
+/// the first month the clean run landed (the first file of `want` under
+/// `bars/`, a month's bars), the header region of zeros the store writes
+/// before a new month's first commit. Nothing else of the run is on disk.
+fn cut_in_creation(clean: &Path, store: &Path, want: &BTreeMap<PathBuf, Vec<u8>>) {
+    let journal = std::fs::read_to_string(journal_path(clean)).unwrap();
+    let lines: Vec<&str> = journal.lines().collect();
+    let begun = lines.iter().position(|l| l.starts_with("begin ")).unwrap();
+    let to = journal_path(store);
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    std::fs::write(&to, lines[..=begun].join("\n") + "\n").unwrap();
+    let month = want.keys().find(|rel| rel.starts_with("bars")).unwrap();
+    assert_eq!(
+        month.extension(),
+        Some(std::ffi::OsStr::new("bin")),
+        "{}",
+        month.display()
+    );
+    let at = store.join(month);
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    let region = usize::try_from(store::format::HEADER_LEN).unwrap();
+    std::fs::write(&at, vec![0_u8; region]).unwrap();
+}
+
 /// WP-16 (DB-N25): A KILL -9 AT ANY POINT LEAVES EVERY MONTH AT ITS OLD STATE
 /// OR ITS NEW ONE, NEVER HALF, AND THE DAY IS DONE AGAIN ON RESUME. A child of
 /// this test binary imports three options days on four workers and is killed
@@ -5006,13 +5032,18 @@ fn a_month_cut_off_in_its_creation_is_counted_unborn() {
 /// more children make on purpose what a kill at a share of the time met only
 /// by chance: one killed, after an unkilled run's whole time, while the test
 /// holds the journal lock the run's first line waits for, which leaves no day
-/// open and nothing of the run on disk; and one left to finish.
+/// open and nothing of the run on disk; and one left to finish. And a kill
+/// inside a month's creation, which no child can be held at, is written on
+/// purpose (`cut_in_creation`) and judged and resumed as every kill is.
 #[test]
 fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store() {
     /// Where a child is stopped (the loop below says how each is chosen).
+    /// `CutInCreation` starts no child: the test writes what a kill inside
+    /// the run's first month creation leaves (`cut_in_creation`).
     #[derive(Clone, Copy, Debug)]
     enum Stop {
         At(u32),
+        CutInCreation,
         BeforeTheFirstLine,
         Never,
     }
@@ -5058,7 +5089,11 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
     // wait), so no day is open and nothing of the run is on disk; or nowhere,
     // left to finish. The last two make on purpose the two outcomes a kill at
     // a share of the time met only by chance: a killed child with no day
-    // open, and a child that ended before its kill (BASE-COV-PULL-PS1).
+    // open, and a child that ended before its kill (BASE-COV-PULL-PS1). A
+    // third such outcome, a kill inside a month's creation, has no point a
+    // child can be held at, so `CutInCreation` writes what that kill leaves
+    // (the day begun, the month's header region of zeros) and judges and
+    // resumes it as every kill (BASE-COV-PULL-PSA, D-7338).
     let stops = [
         Stop::At(1),
         Stop::At(2),
@@ -5067,6 +5102,7 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
         Stop::At(5),
         Stop::At(6),
         Stop::At(7),
+        Stop::CutInCreation,
         Stop::BeforeTheFirstLine,
         Stop::Never,
     ];
@@ -5088,35 +5124,42 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
             holder.lock().unwrap();
             holder
         });
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "gdfl_import::tests::a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store",
-                "--test-threads=1",
-            ])
-            .env(CHILD, &run)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        // How long the child runs before its kill; `None`, never killed.
-        let runs_for = match stop {
-            Stop::At(eighths) => Some(took * eighths / 8),
-            Stop::BeforeTheFirstLine => Some(took),
-            Stop::Never => None,
+        let status = if matches!(stop, Stop::CutInCreation) {
+            cut_in_creation(&clean, &store, &want);
+            // The status every kill here leaves: ended by SIGKILL.
+            <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(9)
+        } else {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "gdfl_import::tests::a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, &run)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // How long the child runs before its kill; `None`, never killed.
+            let runs_for = match stop {
+                Stop::At(eighths) => Some(took * eighths / 8),
+                Stop::BeforeTheFirstLine => Some(took),
+                Stop::Never | Stop::CutInCreation => None,
+            };
+            if let Some(runs_for) = runs_for {
+                std::thread::sleep(runs_for);
+                child.kill().unwrap();
+            }
+            child.wait().unwrap()
         };
-        if let Some(runs_for) = runs_for {
-            std::thread::sleep(runs_for);
-            child.kill().unwrap();
-        }
-        let status = child.wait().unwrap();
         drop(journal_held);
         let journal = std::fs::read_to_string(journal_path(&store)).unwrap_or_default();
         let open_day = journal
             .lines()
             .last()
             .is_some_and(|l| l.starts_with("begin "));
-        if !status.success() && open_day {
+        // A kill that landed inside a day; the planted cut is no kill.
+        if !status.success() && open_day && !matches!(stop, Stop::CutInCreation) {
             interrupted += 1;
         }
         // Whatever the kill left: every month whole, the journal and the
@@ -5124,6 +5167,11 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
         let (months, unborn) = every_month_reads_whole(&store);
         match stop {
             Stop::At(_) => {}
+            Stop::CutInCreation => assert!(
+                !status.success() && open_day && months == 0 && unborn == 1,
+                "kill {n}: the planted cut read {months} months, {unborn} unborn, \
+                 {status:?}, journal {journal:?}"
+            ),
             Stop::BeforeTheFirstLine => assert!(
                 !status.success() && journal.is_empty() && months == 0 && unborn == 0,
                 "kill {n}: a child held at the journal lock left {months} months, \
