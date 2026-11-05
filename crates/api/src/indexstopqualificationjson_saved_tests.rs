@@ -222,6 +222,133 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
         let (status, settings) = page(&format!("identity={identity}")).await;
         assert_eq!(status, StatusCode::OK, "{settings}");
         assert_eq!(settings["status"], "saved", "{settings}");
-        assert!(!completion.is_empty());
+        assert_eq!(settings["kind"], "settings", "{settings}");
+        assert_eq!(settings["completion"], completion, "{settings}");
+        let total: usize = settings["total"]
+            .as_str()
+            .expect("a total")
+            .parse()
+            .expect("a count");
+        assert_eq!(
+            settings["rows"].as_array().expect("rows").len(),
+            total.min(16),
+            "{settings}"
+        );
+        let pinned = format!("identity={identity}&completion={completion}");
+        let (status, again) = page(&pinned).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(
+            again["rows"], settings["rows"],
+            "the kept reader serves the same page"
+        );
+        let (status, second) = page(&format!("{pinned}&offset=1&limit=1")).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(second["rows"][0], settings["rows"][1], "{second}");
+        let (status, folds) = page(&format!("{pinned}&kind=folds&setting=0")).await;
+        assert_eq!(status, StatusCode::OK, "{folds}");
+        assert_eq!(folds["kind"], "folds", "{folds}");
+        for period in ["training", "later", "full"] {
+            let (status, days) = page(&format!(
+                "{pinned}&kind=index-days&setting=0&period={period}"
+            ))
+            .await;
+            assert_eq!(status, StatusCode::OK, "{days}");
+            assert_eq!(days["period"], period, "{days}");
+        }
+        let (status, weeks) = page(&format!("{pinned}&kind=index-weeks&setting=0")).await;
+        assert_eq!(status, StatusCode::OK, "{weeks}");
+        assert_eq!(weeks["kind"], "index-weeks", "{weeks}");
+        let other = "ab".repeat(32);
+        for (query, why) in [
+            (
+                format!("identity={identity}&completion={other}"),
+                "native qualification pin differs",
+            ),
+            (
+                format!("{pinned}&kind=folds&setting={total}"),
+                "native fold setting outside saved extent",
+            ),
+            (
+                format!("{pinned}&kind=index-days&setting={total}"),
+                "native day/week setting outside saved extent",
+            ),
+            (
+                format!("{pinned}&offset={}", total + 1),
+                "native qualification page outside saved extent",
+            ),
+            (format!("identity={other}"), "Native qualification"),
+        ] {
+            let (status, refused) = page(&query).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{query}: {refused}"
+            );
+            let said = refused["refusal"].as_str().expect("a refusal");
+            assert!(said.contains(why), "{query}: {refused}");
+        }
+
+        // A SAVED FILE REPLACED BY A BYTE-IDENTICAL COPY is stale to the kept
+        // reader: refused once, then admitted again by a fresh open.
+        let saved = root
+            .join(cli::index_stop_qualification::NAMESPACE)
+            .join(identity);
+        let body_file = std::fs::read_dir(&saved)
+            .expect("the saved qualification")
+            .map(|entry| entry.expect("an entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "bin"))
+            .expect("a saved body");
+        let copy = saved.join("copy.tmp");
+        std::fs::copy(&body_file, &copy).expect("a byte-identical copy");
+        std::fs::rename(&copy, &body_file).expect("the copy replaces the file");
+        let (status, stale) = page(&pinned).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{stale}");
+        let (status, readmitted) = page(&pinned).await;
+        assert_eq!(status, StatusCode::OK, "{readmitted}");
+        assert_eq!(readmitted["rows"], settings["rows"], "{readmitted}");
+
+        let original = &settings["original"];
+        let source = original["identity"].as_str().expect("a source");
+        let source_pin = original["completion"].as_str().expect("its completion");
+        let (status, catalog) = stop(&format!("identity={source}")).await;
+        assert_eq!(status, StatusCode::OK, "{catalog}");
+        for kind in ["trades", "events", "days"] {
+            let (status, rows) = stop(&format!(
+                "identity={source}&completion={source_pin}&kind={kind}&setting=0"
+            ))
+            .await;
+            assert_eq!(status, StatusCode::OK, "{kind}: {rows}");
+            assert_eq!(rows["kind"], kind, "{rows}");
+        }
+        let (status, meta) = candles(&format!(
+            "identity={source}&pin={source_pin}&setting=0&kind=source"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{meta}");
+        assert_eq!(
+            meta["provenance_status"], "verified_original_source",
+            "{meta}"
+        );
+        let (status, context) = candles(&format!(
+            "identity={source}&pin={source_pin}&setting=0&kind=candles&trade=0&before=2&after=2"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{context} (catalog: {catalog})");
     });
+}
+
+/// One page of the single-stop source reader, as JSON with its status.
+async fn stop(query: &str) -> (StatusCode, Value) {
+    let uri: Uri = format!("/index-stop.json?{query}").parse().expect("a URI");
+    let (status, _, body) = crate::indexstopjson::index_stop_json(uri).await;
+    (status, serde_json::from_str(&body).expect("JSON"))
+}
+
+/// One page of the original-source candle reader, as JSON with its status.
+async fn candles(query: &str) -> (StatusCode, Value) {
+    let uri: Uri = format!("/index-stop/candles.json?{query}")
+        .parse()
+        .expect("a URI");
+    let (status, _, body) = crate::indexstopcandlesjson::index_stop_candles_json(uri).await;
+    (status, serde_json::from_str(&body).expect("JSON"))
 }
