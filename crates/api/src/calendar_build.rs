@@ -925,10 +925,12 @@ mod tests {
         assert_eq!(queued.progress().reading_for, None, "waiting its turn");
         {
             let _reading = builds.reading_census_at_start();
-            match builds.join(&key("NIFTY"), None) {
-                Joined::Follow(build) => assert!(Arc::ptr_eq(&build, &queued)),
-                other => panic!("a queued key is followed: {other:?}"),
-            }
+            let joined = builds.join(&key("NIFTY"), None);
+            let Joined::Follow(build) = joined else {
+                panic!("a queued key is followed: {joined:?}");
+            };
+            assert!(Arc::ptr_eq(&build, &queued));
+            drop(build);
             assert!(
                 matches!(
                     builds.join(&key("RELIANCE"), None),
@@ -981,10 +983,11 @@ mod tests {
         let builds = Builds::default();
         let mut running = Vec::new();
         for n in 0..MAX_BUILDS {
-            match builds.join(&key(&format!("S{n}")), None) {
-                Joined::Lead(build) => running.push(build),
-                other => panic!("room for build {n}: {other:?}"),
-            }
+            let joined = builds.join(&key(&format!("S{n}")), None);
+            let Joined::Lead(build) = joined else {
+                panic!("room for build {n}: {joined:?}");
+            };
+            running.push(build);
         }
         assert!(matches!(builds.join(&key("ONEMORE"), None), Joined::Full));
         assert!(builds.queue_at_start(&key("ONEMORE")).is_none());

@@ -4440,12 +4440,13 @@ mod tests {
     /// minute pull filed as a Groww day pass (P1-02-01, D-1765).
     #[test]
     fn a_leg_whose_payload_disagrees_with_its_envelope_refuses_the_run() {
-        let refused = |leg: String, needle: &str| match legs_from(&leg) {
-            Err(Refusal::Disagrees { leg, why }) => {
-                assert!(why.contains(needle), "{why}");
-                assert!(Refusal::Disagrees { leg, why }.why().contains(needle));
-            }
-            other => panic!("a disagreeing leg must be refused, got {other:?}"),
+        let refused = |leg: String, needle: &str| {
+            let answer = legs_from(&leg);
+            let Err(Refusal::Disagrees { leg, why }) = answer else {
+                panic!("a disagreeing leg must be refused, got {answer:?}");
+            };
+            assert!(why.contains(needle), "{why}");
+            assert!(Refusal::Disagrees { leg, why }.why().contains(needle));
         };
         // The finding's own repro: no vendor means Dhan, 1min is not 1day.
         refused(
@@ -4574,20 +4575,19 @@ mod tests {
         );
         let twice = field("/pull/spot", "dhan", "1day", "bad", "from=x&to=a&from=y");
         assert_eq!(legs_from(&good).expect("a list is not a repeat").len(), 1);
-        match legs_from(&format!("{good}&{twice}")) {
-            Err(Refusal::Malformed(why)) => {
-                assert!(
-                    why.ends_with("(its form names \"from\" more than once)"),
-                    "{why}"
-                );
-                assert!(
-                    Refusal::Malformed(why)
-                        .why()
-                        .contains("NOTHING was started")
-                );
-            }
-            other => panic!("a repeated payload field must refuse the run: {other:?}"),
-        }
+        let answer = legs_from(&format!("{good}&{twice}"));
+        let Err(Refusal::Malformed(why)) = answer else {
+            panic!("a repeated payload field must refuse the run: {answer:?}");
+        };
+        assert!(
+            why.ends_with("(its form names \"from\" more than once)"),
+            "{why}"
+        );
+        assert!(
+            Refusal::Malformed(why)
+                .why()
+                .contains("NOTHING was started")
+        );
     }
 
     /// DB-B32: the document names the run's own start and what each leg
@@ -4675,15 +4675,14 @@ mod tests {
     #[test]
     fn a_leg_that_cannot_be_read_refuses_the_whole_run() {
         let short = format!("leg={}", enc("/pull/spot|dhan|1day"));
-        match legs_from(&short) {
-            Err(Refusal::Malformed(named)) => {
-                assert!(
-                    named.contains("dhan"),
-                    "the refusal quotes the leg: {named}"
-                );
-            }
-            other => panic!("a four-part leg must be refused, got {other:?}"),
-        }
+        let answer = legs_from(&short);
+        let Err(Refusal::Malformed(named)) = answer else {
+            panic!("a four-part leg must be refused, got {answer:?}");
+        };
+        assert!(
+            named.contains("dhan"),
+            "the refusal quotes the leg: {named}"
+        );
 
         let good = field("/pull/spot", "dhan", "1day", "d", "a=1");
         let mixed = format!("{good}&{short}");
@@ -4725,14 +4724,13 @@ mod tests {
             Some(MAX_RUN_LEGS)
         );
         let over = vec![one; MAX_RUN_LEGS + 1].join("&");
-        match legs_from(&over) {
-            Err(Refusal::TooManyLegs(count)) => {
-                assert_eq!(count, MAX_RUN_LEGS + 1);
-                let why = Refusal::TooManyLegs(count).why();
-                assert!(why.contains(&MAX_RUN_LEGS.to_string()), "{why}");
-            }
-            other => panic!("one leg past the bound must be named, got {other:?}"),
-        }
+        let answer = legs_from(&over);
+        let Err(Refusal::TooManyLegs(count)) = answer else {
+            panic!("one leg past the bound must be named, got {answer:?}");
+        };
+        assert_eq!(count, MAX_RUN_LEGS + 1);
+        let why = Refusal::TooManyLegs(count).why();
+        assert!(why.contains(&MAX_RUN_LEGS.to_string()), "{why}");
         // The page's own shape: a member form of `MAX_MEMBERS` symbols that
         // each need escaping, encoded once more for the payload and once
         // more for the field.
@@ -4788,13 +4786,14 @@ mod tests {
         let invented: Vec<String> = (0..=pull::vendor::FEED_COUNT)
             .map(|n| field("/pull/spot", &format!("nofeed{n}"), "1day", "x", "a=1"))
             .collect();
-        match legs_from(&invented.join("&")) {
-            Err(Refusal::Malformed(named)) => assert!(
-                named.contains("nofeed0"),
-                "the refusal quotes the leg that named no feed: {named}"
-            ),
-            other => panic!("a leg naming no feed must be refused, got {other:?}"),
-        }
+        let answer = legs_from(&invented.join("&"));
+        let Err(Refusal::Malformed(named)) = answer else {
+            panic!("a leg naming no feed must be refused, got {answer:?}");
+        };
+        assert!(
+            named.contains("nofeed0"),
+            "the refusal quotes the leg that named no feed: {named}"
+        );
         // One invented vendor among real ones still refuses the whole run.
         let mixed = [
             field("/pull/spot", "dhan", "1day", "d", "a=1"),
@@ -7489,10 +7488,10 @@ mod tests {
     /// The reason of a NOT KNOWN answer, or a failure naming what was
     /// answered instead.
     fn not_known_of(found: &Restart) -> &str {
-        match found {
-            Restart::NotKnown(why) => why,
-            other => panic!("NOT KNOWN was expected, and the scan said {other:?}"),
-        }
+        let Restart::NotKnown(why) = found else {
+            panic!("NOT KNOWN was expected, and the scan said {found:?}");
+        };
+        why
     }
 
     /// **A RECORD THE SCAN CANNOT DECODE IS NEVER DROPPED IN SILENCE**
@@ -8567,6 +8566,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_terminal_refusal_replaces_an_earlier_transient_cause_and_stays_halted() {
+        type Answer = std::future::Ready<(axum::http::StatusCode, String)>;
         let (held, groups) = pass_fixture("terminal-after-retry", vec![leg("zerodha", "1day")]);
         let mut outcomes = vec![PassOutcome::Clean];
         let checkpoints = checkpoints_for(&groups);
@@ -8594,11 +8594,7 @@ mod tests {
             &groups,
             &mut outcomes,
             &checkpoints,
-            &|_site, _leg| {
-                panic!("a terminal feed must never be requested again");
-                #[allow(unreachable_code)]
-                std::future::ready(receipt(200, "STORED"))
-            },
+            &|_site, _leg| -> Answer { unreachable!("a terminal feed is never asked again") },
         )
         .await;
         assert_eq!(outcomes, [PassOutcome::Halted]);
@@ -9053,6 +9049,30 @@ mod tests {
              legs reads like one that had half as many: {doc}"
         );
     }
+
+    /// **A PLUS IN A LEG'S LABEL READS BACK AS A PLUS, A FUTURES LEG AS THE
+    /// PAGE WRITES IT AGREES WITH ITS ENVELOPE, AND A SLOT THAT HOLDS NO RUN
+    /// IS NEVER EDITED** (BASE-COV-API repair 3, D-8661): the `enc` and
+    /// `declared` shapes this module builds legs with, read back through
+    /// `legs_from`, and `edit_slot` over an empty slot. Extremes: a label of
+    /// one plus; a futures leg; an empty slot asked to edit; and, at once, a
+    /// plus label on a futures leg read back whole.
+    #[test]
+    fn a_plus_label_and_a_futures_leg_read_back_and_an_empty_slot_is_not_edited() {
+        let legs = legs_from(&field("/pull/fno", "dhan", "futures", "a+b", "x=1"))
+            .expect("the page's own futures leg");
+        assert_eq!(legs.len(), 1);
+        assert_eq!(
+            (legs[0].route, legs[0].dir.as_str(), legs[0].label.as_str()),
+            (Route::Fno, "futures", "a+b")
+        );
+        assert!(legs[0].body.contains("series=fut"), "{}", legs[0].body);
+        let one = legs_from(&field("/pull/spot", "dhan", "1day", "+", "x=1")).expect("one leg");
+        assert_eq!(one[0].label, "+");
+        let site = site("cover-empty-slot");
+        edit_slot(&site, |_| unreachable!("an empty slot is never edited"));
+        assert!(site.run.lock().expect("the slot").is_none());
+    }
 }
 
 /// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016): each one
@@ -9431,10 +9451,7 @@ mod cloud_mutant_tests {
         };
         let (status, body) = request_leg(site, leg).await;
         assert!(status.is_client_error(), "{status}: {body}");
-        assert!(
-            body.contains("F&amp;O") || body.contains("fno") || body.contains("F&O"),
-            "{body}"
-        );
+        assert!(body.contains("F&amp;O"), "{body}");
     }
 
     /// A leg that answers as a transient failure and adds nothing is retried
@@ -9760,15 +9777,16 @@ mod cloud_mutant_tests {
             legs_from(&leg(bound)).expect("the bound is admitted").len(),
             1
         );
-        match legs_from(&leg(bound + 1)) {
-            Err(Refusal::Malformed(why)) => assert!(
-                why.ends_with(&format!(
-                    "(its form names more than {bound} distinct fields)"
-                )),
-                "{why}"
-            ),
-            other => panic!("a payload past the bound must refuse the run: {other:?}"),
-        }
+        let answer = legs_from(&leg(bound + 1));
+        let Err(Refusal::Malformed(why)) = answer else {
+            panic!("a payload past the bound must refuse the run: {answer:?}");
+        };
+        assert!(
+            why.ends_with(&format!(
+                "(its form names more than {bound} distinct fields)"
+            )),
+            "{why}"
+        );
     }
 
     /// A leg failure or a dead chain addressed to a feed the document does
@@ -11016,10 +11034,10 @@ mod cloud_walk_tests {
     }
 
     fn guessed_of(answer: Restart) -> Guessed {
-        match answer {
-            Restart::Guessed(guessed) => *guessed,
-            other => panic!("expected a guessed answer, got {other:?}"),
-        }
+        let Restart::Guessed(guessed) = answer else {
+            panic!("expected a guessed answer, got {answer:?}");
+        };
+        *guessed
     }
 
     fn pairing_at(close: u64, runs: Vec<u64>) -> Guess {
@@ -11445,3 +11463,7 @@ mod cloud_tests_1018 {
         assert!(!may_be_open(None), "no close the walk could not pair");
     }
 }
+
+#[cfg(test)]
+#[path = "pullrun_cover_tests.rs"]
+mod cover_tests;

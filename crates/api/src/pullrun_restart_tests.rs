@@ -108,13 +108,15 @@ fn journal_at(root: &std::path::Path, records: &[Record]) -> crate::audit::Journ
     journal
 }
 
-/// The answer's NOT KNOWN reason, or a failure naming what it was instead.
+/// The answer's guessed NOT KNOWN reason, or a failure naming what it was
+/// instead. Every caller asks it of a guessed answer: a plain NOT KNOWN, which
+/// no caller here meets (its arm was never reached, BASE-COV-API repair 3),
+/// fails as any other answer does.
 fn why_not_known(answer: &Restart) -> String {
-    match answer {
-        Restart::NotKnown(why) => why.clone(),
-        Restart::Guessed(guessed) => guessed.why.clone(),
-        other => panic!("expected NOT KNOWN, got {other:?}"),
-    }
+    let Restart::Guessed(guessed) = answer else {
+        panic!("expected a guessed NOT KNOWN, got {answer:?}");
+    };
+    guessed.why.clone()
 }
 
 /// `/pull/run.json` for `answer`, parsed.
@@ -628,10 +630,10 @@ fn a_close_that_directly_follows_its_walk_still_pairs() {
 
 /// The guessed half of `answer`, or a failure naming what it was instead.
 fn guessed_of(answer: &Restart) -> &Guessed {
-    match answer {
-        Restart::Guessed(guessed) => guessed,
-        other => panic!("expected a guessed NOT KNOWN, got {other:?}"),
-    }
+    let Restart::Guessed(guessed) = answer else {
+        panic!("expected a guessed NOT KNOWN, got {answer:?}");
+    };
+    guessed
 }
 
 /// **AN F&O WALK'S CLOSE BEHIND ANOTHER WALK'S OPENING RECORD IS NOT KNOWN**

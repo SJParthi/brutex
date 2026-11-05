@@ -193,24 +193,24 @@ fn feed(root: &Root, query: &str) -> Result<Value, Refusal> {
 }
 
 fn asked(result: Result<Value, Refusal>) -> String {
-    match result {
-        Err(Refusal::Asked(why)) => why,
-        other => panic!("expected a 400 refusal, got {other:?}"),
-    }
+    let Err(Refusal::Asked(why)) = result else {
+        panic!("expected a 400 refusal, got {result:?}");
+    };
+    why
 }
 
 fn absent(result: Result<Value, Refusal>) -> String {
-    match result {
-        Err(Refusal::Absent(why)) => why,
-        other => panic!("expected a 404, got {other:?}"),
-    }
+    let Err(Refusal::Absent(why)) = result else {
+        panic!("expected a 404, got {result:?}");
+    };
+    why
 }
 
 fn refused(result: Result<Value, Refusal>) -> String {
-    match result {
-        Err(Refusal::Refused(why)) => why,
-        other => panic!("expected a 500 refusal, got {other:?}"),
-    }
+    let Err(Refusal::Refused(why)) = result else {
+        panic!("expected a 500 refusal, got {result:?}");
+    };
+    why
 }
 
 // ═══ paging and fields ═══
