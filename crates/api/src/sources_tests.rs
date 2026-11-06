@@ -2568,3 +2568,92 @@ fn a_row_is_compared_by_its_feeds_roles_and_tallied_by_what_it_was() {
     assert_eq!(summed["prices_within_tolerance"], 3);
     assert_eq!(summed["prices_disagree"], 0);
 }
+
+/// **THE DAY TABLE'S QUESTION, A BASIS NO ONE MEASURED AND A MISSING DAY'S
+/// REASON ARE SAID AT THEIR EDGES.** The route tests ask well-formed days of
+/// held GDFL and Zerodha series, so the refusals and the reasons below were
+/// never reached.
+///
+/// Extremes: (1) a year of two digits is no day; (2) four dash-separated
+/// fields are none; (3) a month alone at `to` is its last day, the 29th of
+/// a leap February; (4) February 30th is refused; (5) a thirteenth month is
+/// refused; (6) `from` after `to` is refused by name; (7) an order that is
+/// neither `asc` nor `desc` is refused; (8) a feed whose basis was never
+/// measured says null and why; (9) no feed storing the rung, a series of no
+/// month, GDFL before and after its archive, Zerodha before and after the
+/// operator's window, a Sunday inside it and a weekday inside it each get
+/// their own word. Combined: (10) a Sunday before GDFL's archive is "before
+/// the archive" (the archive is asked before the calendar); (11) a Sunday
+/// before Zerodha's window is "outside your window" (the window is asked
+/// before the calendar). Out of the box: (12) the year 0000 and a year in
+/// full-width digits are no days.
+#[test]
+fn the_day_questions_an_unmeasured_basis_and_a_missing_days_reason_are_said_at_their_edges() {
+    let refused = |text: &str| day_param(text, "from", false).expect_err(text);
+    assert_eq!(
+        refused("24-03"),
+        "from=\"24-03\" is not a day YYYY-MM-DD or a month YYYY-MM"
+    );
+    assert!(refused("2024-03-01-05").contains("is not a day YYYY-MM-DD"));
+    assert_eq!(day_param("2024-02", "to", true), Ok(day(2024, 2, 29)));
+    for text in [
+        "2024-02-30",
+        "2024-13",
+        "0000-01",
+        "\u{ff12}\u{ff10}\u{ff12}\u{ff14}-03",
+    ] {
+        assert!(refused(text).contains("is not a day YYYY-MM-DD"), "{text}");
+    }
+    let base = "exchange=NSE&segment=CASH&symbol=INVENTEDCO";
+    assert_eq!(
+        DayAsk::parse(&format!("{base}&from=2024-03-05&to=2024-03-04")).err(),
+        Some("from=2024-03-05 is after to=2024-03-04".to_owned())
+    );
+    assert_eq!(
+        DayAsk::parse(&format!("{base}&from=2024-03-04&order=sideways")).err(),
+        Some("order=\"sideways\" is not asc or desc".to_owned())
+    );
+
+    let basis = basis_json(Feed::Dhan, Segment::Cash, Timeframe::MINUTE_1, Kind::Stored);
+    for field in ["price", "volume", "adjusted_as_of", "close", "close_label"] {
+        assert_eq!(basis[field], Value::Null, "{field}");
+    }
+    assert!(
+        basis["unverified"]
+            .as_str()
+            .is_some_and(|why| !why.is_empty())
+    );
+
+    let inst = Instrument {
+        exchange: Exchange::Nse,
+        segment: Segment::Cash,
+        symbol: "INVENTEDCO".to_owned(),
+        contract: None,
+    };
+    let held = |vendor: Vendor, months: Vec<YearMonth>| -> HeldSeries {
+        let series = Series {
+            inst: inst.clone(),
+            vendor,
+            rung: Timeframe::MINUTE_1,
+        };
+        (series, Arc::from(months))
+    };
+    let march = vec![YearMonth::new(2024, 3).expect("a month")];
+    let gdfl = held(Vendor::Gdfl, march.clone());
+    let zerodha = held(Vendor::Zerodha, march);
+    let empty = held(Vendor::Zerodha, Vec::new());
+    for (series, when, want) in [
+        (None, day(2024, 3, 4), "no_feed_stores_this_rung"),
+        (Some(&empty), day(2024, 3, 4), "none_of_this_instrument"),
+        (Some(&gdfl), day(2018, 8, 31), "before_archive"),
+        (Some(&gdfl), day(2026, 9, 25), "after_archive"),
+        (Some(&zerodha), day(2017, 12, 29), "outside_your_window"),
+        (Some(&zerodha), day(2026, 10, 1), "outside_your_window"),
+        (Some(&zerodha), day(2024, 3, 3), "closed"),
+        (Some(&zerodha), day(2024, 3, 4), "not_held"),
+        (Some(&gdfl), day(2018, 9, 2), "before_archive"),
+        (Some(&zerodha), day(2017, 12, 31), "outside_your_window"),
+    ] {
+        assert_eq!(absent_why(series, when), want, "{when}");
+    }
+}

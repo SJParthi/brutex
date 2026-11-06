@@ -169,6 +169,13 @@ check, or code that runs:
 | `sources_tests.rs` | `a_row_is_compared_by_its_feeds_roles_and_tallied_by_what_it_was` | 11 (8 / 2 / 1) | sources.rs 2387:8 T, 2388, 2400:55 F, 2400:72 F, 2403, 2433:35 T, 2461:13 F, 2462-2463, 2534:24 T, 2535, 2539, 2560, 2598 |
 | `render.rs` | `the_finder_names_a_handler_by_its_shape_and_lets_prose_be` | 12 (8 / 2 / 2) | render.rs 5133:19 F, 5136:29 T, 5137 |
 | `server_cloud_mutant_tests_e.rs` | `the_held_back_model_answers_both_ways_at_fixed_instants` | 11 (8 / 2 / 1) | the file's 314:8 T, 317, 328 |
+| `sources_tests.rs` | `the_day_questions_an_unmeasured_basis_and_a_missing_days_reason_are_said_at_their_edges` | 12 (9 / 2 / 1) | sources.rs 1044:29 F, 1062, 1153-1155, 2671:12 T, 2672, 2677, 3804:9 F, 3805, 3812:12 T, 3813, 3819:8 T, 3821:29 T, 3823 |
+| `booleanlaunch_tests.rs` | `each_launch_field_at_its_edge_is_refused_in_its_own_words` | 15 (12 / 2 / 1) | booleanlaunch.rs 90:48 F, 109:8 T, 111:12 T, 113:13 T, 150:8 F, 152:12 T, 367-369, 425:8 T, 425:31 T, 426-429, 471:8 T, 472:12 T |
+| `booleanlaunch_tests.rs` | `observation_limits_too_small_or_unreadable_are_said_by_the_metadata_route` (seven children, each proving itself by a file) | 11 (8 / 2 / 1) | booleanlaunch.rs 224, 241:8 T, 241:32 T, 242, 408-410, 421:16 T, 422-423 |
+
+Also `booleanlaunch_tests.rs` 439, 460-465: the configuration child's profile path is passed by
+`Command::envs` over the `Option`, and its 45 s / 1 MiB watchdog is an assert, with a guard
+that kills and reaps the child on every way out (a failing assert included).
 
 Instrumented filtered run of every touched file's tests (`devtest.sh r4`, one `cargo test`):
 lib `337 passed; 5 failed; 1 ignored` (the five head-deadline host-red candidates only),
@@ -186,6 +193,10 @@ covered with `llvm-cov show` of that run's profile, the rows left in the edited 
   :5801; TRUEDATA_FNO :5647, GDFL_FNO :5756).
 - sources.rs 1632:13 F, 1633: `windows(2)` yields only two-element slices.
 - sources.rs 2458:16 F: `at` enumerates a four-element array and `equal` is `[false; 4]`.
+- booleanlaunch.rs 450:12 F: `booleanevidencejson::search_policy` returns
+  `admission_projection::policy`, whose tail is the object literal
+  `json!({"digest":..,"values":rows})` (booleanadmission_projection.rs:76-133), so
+  `as_object_mut()` is always Some.
 
 ### Host reds (G2's files)
 
@@ -197,8 +208,35 @@ covered with `llvm-cov show` of that run's profile, the rows left in the edited 
   `pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is`) fail on this host in
   every run so far, in the baseline (the file as at START) and filtered: each response is cut
   at the stall deadline after about 5.4 MB of 16 or 8 MiB ("cut after 5374637 of 16777216
-  bytes at 1.633183617s"), and one reader meets a connection reset. Proof on START with the
-  same command: pending (NEXT).
+  bytes at 1.633183617s"), and one reader meets a connection reset. PROVED a host red: on
+  START `6ea46e59` (the scratch worktree, every tracked file touched, the same instrumented
+  build) `cargo test -p api --lib --locked --no-fail-fast -- server::head_deadline_body_tests`
+  prints `test result: FAILED. 7 passed; 5 failed` with the same five messages ("cut after
+  5374637 of 16777216 bytes at 3.764259572s", "cut after 5484147 framed bytes", "cut after
+  5374638 of 8388608", "cut after 3904835 bytes", "cut after 3904834 of 16777216"), and each
+  alone (`--exact <name> --test-threads=1`) fails the same way, so it is not load: this
+  kernel (Linux 6.18.44; `tcp_wmem` 4096 16384 4194304, `tcp_rmem` 4096 131072 33554432)
+  holds 3.9-5.5 MB in flight when the stall deadline cuts the paced reader. Verify r3 ran the
+  file green on the Mac. Owed to the Mac's Route B: these tests' lines past the cut.
 
-NEXT: red round for the four new tests (a hand change each, in the scratch worktree);
-head-deadline reds on START; then G2 production rows, sources.rs first, file by file.
+### Red round 1 (each new test shown red by a hand change, then restored)
+
+Scratch worktree at `c954f932`, four hand changes, instrumented build, `cargo test -p api
+--lib --locked --no-fail-fast -- <the four>`: `test result: FAILED. 0 passed; 4 failed`,
+each at its own assertion:
+
+- `sources.rs` `price_cmp` without `|| a < 0`: "assertion `left == right` failed: a
+  negative price; left: Some((Number(-10001.00), true))".
+- `sources.rs` `compare_row` comparing one vendor's two cells unless their rungs differ:
+  `left: One` for `RowBasis::NotCompared`.
+- `render.rs` `inline_handler` without `b'/'` in attribute position: `"<br/onfocus=z>"`,
+  `left: None`.
+- `server.rs` `settled_today` with `minute > settles`: "past close", `left: Err("REFUSED · the
+  window ends 2025-07-01 and today is 2025-07-01 ...`.
+
+The worktree was restored (`git checkout -- .`) and the main tree's tracked files touched
+before its next build (OPS-10).
+
+NEXT: red round 2 for the three tests after round 1; then G2 production rows file by file
+(calendar_route, speed, trades, calendar_record, disk_route, calendar_of, scrub_route, topjson,
+operation_audit, master, then sources' day table, provenance, bars_sort, census_cache, server).
