@@ -19,6 +19,29 @@ lines, 10 sides), (F) failing arms (133 lines, 387 sides) and (U) rows with thei
 (above all `recovery.rs`, `facets.rs`, `chain.rs`, `audit_json.rs`, `settings_route.rs`), besides the items owed
 to the Mac and the two L-BCA-5 projections.
 
+## The second continuation (token `BASE-COV-API-AS1-20261105-3`, 6 Nov 2026), in progress
+
+The second continuation took the branch at `e033f06e` (owner file `12205098`), changes test code only, and
+pushes after every step. Done so far (figures from this session's own instrumented runs of the named tests, the
+pinned nightly with Route B's flags; Route B whole:api on the new code tip is still to run):
+- `7bd8a33a` `facets_tests.rs`: a delta naming an expiry, an expiry
+  not held, a delta with no expiry, an unread contract through `apply`, `Changed::of`'s skips, a `since` over no
+  census, the cache helpers driven directly, refusals through `answer()` (one contract under two spellings is
+  `rows_incomplete`), a second builder inside a held whole build, `kick` over refused reads: 76 of the file's 106
+  GAP rows covered in the facets tests' own run.
+- `d4f77b3d` `chain_route_tests.rs`: the ledger's unkeyable record (a strike of 0 paisa), an alias record, `mark`'s
+  arms, `first_stored_from` over month files, `/chain.json` with a whole and an unreadable ledger, a listed put,
+  two instants of one spot month, `render_instant` past its strikes: 22 of the file's 42 GAP rows.
+- `d4f77b3d` `census_cover_tests.rs`: the three `match` arms that `panic!` are `let-else` failing arms (rows 225,
+  492, 1163); the four asserted cases are named on their tests' `Extremes:` lines (the first continuation's
+  "Not done").
+- One slip, said plainly: one shell command of this session carried a stray version query of the interpreter the
+  brief bans. Its output was discarded; nothing ran through it and no file holds it.
+
+NEXT: the remaining G1 files by size (`recovery.rs`, `settings_route.rs`, `audit_json.rs`, `bars.rs`,
+`store_route.rs`, `candidatejson.rs`, then the small ones and the test-code rows), then every new test red
+under a hand change, then the gates and Route B whole:api on the code tip, the lists and the fix json.
+
 ## What the continuation did (token `BASE-COV-API-AS1-20261105-2`)
 
 The continuation took the branch at `3b58556d` (owner file `bf435421`), changed test code only, and pushed after
