@@ -291,4 +291,35 @@ server::feeds_route::tests::the_window_under_degraded_settings_is_served_only_fr
 server::feeds_route::tests::the_descriptor_facts_behind_five_branches_hold_feed_by_feed
   hand change: crates/pull/src/vendor.rs: «is_fold: false,» -> «is_fold: true,»
   red at crates/api/src/feeds_route.rs:3605: Zerodha measures its day as a fold
+
+Red run 2 (continuation -4): the four tests added after the run above, and the two tests whose new asserts it did
+not reach (the saved qualification's another-root and rank-budget asserts; the single-stop page kinds loop).
+Trees: local, never-pushed commits over code tip d1981ec9: red2a (532b881e) holds six hand changes at once, red2b
+(a9118762) holds one; built with the repo toolchain (rustc 1.97.1), CARGO_TARGET_DIR=/var/tmp/as3/K4, cargo test -p
+api --lib --locked --no-run (both builds stamped: no "cli run persistence disabled" warning); run as
+api-<hash> --exact <the 6 full names> (TMPDIR a 1777 tmpfs). red2a: "test result: FAILED. 0 passed; 6 failed".
+red2b: "5 passed; 1 failed": the saved qualification failed at its another-root assert, and the other five passed
+on the code tip's own code (the discovery test with its two new cases among them).
+
+autopilot::cloud_mutant_tests::a_live_loop_over_an_empty_vendor_refuses_it_by_name_and_keeps_passing (red2a)
+  hand change: crates/api/src/autopilot.rs: «"{month} did not complete. Attempt {attempts} of {MAX_MONTH_ATTEMPTS}; \» -> «"{month} did not finish. Attempt {attempts} of {MAX_MONTH_ATTEMPTS}; \»
+  red at crates/api/src/autopilot.rs:9029: the empty answer is refused by name and its month retried: {"state":"waiting","why":"2021-11 did not finish. Attempt 2 of 3; ...
+frontierjson::tests::a_frontier_whose_absence_cannot_be_checked_is_refused_by_name (red2a)
+  hand change: crates/api/src/frontierjson.rs: «"{why}. {} could not be checked for absence: {unreadable}"» -> «"{why}. {} could not be checked: {unreadable}"»
+  red at crates/api/src/frontierjson.rs:1622: <the file root>: {"rows":null,...,"refusal":"the frontier would not open. <root>/r...
+ingest::tests::a_discovery_asks_for_the_named_expirys_month_or_the_windows (red2a)
+  hand change: crates/api/src/ingest.rs: «year: request.expiry.unwrap_or_else(|| request.window.to()).year(),» -> «year: request.window.to().year(),», and «month: request .expiry .unwrap_or_else(|| request.window.to()) .month(),» -> «month: request.window.to().month(),»
+  red at crates/api/src/ingest.rs:3866: assertion `left == right` failed: underlying=NIFTY&series=opt&expiry=2026-07-30&from=2026-06-01&to=2026-06-30 left ("NIFTY", 2026, 6, "") right ("NIFTY", 2026, 7, "")
+logs::cover_tests::a_window_after_kept_out_server_errors_opens_with_their_count (red2a)
+  hand change: crates/api/src/logs.rs: «telemetry::Value::Uint(kept_out)» -> «telemetry::Value::Uint(kept_out.saturating_sub(1))»
+  red at crates/api/src/logs_cover_tests.rs:910 (the child): assertion `left == right` failed left 0 right 1; the parent at crates/api/src/isolated.rs:66: child ... failed
+indexstopqualificationjson::saved_tests::a_saved_qualification_is_served_by_every_page_that_reads_it (red2a: its rank-budget assert)
+  hand change: crates/api/src/indexstopqualificationjson.rs: «.checked_mul(u64::try_from(std::mem::size_of::<(i64, usize)>()).map_err(display)?)» -> «.checked_mul(0)»
+  red at crates/api/src/indexstopqualificationjson_saved_tests.rs:349 (the child): assertion `left == right` failed: a budget of 4143278 left Ok(4) right Err("native ranking plus retained evidence exceeds read admission")
+indexstopjson::cover_tests::a_second_root_reopens_and_a_page_kind_no_query_names_is_refused_by_name (red2a: its page kinds loop)
+  hand change: crates/api/src/indexstopjson.rs: «let (total, rows) = match asked.kind.as_str() {» -> «let (total, rows) = match asked.kind.trim() {»
+  red at crates/api/src/indexstopjson_cover_tests.rs:43: assertion `left == right` failed: "days " left Ok(Object {...}) right Err("single-stop unsupported page")
+indexstopqualificationjson::saved_tests::a_saved_qualification_is_served_by_every_page_that_reads_it (red2b: its another-root assert)
+  hand change: crates/api/src/indexstopqualificationjson.rs: «value.root == root && value.identity == asked.identity» -> «value.identity == asked.identity»
+  red at crates/api/src/indexstopqualificationjson_saved_tests.rs:331 (the child): no qualification is saved under another root: Object {"batch": String("0"), ... (the kept reader answered)
 `````
