@@ -87814,6 +87814,201 @@ files lands nothing (`already held these bytes`).
 step the other way and one monotone window maximum each way for the wobble.
 `session_between` is at most 14 calendar lookups. L-R426-08.
 
+### D-8650 — PSRB-CCI: the Commodity Channel Index as `indicators::cci`, in the published form on the typical price with the current candle included, a runtime period, and no vocabulary position — 2026-11-05
+
+**Implemented by** PSRB-CCI, built on 5 Nov 2026 by a cloud session on
+`cloud/psrb-cci-20261105` from the design
+`state/strategy-psrb-20261103/PARTS-WILLR-CCI.md` section 6 (written 5 Nov
+2026, repaired four times that day). D-8650 to D-8655 are this part's; D-8656
+to D-8659 are left spare for its repairs.
+
+**Why.** The PSRB strategy family (narrow CPR and Pivot R1, Supertrend,
+Bollinger, RSI, Williams %R, CCI and EMA 200; NSE F&O stocks, cash, intraday)
+reads the CCI in the rule set the operator confirmed on 5 Nov 2026 (AUTHOR-V2,
+"Yes, use defaults"). Nothing in `crates/indicators` computes it.
+
+**Decision.**
+
+1. **The reading is the published definition**, as the design states it:
+   `TP = (high + low + close) / 3` (`hlc3`), `SMA` the mean of the last `n`
+   typical prices (`ta.sma(hlc3, n)`), `MD` the mean absolute deviation of the
+   same `n` from that same `SMA` (`ta.dev(hlc3, n)`), and
+   `CCI = (TP - SMA) / (0.015 * MD)`: the form of `TradingView`'s built-in CCI
+   script, `ta.cci(hlc3, n)`. The current candle's typical price is one of the
+   `n` (offset 0). It is UNVERIFIED against `TradingView`'s help page and
+   output: no output of theirs was compared, so parity here is parity with the
+   published formulas (`parity_with_the_published_definition`).
+2. **A runtime period of 1 to 65,535 candles** (a `u16`; `Cci::new` refuses 0
+   only), held as a ring of `T = H + L + C` values. The first reading is after
+   exactly `period` candles, at candle `period - 1` counting from 0, where
+   `ta.sma` and `ta.dev` first have a value; none before.
+3. **No vocabulary position.** The module emits no condition bit. It is a
+   reading for the F&O strategy path, whose first caller is PSRB-STRAT; the
+   table of position sources in `crates/indicators/src/lib.rs` is unchanged.
+4. **Streaming, carried across sessions.** `fold` takes one candle and the
+   reading after candle `t` reads candles up to `t` only. One `Cci` carried
+   across session boundaries keeps its window, as `TradingView`'s intraday
+   charts do; a daily reset is a new `Cci`. A caller that wants the convention
+   "the anchor excludes the candle" keeps the previous `Reading`, a `Copy`.
+
+**Proof:** PSRB-CCI-I01, PSRB-CCI-I04 and PSRB-CCI-I06 in
+`docs/04-invariants.md`.
+
+### D-8651 — PSRB-CCI: thirds and n-multiples, the identity `CCI = 200 n dev / (3 D)`, exact comparisons by cross-multiplication, `milli` the floor for records, and a level domain of +/-10,000 points well inside the `i128` bound — 2026-11-05
+
+**Decision.** With `T = H + L + C` (three typical prices), `S` the sum of the
+window's `n` values of `T` (`3 n SMA`), `dev = n T - S` for the current candle
+(`3 n (TP - SMA)`) and `D = sum |n T_i - S|` over the window (`3 n^2 MD`),
+every quantity is an integer. The identity, in one line: `TP_t - SMA =
+(n T_t - S) / (3n) = dev / (3n)` and `MD = (1/n) sum |n T_i - S| / (3n) =
+D / (3n^2)`, so with `0.015 = 3/200`,
+`CCI = (dev / (3n)) * (200 / 3) * (3n^2 / D) = 200 n dev / (3 D)`.
+
+* `CCI > m / 1000` exactly when `200_000 n dev > 3 m D` (both sides multiplied
+  by `3 D > 0`), and `CCI < m / 1000` exactly when `200_000 n dev < 3 m D`; a
+  tie is neither. `Reading::above` and `Reading::below` compare those two
+  `i128` products: no division, no rounding, no float (`CLAUDE.md` §7).
+* At the confirmed level, `CCI > +200` exactly when `n dev > 3 D`, which is
+  `TP - SMA > 3 MD` (multiply `TP - SMA > 3 MD` by `3 n^2`); `CCI < -200`
+  exactly when `n dev < -3 D`.
+* `Reading::milli` is `floor(1000 CCI) = (200_000 n dev).div_euclid(3 D)`,
+  narrowed to an `i64` by `i64::try_from(..).ok()`, which always fits by the
+  ceiling of D-8652. It is for records and seeds; no decision reads it, and a
+  floored `milli` equal to a level is not a tie
+  (`a_floored_milli_equal_to_the_level_is_not_a_tie`).
+* A `Level` is held in thousandths of a point, an `i32`: +200 is 200,000.
+  `MAX_LEVEL_MILLI` is 10,000,000, +/-10,000 points, and a level beyond it is
+  refused by name (`LevelOutOfRange { milli }`), never wrapped. That is a
+  chosen domain, 50 times the confirmed level, not one the arithmetic forces:
+  with `D < 2^97`, `3 |m| D < 2^127` would allow about 357,914 points.
+
+**The bounds** (each a `const _: () = assert!(...)` beside the arithmetic,
+taken with `checked_mul`, so a wider domain fails the build): `3 <= T <
+3 * 2^63 < 2^65`; `0 < S < 2^16 * 2^65 = 2^81`, and so is `n T`, so
+`|n T_i - S| < 2^81`; `D < 2^16 * 2^81 = 2^97`; `200_000 n |dev| < 2^18 *
+2^16 * 2^81 = 2^115`; `3 |m| D <= 3 * 10^7 * 2^97 < 2^123`. Every product is
+inside `i128`, so no checked or saturating arithmetic runs at fold or reading
+time and none hides a wrong value. Any positive `i64` price is accepted: no
+price ceiling is needed.
+
+**Proof:** PSRB-CCI-I02 and PSRB-CCI-I05.
+
+### D-8652 — PSRB-CCI: a window of one typical price is a named state with no value and every comparison false; the ceiling `|CCI| <= 100 n / 3` and what follows from it — 2026-11-05
+
+**Decision.** `D = 0` exactly when every `n T_i` equals `S`, that is, every
+typical price in the window is equal; `dev` is then 0 too, and the published
+ratio is `0 / 0`, which `TradingView` reads as `na` (Pine's rule that a
+division by zero gives `na`, as the design recalls it: UNVERIFIED).
+`Reading::flat` names the state; `milli()` is `None`, and `above` and `below`
+are false at every level. Different candles can share a typical price
+((101, 99, 100) and (102, 98, 100) both have `T = 300`), so such a window need
+not be a still market.
+
+**The ceiling.** The deviations `n T_i - S` sum to 0, so `D` is twice the sum
+of the positive ones and `D >= 2 |dev|`. Hence
+`|CCI| <= 200 n |dev| / (3 * 2 |dev|) = 100 n / 3`, reached exactly when `dev`
+is not 0 and the current candle is the only one strictly on its side of the
+mean (every other deviation has the other sign or is 0). At `dev = 0` the
+reading is 0, and `2 |dev| = D` holds only when `D = 0`, which has no reading.
+What follows, for the strategy:
+
+* a period of 6 or less can never read above +200 (at 6 the ceiling is
+  exactly +200), so **PSRB-STRAT's searched CCI periods for a +/-200 level
+  start at 7**; at the default 20 the ceiling is 666.67;
+* a period of 1 always has `D = 0`, and has no value;
+* a period of 2 reads exactly +66.666... or -66.666... whenever it has a value;
+* at period 65,535 the ceiling's `milli` is 2,184,500,000, above `i32::MAX`,
+  which is why `milli()` returns an `i64`.
+
+**Proof:** PSRB-CCI-I03.
+
+### D-8653 — PSRB-CCI: `fold` is O(1) and `reading()` is O(period) by design, the one non-O(1) reading of the PSRB parts; the order-statistic tree is named and not built — 2026-11-05
+
+**Decision.** `Cci::fold` is two `i128` additions, at most one pop and one
+push, whatever the period and the history. `Cci::reading` makes one pass over
+the ring to sum `D`: the mean deviation is taken around the CURRENT mean, which
+moves with every candle, so every term `|n T_i - S|` changes and the window is
+held whole. At the confirmed period 20 that is 20 multiply-subtract-abs-add
+steps in `i128`. An order-statistic tree with subtree counts and sums (the
+count and the sum of the window's values above the mean give
+`D = 2 (n sum_above - S count_above)`) would make a reading O(log period); no
+O(1) method is known to the design.
+
+**O(period) is accepted and no tree is built.** The design decided it in its
+repair 1 (check N4), the default this part's brief carries; it goes to the
+operator in the evening report, and the operator may reverse it before
+PSRB-STRAT's first run. It is the limit L-PSRB-CCI-02 of
+`docs/06-limits.md`. C-PSRB-CCI-02 judges `fold` alone, so no judged row
+measures `reading()` across periods; the wrapper prints that slope on one
+unjudged line (D-8655).
+
+**Proof:** C-PSRB-CCI-01 and C-PSRB-CCI-02 in `docs/04-invariants.md`;
+L-PSRB-CCI-02 in `docs/06-limits.md`.
+
+### D-8654 — PSRB-CCI: refusals and their order, `unwrap_or(0)` where the ring's `Option` cannot be `None`, no timestamp and no later candle read, and the ring allocated once in `new` — 2026-11-05
+
+**Decision.** The refusals are `PeriodZero` (`Cci::new(0)`),
+`LevelOutOfRange { milli }` (`Level::from_milli` beyond +/-10,000,000, naming
+the value) and `Corrupt(why)`, the candle's own `check_evaluable` refusal
+(`HighBelowLow`, `RangeOverflows`, `PriceOutsideRange`, `NegativeVolume`,
+`PriceNotPositive`). `fold` checks the candle before it moves anything, so every
+refusal leaves the whole state as it was, and each test of one compares the
+whole state: ring, sum, last `T` and period.
+
+When the ring is full, `fold` pops the oldest value before it pushes, and reads
+the pop's `Option` with `unwrap_or(0)`: that arm runs only when the ring holds
+`period >= 1` values, so the default never applies. A `match` or `if let`
+there would be a branch no test can take, and `.unwrap()` and `.expect(` stay
+forbidden (gate 11). The fold reads the candle's high, low and close and
+nothing else: timestamps, the open, the volume and the open interest are not
+read, so ordering and holes are the caller's (PSRB-STRAT's), and a reading
+after candle `t` reads nothing after `t`.
+
+The ring is a `VecDeque<i128>` built by `VecDeque::with_capacity(period)` in
+`Cci::new`. Because the pop comes before the push, it never holds more than
+`period` values, and a ring built by `new` never reallocates: 16 bytes a
+candle, about 1 MiB at 65,535 (L-PSRB-CCI-03). A clone reserves only its
+length (the pinned 1.97.1 std builds a cloned `VecDeque` with
+`with_capacity_in(self.len(), ...)`, as the design's repair 3 read it), so a
+cloned `Cci` not yet warm reallocates as it fills; the measured path never
+clones.
+
+**Proof:** PSRB-CCI-I05 and PSRB-CCI-I06.
+
+### D-8655 — PSRB-CCI: C-PSRB-CCI-01 and -02, their sizes, ceiling and 2 µs budget, the unjudged reading line, and the bench helpers each part copies — 2026-11-05
+
+**Decision.** C-PSRB-CCI-01's step is one `fold`, one `reading()`, `above` at
++200 and `below` at -200, at period 20, timed after 2,000, 20,000 and 200,000
+candles of a deterministic walk. C-PSRB-CCI-02 times `fold` ALONE at periods
+20, 200 and 2,000 after 20,000 candles. Each size is 9 rounds of 20,000 steps,
+each step timed alone between two clock reads, so every figure is an upper
+bound on the step. The wrapper `crates/indicators/benches/ratio/psrb_cci.rs`
+sorts each round (gate 11 keeps sorting out of the crate), reads p50, p99 and
+max by nearest rank, prints for each size the best round's three with n and
+the p99 of the median and of the worst round, and judges the best rounds, the
+minimum over trials as the harness takes it: each p99 within the harness's
+`CEILING_PERMILLE` (3.0x) of the first size's, and at most 2 µs. The budget
+and the design's target of 400 ns are ESTIMATES until the Mac's gate 8 run
+measures them.
+
+After the two rows the wrapper prints one line without an id, "reading at
+periods 20, 200, 2000: O(period) by design, L-PSRB-CCI-02, not judged flat",
+with the best-round p99 of the step with the reading at those three periods
+(`measure_reading_period`). It judges nothing and fails nothing: it puts the
+measured slope of D-8653 on record.
+
+The rows run before the first wave's PSRB rows and the F&O rows, fold into the
+same check and are not counted in `ROWS`; their ids are string literals in
+`crates/indicators/benches/ratio.rs`, because `cost_invariants.rs` reads only
+top-level bench files. The measuring functions (`measure_step`,
+`measure_period`, `measure_reading_period`, `summarize`, `flat_within`,
+`StepCost`) live in the module, so its tests cover them at tiny sizes. Each
+PSRB part keeps its own copy of them: a shared helper would make one part wait
+on another, and the duplication is accepted. Gate 14's cover-table row for the
+two ids is the main session's to add when the family is assembled.
+
+**Proof:** C-PSRB-CCI-01 and C-PSRB-CCI-02 in `docs/04-invariants.md`.
+
 ### D-7196 — R4-26 repair 2: a basis step is crossed back by the ratio's LEVELS, never by one step's size alone; a side holds its basis across short runs; only a reversed step feeds the wobble; the ledger reads back the runs generation it names — 2026-10-24
 
 **Context.** D-7195 decision 1 (a) called a proven step `basis_reversed`

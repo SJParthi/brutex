@@ -69,6 +69,8 @@ use indicators::{Candle, OI_NULL};
 mod psrb_willr;
 
 // slot bench-mod PSRB-CCI
+#[path = "ratio/psrb_cci.rs"]
+mod psrb_cci;
 
 // ---- PSRB indicator parts (state/strategy-psrb-20261103/PARTS.md 2.3). One slot per
 // ---- part; each part inserts its bench module (the path attribute naming
@@ -801,6 +803,11 @@ fn main() {
         .collect();
 
     // slot bench-row PSRB-CCI
+    let verdicts: Vec<bool> = verdicts
+        .iter()
+        .copied()
+        .chain([psrb_cci::row(floor, &["C-PSRB-CCI-01", "C-PSRB-CCI-02"])])
+        .collect();
 
     // PSRB rows (state/strategy-psrb-20261103/PARTS.md 2.3): each part puts one statement
     // directly under its own slot, in the form the F&O rows below take, naming its own
