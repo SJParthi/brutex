@@ -1,11 +1,450 @@
 STATUS: IN PROGRESS
 
-# BASE-COV-API-AS1 (shard G1 of `SHARDS.md`), BASE-COV-API repair round 3, 5 Nov 2026
+# BASE-COV-API-AS1 (shard G1 of `SHARDS.md`), BASE-COV-API repair round 3, 5-6 Nov 2026
 
-TOKEN `BASE-COV-API-AS1-20261105-2` (a continuation; the first session's was `BASE-COV-API-AS1-20261105-1`);
-branch `cloud/cov-api-as1-20261105`, cut from the kit commit `f4111a0132473d8771d8624a9538b1362926f70b`; START
-`6ea46e59c07488eeccff388407976041852aae2c`; code tip `b85ecf4deef037dfcf26ecd0979c35dc05203d08`
-(`git rev-list -1 HEAD -- . ':(exclude)reports'`).
+TOKEN `BASE-COV-API-AS1-20261105-3` (the second continuation; the first session's was `BASE-COV-API-AS1-20261105-1`,
+the first continuation's `BASE-COV-API-AS1-20261105-2`); branch `cloud/cov-api-as1-20261105`, cut from the kit
+commit `f4111a0132473d8771d8624a9538b1362926f70b`; START `6ea46e59c07488eeccff388407976041852aae2c`; code tip
+`5f028785a452c773dd51f14887e22d6421b144d1` (`git rev-list -1 HEAD -- . ':(exclude)reports'`).
+
+**Where it stands.** Blocking item (3) is done for every file G1's brief names (the first session, D-8660,
+unchanged). Blocking item (1) is further along and still not met. Route B whole:api on the code tip reads G1's 87
+files (`SHARDS.md`'s 76 and the 11 test files AS1 added) at 60,195/60,999 lines and 4,293/4,986 branch sides: 804
+lines and 693 sides uncovered (the first continuation's tip: 1,059 and 788). Of those, **429 production GAP lines
+and 172 sides** (702 and 277 before) and 77 test-code GAP lines and 77 sides (86 and 86) remain, each listed with
+its text in `gaps-AS1.txt.md`; the rest are rows inside `#[ignore]`d tests (37 lines), HOST rows owed to the Mac's
+run (51 lines, 10 sides), (F) failing arms (139 lines, 397 sides) and (U) rows with their proofs (71 lines, 37
+sides) in `fu-AS1.txt.md`. Of the 429 production lines, 225 (and 51 sides) are the L-BCA-5 regions
+(`booleansearchjson.rs`, `index_consistency_projection.rs`, `candidatejson.rs`' catalog reads, `booleanoosjson.rs`'
+served page) and 105 (62 sides) are `recovery.rs`'; `store_route.rs` holds none now, `facets.rs` fell from 74/25 to
+11/8 and `audit_json.rs` from 24/5 to 2/2. Line 1 stays IN PROGRESS: G1 rows remain that a cloud session can still
+close (above all `recovery.rs`' durable state machine, `settings_route.rs`' leftover-cleared save, `chain.rs`' first
+stamp walk, `bars.rs`' merge-plan arms), besides the items owed to the Mac and the L-BCA-5 projections.
+
+## What the second continuation did (token `BASE-COV-API-AS1-20261105-3`, 6 Nov 2026)
+
+The second continuation took the branch at `e033f06e` (owner file `12205098`), changed test code only, and pushed
+after every step: `7bd8a33a`, `d4f77b3d`, `bb4e0377`, `ee5daf59`, `554d64de`, `9b7056af`, `aed9488e`, `8e0fc6f1`,
+`11d3f63a`, `ec865d10`, `5f028785` (code), with a reports commit after the second. No production line changed: every changed
+hunk of a production file lies inside its `mod tests` (checked by hunk position: `assets.rs`, `audit_json.rs`,
+`recovery.rs`, `store_route.rs`), so the production line numbers are `b85ecf4d`'s and START's mapping still holds.
+
+### New tests, each with its `Extremes:` doc line (D-8661)
+
+| file | test (as the harness prints it) | extremes (singles / at once / out of the box) |
+|---|---|---|
+| `facets.rs` (`facets_tests.rs`) | `server::facets::tests::a_delta_names_only_what_moved_and_an_unread_contract_is_counted_once` | 9 / 2 / 1 |
+| `facets.rs` | `server::facets::tests::an_index_moves_by_its_own_evidence_and_a_node_no_store_text_gives_is_refused` | 10 / 2 / 1 |
+| `facets.rs` | `server::facets::tests::the_route_says_a_refused_delta_and_refused_rows_and_two_spellings_are_never_short` | 8 / 2 / 1 |
+| `facets.rs` | `server::facets::tests::a_second_builder_waits_for_the_first_and_a_refused_read_starts_no_build` | 8 / 2 / 1 |
+| `chain.rs` (`chain_route_tests.rs`) | `server::chain::tests::a_ledger_record_this_build_cannot_key_is_unread_and_a_mark_moves_only_its_own` | 8 / 2 / 1 |
+| `chain.rs` | `server::chain::tests::a_listed_keys_first_stamp_is_read_month_by_month_and_a_month_that_will_not_read_is_named` | 8 / 2 / 1 |
+| `chain.rs` | `server::chain::tests::the_chain_says_its_ledger_reads_a_listed_put_and_opens_a_spot_month_once` | 8 / 2 / 1 |
+| `settings_route.rs` (`settings_route_tests.rs`) | `server::settings_route::tests::a_save_names_the_key_it_moved_and_a_reader_that_has_seen_further_is_kept` | 8 / 2 / 1 |
+| `settings_route.rs` | `server::settings_route::tests::every_credential_field_a_feed_names_is_one_the_charter_records` | 4 / 1 / 1 |
+| `audit_json.rs` (`audit_json_cover_tests.rs`) | `audit_json::cover_tests::a_torn_journal_is_said_a_numbered_page_is_silent_and_an_unstatable_census_is_named` | 7 / 2 / 1 |
+| `store_route.rs` | `server::store_route::tests::a_delta_at_the_last_month_and_each_refused_read_answer_by_their_own_rule` | 7 / 2 / 1 |
+| `store_route.rs` | `server::store_route::tests::a_day_refused_for_two_kinds_is_one_day_and_a_since_of_a_part_not_held_is_refused` | 6 / 2 / 1 |
+| `recovery.rs` (`recovery_cover_tests.rs`) | `recovery::cover_tests::an_assessment_counts_each_day_by_its_own_evidence` | 10 / 2 / 1 |
+| `recovery.rs` | `recovery::cover_tests::a_start_counts_every_window_and_reconciles_only_its_own_pending_days` | 12 / 2 / 1 |
+| `recovery.rs` | `recovery::cover_tests::the_page_names_every_state_and_a_pointer_to_another_plan_is_refused` | 12 / 2 / 1 |
+| `recovery.rs` | `recovery::cover_tests::a_seal_a_descriptor_an_envelope_and_a_pointer_are_each_refused_by_their_own_rule` | 19 / 2 / 1 |
+| `recovery.rs` | `recovery::cover_tests::a_shares_assessment_reads_its_cash_session_and_its_withdrawn_days` | 8 / 2 / 1 |
+| `assets.rs` | `assets::tests::a_bundle_is_addressed_only_under_its_own_folders_and_a_walk_stops_at_its_bound` | 8 / 2 / 1 |
+
+Per file, every file this continuation tests holds at least 8 named extremes, 2 at once and 1 out of the box over
+its new tests: `facets.rs` 35 / 8 / 4, `chain.rs` 24 / 6 / 3, `settings_route.rs` 12 / 3 / 2, `store_route.rs`
+13 / 4 / 2, `recovery.rs` 61 / 10 / 5, `assets.rs` 8 / 2 / 1; `audit_json.rs` 7 / 2 / 1 here, beside the first
+session's four tests in the same module (whose doc lines name more). Three tests sit below eight singles on their own
+(`every_credential_field_..` 4, `a_torn_journal_..` 7, `a_day_refused_for_two_kinds_..` 6): their files clear the
+rule, and each case they hold is asserted.
+
+What they reach, in short:
+- `facets_tests.rs`: a delta naming an expiry (only the contract that moved, its other side `null`, the unchanged
+  future left out), an expiry the underlying does not hold, a delta with no expiry; a contract text the index cannot
+  read counted once through the real `apply` and never again when it grows; a key of another segment and a key
+  appended twice left out of `Changed`; a `since` over no census; the cache helpers driven directly (`whole`,
+  `advance` over the same, another and an absent read, `serves_as_previous`, `PendingHold::if_idle` with one and two
+  holders), and hand-built index nodes (a strike of `i64::MIN`, refused `rows_unreadable`; a spanless contract,
+  skipped); refusals through `answer()` itself (`since_in_future`, `rows_unreadable`, and one contract stored under
+  two spellings refused `rows_incomplete`, never a short list); a second builder inside a whole build held open by
+  the test pause, which waits and builds nothing; `kick` over refused reads.
+- `chain_route_tests.rs`: a lineage record struck at 0 paisa, which the ledger's reader accepts and the option
+  reader refuses (unread); an alias record; `mark` for an unnamed underlying and for a renamed key first stored at
+  the ex-date's first instant; `first_stored_from` over month files written here; `/chain.json` with a ledger that
+  reads whole, one that is not UTF-8, a listed put read from its own month, two instants of one spot month;
+  `render_instant` over a ladder position past its strikes.
+- `settings_route_tests.rs`: an offered feed saved as `/db`'s opening feed and one refused; `window.from` unset under
+  a saved `window.to`, and `window.to` alone, each refused naming its key; a save nested inside a read (the reader
+  that saw further is kept, read off the map directly); `ist_text` at `i64::MAX`, `i64::MIN` and 0; the feed
+  table's window and the charter's credential fields asserted (they carry the (U) proofs below).
+- `audit_json_cover_tests.rs`: a journal torn past three records and one of five bytes alone (`TORN WRITE`, the
+  page clamped); a folder at the journal's path (the finding below); a numbered and a worded page through the
+  route; `committed_at` over a census path under a file, in a symbolic link loop, and absent.
+- `store_route.rs` `mod tests`: a delta at 9999-12; a `since` of an absent census and of parts the census does not
+  hold (a two-part census made by `Manifests::partitions`); a `since` over a census that will not read; a folder at
+  the quarantine ledger's name; the behind cache poisoned by a thread that died holding it; a day the census refused
+  for two kinds counted once.
+- `recovery_cover_tests.rs`: a site whose Zerodha master maps NIFTY by an invented `INDICES` row, and one that maps
+  FORCEMOT under `zerodha_cross_checked` (a Zerodha cash row and a Groww witness carrying the universe table's
+  ISIN; invented tokens), over source months written by the store's own writer, each day's session taken from the
+  calendar of record. `assess` past the identity check for the first time (whole, holed, empty, daily-only and
+  closed days, a bar before the session, a Muhurat day, a Sunday daily bar and a two-month scan refused; a share's
+  withdrawn days); `start` over five windows with the shared attempt ledger written first (`execute`'s verdicts and
+  `reconcile_pending`'s every pass-over, reassessment and refusal, and a forged ledger key blocking the run);
+  `page_html` over every state; `latest_view` over a real pointer, a forged one and a folder plan; `validate_seal`,
+  `successor_identity`, `checked`, `plan`, `active_history` and `preflight_plan`'s refusals.
+- `assets.rs` `mod tests`: `content_addressed` and `newest_under`'s bound.
+
+Every child proves it ran by a file its parent reads; no print site was added (gate 23).
+
+### Test code made to read its own failing arm, no check weakened
+
+- `census_cover_tests.rs`: three `match` arms that `panic!` (rows 225, 492, 1163 of the first continuation's list)
+  are `let .. else { panic!(..) }` with the same message and the same value shown; the four cases two of its tests
+  asserted and did not name are named on their `Extremes:` lines (the first continuation's "Not done").
+- `audit_json.rs`' test: one assertion over `a || b` is two assertions, so no side is reached only by a failure.
+- `recovery.rs`' tests: the garbage-history assertion names the one spelling its refusal carries ("trailing
+  bytes"; its alternative was never evaluated); the retired-symbol test's check on a failed run is one assertion over
+  the result instead of an `if let` whose arm no passing run reaches.
+
+### Red under a hand change: 16 of 16, then 2 of 2
+
+Two sets of hand behaviour changes to production code, each applied in this tree, never committed, built with Route
+B's flags and run over exactly the new tests; then reverted with `git checkout`, `git status` empty.
+- At `aed9488e`, sixteen changes at once: `test result: FAILED. 0 passed; 16 failed`.
+- At `ec865d10`, two changes for the two tests added after it: `test result: FAILED. 0 passed; 2 failed`.
+
+Every test failed at the assertion its change targets:
+
+| test | hand change at | change | red at |
+|---|---|---|---|
+| `server::facets::tests::a_delta_names_only_what_moved_and_an_unread_contract_is_counted_once` | `facets.rs:396` | an unread contract counted on every apply | `facets_tests.rs:1997` "grown, never counted again" (2) |
+| `server::facets::tests::an_index_moves_by_its_own_evidence_and_a_node_no_store_text_gives_is_refused` | `facets.rs:516` | a pending read as idle under one holder | `facets_tests.rs:2193` `expect_err("held")` |
+| `server::facets::tests::the_route_says_a_refused_delta_and_refused_rows_and_two_spellings_are_never_short` | `facets.rs:1958` | the rows' sum check disabled | `facets_tests.rs:2314` (200, not 409) |
+| `server::facets::tests::a_second_builder_waits_for_the_first_and_a_refused_read_starts_no_build` | `facets.rs:626` | a builder that waited builds again | `facets_tests.rs:2477` "the second built again (2.999 s)" |
+| `server::chain::tests::a_ledger_record_this_build_cannot_key_is_unread_and_a_mark_moves_only_its_own` | `chain.rs:510` | an unkeyable record counted read | `chain_route_tests.rs:972` (4, 0) |
+| `server::chain::tests::a_listed_keys_first_stamp_is_read_month_by_month_and_a_month_that_will_not_read_is_named` | `chain.rs:720` | the walk stops after its first month | `chain_route_tests.rs:1071` (None) |
+| `server::chain::tests::the_chain_says_its_ledger_reads_a_listed_put_and_opens_a_spot_month_once` | `chain.rs:1051` | a whole ledger said `partial` | `chain_route_tests.rs:1165` |
+| `server::settings_route::tests::a_save_names_the_key_it_moved_and_a_reader_that_has_seen_further_is_kept` | `settings_route.rs:741` | `window.from` never named | `settings_route_tests.rs:1156` (`window.to`) |
+| `server::settings_route::tests::every_credential_field_a_feed_names_is_one_the_charter_records` | `settings_route.rs:772` | a feed's field pushed even when held | `settings_route_tests.rs:1222` ("api-key" twice) |
+| `audit_json::cover_tests::a_torn_journal_is_said_a_numbered_page_is_silent_and_an_unstatable_census_is_named` | `audit_json.rs:1345` | "could not be stat'ed" said as "could not be read" | `audit_json_cover_tests.rs:391` |
+| `server::store_route::tests::a_delta_at_the_last_month_and_each_refused_read_answer_by_their_own_rule` | `store_route.rs:1252` | the absent census's refusal words cut | `store_route.rs:2893` |
+| `server::store_route::tests::a_day_refused_for_two_kinds_is_one_day_and_a_since_of_a_part_not_held_is_refused` | `store_route.rs:482` | refused days counted per row, not per day | `store_route.rs:3049` (3) |
+| `recovery::cover_tests::an_assessment_counts_each_day_by_its_own_evidence` | `recovery.rs:1542` | a vendor hole counted as one minute | `recovery_cover_tests.rs:766` (missing 2) |
+| `recovery::cover_tests::a_start_counts_every_window_and_reconciles_only_its_own_pending_days` | `recovery.rs:1136` | a window not applicable counted unverified | `recovery_cover_tests.rs:982` (the summary sentence) |
+| `recovery::cover_tests::the_page_names_every_state_and_a_pointer_to_another_plan_is_refused` | `recovery.rs:2006` | "Not applicable" said as "Not used" | `recovery_cover_tests.rs:1089` |
+| `recovery::cover_tests::a_seal_a_descriptor_an_envelope_and_a_pointer_are_each_refused_by_their_own_rule` | `recovery.rs:324` | the sealed inventory's identity check disabled | `recovery_cover_tests.rs:1214` `expect_err` |
+| `assets::tests::a_bundle_is_addressed_only_under_its_own_folders_and_a_walk_stops_at_its_bound` | `assets.rs:293` | `&&` read as `||` | `assets.rs:1815` (another first folder addressed) |
+| `recovery::cover_tests::a_shares_assessment_reads_its_cash_session_and_its_withdrawn_days` | `recovery.rs:1534` | a withdrawn day's minutes counted missing | `recovery_cover_tests.rs:1420` (missing 2,693) |
+
+### Rows this continuation proves (U), and why
+
+Each is in `fu-AS1.txt.md` with its proof in brackets; where a proof rests on a compiled table, a test asserts the
+table, so a later table that reaches the arm turns that test red.
+- `facets.rs` 757:44 False (`moved_off_lock` answers true whenever the slot holds no part), 932 (the same read guard
+  had `reflects` Some at 921), 1980 (`VendorCensusNow::census` is always `Some`), 1984-1991 (`store_wire::compact`
+  cannot fail: integers, `&'static str` and `Vec<String>` into a `Vec` writer), 2307:32 False (a two-slot array
+  indexed by 0 or 1).
+- `chain.rs` 832:13 False and 833 (the month was found or just pushed), 776:12 False (`Metadata::modified` is `Ok`
+  on every unix target).
+- `settings_route.rs` 213 and 726:12 False (the feed table records a window: asserted), 772:20 True and 773-774 (every
+  feed's key field is a charter field: asserted), 592:28 False (`json!({..})` is an object).
+- `audit_json.rs` 1016, 1041, 1054 (`census` is always `Some`), `store_route.rs` 1297-1300 (`compact_delta` cannot
+  fail, the same serde proof).
+- `bars.rs` 738:16 False, 748:13 False and 749 (`u64::try_from` of a `usize` is always `Ok`: `usize` is at most 64
+  bits wide on every Rust target); carried GAP rows, reclassed after the run.
+
+### A finding, not fixed (no decision id left in AS1's block)
+
+`audit::Journal::look` (`audit.rs:1448-1466`, G1's file) reads its state from one `metadata` call and never asks
+`is_file()`: a folder at the pull journal's path is `Log::Held` with `records = len / 256` (16 for ext4's 4,096-byte
+folder; another number on APFS) and no trouble sentence. The read that follows is refused (`Is a directory`), and
+`/audit.json` says so in `feed_scope.error`, `last_runs_error` and `runs_error`, so the failure is not hidden, but
+`present: true`, `records: 16` and `trouble: null` misstate a folder as a journal. The one-arm fix: `Ok(meta) if
+!meta.is_file() => Log::Unreadable { reason: "not a regular file" }` with a test that fails first. A production fix
+needs its own decision id (`RULES-MAC-COV-API.md`, step 3), and AS1's block (D-8660, D-8661) holds none spare: for the
+main session or ASA. `a_torn_journal_..` asserts only what must hold (the refusal said in all three places, no run
+listed), not the folder's count.
+
+### Two slips, said plainly
+
+- One shell command of this session carried a stray version query of the interpreter the brief bans. Its output was
+  discarded; nothing ran through it and no file holds it.
+- A first Route B attempt at `aed9488e` (09:43-10:10 IST) ran from a detached worktree while iteration builds went on
+  in this checkout with the same target folder. The nightly names a member's test objects by a hash the two trees
+  share (`build/api/7b94fb89521800a1/out/`), so the later builds replaced the objects under its readout (`profile
+  data may be out of date - object is newer`, `10174 functions have mismatched data`). It was stopped, nothing of it
+  is used, and the worktree (made by this session) was removed. Two later readouts were stopped too: one at
+  `ec865d10` when clippy found four lints in the new tests (the fix moved the code tip), and one at `5f028785` when
+  the stable test gate, run during the readout, replaced the uplifted `debug/api` binary (both toolchains uplift the
+  bin target to that one path; the nightly's test objects sit apart, the bin does not) at 10:39:12 IST. The figures
+  below are from one run on the code tip with no other cargo command at all from its build to its last readout.
+
+## Coverage, Route B (the second continuation, code tip `5f028785`)
+
+The kit's `d3-route-b-cloud.sh`, unchanged, with `D3_DIR` holding the kit's `d3-covset.mjs`:
+- Pins: `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, `llvm-cov` and `llvm-profdata` `LLVM version
+  23.1.0-rust-1.99.0-nightly` (the script's own check passed).
+- Build: `RUSTFLAGS='-C instrument-coverage -Z coverage-options=branch'`, `CARGO_PROFILE_DEV_OPT_LEVEL=0`,
+  `CARGO_PROFILE_DEV_DEBUG=0` (for room), `CARGO_BUILD_JOBS=3`, `llvm-profdata merge -sparse`, `llvm-cov show
+  --show-branches=count`; test arguments `--skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip
+  spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (G2's and G3's 4-core hangs, as before).
+- Reading: whole:api, package `api`, on the code tip `5f028785` (the run's own `tip` line). The set is the kit's 205
+  coverage files plus the 11 test files AS1 added: 216 (`whole-api-set-AS1.txt`, built as the earlier sessions
+  built theirs).
+- Host: this cloud container (Linux x86_64, 4 cores, root). The build tree is `/home/user/as1-k` and the profile
+  folder a new one under `/tmp` (mode 1777) with `umask 000`, so a child the permission tests re-run as uid 65534
+  can execute the test binary and write its profile.
+- Run: 6 Nov 2026, 10:45:37 to 11:13:57 IST (build 2 min, tests 5 min, readout 20 min), with no other cargo command
+  from its build to its last readout (the slips above). Exit 3: NOT PROVED exactly the 22 `crates/api/benches/**`
+  files and `crates/api/src/lib.rs`, which no object holds (L-BCA-2), as every earlier run. Tests under it: 3,144
+  passed, 13 failed (host reds, below), 16 ignored.
+
+| reading | lines | branches |
+|---|---|---|
+| whole `api`, 193 files read (NOT PROVED 23, as above) | 177,333/181,502 (4,169 uncovered) | 13,024/15,580 (2,556 uncovered sides) |
+| G1's 87 files, code tip `5f028785` | 60,195/60,999 (804 uncovered) | 4,293/4,986 (693 uncovered sides) |
+| G1's 76 files of `SHARDS.md` alone, code tip | 57,162/57,954 (792 uncovered) | 4,242/4,900 (658 uncovered sides) |
+| G1's 87 files at the first continuation's tip `b85ecf4d` (its run) | 58,420/59,479 (1,059 uncovered) | 4,178/4,966 (788 uncovered sides) |
+| the same 76 files at `b85ecf4d` (its run) | 55,990/57,038 (1,048 uncovered) | 4,134/4,892 (758 uncovered sides) |
+| the same 76 files at the first session's tip `3f324ee8` (its run) | 55,261/56,448 (1,187 uncovered) | 4,033/4,890 (857 uncovered sides) |
+| whole `api` at `b85ecf4d` (its run) | 175,544/179,982 (4,438 uncovered) | 12,903/15,560 (2,657 uncovered sides) |
+
+The whole-`api` figure holds every group's host rows (a root, 4-core host) and does not compare one to one with
+the Mac's.
+
+**Classification.** No production line moved (every production-file hunk is inside its `mod tests`), so each
+uncovered row of a G1 file is mapped to the first continuation's tip through `git diff -U0 b85ecf4d 5f028785` and
+takes that continuation's class from its lists. A row its lists never held
+was classed by hand, each with its reason (49 rows): the (U) rows this continuation proves (22 lines, 9 sides, their
+proofs above and in `fu-AS1.txt.md`; three of them, `bars.rs` 738:16 False, 748:13 False and 749, are carried GAP
+rows reclassed after the run, from the lists' text alone); the failing arms of its new and converted test code, (F) (6 lines, 10 sides:
+`let-else` refusals, `unreachable!` closures, the failing side of an `assert!` condition); one test-code GAP side
+(`recovery_cover_tests.rs` 1112:24 False, a data side of an `.any(..)` inside an assertion that no row before the
+match fails); and `calendar_build.rs` 471:12 False, a race arm (a newer build of the key replaced this one in the
+map before it was dropped) that the first continuation's run covered by scheduling and this one did not: GAP
+production, named. No row is left unclassed.
+
+| class | lines | sides | where |
+|---|---|---|---|
+| GAP production | 429 | 172 | `gaps-AS1.txt.md` |
+| GAP test code | 77 | 77 | `gaps-AS1.txt.md` |
+| GAP inside `#[ignore]`d tests | 37 | 0 | `gaps-AS1.txt.md` (owed to the Mac, L-BCA-3) |
+| HOST (covered on the Mac's run of START, not here) | 51 | 10 | `gaps-AS1.txt.md` |
+| (F) failing arm in test code | 139 | 397 | `fu-AS1.txt.md` |
+| (U) with proof | 71 | 37 | `fu-AS1.txt.md` |
+
+Production GAP by file at the code tip (lines/sides; the first continuation's in brackets where it changed):
+`booleansearchjson.rs` 117/26, `recovery.rs` 105/62 (259/119), `index_consistency_projection.rs` 89/10,
+`settings_route.rs` 18/1 (24/8), `chain.rs` 16/1 (30/12), `bars.rs` 15/19 (16/21), `facets.rs` 11/8 (74/25),
+`candidatejson.rs` 10/9, `booleanoosjson.rs` 9/6, `census.rs` 7/3, `recovery_journal.rs` 7/3, `main.rs` 6/1,
+`feed_checks_files.rs` 5/1, `assets.rs` 3/2 (4/5), `pullrun.rs` 2/5, `audit_json.rs` 2/2 (24/5), `detail.rs` 2/2,
+`calendar_build.rs` 1/2 (1/1, the race side above), `credential_law.rs` 1/2, `bars_change.rs` 1/1,
+`page_report_route.rs` 1/1, `import_journal.rs` 1/0, `indexmap.rs` 0/4, `backtest.rs` 0/1. `store_route.rs` (12/6
+before), `feed_checks.rs`, `folder.rs` and `aliases.rs` hold none.
+
+Test-code GAP by file (lines/sides): `tests/pool_load.rs` 11/16, `audit_lock_wait_tests.rs` 11/3,
+`settings_route_tests.rs` 10/6, `stop_tests.rs` 6/5, `server_cloud_mutant_tests_a.rs` 5/5,
+`gap_peer_route_tests.rs` 5/1, `census_warm_tests.rs` 4/18, `recovery.rs`' tests 4/6, `bars_page_tests.rs` 3/1,
+`saved_response_boundary_tests.rs` 3/1, `recovery_journal.rs`' tests 3/0, `credential_law_tests.rs` 2/3,
+`census.rs`' tests 2/2, `credential_law.rs`' tests 2/0, and 11 more files with one to three rows each
+(`gaps-AS1.txt.md`).
+
+The red-proof table above gives each line as it stood in the tree the change was made in (`aed9488e` for the first
+sixteen rows, `ec865d10` for the last two). Later commits moved a few test rows by up to eight lines without
+touching an assertion: `8e0fc6f1` named more of two tests' asserted cases on their `Extremes:` lines (one and two
+doc lines), and `5f028785` removed three lint-expectation attributes of four lines each.
+
+## Gates (the second continuation, code tip `5f028785`)
+
+| gate | command | result |
+|---|---|---|
+| fmt | `cargo fmt --all --check` | clean at the code tip |
+| clippy | `cargo clippy -p api --all-targets --locked -- -D warnings` (stable 1.97.1) | exit 0 on the code tip's content, the last run after the last code change (`5f028785` itself is that run's fix: three lint expectations the formatted tests no longer needed and `Duration::from_mins`) |
+| tests | `cargo test -p api --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (stable 1.97.1, dev profile, `CARGO_PROFILE_DEV_DEBUG=0` for room) | lib: 3,060 passed, 12 failed, 16 ignored, 1 filtered out (the skipped G2 test); bin unit tests 4 passed; `binary` 4; `cloud_mutants_bars` 58, 1 filtered out (the skipped G3 test); `logs_r3_24` 6; `pool_load` 5; `state_stream_emits` 4; `store_step_forms` 3; doc tests 1. 10:34:25-10:44:47 IST with the build. Every red is a host red; proofs below |
+| tests under Route B | the same suite, instrumented, in the coverage run above | 3,144 passed, 13 failed (host reds), 16 ignored |
+| red, every new test | 16 hand behaviour changes at `aed9488e`, then 2 at `ec865d10` | 16 of 16 and 2 of 2 red at their targeted assertions; reverted, `git status` empty |
+| print sites (gate 23) | the diff searched for `print!`, `println!`, `eprint!`, `eprintln!`, `dbg!`, `stdout`, `stderr` | none added; every child proves it ran by a file its parent reads |
+| decision citations | `cargo test -p core --test decision_citations --locked` | **red until ASA lands D-8660 and D-8661 in `docs/05-decisions.md`**: `every_cited_decision_heads_an_entry_or_is_named_pending` names exactly `D-8660 first cited at crates/api/src/audit.rs:5372` and `D-8661 first cited at crates/api/src/aliases.rs:497`; nothing else |
+
+No bench was run: `crates/api/benches/` is ASA's, and none of this continuation's tests times anything (the builder
+test's 2.7 s ceiling is a behaviour bound against a second 1.5 s build, not a measurement); the first session's
+timing figures (its record below) stand as they were.
+
+## Host reds of this continuation's runs (for the Mac)
+
+All are this host's: a root user (permission-bit tests) and 4 cores (crowd, deadline and stop timing). None is in a
+file this continuation changed.
+- **Route B, 13 reds:** `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`,
+  `pullrun::cloud_mutant_tests::newest_records_that_cannot_be_read_leave_the_answer_not_known`,
+  `pullrun::restart_tests::the_journals_own_extremes`,
+  `server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`,
+  `server::cloud_mutant_tests_c::a_store_that_takes_no_write_trips_the_store_breaker`,
+  `server::cloud_mutant_tests_c::a_store_whose_audit_dir_cannot_be_made_is_at_fault`,
+  `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`, the five
+  `server::head_deadline_body_tests` (`a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole`,
+  `a_chunked_body_reaches_a_slow_reader_whole`, `a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`,
+  `pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is`,
+  `slow_readers_at_the_cap_are_served_whole_and_the_next_waits`) and `tests/pool_load.rs`
+  `the_feed_list_stays_fast_while_32_clients_loop_each_route`: the same 13 names as the first continuation's run
+  and its stopped runs here. **Proof:** each is among the first session's reds of this host, each of which failed the
+  same way at START with the same command (its `rb0-start`; the list and statements are in its record below).
+- **The stable run, 12 lib reds:** the same twelve lib tests as Route B's. The first continuation's two other stable
+  reds (`server::cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused`
+  and the millisecond collision in `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`)
+  passed this time; `tests/pool_load.rs`' red passed in the stable run.
+
+## NEEDS THE MAC
+
+- Route B whole:api on its pin, including the HOST rows in `gaps-AS1.txt.md` (lines the Mac's run of START covered
+  and this host reaches only by host-red or skipped tests).
+- The two tests skipped here as 4-core hangs (`a_full_calendar_pool_refuses_the_census_and_the_audit`,
+  `spot_json_is_refused_by_name_when_every_store_read_slot_is_held`), this host's reds (above) on 14 cores as a
+  non-root user, and the timing test `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`.
+- The ignored real-data tests (L-BCA-3: the GAP-ignored rows, among them `audit_lock_wait_measure.rs:40`) and the
+  load-bound census warm test (L-BCA-4).
+- macOS rows: `feed_checks_files.rs`' non-UTF-8 file name arm ((U) on aarch64-apple-darwin, its Linux test kept);
+  `census_cover_tests`' mode-bit test runs there as the user itself; the read-back test's file on another device may
+  differ by inode rather than by device (the same refusal either way). `chain.rs` 776:12 False is (U) on both
+  targets (`Metadata::modified` is `Ok` on every unix target). The new tests use no Linux-only facility: FIFOs,
+  symbolic link loops and folder sizes are read through `std` on both; the folder-as-journal case asserts the
+  refusal, not the folder's size (4,096 on ext4, another number on APFS).
+- The shadow D rows and attacks on real data; the D1 landing.
+
+## For the main session or ASA
+
+- `audit::Journal::look` and a folder at the journal's path (the finding above): a one-arm fix that needs its own
+  decision id.
+- `docs/05-decisions.md` entries D-8660 and D-8661 (drafts below; D-8661's items 10-14 are this continuation's); the
+  decision-citation gate stays red until they land.
+
+## Decision drafts (this branch's ids only; ASA writes `docs/`)
+
+### D-8660 — Repair 3, shard AS1: blocking item (3) for G1's named files — eight extremes per test, the small-size timing wrappers run first (BASE-COV-API, repair 3) — 2026-11-05
+
+**Decided.** Each test G1's brief names carries at least eight extreme cases, two of them combinations at once and one out of the box, each asserted and named on the test's `Extremes:` doc line, the new tests beside the file they test:
+
+| file | test | extremes / at once / out of the box |
+|---|---|---|
+| `detail.rs` | `a_pool_made_at_run_time_is_the_pool_a_static_is` | 8 / 2 / 1 |
+| `store_route.rs` | `a_quarantined_months_row_names_it_and_every_other_row_says_none` | 10 / 2 / 1 |
+| `facets_tests.rs` (with `facets.rs`) | `an_underlying_held_on_two_exchanges_is_refused_until_one_is_named` | 10 / 3 / 1 |
+| `emitted.rs` (BCA-19) | `every_reachable_emit_site_puts_a_record_in_the_file` (the matcher's extremes) | 8 / 2 / 1 |
+| `audit.rs` | `the_append_timing_runs_at_a_small_size` | 8 / 2 / 1 |
+| `audit_lock_wait_measure.rs` | `the_lock_wait_measurement_runs_at_a_small_size` | 8 / 2 / 1 |
+| `import_journal.rs` | `the_end_line_timing_runs_at_a_small_size` | 8 / 2 / 1 |
+| `import_journal.rs` | `the_field_count_timing_runs_at_a_small_size` | 9 / 2 / 1 |
+| `pullrun_restart_tests.rs` | `the_open_runs_timing_runs_at_a_small_size` | 8 / 2 / 1 |
+| `pullrun_restart_tests.rs` | `the_walks_worst_case_timing_runs_at_a_small_size` | 8 / 2 / 1 |
+
+A small-size timing wrapper first calls the full-size measurement's own entry at its smallest size (`appends_timed(.., 3, u128::MAX)`, `end_lines_folded_beside(3)`, `costs_with_64_open_runs(65, 2)`, `costs_of_the_walks_worst_case(2)`) so the `#[ignore]`d full-size path's helper lines run in every `cargo test`, then walks its extremes through a helper that returns what it measured (`appends_timed_over`, `latency_over`, `end_lines_folded`, `end_line_fold_at`, `costs_with_open_runs`, `costs_of_walks`) so each case is asserted, not printed. `sweeprun_accepted_tests.rs`' press tests are kept as they are (verify r3: met). Every test above was shown red under a hand behaviour change (ten changes, ten tests red at their new assertions).
+
+**Why.** D-7346's rule (eight extremes per tested file) applied to the files repair 3 names for G1; the timing wrappers' helpers were reachable only from `#[ignore]`d full-size runs, so their lines were GAP rows `ignored` on every ordinary run.
+
+**Rejected.** Raising the ignored full-size runs into the default suite: their sizes are the bench's, not a unit test's (the load-bound and ignored real-data tests stay owed to the Mac, L-BCA-3, L-BCA-4).
+
+### D-8661 — Repair 3, shard AS1: G1's GAP rows closed by direct tests in cover modules, test-only failing arms made recognisable, and what stays open (BASE-COV-API, repair 3) — 2026-11-05
+
+**Decided.**
+
+1. A production file's unreached rows are driven by a test module of its own, `<file>_cover_tests.rs`, declared at the END of the production file (`#[cfg(test)] #[path = "..."] mod cover_tests;`) so no production line moves and the kit's START line map still holds. Files: `audit_json`, `candidatejson`, `census`, `chain`, `detail`, `feed_checks_files`, `merge`, `pullrun`, `recovery`, `recovery_journal`, `repair_route`. Smaller additions sit in the file's existing test module (`credential_law_tests.rs`, `settings_route_tests.rs`, `folder.rs`, `store_route.rs`, `pullrun.rs`' `mod tests`). No production path was restructured for a test (D-6017).
+2. Test code only, never a check weakened: a test closure that is never called is a one-line `unreachable!` (it was a multi-line body whose first line counted as a GAP); a test's `other => panic!(..)` match arm (the kit reads those as GAP rows) is a `let .. else { panic!(..) }` with the same message and the same value shown, which the kit's list already reads as a failing arm; `why_not_known` asks for the guessed answer every caller passes (its plain NOT KNOWN arm was never reached anywhere); one assertion that accepted three spellings names the one the refusal carries.
+3. Rows that cannot be reached on any target are (U), each with its proof in `fu-AS1.txt.md`; a row only Linux reaches is (U) on the Mac with its Linux test kept and listed under NEEDS THE MAC.
+4. Every new test is shown red under a hand behaviour change to production (scratch tree, never committed).
+5. **Continuation (token `-2`).** G1's lists hold every row of the 11 `*_cover_tests.rs` files AS1 added (87
+   files): the first session's lists read `SHARDS.md`'s 76 and left those files' failing arms unlisted.
+6. A row whose unreachability rests on a compiled table (the calendar of record's years) is (U) only beside a
+   test that asserts that table (`server::feed_checks::tests::every_day_and_year_the_calendar_holds_is_said_and_a_refused_version_is_a_500`),
+   so a later table that reaches the arm turns that test red rather than leaving the list stale.
+7. Mode-bit and environment arms run in children of the test binary (`crate::isolated::where_permission_binds`,
+   `rerun`, `rerun_unsetting`), each child proved by a file its parent reads, never by a print site (gate 23); a
+   build tree and profile folder the uid-65534 child can reach (`/home/user/as1-deep`, a 1777 tmpfs, umask 000)
+   so its profile counts.
+8. Test-code forms: a lone `?` test step is `.expect(..)` naming the step; a two-status assertion is one
+   `contains`; a test helper's lazy `&&` whose right side only a failure reaches is read as an array.
+9. Race arms (a file rewritten or grown between two reads of one request, a build finished between a timeout and
+   its lock) and fault arms (a lock call that fails other than by contention, a thread that will not start) stay
+   GAP rows, named, until a seam or a fault injector exists for them; none is restructured for a test (D-6017).
+10. **Second continuation (token `-3`).** Paths no earlier fixture reached are reached by synthetic fixtures
+    only: a Zerodha master with an invented `INDICES` row, a share mapped under `zerodha_cross_checked` by a
+    Zerodha cash row and a Groww witness that carries the universe table's own ISIN (invented tokens), and source
+    months written by the store's own writer whose sessions come from the calendar of record
+    (`pull::calendar::kind_of`); never a vendor row.
+11. A defensive arm that a direct call reaches is driven by that call, and the refusal or skip it makes is
+    asserted: a hand-built index node, a ladder position past its strikes, a census of two in-memory partitions
+    (`census::Manifests::partitions`), a pending hold with one and with two holders. Only a region that no input,
+    file, folder, variable or direct call reaches is (U).
+12. Item 6's rule, applied again: the feed table's recorded window and the charter's credential fields are asserted
+    by tests (`a_save_names_the_key_..`, `every_credential_field_..`), beside the rows proved (U) by them.
+13. A race arm stays a GAP row, named, unless a test can hold one side open deterministically: the test pause over a
+    whole facet build (`SLOW_BUILD_KEY`) and a save nested inside a read each hold one, and the side they hold is
+    asserted, never timed alone (the builder's bound is a whole build's length, 1.5 s, against a 2.7 s ceiling).
+14. A defect a test finds that AS1 holds no id to fix is reported with its exact one-arm change and left for an id
+    (`audit::Journal::look` and a folder at the journal's path), and the test asserts only what must hold.
+
+**Open, and why.** `booleansearchjson.rs`, `index_consistency_projection.rs`, `candidatejson.rs`' catalog rows and `booleanoosjson.rs`' served page (L-BCA-5: `cli::boolean_evidence` re-exports readers only, "never successor-authoring authority", and a priced-candidate capture takes `indicators` and `engine` types `api` cannot name); `recovery.rs`' lines after a broker request that reached a vendor (`retry_day` 1772-1812, L-BCA-6), its 100,000-unit bounds and the refusals of a durable history no fixture writes yet (successor preparation and activation, an active pointer of another plan); `bars.rs`' merge-plan `let-else` arms, each owed a proof or an input; race arms (facets' moves between two locks, a census or version file rewritten between two reads, a recovery pointer changed mid-read) and fault arms (a thread that will not start, a join error, a full disk, a pool admission refused); the rest listed in `gaps-AS1.txt.md` with every row's text.
+
+**Rejected.** `#[coverage(off)]`, an excluded file, a weakened or deleted test, a production refactor for reachability.
+
+## Files (all three sessions)
+
+Changed, all G1's or new test files declared in them (`files_outside_ownership`: none; checked against G1's 87
+files). Not touched: `lib.rs`, `benches/`, `Cargo.*`, `docs/`, `.github/`. This continuation's
+(`b85ecf4d..5f028785`), test code only: `assets.rs` (+67, `mod tests`), `audit_json.rs` (+2, -4, `mod tests`),
+`audit_json_cover_tests.rs` (+138), `census_cover_tests.rs` (+19, -13), `chain_route_tests.rs` (+312),
+`facets_tests.rs` (+654), `recovery.rs` (+7, -10, `mod tests`), `recovery_cover_tests.rs` (+752),
+`settings_route_tests.rs` (+132), `store_route.rs` (+264, `mod tests`). All three sessions together over the kit:
+41 files, +8,303, -381. The earlier sessions' lists are in their records below.
+
+## Not done
+
+- G1's remaining GAP rows, every one in `gaps-AS1.txt.md` with its text. The largest blocks:
+  - `booleansearchjson.rs` (117/26), `index_consistency_projection.rs` (89/10), `candidatejson.rs`' catalog reads
+    (10/9) and `booleanoosjson.rs`' served page (9/6), L-BCA-5: each reads a saved research artifact that only
+    `cli`'s search machinery writes; `cli::boolean_evidence` re-exports readers only, and a priced-candidate
+    capture takes `indicators` and `engine` types `api` cannot name.
+  - `recovery.rs` (105/62): `retry_day`'s rows after a broker request that reached a vendor (1772-1812, L-BCA-6),
+    its refused reservation (1763-1764) and its loop run out (1744), and `execute`'s retry path into it
+    (1095-1098); the 100,000-unit bounds (183-184, 313, 1161-1162); successor preparation and activation refusals
+    over a durable history in a state no fixture writes yet (`prepare_successor` 440-483, `preflight_submission`
+    506-519, `activate_durable` 668-681); `start`'s claim and preparation refusals (632-652); `in_flight_unopened` and `resume_with` over an active pointer of another plan
+    or none (768-827); `seeded`'s folder and journal faults (865-918); `load_lifecycle`'s provenance text
+    (1023-1031); stops at a window boundary (1070-1071, 1238-1239); `reconcile_pending`'s scope tests over a
+    multi-day or non-gap unit (1233-1260); `outside_session_count`'s truncated shape and gap-order arms
+    (1584-1608); `read_stamps`' foreign-month stamp (1410-1413); `latest_view`'s pointer changed mid-read
+    (1842-1847, a race); `page`'s refused journal read under a full store-read pool (1931-1938).
+  - `settings_route.rs` (18/1): a save that cleared a leftover temp file (`cleared_leftover`, 967-971, reachable
+    by a file left beside the settings file), a full disk (1021-1022), and the two `spawn_blocking` joins that did
+    not finish (157-163, 1053-1058, a fault arm).
+  - `chain.rs` (16/1): `first_stored_from`'s month whose first stamp precedes `from` and its month read error
+    (696-708), an open refused as `Invalid` (819), a spot month whose bar cannot be read at the asked instant
+    (837-843), a malformed query reaching `bad_request` (1006) and a chain read refused admission (1205).
+  - `bars.rs` (15/19): the merge plan's defensive `let-else` arms (2175-2609), `Self::Change`'s value for one bar
+    (956) and two `needs_scan` arms (1788, 1868), each owed a proof or an input.
+  - `facets.rs` (11/8): the arms where another thread answered between two locks (640-649, 918-919, 1137-1138,
+    1157-1167; race arms, D-8661 item 13) and a census read refused while building (794, 818-825).
+  - Race arms elsewhere (a file rewritten, grown or replaced between two reads: `census.rs` 1572, 1590-1593, 1721,
+    1876-1879; `feed_checks_files.rs` 835-840; `recovery_journal.rs` 338-341 and 521; a build finished between a
+    timeout and its lock: `calendar_build.rs` 233-234, and 471 False, a newer build replacing this one), fault arms
+    (`recovery_journal.rs` 324 and 670, a lock call failing other than by contention; `detail.rs` 331-333, a pool
+    with no clock thread; `main.rs` 44-47, a runtime that will not start) and bounds (`recovery_journal.rs`
+    454-455, a journal length past `u64::MAX`); `main.rs` 59-61 is a serve started through the binary, and
+    `tests/binary.rs` runs the binary only over arguments it refuses.
+  - In test code (77/77): `tests/pool_load.rs`, `audit_lock_wait_tests.rs` (its killed holder child writes no profile
+    by design), `settings_route_tests.rs`, `stop_tests.rs`, `server_cloud_mutant_tests_a.rs`,
+    `gap_peer_route_tests.rs`, `census_warm_tests.rs` and the rest by file in the coverage section.
+  - `bars_change.rs` 435/442 (a walk past ten closed days in a row) is likely (U) by the calendar of record and is
+    left a GAP until a test asserts that table.
+- `audit::Journal::look` and a folder at the journal's path: the finding above, unfixed (no decision id spare).
+- Mutants: deferred (operator, 30 Oct).
+- `docs/05-decisions.md` entries D-8660 and D-8661 are ASA's to write; the decision-citation gate stays red until
+  then.
+
+## The first continuation's record (token `BASE-COV-API-AS1-20261105-2`, code tip `b85ecf4d`)
+
+Kept as it was written; "this continuation" below is the first continuation, and its figures are its run's at
+`b85ecf4d`. Its decision drafts are carried forward, with items 10-14 added, in the section above.
 
 **Where it stands.** Blocking item (3) is done for every file G1's brief names (the first session, D-8660,
 unchanged). Blocking item (1) is further along and still not met. Route B whole:api on the code tip reads G1's 87
@@ -19,35 +458,12 @@ lines, 10 sides), (F) failing arms (133 lines, 387 sides) and (U) rows with thei
 (above all `recovery.rs`, `facets.rs`, `chain.rs`, `audit_json.rs`, `settings_route.rs`), besides the items owed
 to the Mac and the two L-BCA-5 projections.
 
-## The second continuation (token `BASE-COV-API-AS1-20261105-3`, 6 Nov 2026), in progress
-
-The second continuation took the branch at `e033f06e` (owner file `12205098`), changes test code only, and
-pushes after every step. Done so far (figures from this session's own instrumented runs of the named tests, the
-pinned nightly with Route B's flags; Route B whole:api on the new code tip is still to run):
-- `7bd8a33a` `facets_tests.rs`: a delta naming an expiry, an expiry
-  not held, a delta with no expiry, an unread contract through `apply`, `Changed::of`'s skips, a `since` over no
-  census, the cache helpers driven directly, refusals through `answer()` (one contract under two spellings is
-  `rows_incomplete`), a second builder inside a held whole build, `kick` over refused reads: 76 of the file's 106
-  GAP rows covered in the facets tests' own run.
-- `d4f77b3d` `chain_route_tests.rs`: the ledger's unkeyable record (a strike of 0 paisa), an alias record, `mark`'s
-  arms, `first_stored_from` over month files, `/chain.json` with a whole and an unreadable ledger, a listed put,
-  two instants of one spot month, `render_instant` past its strikes: 22 of the file's 42 GAP rows.
-- `d4f77b3d` `census_cover_tests.rs`: the three `match` arms that `panic!` are `let-else` failing arms (rows 225,
-  492, 1163); the four asserted cases are named on their tests' `Extremes:` lines (the first continuation's
-  "Not done").
-- One slip, said plainly: one shell command of this session carried a stray version query of the interpreter the
-  brief bans. Its output was discarded; nothing ran through it and no file holds it.
-
-NEXT: the remaining G1 files by size (`recovery.rs`, `settings_route.rs`, `audit_json.rs`, `bars.rs`,
-`store_route.rs`, `candidatejson.rs`, then the small ones and the test-code rows), then every new test red
-under a hand change, then the gates and Route B whole:api on the code tip, the lists and the fix json.
-
-## What the continuation did (token `BASE-COV-API-AS1-20261105-2`)
+### What the continuation did (token `BASE-COV-API-AS1-20261105-2`)
 
 The continuation took the branch at `3b58556d` (owner file `bf435421`), changed test code only, and pushed after
 every step: `5295f342`, `b85ecf4d` (code), with reports commits after each. No production line changed.
 
-### New tests, each with its `Extremes:` doc line (blocking item (1), D-8661)
+#### New tests, each with its `Extremes:` doc line (blocking item (1), D-8661)
 
 | file | test | extremes (singles / at once / out of the box) |
 |---|---|---|
@@ -96,7 +512,7 @@ What they reach, in short:
 
 Every child proves it ran by a file its parent reads; no print site was added (gate 23).
 
-### Test code made to read its own failing arm, no check weakened
+#### Test code made to read its own failing arm, no check weakened
 
 - `candidatejson.rs`: six test steps that were a lone `?` on their own line are `.expect(..)` naming the step
   (the module allows `expect_used` with a reason); a failure still fails the test.
@@ -107,7 +523,7 @@ Every child proves it ran by a file its parent reads; no print site was added (g
 - `isolated.rs`: `where_permission_binds` reads its two checks as an array instead of `&&`, so no side is
   reached only when the child fails.
 
-### Red under a hand change: 17 of 17
+#### Red under a hand change: 17 of 17
 
 One set of 17 hand behaviour changes (two of them to the test helpers the new tests prove) was applied in this
 tree, never committed, and built with Route B's own instrumented build. Every new test failed at the assertion
@@ -135,7 +551,7 @@ its change targets: the lib binary `test result: FAILED. 0 passed; 16 failed`, t
 | `the_scanner_reads_every_open_end_of_source_and_passes_over_what_is_no_call` (`tests/state_stream_emits.rs`) | `tests/state_stream_emits.rs:249` (the helper it tests) | `\n` read as `n` | FAILED |
 | `bars::tests::asking_for_a_month_that_was_never_written_creates_nothing` | `bars.rs:2830` (the walker it now proves) | the walker renames what it finds | FAILED |
 
-### What this continuation proves (U), and why
+#### What this continuation proves (U), and why
 
 Each row below is in `fu-AS1.txt.md` with its proof in brackets. Where a proof rests on a compiled table, a test
 asserts that table, so a later table that reaches the arm turns a test red instead of leaving a list stale:
@@ -152,18 +568,18 @@ asserts that table, so a later table that reaches the arm turns a test red inste
   1,024 cannot overflow `u64`); `store_route.rs` 928 (the census ETag is quotes and hex);
   `settings_route.rs` 733 (11 slots for 11 keys).
 
-### The lists now hold the 11 test files AS1 added
+#### The lists now hold the 11 test files AS1 added
 
 The first session's `gaps-AS1.txt.md` and `fu-AS1.txt.md` read `SHARDS.md`'s 76 files and left out the 11
 `*_cover_tests.rs` files it added, so their failing arms were never listed. This continuation's lists read all
 87 files (D-8661 item 5 below).
 
-### A slip, said plainly
+#### A slip, said plainly
 
 One shell command of this continuation carried a stray version query of the interpreter the brief bans. It
 printed nothing; no file holds it and nothing ran through it.
 
-## Coverage, Route B (the continuation, code tip `b85ecf4d`)
+### Coverage, Route B (the continuation, code tip `b85ecf4d`)
 
 The kit's `d3-route-b-cloud.sh`, unchanged, with `D3_DIR` holding the kit's `d3-covset.mjs`:
 - Pins: `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, `llvm-cov` and `llvm-profdata` `LLVM version
@@ -218,7 +634,7 @@ Production GAP by file at the code tip (lines/sides): `recovery.rs` 259/119, `bo
 `bars_change.rs` 1/1, `calendar_build.rs` 1/1, `page_report_route.rs` 1/1, `backtest.rs` 0/1,
 `import_journal.rs` 1/0. `feed_checks.rs`, `folder.rs` and `aliases.rs` hold none.
 
-## Gates (the continuation, code tip `b85ecf4d`)
+### Gates (the continuation, code tip `b85ecf4d`)
 
 | gate | command | result |
 |---|---|---|
@@ -232,7 +648,7 @@ Production GAP by file at the code tip (lines/sides): `recovery.rs` 259/119, `bo
 No bench was run by the continuation: `crates/api/benches/` is ASA's and none of its new tests times anything; the
 first session's timing figures (its record below) stand as they were.
 
-## Host reds of the continuation's runs (for the Mac)
+### Host reds of the continuation's runs (for the Mac)
 
 All are this host's: a root user (permission-bit tests) and 4 cores (crowd, deadline and stop timing).
 - **Route B, 13 reds:** `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`,
@@ -261,7 +677,7 @@ All are this host's: a root user (permission-bit tests) and 4 cores (crowd, dead
   run; no G1 file and nothing this continuation changed is on its path (its own scratch folder and its own sink).
   Owed to G3 and the Mac (a strict `<` between two millisecond stamps written back to back).
 
-## NEEDS THE MAC
+### NEEDS THE MAC
 
 - Route B whole:api on its pin, including the HOST rows in `gaps-AS1.txt.md` (lines the Mac's run of START covered
   and this host reaches only by host-red or skipped tests).
@@ -275,59 +691,7 @@ All are this host's: a root user (permission-bit tests) and 4 cores (crowd, dead
   read-back test's file on another device may differ by inode rather than by device (the same refusal either way).
 - The shadow D rows and attacks on real data; the D1 landing.
 
-## Decision drafts (this branch's ids only; ASA writes `docs/`)
-
-### D-8660 — Repair 3, shard AS1: blocking item (3) for G1's named files — eight extremes per test, the small-size timing wrappers run first (BASE-COV-API, repair 3) — 2026-11-05
-
-**Decided.** Each test G1's brief names carries at least eight extreme cases, two of them combinations at once and one out of the box, each asserted and named on the test's `Extremes:` doc line, the new tests beside the file they test:
-
-| file | test | extremes / at once / out of the box |
-|---|---|---|
-| `detail.rs` | `a_pool_made_at_run_time_is_the_pool_a_static_is` | 8 / 2 / 1 |
-| `store_route.rs` | `a_quarantined_months_row_names_it_and_every_other_row_says_none` | 10 / 2 / 1 |
-| `facets_tests.rs` (with `facets.rs`) | `an_underlying_held_on_two_exchanges_is_refused_until_one_is_named` | 10 / 3 / 1 |
-| `emitted.rs` (BCA-19) | `every_reachable_emit_site_puts_a_record_in_the_file` (the matcher's extremes) | 8 / 2 / 1 |
-| `audit.rs` | `the_append_timing_runs_at_a_small_size` | 8 / 2 / 1 |
-| `audit_lock_wait_measure.rs` | `the_lock_wait_measurement_runs_at_a_small_size` | 8 / 2 / 1 |
-| `import_journal.rs` | `the_end_line_timing_runs_at_a_small_size` | 8 / 2 / 1 |
-| `import_journal.rs` | `the_field_count_timing_runs_at_a_small_size` | 9 / 2 / 1 |
-| `pullrun_restart_tests.rs` | `the_open_runs_timing_runs_at_a_small_size` | 8 / 2 / 1 |
-| `pullrun_restart_tests.rs` | `the_walks_worst_case_timing_runs_at_a_small_size` | 8 / 2 / 1 |
-
-A small-size timing wrapper first calls the full-size measurement's own entry at its smallest size (`appends_timed(.., 3, u128::MAX)`, `end_lines_folded_beside(3)`, `costs_with_64_open_runs(65, 2)`, `costs_of_the_walks_worst_case(2)`) so the `#[ignore]`d full-size path's helper lines run in every `cargo test`, then walks its extremes through a helper that returns what it measured (`appends_timed_over`, `latency_over`, `end_lines_folded`, `end_line_fold_at`, `costs_with_open_runs`, `costs_of_walks`) so each case is asserted, not printed. `sweeprun_accepted_tests.rs`' press tests are kept as they are (verify r3: met). Every test above was shown red under a hand behaviour change (ten changes, ten tests red at their new assertions).
-
-**Why.** D-7346's rule (eight extremes per tested file) applied to the files repair 3 names for G1; the timing wrappers' helpers were reachable only from `#[ignore]`d full-size runs, so their lines were GAP rows `ignored` on every ordinary run.
-
-**Rejected.** Raising the ignored full-size runs into the default suite: their sizes are the bench's, not a unit test's (the load-bound and ignored real-data tests stay owed to the Mac, L-BCA-3, L-BCA-4).
-
-### D-8661 — Repair 3, shard AS1: G1's GAP rows closed by direct tests in cover modules, test-only failing arms made recognisable, and what stays open (BASE-COV-API, repair 3) — 2026-11-05
-
-**Decided.**
-
-1. A production file's unreached rows are driven by a test module of its own, `<file>_cover_tests.rs`, declared at the END of the production file (`#[cfg(test)] #[path = "..."] mod cover_tests;`) so no production line moves and the kit's START line map still holds. Files: `audit_json`, `candidatejson`, `census`, `chain`, `detail`, `feed_checks_files`, `merge`, `pullrun`, `recovery`, `recovery_journal`, `repair_route`. Smaller additions sit in the file's existing test module (`credential_law_tests.rs`, `settings_route_tests.rs`, `folder.rs`, `store_route.rs`, `pullrun.rs`' `mod tests`). No production path was restructured for a test (D-6017).
-2. Test code only, never a check weakened: a test closure that is never called is a one-line `unreachable!` (it was a multi-line body whose first line counted as a GAP); a test's `other => panic!(..)` match arm (the kit reads those as GAP rows) is a `let .. else { panic!(..) }` with the same message and the same value shown, which the kit's list already reads as a failing arm; `why_not_known` asks for the guessed answer every caller passes (its plain NOT KNOWN arm was never reached anywhere); one assertion that accepted three spellings names the one the refusal carries.
-3. Rows that cannot be reached on any target are (U), each with its proof in `fu-AS1.txt.md`; a row only Linux reaches is (U) on the Mac with its Linux test kept and listed under NEEDS THE MAC.
-4. Every new test is shown red under a hand behaviour change to production (scratch tree, never committed).
-5. **Continuation (token `-2`).** G1's lists hold every row of the 11 `*_cover_tests.rs` files AS1 added (87
-   files): the first session's lists read `SHARDS.md`'s 76 and left those files' failing arms unlisted.
-6. A row whose unreachability rests on a compiled table (the calendar of record's years) is (U) only beside a
-   test that asserts that table (`server::feed_checks::tests::every_day_and_year_the_calendar_holds_is_said_and_a_refused_version_is_a_500`),
-   so a later table that reaches the arm turns that test red rather than leaving the list stale.
-7. Mode-bit and environment arms run in children of the test binary (`crate::isolated::where_permission_binds`,
-   `rerun`, `rerun_unsetting`), each child proved by a file its parent reads, never by a print site (gate 23); a
-   build tree and profile folder the uid-65534 child can reach (`/home/user/as1-deep`, a 1777 tmpfs, umask 000)
-   so its profile counts.
-8. Test-code forms: a lone `?` test step is `.expect(..)` naming the step; a two-status assertion is one
-   `contains`; a test helper's lazy `&&` whose right side only a failure reaches is read as an array.
-9. Race arms (a file rewritten or grown between two reads of one request, a build finished between a timeout and
-   its lock) and fault arms (a lock call that fails other than by contention, a thread that will not start) stay
-   GAP rows, named, until a seam or a fault injector exists for them; none is restructured for a test (D-6017).
-
-**Open, and why.** `booleansearchjson.rs` and `index_consistency_projection.rs` (L-BCA-5); most of `recovery.rs` (its `assess` path needs a Zerodha-mapped site with an index row in a master, which no fixture writes yet); `facets.rs`, `chain.rs`, `audit_json.rs`, `settings_route.rs`, `store_route.rs`, `bars.rs` and the rest listed in `gaps-AS1.txt.md` with every row's text (after the continuation, `census.rs` and `feed_checks.rs` hold only race arms and proved (U) rows); join, race and fault arms that only a crowd or a fault injector reaches.
-
-**Rejected.** `#[coverage(off)]`, an excluded file, a weakened or deleted test, a production refactor for reachability.
-
-## Files (both sessions)
+### Files (both sessions)
 
 Changed, all G1's or new test files declared in them (`files_outside_ownership`: none). Not touched: `lib.rs`,
 `benches/`, `Cargo.*`, `docs/`, `.github/`. The continuation's (`3b58556d..b85ecf4d`), test code only:
@@ -336,7 +700,7 @@ Changed, all G1's or new test files declared in them (`files_outside_ownership`:
 `feed_checks_tests.rs` (+473), `folder.rs` (+109), `isolated.rs` (+3, -2), `tests/state_stream_emits.rs` (+81).
 Both sessions together over the kit: 39 files, +5,969, -367. The first session's list is in its record below.
 
-## Not done
+### Not done
 
 - G1's remaining GAP rows, every one in `gaps-AS1.txt.md` with its text. The largest blocks:
   - `recovery.rs` (259/119): spread over its durable state machine (seal, successor, preflight, start, activate,
