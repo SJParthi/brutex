@@ -61,6 +61,7 @@
 #![deny(missing_docs)]
 
 pub mod anchored;
+pub mod bollinger;
 pub mod column;
 pub mod daily;
 pub mod evaluator;
