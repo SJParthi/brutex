@@ -88483,6 +88483,63 @@ unused.
 
 <!-- slot FNO-COSTS -->
 
+### D-8110 — NSE cash-equity intraday charges get their own dated table and a two-clock note, three new modules of `crates/costs` (package FNO-COSTS) — 2026-11-01
+
+**Context.** Operator rule 7 (30 Oct 2026): every F&O stock trade carries two cost clocks, its own day's official rates and today's Dhan rates, both computed and labelled; the headline uses the worse. `crates/costs` could price neither: `RateSelector::Dated` refused equity on every date, the regime tables hold an anchor and two later rows at one rupee per crore (`regime.rs` `MAX_LATER_ROWS`), and NSE's cash rows need six rows and the exact Rs 306.99 and Rs 0.01 per crore (`state/fib-strategy-20261030/COSTS.md` section 7).
+
+**Decision.** Three modules, each sole-owned by this package:
+- `equity_dated`: the 25 rows of `costs-table.json` version `costs-table/2026-10-30/r1` (`EQUITY_DATED_ROWS`, `EQUITY_DATED_VERSION`), every rate an exact `Ratio`, each with its source and status; `rates_on(day)` picks one row per component from fixed series checked at compile time; `STATE_STAMPS` and `worst_state_stamp` hold the 15 rows of the State table (SECONDARY).
+- `equity_readings`: `ReadingSet` has one enum per open choice of COSTS.md section 6, `note` prices one set, `official` the official method, `worst` every line at its worst.
+- `equity_clock`: `price_trade(fills, day)` returns a `TwoClock` with four notes, the readings that give each worst, the rows priced, gross, net and the headline, `max(dated worst, today worst)`.
+
+The window is 2018-09-03 to 2026-10-30 (the read day), and a day outside it is refused by name on both clocks.
+
+**Why not extend the regime or the stack.** A regime row cannot hold the rates. `stack.rs` has one GST base and one stamp law and prices one reading of each open choice (D-8111); it stays what it is, and `the_new_note_and_the_crates_own_stack_agree_on_every_vector_they_both_price` holds the two to the paisa on every vector both can price, so there is one method and no drift.
+
+**Pure.** The package returns typed records (`NoteLines`, `ReadingSet::labels`, `EquityRates::row_ids`, `TwoClock`) and does no I/O. FNO-RECORDS saves them; the run identity takes `EQUITY_DATED_VERSION` through FNO-SEC-WIRE. The version is pinned to a fingerprint of the rows, so a changed rate fails until the version moves.
+
+D-8117 to D-8119 are unused.
+
+### D-8111 — The dated selector prices NSE equity intraday only on the days this stack's one GST base and one stamp law are the dated ones, 2022-07-18 to 2026-10-30; `DATED_RATES_VERSION` moves to r3 — 2026-11-01
+
+**Context.** PARTS.md's FNO-COSTS section has `dated_card`'s `Equity(Intraday)` arm return the dated card. `stack.rs::settle_precise` has one GST base (brokerage + exchange + SEBI) and one stamp law (0.003% of the buy value). The dated table has no GST on the SEBI fee before 2022-07-18 (row GST-SEBI) and a State stamp on both sides before 2020-07-01 (row SD-STATE). A card on those days would print a wrong figure under the label "dated".
+
+**Decision.** `dated_card` returns the table's card for NSE from 2022-07-18 (`DATED_INTRADAY_FROM`) to `READ_ON`. Earlier days are refused by name, and the refusal names `equity_clock::price_trade`, which prices them. Later days, BSE (no dated row exists), delivery and MTF (no dated row exists) are refused by name. CLAUDE.md section 4 bans the fallback that hides a failure; a refusal hides nothing.
+
+**Consequences.** `DATED_RATES_VERSION` is `dated-regime/r3`, its fingerprint re-pinned in the same change; every options figure is r2's. The tests that asserted the blanket refusal on NSE intraday, or named r2, move to BSE, to the priced figure or to r3 (`ledger.rs`, `stack.rs`, `schedule.rs`). `RateSelector` is used only inside `crates/costs` (`grep -rln RateSelector crates`), so no other crate changes. Invariant rows CHG-05 ("refuses equity ... on every date"), CHG-35 and CHG-37 (both `dated-regime/r2`) are older than this entry and name what it changes; a part edits only its own slot lines (PARTS.md 4.1), so FNO-COSTS-I10 carries the correction and the test CHG-05 cites keeps its name.
+
+### D-8112 — The worst note is every line at its own largest reading, on a GST base of those lines, and a tie keeps the official reading — 2026-11-01
+
+**Decision.** `worst` takes each line's largest reading separately. Every line is a sum of non-negative terms and GST is non-decreasing in its base, so that is at least every consistent reading set; `the_worst_is_at_least_every_reading_set_and_the_worst_set_reproduces_it` walks all 9,216 sets on CN22 and CN24 and, with all 16 State choices, all 147,456 on CN01, on both clocks, and the random-trade property samples them on 200 trades. A tie keeps the first (official) reading, so `ReadingSet::labels` shows only what moved.
+
+**SPEC.md OP-27's square-off split is a reading too.** COSTS.md section 6 lists RD-SQ (on top or instead); SPEC.md section 12 also lists "auto square-off as one order or several". `SquareOffSplit` computes both, one fee per broker order and one per traded second it filled in, and the worst takes the larger. A broker order with one fill ties, so COSTS.md's CN22 and CN23 are unchanged.
+
+**A note is one trade.** `price_trade` prices a trade alone. Two trades of one stock on one day are two notes, so the DP reading and a State cap apply per trade, which over-states the day. The rupee rounding of STT and stamp is per note here, and NSE rounds the client's whole day: that can go either way, by at most 50 paise a line a trade (docs/06-limits.md L-FNO-COSTS-03). The official column is therefore "priced alone", not the client's whole day.
+
+### D-8113 — RD-GST applies to the DP charge's GST too: Rs 2.26, one paisa over COSTS.md's worst columns — 2026-11-01
+
+**Context.** COSTS.md's calculator (`costs-evidence/calc/vec.js`) keeps the larger RD-GST reading for the main GST line and the square-off fee's GST, and rounds the DP charge's GST once: `W.dpGst = apply(1250n, GST)`, Rs 2.25. CGST 9% + SGST 9% on Rs 12.50 is Rs 1.13 + Rs 1.13 = Rs 2.26. RD-DP's own row says "Rs 14.75".
+
+**Decision.** Operator rule 7 outranks a table's arithmetic: compute each reading and use the worse. The crate's worst takes Rs 2.26. So the crate's worst note is COSTS.md's plus one paisa on three lines: GST on DP, the total, and the headline. `every_contract_note_matches_costs_md_to_the_paisa_under_all_four_columns` asserts both: COSTS.md's two worst columns to the paisa under COSTS.md's own reading set (`dp_gst: Once`), and the crate's worst as that plus the one paisa. No row of the table changes, so `EQUITY_DATED_VERSION` stays r1. The main session may correct the vectors in a table r2; this entry then stops being a difference.
+
+### D-8114 — The worst listed State is the highest duty of all 15 rows at that value: Himachal Pradesh's flat Rs 50 below about Rs 5 lakh a day, Telangana to about Rs 16.67 lakh, Tamil Nadu above — 2026-11-01
+
+**Context.** Operator decision 9.5 (30 Oct 2026): stamp duty before 1 Jul 2020 uses the worst listed state. COSTS.md section 3 summarises that as Telangana up to Rs 16.67 lakh of turnover and Tamil Nadu above. That summary omits the small-turnover end: 0.01% of less than Rs 5 lakh is less than Himachal Pradesh's flat Rs 50 a day. COSTS.md's calculator takes the maximum over every listed State, and its vectors (about Rs 10 lakh) all land on Telangana.
+
+**Decision.** `worst_state_stamp` takes the same maximum over `STATE_STAMPS`, half-up to the paisa and then capped, the first in table order on a tie. The rates stay SECONDARY (Zerodha's archived calculator) and the row's status `Unverified`; `StateChoice::Named` prices any one State, so the operator's named State needs no new code.
+
+### D-8115 — What a trade's input must be, and what is refused by name — 2026-11-01
+
+**Decision.** `NoteInput::from_fills` takes the orders in time order, the first opening the trade, each with fills in strictly increasing seconds (one fill per traded second, as FNO-SEC-EXEC gives them; per-fill brokerage counts seconds, so two fills in one second are an error, not two fills). Refused by name: no order (`EmptyDay`), an order with no fill, a quantity or price not positive, a second not later than its order's last, more than `MAX_FILLS` (131,072) fills, a broker square-off on the opening side, an overflow of a fill's value or a side's total, and an unsquared trade (`OpenIntradayPosition`). `MAX_FILLS` is several whole sessions of 22,500 seconds on every order; it keeps the per-fill brokerage sum inside `i64` without a checked add per fill. Every later line is computed in `i128` from those `i64` totals, then narrowed, and cannot leave `i64`: each rate is a fraction under one and the fixed fees are bounded by `MAX_FILLS`. The net is the one figure that can, and `price_trade` refuses it.
+
+### D-8116 — The benches `C-FNO-COSTS-01..03` print p50, p99 and max at 1x, 10x and 100x; their wrappers hold the sort and no `ratio` call; the Data API is a monthly figure, not a charge — 2026-11-01
+
+**Bench shape.** `equity_clock::measure_rates_on`, `measure_price_trade` and `measure_worst` live in the library and the unit tests run them at tiny sizes (PARTS.md "bench shape"). `benches/ratio.rs` is the thin wrapper: it sorts the samples, prints the spread and fails on a p99 that grows past `CEILING_PERMILLE` from 1x or from 10x to 100x or leaves its absolute budget. The sort stays in the bench because gate 11 rule 4 refuses it in production code and `.github/gates_ledger.rs` is not this package's. The wrappers call a helper not named `ratio`, so gate 14's exact measurement-point pin for this file stays 27; the three ids enter gate 14's table at the main session's one edit at F1's assembly.
+
+**A row's figure is its best round (repair 1).** The first shape read one pass, and check 1 ran its release binary 85 times at load 14 to 24: it exited 1 in 4 runs, on these three rows only, while every budget held (`state/fib-strategy-20261030/check-FNO-COSTS-r1.md` F1). Each row now times its sizes in turns, `FNO_ROUNDS` (20) times over, and a size's figure is its round with the smallest p99, as `cost_ps` takes the minimum of its trials and FNO-LADDER's rows take their best round. The median and worst round's p99 are printed beside it, so the spread stays visible. In turns, not one size's rounds and then the next's: inside one of those runs the same fixed work moved 2.4x to 2.9x between sizes (p50 3.25 to 7.81 ns, 0.292 to 0.834 µs), nearly the whole 3.0x ceiling, so sizes timed apart can compare two machine states. `CEILING_PERMILLE` and the budgets did not move. A last size that timed at zero now fails too: only the baseline was guarded, so a refused 100x row would have passed the ceiling and the budget with no sample.
+
+**The Data API.** `DHAN_DATA_API_MONTHLY` is Rs 499 a month plus "applicable taxes" (`sources-charges.md` row B-13, line 37). GST at 18% is taken as those taxes, labelled in its source string. It is for the account replay, never a per-trade charge, so `price_trade` does not include it.
+
 <!-- slot FNO-SEC-EXEC -->
 
 <!-- slot FNO-LADDER -->

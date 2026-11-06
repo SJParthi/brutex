@@ -1106,9 +1106,21 @@ mod tests {
             v1.close(Mode::DhanCalculator, RateSelector::Dated),
             Err(DHAN_HAS_NO_DATED_RATES)
         );
-        // The dated set has no equity history: the regime's refusal.
+        // The dated set prices NSE equity intraday from 2022-07-18 (D-8111):
+        // on 2026-10-15 its rates are today's, so the totals agree.
+        assert_eq!(
+            v1.close(Mode::Precise, RateSelector::Dated)
+                .map(|day| day.total()),
+            v1.close(Mode::Precise, TODAY).map(|day| day.total())
+        );
+        // BSE equity has no dated rows: the refusal.
         assert!(matches!(
-            v1.close(Mode::Precise, RateSelector::Dated),
+            ledger(
+                INTRADAY,
+                Exchange::Bse,
+                &[buy(50, 1_520_00), sell(50, 1_530_00)]
+            )
+            .close(Mode::Precise, RateSelector::Dated),
             Err(ChargeError::Cost(CostError::Unverified(_)))
         ));
         // An empty day, in both modes.
@@ -1632,10 +1644,11 @@ mod tests {
                 );
             }
         }
+        // BSE equity has no dated rows (D-8111).
         assert!(matches!(
             refused(
                 INTRADAY,
-                Exchange::Nse,
+                Exchange::Bse,
                 buy(1, 1),
                 Mode::Precise,
                 RateSelector::Dated
