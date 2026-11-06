@@ -3011,10 +3011,6 @@ mod tests {
     /// for the segment, not the epochs); out of the box, a census of two
     /// partitions where a read gives three.
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one journal and one two-part census, each refusal beside its answer"
-    )]
     fn a_day_refused_for_two_kinds_is_one_day_and_a_since_of_a_part_not_held_is_refused() {
         let dir = crate::server::tests::agreeing("store-two-kinds");
         let site = crate::server::tests::site("store-two-kinds", &dir);

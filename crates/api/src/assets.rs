@@ -1820,7 +1820,7 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).expect("a folder");
         std::fs::write(root.join("old.txt"), b"old").expect("a file");
         std::fs::write(root.join("sub").join("new.txt"), b"new").expect("a file");
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_mins(1);
         std::fs::File::options()
             .write(true)
             .open(root.join("sub").join("new.txt"))

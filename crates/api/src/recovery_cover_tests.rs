@@ -730,10 +730,6 @@ fn session_of(day: Day) -> Vec<i64> {
 /// session on a day whose session is whole (held, and an issue, no gap); out
 /// of the box, a scan of one day that is a Sunday with nothing held.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one store, every day shape an assessment reads, each beside the others"
-)]
 async fn an_assessment_counts_each_day_by_its_own_evidence() {
     let (root, site) = mapped_site("recovery-cover-assess");
     let (d1, d2, d3, d6, d7) = (
@@ -1048,10 +1044,6 @@ async fn a_start_counts_every_window_and_reconciles_only_its_own_pending_days() 
 /// a pointer that is itself sound; out of the box, a feed line whose doing is
 /// markup (escaped, never rendered).
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "every state the page names, then each pointer it may be handed"
-)]
 async fn the_page_names_every_state_and_a_pointer_to_another_plan_is_refused() {
     let day = on(2026, 7, 1);
     let row = |status: Status| Record {
