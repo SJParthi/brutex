@@ -322,4 +322,17 @@ indexstopjson::cover_tests::a_second_root_reopens_and_a_page_kind_no_query_names
 indexstopqualificationjson::saved_tests::a_saved_qualification_is_served_by_every_page_that_reads_it (red2b: its another-root assert)
   hand change: crates/api/src/indexstopqualificationjson.rs: «value.root == root && value.identity == asked.identity» -> «value.identity == asked.identity»
   red at crates/api/src/indexstopqualificationjson_saved_tests.rs:331 (the child): no qualification is saved under another root: Object {"batch": String("0"), ... (the kept reader answered)
+
+Red run 3 (continuation -4): the test added for month_get's retry, and the saved qualification's new candle assert.
+Tree: a local, never-pushed commit red3 (fca3d025) over code tip 7d7d243f holding two hand changes; built with the
+repo toolchain (rustc 1.97.1), CARGO_TARGET_DIR=/var/tmp/as3/K4, cargo test -p api --lib --locked --no-run
+(stamped); run as api-<hash> --exact <the 2 full names> plus server::pool_table_tests::a_read_stops_when_its_reader_leaves
+(its wait now the shared eventually; no hand change aimed at it): "1 passed; 2 failed".
+
+server::ops_safety_tests::a_month_asked_while_every_store_read_slot_is_held_is_asked_again (red3)
+  hand change: crates/api/src/ops_safety_tests.rs: «if status != StatusCode::TOO_MANY_REQUESTS {» -> «if status != StatusCode::IM_A_TEAPOT {» (month_get, the helper whose retry it drives)
+  red at crates/api/src/ops_safety_tests.rs:184 (the child): assertion `left == right` failed: {"error":"a month of bars not admitted (Saturated): at most 4 run at once, ..."} left 429 right 200; the parent at crates/api/src/isolated.rs:66
+indexstopqualificationjson::saved_tests::a_saved_qualification_is_served_by_every_page_that_reads_it (red3: its kept-candle-reader assert)
+  hand change: crates/api/src/indexstopcandlesjson.rs: «cached.root == root && cached.identity == asked.identity» -> «cached.identity == asked.identity»
+  red at crates/api/src/indexstopqualificationjson_saved_tests.rs:468 (the child): no source is saved under another root: Object {"admitted_bytes": String("3326290"), ... (the kept reader answered)
 `````

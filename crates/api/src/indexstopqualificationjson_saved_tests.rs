@@ -466,7 +466,10 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
             &format!("identity={source}&pin={source_pin}&setting=0&kind=source"),
         )
         .expect_err("no source is saved under another root");
-        assert!(elsewhere.contains("another-root"), "{elsewhere}");
+        assert!(
+            elsewhere.starts_with("original_context_refused: ") && elsewhere.contains("(os error 2)"),
+            "{elsewhere}"
+        );
     });
 }
 

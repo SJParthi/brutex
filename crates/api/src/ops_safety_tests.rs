@@ -183,7 +183,7 @@ fn a_month_asked_while_every_store_read_slot_is_held_is_asked_again() {
             let (status, body) = asking.await.expect("the ask joins");
             assert_eq!(status, StatusCode::OK, "{body}");
             let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-            assert_eq!(parsed["bars"].as_array().map(Vec::len), Some(1), "{body}");
+            assert_eq!(parsed.as_array().map(Vec::len), Some(1), "{body}");
             assert_eq!(
                 store_read_busy().await,
                 before + 1,
