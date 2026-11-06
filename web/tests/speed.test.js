@@ -6468,9 +6468,9 @@ test('a stop given a patient list says its processes\' words however late `ps` a
   });
   assert.deepEqual(gone, [{ said: left, killed: false }, true]);
 
-  // F. A `ps` THAT FAILS: a patient list waits out lateness only; a failure is said, by either list, in the same words.
-  const failed = asOne('ps failed: Command failed: ps -A -o pid= -o pgid=');
-  for (const deps of [patiently().deps, {}]) assert.deepEqual(await withPs(failing, () => stopOf('exec sleep 1000', deps)), { said: `${left}${failed}`, killed: false });
+  // F. A `ps` THAT FAILS: a patient list waits out lateness only, and says a failure in the sheet's own words (the
+  // bounded list's are pinned by repair 10's test above; here that half would race a stall of the failing `ps`).
+  assert.deepEqual(await withPs(failing, () => stopOf('exec sleep 1000', patiently().deps)), { said: `${left}${asOne('ps failed: Command failed: ps -A -o pid= -o pgid=')}`, killed: false });
 
   // G. OUT OF THE BOX, NO `ps` ON THIS MACHINE AT ALL: never waited for, said by either list, and the group still ends.
   for (const deps of [patiently().deps, {}]) assert.deepEqual(await withPs(none, () => stopOf('exec /bin/sleep 1000', deps)), { said: `${left}${asOne('ps failed: spawn ps ENOENT')}`, killed: false });
