@@ -3808,45 +3808,64 @@ mod tests {
     /// that names an expiry names that expiry's month, and neither names an
     /// expiry of its own (the contracts ask that follows does). Extremes: a
     /// window reaching today (its end pulled back to last month); a window
-    /// of a month long past; a named expiry in March; and, at once, a named
-    /// expiry with a lower-case underlying on its window's last day; out of
-    /// the box — a window of one day.
+    /// of a month long past; a named expiry in March; a named expiry a month
+    /// past its window's end (the expiry's month, not the window's); and, at
+    /// once, a named expiry with a lower-case underlying on its window's last
+    /// day, and a named January expiry past a December window (its year and
+    /// its month both the expiry's); out of the box — a window of one day.
     #[test]
     fn a_discovery_asks_for_the_named_expirys_month_or_the_windows() {
         let ask = |form: &str| {
             let asked = discovery_ask(&parse_fno(form, today()).expect("a request"));
             (asked.underlying, asked.year, asked.month, asked.expiry)
         };
-        for (form, underlying, month) in [
+        for (form, underlying, year, month) in [
             (
                 "underlying=NIFTY&series=opt&from=2026-01-01&to=2026-08-07",
                 "NIFTY",
+                2026,
                 7,
             ),
             (
                 "underlying=NIFTY&series=opt&from=2026-03-01&to=2026-03-31",
                 "NIFTY",
+                2026,
                 3,
             ),
             (
                 "underlying=nifty&series=fut&expiry=2026-07-30&from=2026-07-01&to=2026-07-30",
                 "NIFTY",
+                2026,
                 7,
             ),
             (
                 "underlying=NIFTY&series=fut&expiry=2026-03-26&from=2026-03-01&to=2026-03-26",
                 "NIFTY",
+                2026,
                 3,
+            ),
+            (
+                "underlying=NIFTY&series=opt&expiry=2026-07-30&from=2026-06-01&to=2026-06-30",
+                "NIFTY",
+                2026,
+                7,
+            ),
+            (
+                "underlying=NIFTY&series=fut&expiry=2026-01-29&from=2025-12-01&to=2025-12-31",
+                "NIFTY",
+                2026,
+                1,
             ),
             (
                 "underlying=BANKNIFTY&series=opt&from=2026-07-14&to=2026-07-14",
                 "BANKNIFTY",
+                2026,
                 7,
             ),
         ] {
             assert_eq!(
                 ask(form),
-                (underlying.to_owned(), 2026, month, String::new()),
+                (underlying.to_owned(), year, month, String::new()),
                 "{form}"
             );
         }
