@@ -2296,7 +2296,8 @@ fn an_index_moves_by_its_own_evidence_and_a_node_no_store_text_gives_is_refused(
 /// with an unpadded date beside its padded spelling (the same); the lists of
 /// that selection, which answer and count the two spellings as one contract;
 /// the rows of the other expiry, which holds no second spelling (answered);
-/// the rows of a spot underlying of the same census (answered); and, at
+/// the rows of a spot underlying of the same census (answered); the census
+/// state and the part generation said on every refusal; and, at
 /// once, both second spellings in one chain (refused once, as incomplete),
 /// and an unread contract beside a second spelling (refused as unreadable,
 /// the check made first); out of the box, the strike spelled `01150000`.

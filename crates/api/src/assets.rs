@@ -1780,4 +1780,71 @@ mod tests {
             "the root path has no segment to alias and must not gain one"
         );
     }
+
+    /// **A BUNDLE PATH IS CONTENT-ADDRESSED ONLY UNDER ITS OWN TWO FOLDERS,
+    /// AND A WALK FOR THE NEWEST FILE STOPS AT ITS BOUND** (BASE-COV-API
+    /// repair 3, D-8661). `content_addressed` and `newest_under`, driven
+    /// directly. Extremes: `_app/immutable/<file>` (addressed); the same under
+    /// another first folder (not); `_app` with another second folder (not);
+    /// `_app/immutable` with no file (not); a folder of two files read whole
+    /// (the newer named); the same folder under a bound of one entry, whose
+    /// subfolder is never descended (stopped); a bound of zero (nothing read);
+    /// a folder that is not there (none); and, at once, the second folder
+    /// right and the first wrong, and a bound that stops the walk before the
+    /// newest file it would have found; out of the box, a path of the two
+    /// folders in upper case (not addressed: the names are exact).
+    #[test]
+    fn a_bundle_is_addressed_only_under_its_own_folders_and_a_walk_stops_at_its_bound() {
+        let path = |segments: &[&str]| -> Vec<String> {
+            segments
+                .iter()
+                .map(|segment| (*segment).to_owned())
+                .collect()
+        };
+        assert!(content_addressed(&path(&[
+            IMMUTABLE_DIR,
+            "immutable",
+            "a.js"
+        ])));
+        for not in [
+            path(&["other", "immutable", "a.js"]),
+            path(&[IMMUTABLE_DIR, "mutable", "a.js"]),
+            path(&[IMMUTABLE_DIR, "immutable"]),
+            path(&["_APP", "IMMUTABLE", "a.js"]),
+        ] {
+            assert!(!content_addressed(&not), "{not:?}");
+        }
+
+        let root = crate::scratch::path("assets-newest-under");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).expect("a folder");
+        std::fs::write(root.join("old.txt"), b"old").expect("a file");
+        std::fs::write(root.join("sub").join("new.txt"), b"new").expect("a file");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("sub").join("new.txt"))
+            .and_then(|file| file.set_modified(later))
+            .expect("a later stamp");
+        let whole = newest_under(&root, 100).expect("a file");
+        assert_eq!(
+            whole.0,
+            root.join("sub").join("new.txt"),
+            "the newer, in the subfolder"
+        );
+        // A BOUND OF ONE ENTRY: the first folder's entries are read, then the
+        // walk stops before it descends.
+        assert_eq!(
+            newest_under(&root, 1).map(|(at, _)| at),
+            Some(root.join("old.txt")),
+            "the subfolder is never descended"
+        );
+        assert_eq!(
+            newest_under(&root, 0),
+            None,
+            "a bound of zero reads nothing"
+        );
+        assert_eq!(newest_under(&root.join("absent"), 100), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

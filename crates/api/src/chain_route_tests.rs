@@ -1127,8 +1127,10 @@ fn a_listed_keys_first_stamp_is_read_month_by_month_and_a_month_that_will_not_re
 /// reads (`read`, no unread line); a ledger that is not UTF-8 (`unreadable`,
 /// its reason said, every instant still answered); a stitched record listing
 /// a put first stored before its ex-date (its first stamp read from its own
-/// month file, after the ex-date); two instants in one spot month (both
-/// answered off one open); a ladder position past the strikes it indexes
+/// month file, after the ex-date); the ledger's records and unread lines
+/// counted (one, none); two instants in one spot month (both answered off
+/// one open); the second instant, with no bar a minute later, said
+/// `no_spot_bar`; a ladder position past the strikes it indexes
 /// (no row written for it); a ladder over no strikes at all (an empty list);
 /// and, at once, the listed put and the two instants in one answer, and the
 /// unreadable ledger with two instants; out of the box, a ledger of one
