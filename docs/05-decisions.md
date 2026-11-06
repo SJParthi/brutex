@@ -82158,11 +82158,11 @@ SC-CLOSE-24, DB-B21 (partial), FM-106, FM-109, FM-112, FM-263; repair 1 of
    any other words cites the file that holds it, with the row's words as
    what it says.
 
-### D-6247 — R3-30 repair 2: a documented RBI gap row continues a running staleness clock and never restarts an expired one — 2026-10-21
+### D-7146 — R3-30 repair 2: a documented RBI gap row continues a running staleness clock and never restarts an expired one — 2026-10-21
 
 Number taken from the ledger head at commit (amendment A6; `feat/db-fix`'s
 head is D-6245 and D-6246 is R3-30's own); the landing renumbers it if
-another package lands D-6247 first. Amends D-6246 item 3; finding DB-B44,
+another package lands D-6247 first (it did: SC-4 repair round 1 took D-6247 at 80799, so BASE-REDS-1023 gave this entry D-7146, D-7145). Amends D-6246 item 3; finding DB-B44,
 blocking issue of `verify-R3-30-r2`.
 
 1. **What was wrong.** D-6246 item 3 let a gap row restart the 14-day clock
@@ -83971,6 +83971,1214 @@ through it"). Under D-7135 no root A is ever built.
 4. PROVEN-GATE rule (c) keeps the definition-3 shares' 2026-08 and 2026-09
    months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
    Placing that step is an ordering decision left to the main session.
+
+### D-7145 — Gate 27b: the R3-30 repair 2 entry that also headed D-6247 is D-7146 now; SC-4 keeps D-6247 (BASE-REDS-1023) — 2026-10-23
+
+Gate 27b was red on `feat/db-fix` at e0668a4bd: `### D-6247` headed two
+entries, SC-4 repair round 1's (docs/05-decisions.md line 80799, 2026-10-20)
+and R3-30 repair 2's (line 81043, 2026-10-21). D-0684's rule: never delete an
+entry, give the NEWER one the next free number. The merged tree's highest was
+D-7138, and D-7139..D-7144 are reserved to the no-fresh-root cut
+(state/decision-blocks.json), so the next free number this package may give
+is the first of its own block after this entry: **D-7146**. The R3-30 entry's
+own text said "the landing renumbers it if another package lands D-6247
+first"; its heading and the four places that cite it for the gap-row rule
+(`pull::riskfree`'s module doc and `Series` comment,
+`pull::reference_data::unlinked_gaps_said`, invariant R330-17) now say D-7146.
+Every other D-6247 in the tree cites SC-4's entry and is unchanged. Gate 27b
+passes (state/fix/ci-gates-logs/bred1023-lp2).
+
+### D-7147 — The CI shell gates 1d, 10, 19, 23 and 30 green on feat/db-fix: each red read at its cause (BASE-REDS-1023) — 2026-10-23
+
+The Mac gate run never ran the shell gates of `.github/workflows/ci.yml`
+before 23 Oct, so packages merged 17..23 Oct each left one red that no merge
+saw. `state/fix/ci-shell-gates.sh <worktree> --jobs language-purity --fast`
+at e0668a4bd printed `RED 1c 1d 23 27b 30 19 10 11 12`
+(state/fix/ci-gates-logs/bred1023-lp1). Each was read before it was changed:
+
+1. **Gate 30** (config/store-steps.toml): IA-1 (304a2320c) and R3-17
+   (3772e3988) are merged and the list said `merged = false`. Set true; rule
+   R-01 (`until = "IA-1"`) retired with its reason (IA-1's run folders,
+   `crates/cli/tests/gdfl_run_logs.rs`); step S-50's rehearsal figures moved
+   from its note into `rehearsed_*` (the note already held them, taken on
+   R3-17's branch build on a private copy, 18 and 19 Oct). Every other
+   package flag agrees with the merge history (the gate checks it).
+2. **Gate 23**: 27 test files' measurement prints (each inside a
+   `#[cfg(test)]` module, listed with what they print in ci.yml) and one
+   protocol write, `pull::gdfl_run_start::StdioGate::claimed`'s
+   `claimed run=<id>` line to the api controller, were undeclared;
+   `pull::gdfl_import_scope`'s test path `temp_dir()/Store` did not name its
+   process (now `brutex-scopes-<pid>`).
+3. **Gate 10**: invariants HA-02 and AG05-13 named a test MODULE; they now
+   name its tests (`store::header::audit_tests::*`,
+   `api::server::disk_route::tests::census_files_roles_kept_bytes_and_the_backup_receipt`).
+4. **Gate 19**: `pull::gdfl_import::Report::name`, the one door a failure
+   enters a report by (IA-1), pushed with no event beside it. Every failure
+   it takes was already logged by `note_failure`; what only the door knows is
+   when the receipt stops naming failures it still counts. It now emits
+   `failures counted and no longer named` (Warn; `failures_total`,
+   `names_dropped`, `names_kept`) at that cut, once per 1,024 dropped
+   (`pull::gdfl_run::tests::the_report_drops_names_only_at_twice_the_bound`).
+5. **Gate 1d**: 455 segment-shaped literals under crates/pull, from the
+   packages merged 17..23 Oct, were undeclared, plus the three field names of
+   item 4. Each word's first site was read; they are declared in
+   `.github/gates_tree.rs` `MERGED_17_23_OCT_LITERAL` in six kinds (refusal
+   codes and fields, test labels, command words, invented values, prose
+   words, platform names); none is an account, an environment, a vendor
+   credential or a parameter-path field, and none is one of gate 1c's ten
+   environment words.
+
+**Addendum, 24 Oct 2026 (DATA-2; see D-7150's addendum for why it is here).**
+Gate 23 refused the print surface again: DATA-2's
+`crates/cli/src/tick_second_check_tests.rs` prints three n = 1,000
+p50 / p99 / max lines, and BASE-REDS-1023's lookup-cost test adds a fourth.
+The file is mounted `#[cfg(test)] #[path]` by `cli::tick_second_check`, so
+no production path reaches it; it is declared in `ci.yml` beside the 23 Oct
+block as `cli/src/tick_second_check_tests.rs:println!:4`.
+
+**Addendum, 24 Oct 2026 (R4-27, merged at 12:34 IST after this package's
+gates had gone green on the DATA-2 merge; recorded here for the reason D-7150's
+first addendum gives).** `ci-shell-gates.sh --jobs language-purity --fast` on
+the merge 561741719 printed `RED 1d 23 30 19 10 12`
+(state/fix/ci-gates-logs/bred1023-lp13). Each read at its cause:
+
+1. **Gate 30**: R4-27 is merged and `config/store-steps.toml` said
+   `merged = false`; set true. Its one step, S-47, still waits for the
+   operator's owner of the derived-rung restate door and for R4-20, so its
+   `not_rehearsed` stands.
+2. **Gate 23**: `cli::decision_measure`'s rate-replay test named a missing
+   table `temp_dir()/brutex-no-such-rate-table`, a fixed path two test
+   processes share; it now names its process
+   (`brutex-no-such-rate-table-<pid>`).
+3. **Gate 19**: the repair door's derive filed three refusals through
+   `rung_refused` and `held_refused`, which DO log (`note_not_derived`, one
+   `pull.derive` Warn each), under names gate 19 cannot read as an event. They
+   are `note_rung_refused` and `note_held_refused` now, the `note_*` form
+   gate 19 names; no behaviour changed.
+4. **Gate 10**: invariant R427-11's proof cell named its bench file alone;
+   it now says the file is run by gate 8, as ZI-09's does.
+5. **Gate 1d**: seven segment-shaped literals R4-27 brought are declared in
+   `.github/gates_tree.rs` `R4_27_LITERAL` (`as_trade`, `keep_flat`, the
+   four rate refusal codes, and the fixture root `match`), each read at its
+   first site; none is a parameter-path field or a gate-1c environment word.
+
+Gate 12 is D-7149's addendum. After both, `--only "1d 1c 0"` and gate 12
+printed `RED none` (state/fix/ci-gates-logs/bred1023-lp15).
+
+**Addendum, 24 Oct 2026 (gate 1e on DATA-2's fixture; IA-4 and
+CLOUD-MUTSTORE, merged after R4-27).** The full run on 5c1d50a91
+(state/fix/ci-gates-logs/bred1023-full8) failed gate 1e: the workspace tests
+stop at `pull::gdfl_cm::tests::fixtures_are_built_not_pasted`, which walks
+every `.rs` file under `crates/` and refuses a whole GDFL capital-market row
+written as one literal (design section 12). DATA-2's
+`crates/cli/src/tick_second_check_tests.rs` held two, invented (`ZZ`, ₹5);
+its five census rows are now joined at run time by a closure, the same
+strings at run time, and the census test is unchanged. Then IA-4
+(1c094c904) and CLOUD-MUTSTORE (d39e789ed) merged; the merge printed
+`RED 1d 23 30 11` (bred1023-lp17): IA-4 marked merged (its steps S-23, S-24
+and S-41 still wait for R3-22, R4-21 and R4-22); `gdfl_nfo_tests.rs`'s
+declared `eprintln!` count 13 -> 18 in `ci.yml` (IA-4's bare-CR and
+newline counts); `IA_4_LITERAL` declares `300`, `ia4-currency`, `ia4-f44`
+and `ia4-resume`; gate 11 is D-7150's addendum. lp18: `RED none`.
+
+**Addendum, 26 Oct 2026 (the 24..26 Oct merges).** The merge of feat/db-fix
+5901ec778 (178 commits, R3-13 to BASE-FIXTURE-1025) turned gates 1d, 23, 29
+and 30 red again (lp21), for D-7147's cause. 1d: R4-22's sixteen literals
+(eleven scratch-root names, three refusal causes, a lower-case series code
+and a format placeholder) declared as `R4_22_LITERAL`. 23: eight test-only
+print files declared in `ci.yml`, and the lineage timing in `core::alias`'s
+tests prints to stdout, since `core` has no telemetry dependency and a test
+measurement line is not a diagnostic. 29: `/pull/quarantine.json` (R4-18's
+plan, an operational read) and `/pull/quarantine` (its press, a write) are
+owed their growth bench by name, beside `/pull/repair.json` and
+`/pull/repair`. 30: IA-10c, R4-18, R4-22 and R4-28 marked merged; S-14,
+S-43 and S-48 now wait for the operator (the token, the approval), which is
+what is left of each; S-37 and S-41, whose only prerequisite was R4-22, are
+rehearsed on a private copy (their `rehearsed_*` fields say on what build
+and copy). The rehearsals found two things the steps did not say: S-41's
+two option days are read again and refused by name (210 files whose month
+holds a bar of the day read differently, `bars_differ_held`, and one that
+needs a new month generation), so the step
+as written does not close OWED-15; and S-37's dry run filed three of the
+five names (GVT&D, NAM-INDIA, UNOMINDA) and nothing for ANGELONE or
+PATANJALI on 2018-09-03 to 07, why UNVERIFIED. Both stay pending with
+those results recorded beside them.
+
+### D-7148 — Gate 1c: the Zerodha verify run's live-lock directory is `verify/running`, never `verify/live` (BASE-REDS-1023) — 2026-10-23
+
+Gate 1c refused `pull::zerodha_spool`'s documented lock path
+lock path, the store root then `verify`, `live` and `<run>.lock` joined by slashes (zerodha_spool.rs lines 21 and 146,
+docs/02-store-format.md line 3553): the pattern reads that `verify` and `live` as
+org `verify`, environment `live`, exactly the shape of a Parameter Store
+path. The pattern was NOT narrowed: a store path and a parameter path are
+both slash-joined segments, and a rule that excused a path after a
+`<placeholder>` would pass a real path written after one (the gate test
+`gate_1c_reads_a_store_path_by_its_segments_and_not_its_root` refuses
+exactly that). The directory was renamed instead: `LIVE_DIR =
+"verify/running"`. No store holds a `verify/` directory (the real store was
+listed read-only on 23 Oct: none), the locks are transient (held while a run
+spools, by a merger while it merges), and no format version names the
+directory, so no migration is owed. A deploy is made with no Zerodha verify
+run in flight, because a writer of the old build and a merger of the new one
+would not see each other's lock. The refusal code `run_live_busy` keeps its
+name. CLAUDE.md §8 is unchanged: no literal parameter path anywhere.
+
+### D-7149 — Gate 12: 46 cost claims name their proof or say UNVERIFIED (BASE-REDS-1023) — 2026-10-23
+
+46 doc blocks under crates/ made a cost claim with no proof gate 12 can
+resolve. Ten are tests, benches or files that ARE the proof and now
+name themselves (or the harness `crates/pull/benches/ratio.rs`); seven
+production claims had a test that times them and now name it
+(`pull::audit_ledger::tests::appends_cost_the_same_at_any_ledger_length`,
+`pull::gdfl_run::tests::progress_and_failure_costs`,
+`pull::gdfl_rekey::tests::plan_cost_per_key_is_flat_in_the_number_of_keys`,
+`pull::reference_data::tests::the_loader_reads_every_table_inside_its_budget`,
+`cli::minute_gaps::measure_tests::admission_cost_per_bar_and_month`,
+`crates/pull/tests/allocation.rs`); the other 29 are structural arguments
+no test times, and now say UNVERIFIED with docs/06-limits.md L-BRED23-01.
+None was re-measured by this package.
+
+**Addendum, 24 Oct 2026 (DATA-2; see D-7150's addendum for why it is here).**
+Two more blocks claimed `status_of` is O(1) with no proof gate 12 resolves:
+the `tick_second_check` line of `crates/cli/src/lib.rs` and the module header
+of `crates/cli/src/tick_second_index.rs`. Both now name
+`cli::tick_second_check::tests::a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand`,
+a new test that times 400 samples of 256 lookups each in a one-symbol and a
+4,096-symbol index, interleaved in one loop, and refuses a large-index median
+more than 16 times the small one's (a scan would be thousands of times
+dearer). The real-store lookups stay as L-T2S-09 measured them.
+
+**Addendum, 24 Oct 2026 (R4-27; see D-7147's second addendum).** Gate 12
+refused 25 doc blocks R4-27 brought. 18 made no cost claim: the word `flat`
+in R4-27's price-shape sense, a FLAT CARRY (a zero-volume minute whose four
+prices are the close before it, INT-15, D-7270), which gate 12's trigger read
+as "the cost is flat". The gate's own rule for this is its scrub of the
+non-cost senses of `flat` (`flat bar`, `flat file`, ... the `NOTCLAIM`
+nouns, D-1930, D-1939); seven price-shape nouns join it (`carry`, `carries`,
+`minute`, `zero-volume`, `at the close`, `at the carried price`, `with no
+volume`), and `flat-<noun>` reads as `flat <noun>` (one hyphen, never two).
+The cost sense keeps triggering beside them, on one line and alone ("flat
+per minute", "flat at 1x", "flat-time", "a flat carry, and the walk is
+flat"): `.github/gates_bounds.rs`
+`tests::the_scrub_removes_the_price_shape_sense_of_a_flat_carry`, which
+failed before the change. Four blocks were re-wrapped so the noun sits on
+the line of its `flat`, and a doc test's variable `flat` is `carry`. The
+other seven ARE claims: four name their proof (`pull::riskfree::replay`
+names `pull::riskfree::tests::a_carried_lookup_is_flat_in_the_table`;
+`pull::padded`'s module, `Walk::step` and the bench registration name
+C-PD-01 and C-PD-02, run by `crates/pull/benches/ratio.rs`), three say
+UNVERIFIED with docs/06-limits.md L-BRED23-07
+(`cli::research_policy::percentage_statistic`,
+`store::month_summary::MonthSummary::padded_on`, `store::repair::same_bar`).
+
+
+**Addendum, 26 Oct 2026 (the 24..26 Oct merges).** Twelve more claims with
+no proof came with DATA-1w, R4-18 and R4-22 (lp23). Six name the test that
+proves them, five say UNVERIFIED beside the claim (L-BRED23-09), and two
+sentences that denied a claim ("NOT O(1)", "Not O(1)") are reworded as
+"linear", which says the same and is no claim.
+### D-7150 — Gate 11: the IA-16, IA-9 and IA-2 sites fixed at their cause or declared with their bound (BASE-REDS-1023) — 2026-10-23
+
+Gate 11 was red after the IA-16 merge on five files. Fixed in code: the
+held-back map is pre-sized to `HELD_BACK_CAP` (rule 3); `closeness` counts
+distinct letter pairs through a pre-sized hash set with no sort (rule 4;
+`pull::gdfl_import::tests::ia16::closeness_counts_each_distinct_pair_once`
+gives the sorted count's values); `day::decisive` ranks a day's failures in
+ONE pass instead of up to five searches (rule 6;
+`pull::gdfl_import::tests::ia16::the_decisive_failure_is_ranked_census_run_open_then_hole`
+checks every rotation of five causes); `quality::sampled_among` probes a
+pre-sized set instead of a list, O(news + sampled) where it was their
+product (rule 7); the day file's copy of `hole_is_repairable` is gone.
+Declared with the bound the gate's rule names (docs/06-limits.md, "Gate 11 —
+BASE-REDS-1023"): the compile-time tables `REPAIRABLE_HOLES` (3),
+`HOLE_REASONS` (5), `SOURCE_UNREACHED` (2), `FLAGS_VERSIONS` (2); a day's
+index files against `SWEPT`; the rescan's `HashSet<Day>` probe;
+`keep_nearest`'s walk of at most `UNKNOWN_SHOWN` = 4.
+
+**Addendum, 24 Oct 2026 (DATA-2, merged after the 23 Oct run; this block's
+ten numbers are spent, so the three gate reds DATA-2 brought are recorded
+here, in D-7149 and in D-7147 rather than under a number outside the block).**
+`ci-shell-gates.sh --jobs language-purity --fast` on the merge 1ec6471a2
+printed `RED 23 11 12` (state/fix/ci-gates-logs/bred1023-lp10), every site
+in `crates/cli/src/tick_second_check.rs` and `tick_second_index.rs`. Gate 11
+had 20 sites. Fixed in code, 9: the index writer finds a cell's row by one
+probe of a pre-sized `HashMap` of the distinct symbols (it binary-searched the
+table), and the unknown `--symbols` report probes a pre-sized `HashSet` of the
+held names (rule 1, 2 -> 0); the two per-day `seen` sets and the `--archive`
+same-path set are sized (rule 3, 4 -> 1); `Status::from_code` and
+`Source::from_code` read `ALL[code - 1]`, a const item proving each table is
+in code order, `Source::of_word` is a match, and the writer's symbol check
+runs in the loop that fills its row map (rule 6, 4 -> 0). Declared, 11, with
+docs/06-limits.md "Gate 11 — BASE-REDS-1023: DATA-2": `Sources::open`'s map of
+distinct archive paths (rule 3); seven sorts, each once per folder listing,
+per report, per file written or per index written (rule 4); a
+`RangeInclusive` and three `HashSet` probes (rule 7). No route reaches the
+check. Tests:
+`cli::tick_second_check::tests::every_code_and_word_of_the_index_reads_back_in_one_step`,
+`cli::tick_second_check::tests::the_index_writer_places_every_cell_by_its_symbols_row_at_the_extremes`.
+
+**Addendum, 24 Oct 2026 (IA-4).** Gate 11 rule 6 refused one new site,
+`pull::gdfl_nfo::header_trailing`, a `find_map` over the two known headers.
+Fixed in code: two probes in order (`after(HEADER_OPEN_INTEREST)
+.or_else(|| after(HEADER_OPEN_INTEREST_SPACED))`), the same answers; the
+file's one pinned unread site (`NFO_SUFFIXES`) stays pinned, so
+`ALLOW_SCAN_UNREAD` did not grow. Test:
+`pull::gdfl_nfo::tests::the_header_reader_answers_both_headers_at_every_trailing_edge`.
+
+
+**Addendum, 26 Oct 2026 (the 24..26 Oct merges).** R3-13, DATA-1w, R4-18,
+R4-22 and R4-28 merged without running gate 11, which refused 37 sites in
+eight files on this package's merge of feat/db-fix 5901ec778
+(state/fix/ci-gates-logs/bred1023-lp21). Nine were fixed in code: the
+binary searches of `store::repair::outside_quarantine` and
+`store::quarantine::judge` became probes of hash sets built once (rule 1, 4
+sites); the three maps of `Summary::load` and the one of `Snapshot::load`
+are pre-sized (rule 3, 4); `cli zerodha-quarantine` finds a stamp listed
+twice by one hash insert a stamp, not a sort (rule 4, 1). The other 28, and
+the five hash probes the fixes add, are declared in `.github/gates_ledger.rs`
+with their bound, none per row of a read; docs/06-limits.md "Gate 11 —
+BASE-REDS-1023: the 24..26 Oct merges" lists each. lp24 after the fix: gate
+11 green but for the five probes, then declared (lp25).
+
+**Addendum, 27 Oct 2026 (R4-19).** R4-19 merged without running gate 11,
+whose rule 6 refused one new site on this package's merge of feat/db-fix
+70eb5c5dd (state/fix/ci-gates-logs/bred1023-lp28): `pull::gaps::Ledger::not_owed`
+found each run's row by `out.iter_mut().find(..)`, a search through the
+distinct answers seen so far, which the data sets (one per listing day,
+removal day or interval) and not a table. Fixed in code, not declared: a
+map from the answer to its row, pre-sized to the four kinds, one probe a
+run; `NotOwed` and `cash_auction::InactiveInterval` derive `Hash`. The rows
+and their order are unchanged. Measured in the same run, best of 31, at
+`MAX_GAPS` runs: before, 6.39 ms with every run a distinct answer against
+11 us with one (580x, the test failed); after, within 16x and passing
+(`pull::gaps::not_owed_tests::not_owed_costs_the_same_with_one_answer_and_with_max_gaps_answers`).
+lp30 after the fix: language-purity --fast RED none (BRED-22).
+
+**Addendum, 27 Oct 2026 (R4-26).** R4-26 merged without this package's
+widened rule 6, which refused four new sites in `pull::corporate_actions` on
+this package's merge of feat/db-fix after R4-26 (state/fix/ci-gates-logs/bred1023-lp34).
+Three were `Kind::parse`, `Tag::parse` and `RunEnd::parse`, each a search of
+its enum's few variants for a word: each is one `match` now, no search, with
+every wire word read back as its own value and garbage, case and another
+enum's word refused
+(`pull::corporate_actions::tests::every_wire_word_reads_back_as_its_own_value_and_nothing_else_does`).
+The fourth was `Table::class_of`, a second walk of the window's rows by
+`find_map` beside `excuse`'s: it is `excuse`'s row's class now, the same
+first `nse` row, one walk, not two
+(`pull::corporate_actions::tests::class_of_is_the_class_of_the_first_nse_row_in_the_window_and_measured_rows_never_decide`,
+ten windows, each also read row by row). The walk that remains, `excuse`'s
+hand-written loop, gate 11 cannot see (L-BRED23-02); its bound is
+L-BRED23-11. No allowlist was widened. Gate 30 on the same merge: R4-26 is
+merged (set true), and S-46, which waited for it, names the two built verbs
+(`cli basis-runs`, `cli fno-membership build`) and waits for the operator
+for the third (an NSE corporate-actions file, its format UNVERIFIED, no
+reader built), with R4-26's own rehearsal of the basis-runs line cited in
+its note (BRED-26, BRED23-F26).
+
+### D-7151 — Gate 11 reads an inner allow and every spelling of a linear search; the 108 sites that surfaced are pinned unread (BASE-REDS-1023) — 2026-10-23
+
+Two gaps verify-BASE-GATE11-r1 named in `.github/gates_ledger.rs`:
+1. **Rule 5c** read only outer `#[allow(`/`#[expect(`; a file-level inner
+   allow of `clippy::unwrap_used` disarmed a whole production file unseen.
+   `opens_disarm` reads the inner forms too.
+2. **Rule 6** read only `.iter().find/position/rposition(`. It now reads
+   `.iter()`, `.into_iter()`, `.iter_mut()`, `.iter().rev()` and
+   `.into_iter().rev()` followed by `find`, `find_map`, `position` or
+   `rposition`. Both are proved by the gate test
+   gate11_reads_an_inner_allow_and_every_spelling_of_a_linear_search.
+   `.any(`/`.all(` and hand-written loops stay unread (L-BRED23-02).
+
+The widened rule 6 surfaced 108 sites in 63 production files. They were not
+read one by one in this package: each file's measured excess is pinned in
+`ALLOW_SCAN_UNREAD`, the list D-1121 kept empty for exactly this ("a future
+change to rule 6 that surfaces sites it cannot classify at once"). No bound
+is claimed for them. A new site in any file is refused, because the per-file
+sum is exact; the shipped test now asserts the list holds at most 108 in 63
+files (it asserted empty) and may only shrink. Reading each into
+`ALLOW_SCAN` with its bound, or removing the search, is the follow-up
+L-BRED23-02 names.
+
+**Addendum, 27 Oct 2026 (repair 1: the opener item 2 left out).** Item 2's
+own regex, in rule 6's doc comment, reads
+`\.(iter|into_iter|iter_mut)\(\)(\.rev\(\))?\.(find|find_map|position|rposition)\(`,
+but the matcher was a hand list of five openers and left out
+`.iter_mut().rev().`, so `xs.iter_mut().rev().find(` passed unseen, on one
+line or as a formatted chain (verify-BASE-REDS-1023-r1, attacks A1 and A11).
+The openers are now built from the regex's parts: each of the three bases,
+then the one optional `.rev()`, then `.` and a search word, so the list and
+the regex cannot disagree again. The gate test
+`gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not` checks every
+base crossed with every search word, reversed or not, on one line and as a
+chain; it failed before at `xs.iter_mut().rev().find(` and passes after
+(BRED-27). No workspace code used the spelling: gate 11 on this branch is
+`OK` with rule 6 at 269 occurrences, as before. A search through another
+adapter (`.iter().copied().find(`, `.iter().enumerate().find(`) is not this
+regex's spelling and stays unread; L-BRED23-02 now names it.
+
+### D-7152 — Three timing tests hold under load by an order or a same-run baseline, never a looser bound (BASE-REDS-1023) — 2026-10-23
+
+1. `api::server::scrub_route` FIFO/symlink/directory refusal ("answered
+   without waiting"): a fixed 5 s bound failed on a loaded Mac. Now five
+   answers of the odd file alternate with five of a regular file on a root
+   of its own, and the odd file's fastest may cost at most 20 times the
+   regular file's fastest plus 50 ms: tighter than 5 s on an idle machine,
+   and it moves with the load.
+2. `api::coverage` lookup flat in the universe: up to 31 alternating pairs of
+   minima, stopping at the first pair that holds the unchanged 4x ceiling (at
+   least seven). Interference only adds time; a lookup that scans a 40x
+   larger universe fails every pair.
+3. web `tests/calendar-loader.test.js`: the two tests wait for the event
+   that must come (`until`, at most 10,000 event-loop turns, no clock)
+   where a 10 ms timer raced the answer's body read.
+None of the three was made to fail before its change on demand: the
+failures were load races seen by BASE-GATE11's and LEDGER-1023's runs
+(NOT PROVED failing first here).
+
+**Addendum, 24 Oct 2026 (a fourth flaky api test, and it was not load).**
+Gate 1e of the full run on 77a635e2e (state/fix/ci-gates-logs/bred1023-full9)
+failed `api::server::tests::a_cross_origin_write_is_refused_and_this_page_s_own_is_not`
+on a right answer: the refusal was `403 Forbidden`, and the test's
+`!response.contains("413")` read the whole response, whose
+`x-brutex-build: 77a635e2e7c8d61d746a2b993fc62cd4130b0102` holds `413`. The
+test passed or failed by the commit hash. Every status code that test module
+asserts against a raw response is now read off the status line alone
+(`status_line`, five sites: the 413 that failed, 405, 404 and two 503s, the
+four positive ones of which could pass on a hash holding their digits). The
+same defect was fixed once before for a process id in a scratch path; this is
+its general form. The hash that failed is replayed in
+`a_status_code_is_read_off_the_status_line_and_never_off_the_build_header`
+(BRED-17). No bound was loosened: the assertions are as strict, and now
+about the status alone.
+
+**Addendum, 24 Oct 2026 (the code-4 barrier experiment under load).** Gate
+1e of the full run on aaca34f6f (state/fix/ci-gates-logs/bred1023-full10,
+load average about 25, other builds fsyncing the same drive) failed
+`api::audit::lock_wait_tests::the_code_4_barrier_experiment_loses_no_record_in_300_runs`
+with 7 of 900 appends refused: two walks contend, so each refusal is the
+other walk's one fsynced append holding the lock past the 1 s
+`APPEND_LOCK_WAIT`, and the old `lost == 0` counted a refusal by name as a
+lost record. This is the eight-appenders case above at two writers. The
+rule is now the one a refused caller lives by: a refusal counts as the
+bound working only when the refused call itself waited at least the bound
+and its text names it (`a_refusal_is_the_bound`), and then the record is
+asked for again (at most 8 asks); any other refusal panics, and every
+record of every run must land. The `try_lock` build refused at once,
+inside the bound, and still fails. The rule is proved both ways in
+`a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_asked_again`
+(a zero-bound refusal from a held lock read as a loss; a hold of 2.5
+bounds waited out by name and the record landing on a later ask) (BRED-18).
+No bound was loosened: `APPEND_LOCK_WAIT` is unchanged, and the test now
+also requires that each refusal waited the whole of it, which the old one
+never checked.
+
+**Addendum, 26 Oct 2026 (a refused write's answer lost to a reset, gate
+31).** The macOS gate of the final run on 6b7059b86
+(state/fix/ci-gates-logs/bred1023-full12b, load average about 45) failed
+`api::speed::tests::a_served_request_is_counted_under_its_matched_path` on
+`ConnectionReset`: its cross-site `POST /page-report` is written by `write!`,
+which sends each formatted piece separately, and the cross-origin refusal
+answered `403` from the head and closed. The body that arrived after the
+close met a closed socket, the server's kernel answered it with a reset, and
+the reset discarded the `403` the client had not read yet. Not load alone and
+not the test: any client whose body trails its head can lose a right
+refusal. FIXED at the cause, in the one shared path: `same_origin_writes_only`,
+`refuse_writes` and `refuse_unstamped_writes` answer through
+`refused_after_draining`, which reads the body to its end (at most
+`MAX_FORM_BYTES` and the frame that crosses it, L-BRED23-08) and then sends
+the same `403`. Proved both ways: with the drain taken out,
+`a_write_refused_before_its_body_is_read_still_reaches_its_client` (the body
+300 ms after the head) failed on `ConnectionReset` and
+`a_refusal_reads_its_body_to_the_end_within_the_bound_and_answers_the_same`
+read 0 bytes of a 1-byte body (round2/logs-BASE-REDS-1023-t11.log); with it
+both pass (t9) (BRED-19). No bound was loosened and the refusal is unchanged.
+
+**Addendum, 27 Oct 2026 (a fourth timing test).** `cargo test -p pull`
+on this branch with the gate suite running beside it failed
+`pull::ingest::census_store::kept_tests::a_fifo_swapped_in_after_the_look_never_blocks_the_stub_check`
+(R3-19): "answered within 100 ms, never waiting on the FIFO: Timeout"
+(round2/logs-BASE-REDS-1023-g9-pull.log). The check does not wait (it opens
+`O_NOFOLLOW | O_NONBLOCK`); the rename of the FIFO over the stub and the
+open on the store's disk took longer than the fixed 100 ms with nothing
+waiting. Made load-robust as item 1 was: the same check, with a regular
+file swapped in the same way, is timed first in the same run, and the FIFO
+case must answer `false` within 100 ms or 20 times that baseline, whichever
+is the longer. 100 ms stays the floor, so nothing is looser on an idle
+machine, and a check that waits for a writer never answers, so no bound
+lets it pass. Proved both ways: with a check that opens without
+`O_NONBLOCK` substituted, the test failed, "no answer within 538.95 ms (the
+regular file's swap took 26.95 ms)" (round2/logs-BASE-REDS-1023-t17.log);
+with the real check it passes (t18) (BRED-23).
+
+**Addendum, 27 Oct 2026 (a fifth timing test).** `npm test` on this
+branch with the gate suite running beside it failed web
+`tests/db-search.test.js` "a keystroke never walks the census, and its p99
+over a GDFL-sized census is inside one frame (16 ms)": "p99 20.29 ms is
+over one 60 Hz frame". The p99 was over every sample, so a keystroke the
+scheduler held off the core counted as the search's cost. Made
+load-robust as item 2 was, by minima: each of the 174 keystrokes is timed
+in ten passes and its fastest is its cost; the p99 is over the keystrokes,
+and the 16 ms bound is unchanged. A search that walked the census would pay
+it in every pass, so in its fastest too, and the census reads are still
+counted (0). After, with the same suite running: fastest-of-10 p50 0.012
+ms, p99 3.148 ms, max 4.937 ms; every sample (1,740) p50 0.017 ms, p99
+9.832 ms, max 33.946 ms (BRED-25). `search` holds no cache, so a later pass
+is not a cache hit.
+
+**Addendum, 27 Oct 2026 (repair 1: a sixth failure under load, and it was a
+race, not a bound).** verify-BASE-REDS-1023-r1 ran `npm test` at load 30-59:
+`tests/speed.test.js` "a --restart command that does not exit within
+--restart-wait-ms ..." failed at "and the command it was waiting on was
+ended with it", and its `sleep 1000` was still running minutes later with
+parent 1. The cause is an order, not a time: `run()` in
+`web/ci/speed-sheet.mjs` spawned the detached command and installed the
+exit and signal guards AFTER it, so a SIGTERM that reached the sheet in
+between ended it by the default action and the command's group, which a
+terminal's signal no longer reaches, was never signalled. The browser
+harness's `launch()` had the same order (spawn, then `tracked()` installs
+`guardProcess()`). Both now install their guards first: once Node has a
+listener, a signal is only queued until the running JavaScript returns, by
+when the command is in `COMMANDS` (the browser in `LIVE`). There is no bound
+to loosen and none was. The proof has no wall-clock race either: the test
+runs the sheet and the harness in a new node process whose
+`child_process.spawn` sends that process SIGTERM from inside the spawn,
+every time; it failed before on both ("and the command it had just started
+was ended with it", then, with only the sheet fixed, "and the browser it
+had just started was ended with it") and passes after (BRED-28).
+
+**Addendum, 27 Oct 2026 (repair 1: a seventh timing test).** This repair's
+own `cargo test -p api` at load 35-43 failed
+`server::census_cache::warm_tests::a_census_change_never_blocks_a_request`:
+"a request waited: p50 531.459µs, p99 3.796917ms, max 53.529166ms". The
+bound is there to tell a request that waited for the census from one that
+did not, and a request that waits pays the census read's five-second pause;
+this one paid 53 ms, a request the scheduler held off the core. Made
+load-robust as item 2 was, by runs: the experiment (a store of its own, the
+change beside 1,000 requests under the five-second pause, every other
+assertion held) runs until one run's slowest request is under the
+UNCHANGED 50 ms, at most seven runs. Interference only adds time; a design
+that makes a request wait for the read pays five seconds in every run and
+fails all seven, with each run's (p50, p99, max) in the message. The stop
+rule is its own test,
+`the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with_every_run`
+(it stops at the first run that holds, fails with every run when none does,
+and a time at the bound does not hold) (BRED-29). Failing first: the run
+above, under load; NOT forced on demand.
+
+**Addendum, 27 Oct 2026 (repair 2: an eighth timing test, a load test that
+could not see the defect it names, and a stop rule that held on nothing).**
+verify-BASE-REDS-1023-r2 found `cargo test -p api` red under load on R3-08's
+`crates/api/tests/pool_load.rs` test
+`the_feed_list_stays_fast_while_32_clients_loop_each_route`: 3 of 7 suites
+at load 19-26 and 2 of 6 direct runs at load about 19.5, for example
+"/feeds.json p99 35.14825ms (p50 1.341292ms, max 58.004542ms) ...; the
+control was 2.291708ms". One run decided the test; its p99 is the
+third-slowest of 200 answers, and its control was a separate, earlier
+phase. Reproduced here with one run deciding: 2 of 50 runs at load 20-27
+(loaded p99 13.75 ms and 232.77 ms beside controls of 4.50 ms and 4.49 ms;
+round2/logs-BRED1023-r2-before-more.log). Three changes; no bound was
+loosened.
+1. By runs, as item 2 and the seventh test: a run is the control and the
+   loaded phase back to back on a server and a store of its own, read by
+   R3-08's rule UNCHANGED (`FeedsRun::holds`: the loaded p99 strictly
+   under 10 ms while the control's p99 is under 5 ms, otherwise at most
+   twice the control's p99); runs repeat until one holds, at most seven,
+   and every non-timing assertion holds in every run. The stop rule is its
+   own test,
+   `the_first_feed_run_that_holds_ends_the_runs_and_none_holding_fails_with_every_run`,
+   which replays the verifier's failing figures: with one run deciding
+   (`FEEDS_FAST_RUNS = 1`, the old design) it failed, "a noisy run, then
+   one that holds", left `Err([FeedsRun { ..., loaded: (1.341292ms,
+   35.14825ms, 58.004542ms) }])`; with seven it passes
+   (round2/logs-BRED1023-r2-before.log, round2/logs-BRED1023-r2-after.log).
+2. A starved worker shows now; it did not before. The verifier asked that
+   a starved worker still fail every run, so that was measured first: with
+   `spawn_blocking` taken out of `api::detail`'s `admitted` (every pooled
+   read inline on an async worker) the test as it stood passed 3 of 3 on
+   its FIRST run, loaded p99 2.76 to 6.19 ms
+   (round2/logs-BRED1023-r2-starved.log). A five-bar month reads in
+   microseconds, so R3-08's sentence "a starved async worker (a file read
+   on it) costs far more than that" was never measured and is false at
+   this fixture, and no run count could have made the test see one. Now a
+   writer holds February for the whole run, as R3-08's own repair-plan test
+   does; one seek of it per run must wait the read's 200 ms patience and
+   answer 503 with Retry-After; and in the loaded phase four more clients
+   (as many as the test runtime's async workers, half the store-read
+   pool's eight slots) seek it beside R3-08's 32, whose routes and rate are
+   unchanged. Each seek waits in the store-read pool, and the feed list's
+   own pool never waits on it; on an async worker the wait holds that
+   worker 200 ms a seek. With the same mutant the test failed 3 of 3,
+   every one of its 21 runs, loaded p99 191.9 to 209.3 ms beside controls
+   of 1.4 to 6.8 ms, about 110 s a test
+   (round2/logs-BRED1023-r2-seekers-starved.log); with the real code it
+   passed 30 of 30 at load 13-15, each on its first run, loaded p99 2.19
+   to 6.25 ms, the 36 clients making 8,794 to 16,276 requests a loaded
+   phase (round2/logs-BRED1023-r2-seekers.log). (The first
+   form put the seek in the 32 clients' round robin: the mutant failed all
+   21 runs of 3 tests, p99 208 to 391 ms, but the seek held each client
+   200 ms a turn and cut their requests from about 15,000 a phase to 363,
+   round2/logs-BRED1023-r2-starved-held.log and -held.log; not kept.)
+3. The census stop rule `first_run_within` read a run that timed nothing as
+   holding: `ranks` of an empty run is zero, under any bound (the
+   verifier's follow-up). A run with no time now never holds; its test
+   failed before ("left: Ok(0)") and passes after (BRED-31).
+
+### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
+
+Gate 1e builds and tests the workspace in a worktree with `web/` removed
+(CLAUDE.md §2: no crate may need the front end to build, test or run). Two
+`api::server::bars_export` tests (R3-10) read `web/src/lib/db/bars-plan.js`
+and `web/src/lib/db/export.js` to check that the browser's `EXPORT_CAP` and
+`BAR_CSV_COLS` state the server's `EXPORT_CEILING` and `COLUMNS`, and
+panicked there with "No such file or directory". The cross-check is the same
+fact read from the other side now: `web/tests/export-agrees-with-the-server.test.js`
+reads `crates/api/src/bars_export.rs` as text and compares the cap and the
+35 column labels in order. The crate tests keep every assertion of the
+server's own behaviour (the 20,000-row ceiling written whole and one more
+refused, the header being the columns). Gate 1e's own run also met three
+load-sensitive tests, which D-7152 items 4 and 5 make robust.
+
+D-7152, items added the same day (append-only: the entry above is not
+edited):
+4. `api::audit::lock_wait_tests::eight_concurrent_appenders_lose_no_record`:
+   one of 800 fsynced appends waited past `APPEND_LOCK_WAIT` on a loaded
+   drive. A refused appender now asks again; every refusal must name its
+   bound, every record lands once, and a refusal is allowed only if a
+   successful append of the same run took at least half the bound (the
+   `try_lock` build it guards against refused while every success took
+   milliseconds, and still fails).
+5. `store::file::write_door_tests::the_write_door_costs_the_same_at_one_ten_and_a_hundred_times_the_bars`:
+   up to three whole measurements, stopping at the first in which every
+   unchanged bound holds; a door that scans the month fails all three.
+
+### D-7154 — The web job's three reds: W1 rebuilt, W3 from 32 type errors to 0 at their root, W5 portable (BASE-REDS-1023) — 2026-10-23
+
+1. **W1** (web/build matches web/src): the committed bundle was older than
+   its source (34 files at 59034d988). Rebuilt with `npm --prefix web run
+   build` and committed with this change, the only generated output it
+   carries; a package that changes web/src after it commits its own rebuild.
+2. **W3** (svelte-check, ceiling 0): 32 errors from five roots, none a
+   behaviour change. `read-pools.js` built each row by spreading
+   `Object.fromEntries`, so a row typed as `{ pool }` or `{ route, asked }`
+   alone and every reader of a counter erred (20 of the 32): each row is now
+   built field by field under the `PoolRow`/`RouteRow` typedefs. The panel
+   narrowed the answer by `!tables.fault`, which does not exclude an empty
+   string: it tests `fault === null`. `ingest-months.js`'s lane typedef
+   gained the `openEnd` it returns; `gap-verdict.js` reads a null
+   `unreadable_records` as 0, which `null > 0` already did; three test files
+   annotate their fixtures' parameters. `npm --prefix web run check`: 0
+   errors (one warning, which the gate does not count).
+3. **W5** (no comment swallows a CSS rule): `xargs -d '\n'` is GNU only, and
+   the Mac gate run (BSD xargs) refused the step while the checker passed
+   every one of its 64 files. The step hands the same list over
+   NUL-delimited (`tr '\n' '\0' | xargs -0`), which both xargs read alike.
+The web suite: 1,570 of 1,570 pass (two new tests:
+`web/tests/export-agrees-with-the-server.test.js`, D-7153).
+
+**Addendum, 27 Oct 2026 (DATA-1w and R3-15).** The web job on this
+package's merge of feat/db-fix a32722c45 (state/fix/ci-gates-logs/bred1023-web16)
+said `RED W1 W3`. W1: R3-15 changed `web/src` (the layout, `api-status.js`,
+the new speed page) and committed no rebuilt bundle; `npm --prefix web run
+build`, then `web/build` committed. W3: svelte-check counted 26 errors at a
+ceiling of 0, each fixed at its root: `tests/feed-checks.test.js`'s `fake`
+had no types (12 errors at its readers), now typed as the
+`(url: string) => Promise<Response>` that `read` takes, its stand-in cast
+through `unknown` and its `error` matches read `?? ''`; `ci/speed-sheet.mjs`
+read `kept` after a closure set it, which the checker narrows to its `null`
+initialiser (4 errors), now read once under its declared type;
+`tests/speed.test.js` (9): a JSDoc that sat above the wrong `const`, a
+stand-in whose `build` may answer `null` typed as never doing so, a union
+read without its cast, a piped `stdout` read as possibly null, two `before`
+lines given the `at` and `by` their type names, and a failure message that
+read a `method` no sheet row carries (it names the row's page now). The
+gate (`--only W3`, bred1023-web17): 0 errors. No ceiling was raised.
+
+**Addenda, 30 Oct 2026 (BASE-REDS-1023 repair 3; verify-BASE-REDS-1023-r3
+and the assurance attack of 29 Oct 2026).** The D-7145..D-7154 block is
+used, so each is an addendum to the entry it extends; nothing above is
+edited.
+
+1. **D-7153, gate 1e: gate 1h.** Gate 1e builds and tests a worktree with
+   `web/` deleted, and it was red on 14 of 16 Mac runs from 19 Oct because
+   two `bars_export` tests read `web/` (RA-01, RO-08); verify r3 ran only
+   `--fast`, which skips 1e. A new step, Gate 1h, runs `source_scan
+   web-reads` over every tracked path: it reads the TEST code of each `.rs`
+   under `crates/` (whole files under `tests/`, `benches/`, `examples/`,
+   `src/` files only a test module mounts, and the `#[cfg(test)]`,
+   `#[cfg(all(test, ..))]` and `#[test]` items of the rest) and refuses a
+   statement that climbs with `..` into `web`, holds a `web` segment beside
+   a repository anchor, or reads a name bound to a path into `web/` (by the
+   test, or by a production `const`/`static` of its crate); every `concat!`
+   joined, every literal decoded; and a tracked link under `crates/` into
+   `web/`. The rule is the shape every such read has taken, not a list of
+   files: a fixture's own `web/` under a temp root, a comment and a
+   production read pass. It is red on f01d7a0e4 (`bars_export.rs:1162` and
+   `:1165`) and green here; its twelve tests run in gate 0 (three of them pin
+   its readers' exact answers, after a pre-check of every mutant of the
+   set found survivors there, BRED23-F37). The bound and
+   what it cannot see are L-BRED23-17. Gate 1e itself has NOT yet run
+   whole on this repair's tip: the full gate run waited for a cargo slot
+   until the drain of 30 Oct 15:18 IST and was not started under it (this
+   repair's report, NOT DONE); the next check or the landing gate runs it.
+   The moved web test was shown to bind the server: a ceiling of 20,001 and a
+   first column `feed_x` in a scratch copy of `bars_export.rs` each failed
+   it.
+2. **D-7152 item 4 and its addendum: no test asks again where its caller
+   does not (TST-01).** Every production caller of the plain
+   `Journal::append` and of `open_run`/`close_run`/`close_unopened` surfaces
+   an `APPEND_LOCK_WAIT` refusal once (L-BRED23-16 lists each, file and
+   line); only `RunLedger::write` offers a refused member failure again, at
+   its next flush. So `eight_concurrent_appenders_lose_no_record` and the
+   code-4 barrier experiment ask each record once: a refusal is accepted
+   only when the call itself waited the whole bound and names it (a sooner
+   one, the `try_lock` build's shape, fails), and the journal must hold
+   exactly the answered successes, whole and once. Round 2's
+   `a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_asked_again`
+   is `..._is_named` now. The wait and the refusals of eight appenders at
+   1x, 10x and 100x records held are printed by
+   `eight_appenders_at_one_ten_and_a_hundred_times_the_records_held` and
+   written in L-BRED23-16 with their loads: a refusal rate above zero under
+   load is a stated limit, not a retry.
+3. **D3 (operator decisions D2 and D3, D-7250) on this part's set, narrow
+   reading.** Each coverage gap verify r3 measured has a test written to
+   reach it (BRED-33 to BRED-39; Route B's measurement of the crates on
+   this tip is owed: this repair's report), or its code was
+   removed as redundant, never
+   covered by weakening: `quarantine::judge` reads its two stamp sets
+   directly (its `named_by` closure had a whole-month arm no caller
+   reached); `note_hole_skipped` takes the hole's reason and whether it is
+   repairable (a `Skip` parameter gave it a done/restated arm its one
+   caller never passed); `zerodha_spool::live_probe`'s answer to one
+   `flock` attempt is `probed`, which a test hands the host refusal no lock
+   file gives on request; one assertion keeps the one spelling its page
+   writes. This part's load-robust measurements put their decisions in
+   functions their own tests drive with invented figures (the write door's
+   misses and stop rule, the lookup ratio's `settled`, the feed run's
+   verdicts), so no side waits for a loaded machine to be taken. The four
+   M2 survivors (`flat_spaces` `||`/`>`, `disarms` `+=`, `opens_disarm`)
+   each have a test that fails under the mutant.
+4. **L-BRED23-10 corrected.** Its `/calendar-days.json` figures timed the
+   route's 400 for `limit=50`; they are timed again on answered requests.
+
+
+**Addenda, 31 Oct 2026 (BASE-REDS-1023 repair 4; check r4 of 30 Oct 2026,
+cut by the operator's hold before it returned, its items listed from its
+own notes).** The block is used, so each is again an addendum to the entry
+it extends; nothing above is edited.
+
+5. **D-7153, gate 1h: a helper whose value is the repository root carries
+   the read (V4-2).** Gate 1h bound a repository anchor only through `let`,
+   `const` and `static`, never through a function, so the tree's own helpers
+   carried a `web/` read past it: on repair 3's tip, `read("web/src/lib/db/export.js")`
+   appended to `crates/store/tests/cited_commits.rs` (its `read` joins
+   `repo()`, the manifest directory two levels up) and
+   `workspace_root().join("web/src/lib/db/bars-plan.js")` appended to
+   `crates/core/tests/cost_invariants.rs` gave `0 finding(s)`, rc 0
+   (reproduced here, the checker's probes verbatim). Now a function whose
+   VALUE holds the root (its tail or a `return`: `CARGO_MANIFEST_DIR`,
+   `file!()`, `current_dir`, a climb of two `..` or more and nothing else, a
+   root value of its crate, a `let` of its body bound to one, or a call to
+   another such function) and whose return type can carry a path is a root
+   helper, found over the whole tree to a fixpoint; and a test statement
+   that JOINS a `web` segment onto one (an argument of `.join`, `.push`,
+   `Path::new`, `format!`, `concat!`, or of the helper itself) is refused.
+   Two readings were measured on this tree and dropped first, by their
+   counts, not by taste: "any anchor anywhere in the body" made 26,406
+   functions anchors (a bare `..` in validators and messages, and a test
+   file's `read` matched every `read(..)` of its crate), and with strong
+   anchors only, still 17,636 through crate-wide method names; each refused
+   30 to 37 statements that read nothing. So a bare or method call reaches a
+   helper of its own file only, a path call one anywhere, and a helper whose
+   value is the root refuses only a JOINED `web` (`default_web_dir().ends_with("web")`
+   compares text and passes). Check r4's other routes are refused too: a doc
+   comment's examples (E3), a production `macro_rules!` expanded in a test
+   (E4), `web` in any case (E5, the Mac's volume is case-blind), a tracked
+   link to the repository root or above it (E6), `stringify!(web)`,
+   `#[tokio::test]` and `cfg(any(test, ..))` items (E7). What it still cannot
+   see is named in ci.yml's gate 1h and L-BRED23-17. On this tree: worktree
+   0 findings; the probe tree exactly the two probes; f01d7a0e4 still its
+   two `bars_export.rs` lines.
+6. **D-7148: the old live-lock folder is honoured, both ways (V4-1).** The
+   entry's "No store holds a `verify/` directory (... 23 Oct: none)" is no
+   longer true: the real store, listed read-only on 30 Oct (12 run locks)
+   and on 31 Oct 2026 14:29 IST, holds the old folder (`live` under
+   `verify`) with 49 run locks and their 49 spools, and no `running`. A
+   writer of the build before the rename takes its run's lock there alone,
+   so the new merger probed only `running` and read every such run as free.
+   Now, whenever the store holds the old folder, the merger takes a run's
+   lock there too, after the new one, and a run whose OLD lock is held is
+   live (its spools wait, named); a writer takes both, so a merger of the
+   old build reads its run live. A store without the old folder never gets
+   one. The deploy precondition of L-BRED23-06 is narrowed to what this
+   cannot cover, stated there.
+7. **What repair 4 ran, and what stays owed.** `state/fix/DRAIN-base-reds`
+   was set at 14:39 IST on 31 Oct, after this step began, so it started no
+   long cargo run. It ran `ci-shell-gates --jobs language-purity --fast`
+   (RED none), the Zerodha tests of `cargo test -p pull --lib` (82 passed),
+   `cargo clippy -p pull --all-targets -- -D warnings`, `cargo fmt --all
+   --check` and `cargo deny check` (each green), and D3 phase A: Route C of
+   the `.github` files, `source_scan.rs` 2127 of 2127 lines and 354 of 354
+   branches. Gate 1e whole, the full gate run, the crates' full suites and
+   Route B of the crates are owed, as they were after repair 3.
+
+**Addenda, 31 Oct 2026 (BASE-REDS-1023 repair 5; check r5 of 31 Oct 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r5.json`, verdict fail on five
+items, each reproduced here first).** The block is still used, so each is
+an addendum to the entry it extends; nothing above is edited.
+
+8. **D-7148: one folder under two names is one lock, taken once (E10).**
+   Repair 4 took a run's lock in the old folder whenever that folder
+   existed and never asked whether it is the folder `running` already is.
+   With either a link to the other (a deploy giving both builds one folder
+   makes exactly that), a run's two lock names open one file, and
+   `flock(2)` locks a file with each open of it a holder: the writer locked
+   it, then waited `LIVE_WAIT` on its own lock through the other name and
+   refused every append `run_live_busy`, naming its own pid as another
+   process (30.03 s, the checker's probe, both directions); a merger
+   locked it and then read its own hold as a writer's, so every such run
+   read live for ever and its spools never merged. Now both compare the two
+   open files by device and inode (`one_file`: one `fstat` each) and lock
+   one file once; the writer opens each lock file once and every try of its
+   wait locks that open file, so a name that changes during a wait cannot
+   bring the self-wait back. A refused `fstat` is refused by name, never
+   read as two files. Chosen over comparing the two folders' canonical
+   paths because the open files are what `flock` locks: no name resolved
+   before the open can disagree with the file locked after it. BRED-43;
+   L-BRED23-06 (what a deploy must not do) and L-BRED23-18 (the cost).
+9. **D-7153, gate 1e: a fixture's scratch root is never one an earlier
+   process left.** Check r5's one full gate run was red in gate 1e alone,
+   on `halted_execution_tests`'s fixture: its root was named by the pid
+   and the process's counter, made with `create_dir` and never removed, so
+   542 of them (all counter 0) were in the temp folder and a test process
+   under a pid macOS gave again failed `File exists`. A failure that a
+   re-run passes is not cleared by the re-run (D1): the root's name holds
+   the wall clock's nanoseconds as well, so an earlier process under the
+   same pid ran at another instant and cannot hold it, and `Drop` removes
+   the root (a root that would not go is left, and no later fixture can
+   claim its name). The regression test makes the old names of the next 64
+   fixtures first and still claims a fresh root (BRED-47). The tree holds
+   more fixtures of the same shape (a pid-only name in
+   `strict_range_config.rs` and `boolean_catalog_command.rs`, roots kept by
+   many others: 1,228,394 entries in the temp folder on 31 Oct 2026); they
+   are a follow-up, named in this repair's report, not changed here.
+10. **D-7148, D-7150: the three coverage gaps check r5 measured, closed by
+    tests through production code.** `SpoolError`'s `Display` (its
+    `run_live_busy` arm changed in repair 4) formatted four refusals no
+    test formatted: each is now built by the code that refuses (a writer
+    meeting another run's header, a reader meeting a failed CRC, a merge
+    log damaged before its last record, a run past `u32::MAX`, a link at a
+    spool's name) and read by its words (BRED-45). The writer's wait
+    (repair 4's `take_one`) never reached its `LIVE_WAIT` refusal or the
+    host's refusal of the `flock`: one try's decision is now `tried`, a
+    seam as `probed` is for the merger's probe, driven arm by arm, and the
+    writer itself is held past the wait for each of a run's two locks at
+    once (BRED-44, one 30 s wait in the suite). `admit` (repair 3) never
+    met a restated day a run asks to skip: a run with `skip_restated` now
+    counts one and reads nothing (BRED-46).
+11. **What repair 5 ran** is in this repair's report
+    (`state/fix/round2/fix-BASE-REDS-1023.json`) and its progress file,
+    with each command's result line: the fails-before run of the new tests
+    on repair 4's tree, the gates, the full `ci-shell-gates.sh` run with
+    gate 1e whole, and D3 Route B on the final tip.
+12. **D-7148: the merger's probe names the host's refusal of either lock
+    (D3 on repair 5's first tip).** D3 Route B on the first tip of this
+    repair (1 Nov 2026) found one line of `live_probe` no test reached:
+    its refusal when the host refuses the `flock` of the old folder's lock
+    (a store on a volume whose host refuses advisory locks), which repair
+    5's own change had moved onto a line of its own. Its body is now
+    `live_probe_with`, which takes the `flock` try; `live_probe` hands it
+    the real one. A test hands it the host's refusal of each of a run's
+    two locks in turn: each probe is refused by name and the lock it took
+    goes with it (BRED-48). Chosen over a test of `probed` alone, which
+    already existed and never reached the probe's own refusal.
+
+**Addenda, 1 Nov 2026 (BASE-REDS-1023 repair 6; check r6 of 1 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r6.json`, verdict fail on three
+items, each reproduced here first).** The block is still used, so each is
+an addendum to the entry it extends; nothing above is edited.
+
+13. **D-7152: a test's own thread with no guard sees no knob another test
+    set (check r6, blocking 1).** `knobs::serially` serialised the tests
+    that move a knob and no test that only reads one took it. A throwaway
+    probe in `knobs.rs` counted 68 of the 2,437 cli lib tests reading knobs
+    with no guard, 696,136 reads in one run, every one on the test's own
+    thread, and no move by a thread with no guard. A knob moving between
+    two reads of one run ended `the_audit_renders_every_stage_of_the_institutional_stack`
+    with `RESULT NOT RECORDED` (red once in gate Tests; 4 of 12 audits in
+    check r6's probe). Chosen: `knobs::scope`, compiled only in test builds:
+    a test's own thread (the harness names it by the test's path) that holds
+    no guard reads the store as empty, blocks on nothing, and has its `set`
+    and `clear_all` refused by name; any other thread sees the store while
+    the guard is held, which is what a holder's worker needs. Refused: a
+    guard in each of the 68 (check r6's own suggestion), which holds only for
+    the readers someone remembered, so the next new test is the same race,
+    and which serialises tests that have no reason to wait. A shared lock
+    each reader holds for its whole run was refused too: a run takes
+    production locks (`LEDGER`, the writer caches) as well, and a reader and
+    a mover taking such a pair in opposite orders would hang the suite, which
+    is worse than a red test. The residual, a worker of a test with no guard
+    while another test holds it, is L-BRED23-20; the count found none.
+14. **D-7152: a web test waits for an order and times a ratio's two sides
+    in turn (check r6, blocking 2 and 3).** Two of four whole `npm test`
+    runs on one tip were red, each by a different test: 'the long-query
+    filter grew 3.49x' (and 5.05x before) measured one side after the other,
+    so a stall landed on one side; and 'the watch asked 1 time(s) in 40 ms at
+    a 5 ms period', a sleep assuming how many periods fit in it. Reproduced
+    with no load: a preload reading a test's first ten clock reads at five
+    times their length turned `prefix.test.js` red three of three ('grew
+    5.47x', '4.70x', '5.76x'); test timers falling due at once turned
+    `store-watch.test.js` red. `web/tests/in-turn.js` holds both tools (BRED-51). Every
+    bound stands. A hundredfold walk still fails, and its test measures one
+    for real, through the same code.
+15. **D-7152: the class, looked for before the next check found it.** The
+    whole web suite ran with each test timer falling due at once, then with
+    a 30 ms stall before every timer callback: store-watch was the only wait
+    race among 1,810 tests (the squeezed run's six other reds are fixtures
+    whose delay is the behaviour under test). Then three whole suites at once
+    beside eight CPU hogs, twice, at load 103-234: prefix, find and
+    store-watch held, and one more test fell, a real browser's hidden tab:
+    'a load in a hidden tab ends within 20000 ms: 32033 ms', with phases
+    load 12, settle 3069, paint 6069, heap 32032 ms. The waits were 6 s; the
+    two commands after them took 26 s on a starved renderer, and once did not
+    answer in a command's whole 30 s, which the harness says by name. The
+    bound stands and now reads what it was written for (`waited`), and that
+    one named answer is asked again, twice at most (BRED-52). The next
+    loaded round (three whole suites, load 164-197) found the harness saying
+    something false: "1 loads still had a request in flight after 30 s" about
+    a load 3.8 s old, when a page the machine had slowed asked during the
+    settle's two frames. `settle` now waits for that request too, up to the
+    same cap, so the sentence is true whenever it is said; a stand-in protocol
+    proves it with no clock, red before the change. The paint-wait
+    test's clock bounds became counts of what the wait did. `head_deadline_body_tests`,
+    check r6's follow-up, made 16 MiB in its handlers under a 300 ms head
+    deadline, and slept 100 ms to assume two readers held their slots: both
+    gone (BRED-53). Other wall-clock bounds in Rust tests (69 sites by a
+    grep, most in seconds) are as they were: none has been seen red since
+    this package's earlier repairs, and a change to them with no red to
+    prove it would be guesswork.
+16. **D-7152: cli's set measured for the first time, and its gaps closed.**
+    The instrumented cli lib binary overflowed its 2 MiB test threads, so no
+    earlier round read a figure for cli; check r6 cleared it with
+    `RUST_MIN_STACK=67108864` (environment only: `BASE-STACK-1028` is the
+    package that fixes the cause). That first figure, on e53cd7f60, named 97
+    uncovered lines and branches in functions this part touched by one line:
+    `check_day`, `extra_pass`, `run`, `rows_of`, `refuse_quarantined`,
+    `encode`. Each is a refusal or a skip a test can drive, so each has one
+    (BRED-54), except what no input and no direct call reaches, listed with its
+    proof in `state/fix/round2/deep-BASE-REDS-1023-<tip>-fu.txt`. One seam was
+    added: `run_with` takes the day's check, because a worker that stops is
+    the one refusal of the run no input reaches, and `run` passes `check_day`.
+    Refused: reading the refusal as unreachable, since the join's `Err` is
+    real and its sentence is the operator's only word for it.
+17. **D-7152: two more found by this repair's own Route B, at load 80.**
+    `a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole` read
+    an empty second answer: the head clock starts when the server hands its
+    last byte to the socket, and this client then read what the kernel held
+    at its slow pace and checked 16 MiB before asking, so the idle socket
+    closed first, as an idle socket must. The second request now goes before
+    the first response ends, as the pipelining test next to it sends one, so
+    the socket has to outlive the body to answer and no clock decides it.
+    `both_second_formats_answer_the_same_bars_at_p99` read a sealed lookup
+    p99 of 284.0 µs against raw 7.8 and a bound of 231.2: the two forms are
+    timed one after the other, so a stall landed on one. It takes the rule
+    the write door took in repair 1: up to five whole measurements, stopping
+    at the first that holds, the decision a function a test drives with
+    invented figures, every bound unchanged (L-BRED23-22). Refused: timing
+    the forms in turn alone, which does not close it, because a sealed
+    lookup takes twenty times a raw one here and so is twenty times as likely
+    to hold a stall.
+
+**Addenda, 2 Nov 2026 (BASE-REDS-1023 repair 7; check r7 of 2 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r7.json`, verdict fail on two
+items).** The block is still used, so each is an addendum to the entry it
+extends; nothing above is edited.
+
+18. **D-7152: a timed refusal stood behind another test's re-read (check r7,
+    blocking 1); addendum 15 corrected here, because the ledger is
+    append-only.** Addendum 15 said of the other wall-clock bounds in Rust
+    tests that "none has been seen red since". That claim rested on no count
+    of who shares a lock, and it fell at the next gate:
+    `a_fifo_a_directory_or_a_symlink_at_a_scrub_file_is_refused_at_once`, the
+    bound this package's first repair made a ratio, failed gate 1e on tip
+    4a486314a with 308.5 ms against a regular file's 1.2 ms. The route was
+    right and the measure was not. `KEPT` is one lock a vendor in the whole
+    process and `with_index` holds it across a re-read;
+    `a_growing_ledger_read_by_many_is_never_indexed_again_from_its_start`, next
+    in the binary's order, asks for that lock from eight threads; the regular
+    root of the FIFO test takes the vendor's index for its own ledger, so the
+    growing ledger's next reader starts again from byte 0 and the next timed
+    refusal waits for it. Measured on the tip's binary: the two alone in 48
+    loops at load 250, 3,888 runs, 0 failed; beside four whole api lib copies,
+    815 runs, 14 failed, every one on the ledger, which is refused under the
+    lock, and none on the cursor, refused before it. Chosen:
+    `zerodha_index_alone`, a mutex of the test module held for the whole of
+    the three tests that index that vendor, this repository's `CACHE_TEST` and
+    `PRESS_TESTS` shape. The odd file's answers are still taken in turn with
+    the regular ones and held to the same 20 regular answers and 50 ms. The
+    same two loads on the repaired binary: alone 2,769 runs, beside whole
+    copies 814 runs, 0 failed. A 300 ms sleep put by hand on `open_plain`'s
+    refusal of a file that is not regular still fails it, 'answered in
+    301.129834ms against a regular file's 75.584µs', in each of three runs, so
+    a real wait is seen (`state/fix/round2/logs-BRED1023-r7-wait.log`).
+    Refused: another vendor for the FIFO test, because none is free (the regular root's
+    answer would restart the index under the read counts of the Dhan and
+    TrueData tests and the steps of the Groww test, and gdfl's dozen tests would
+    stand in its timing); refusing a non-regular file before the lock, which
+    changes a correct route to please a test.
+19. **D-7152: the third test of TST-01's shape (check r7, blocking 2).**
+    `the_holder_is_named_through_every_in_process_hand_off` still asserted no
+    refusal at all, the assertion repair 3 took out of the two tests beside
+    it, and failed 'no append refused' left 1 right 0 in 3 of 4 whole api lib
+    copies under check r7's load. Its sampler's attempts take the same lock,
+    and no production caller of the plain append that meets the bound hides
+    it. Each record is now asked once and its answer goes through
+    `refused_of`, which is `judged`: past the bound and named counts one and
+    is printed, inside the bound or unnamed fails, `held >= 50` and
+    `unnamed == 0` as they were. `the_hand_off_counts_a_named_refusal_and_fails_a_lost_one`
+    proves the count on invented refusals. Beside this repair's overload the
+    test alone ran 128 times, green each time: 61,440 appends, 20 refused by
+    the bound, at most 3 in one run. A grep of the workspace for the
+    shape found three more in `flock_patient_tests.rs`, on `store::flock`'s
+    1 s bound: their holds are a 1 or 2 ms sleep with no `fsync`, no saved log
+    shows one red, and check r7's store hunt passed them, so they are left as
+    they are, by that reading and not by a claim that they cannot fail.
+20. **D-7152: `parallel` joins every worker before it reads an answer, and two
+    of the ledger's sentences (check r7's follow-ups).** Collecting the joins
+    into a `Result` stopped at the first `Err`, so a second stopped worker
+    stayed unjoined and `thread::scope` panicked in place of "a worker
+    stopped": BRED-54's sentence held for one stopped worker only (an exact
+    copy of the old function, 'a scoped thread panicked'). No input stops one
+    today; the fold costs nothing and makes the sentence true for any number.
+    Addendum 13's 2,437 and L-BRED23-20's 2,425 are one count: 2,437 listed,
+    12 ignored, 2,425 run. `knobs::scope::may_move` lets a thread that is no
+    test's own move a knob with no guard, which L-BRED23-20 now says beside the
+    reads; the probe counted no such move.
+21. **D-7152: three more, found by this repair's own overload (48 test loops,
+    16 flock loops, 8 hand-off loops and four whole api lib copies at once,
+    load up to about 300), none by check r7.** Reading addendum 15 as a claim
+    to test, not one to trust, this repair ran the suite heavier than any gate
+    does before it committed. `a_census_change_never_blocks_a_request`
+    failed in 4 of 4 copies at once, 347 to 584 stale where it asked 800: the
+    count raced the read's five seconds, so it held only below 5.6 ms a
+    request, and it is no bound the seven runs of L-BRED23-14 retry. Now
+    `stale_until_the_read_lands`, a function a test drives with invented runs:
+    stale from the 200th request at the latest and current again only once the
+    pause is out, which at speed says what the count said and on a slow
+    machine says what is true. `no_db_view_reads_the_whole_census` raced a
+    second of pause against its views the same way: `slow_read::pause` now ends
+    when its test sets zero, and that test and the warming test hold the read
+    across what they ask. Its 900 ms bounds stand, in one of up to seven asks,
+    L-BRED23-14's rule, because a view on the stalled machine took 903 ms to
+    1.7 s with nothing to wait for; a view that waited for the held read
+    answers only when the read is out and says 0, so what it says fails it,
+    whatever the clock. The never-blocks test's last step read its row beside
+    the census's swap ('left: Refreshing'), and now waits for the row.
+    `a_reader_that_stops_reading_is_closed_and_logged_as_cut` took 1.15 s
+    against its 1 s in one copy; its upper bound takes the same rule, a run of
+    its own each time, and a reader never cut holds its slot past the next
+    client's six seconds in every run. Loops of the census, view, stop and
+    warming tests under the same load: 1,103 runs, 18 failed before the last
+    two changes (`scratch/repair-BASE-REDS-1023-r7/after3.log`), 471 runs, 0
+    failed after (`after4.log`), and four whole copies green beside them.
+    Refused: a longer pause alone, which moves the race; a count scaled by the
+    time the loop took, which keeps a clock in the assertion.
+22. **D-7152: a minute line reached the log after a flush had returned.**
+    `a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free` read no
+    line for its route (left (0, 0)) in one copy, and the line is in that
+    copy's log 68 ms after the test's own flush: `Speed::roll` froze under the
+    roll lock and every caller wrote after it, so a flush beside it had taken
+    the count, and held it unwritten, when this test's flush returned empty.
+    The test was right and the code was not: on a stopping process the minute
+    thread can hold the last line the same way, and the last flush returns
+    past it, so that count would never reach the log. `Speed::roll_writing`
+    writes under the lock, on both paths; the minute thread waits for its
+    table with `OnceLock::wait` (it starts inside the table's first use), which
+    also takes away a branch only a minute's edge could reach. No request
+    takes that lock. Cost measured in L-BRED23-23.
+
+**Addenda, 3 Nov 2026 (BASE-REDS-1023 repair 8; check r8 of 3 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r8.json`, verdict fail on one item).**
+The block is still used, so each is an addendum to the entry it extends;
+nothing above is edited.
+
+23. **D-7152: the hand-off sampler's re-check kept a side that only timing
+    reaches (check r8, blocking: the D3 GAP
+    `crates/api/src/audit_lock_wait_tests.rs:295:21 False`).** Addendum 19's
+    sampler re-checked a sample that read "not this process" with
+    `held_now(&journal) && wrong()`. The False side of `held_now` there is a
+    lock let go inside the re-check's millisecond: a pass, which no run of
+    check r8's Route B reached (that test 51/52 lines, 8/10 branches), and
+    neither an (F) side, which is only an assertion's failing arm, nor a (U)
+    one, since timing reaches it. Chosen: `still_unnamed`, which takes both
+    answers at each re-check and only then compares the pair with (held,
+    unnamed), so no side of the judgement hangs on timing, and
+    `a_lock_let_go_inside_a_recheck_names_no_lost_holder` drives each case by
+    hand: held and unnamed at both re-checks is the defect; let go or named at
+    either is not, and a cleared sample is not asked again. The count is
+    `unnamed += u64::from(still)`, so the `if still` pair beside it, an
+    increment that only a failing run makes, has no branch left either. The
+    sampler's `assert_eq!(unnamed, 0)` and `held >= 50` are as they were.
+    Refused: an (F) entry for a passing side; a loop that retries the test
+    until a run happens to reach it.
+24. **D-7152: the seven runs of L-BRED23-14 fell inside seconds (check r8,
+    follow-up 1).** Addendum 21 ended a held census read at zero, so a run of
+    `a_census_change_never_blocks_a_request` lasts under a second where it
+    lasted the read's five seconds (a whole test process of one run, on the
+    repair-7 tip's binary: 0.69 to 1.00 s, p50 0.78 s, n = 20 at load 47 to
+    50; check r8 read 0.36 to 0.8 s), and its seven runs fit in a few seconds:
+    one
+    burst of load failed all seven inside check r8's connection storm ('a
+    request waited in every run', max 63 to 97 ms), against 0 of about 400
+    runs outside it, and the doc of `NEVER_BLOCKS_RUNS` and L-BRED23-14's
+    'about six seconds more' were no longer true. `first_run_within` now waits
+    `apart` after each run that does not hold, and none after the run that
+    holds (`the_runs_after_a_miss_are_apart_and_the_run_that_holds_ends_them_at_once`).
+    The never-blocks test passes the read's five seconds
+    (`NEVER_BLOCKS_APART`), so its seven sample the machine across more than
+    half a minute again, and the cut test passes the same, since a run of it
+    lasts under half a second (0.39 to 0.52 s a whole process, p50 0.42 s, n =
+    20, the same binary); the /db view asks pass zero, because a read held for a
+    minute bounds them and waiting would let it run out. Every bound, every
+    count of runs and every other assertion is unchanged, and a run that holds
+    costs nothing more. Refused: more runs, which buy the spread with more
+    chances; a wider bound. The R3-14 paragraph that repair 7's two new tests
+    had cut from its test in `speed_tests.rs` (check r8, follow-up 2) is back
+    on `two_freezes_at_once_never_count_backwards`.
+
+**Addenda, 4 Nov 2026 (BASE-REDS-1023 repair 9; check r9 of 3 Nov 2026, the
+D1 landing gate, `state/fix/ci-gates-logs/land-BASE-REDS-1023-20261103T1911Z-g2`:
+web `npm test` red on the merged tree M = 83f46245d on two items, green on
+feat/db-fix X = f01d7a0e4).** The block is still used, so each is an addendum
+to the entry it extends; nothing above is edited.
+
+25. **D-7152: a command's stop asks every process of its group once, a fork
+    the group's signal missed included (check r9, blocking 2: "the sheet is
+    still on stdout").** The speed sheet's `run().stop()` sent SIGTERM to the
+    command's process group once. On this Mac a signal sent to a process
+    group misses a process whose parent is forking it at that instant: the
+    parent is signalled, the child is not in the group yet, and nothing sends
+    the signal again (Linux restarts such a fork). On M the `--writer`
+    `echo the-writer-printed; sleep 30` was stopped as its shell forked the
+    `sleep`; the sleep ran on, was killed 5 s later, and the sheet said
+    FAILED ("was sent SIGTERM and, still running 5000 ms later, SIGKILL"), so
+    its stdout began `# Speed sheet — FAIL`. Probed on 4 Nov
+    (`scratch/repair-BASE-REDS-1023-r9`, `forkrace.mjs`): 3 of 300 such stops
+    at load 23 to 36 left the `sleep 30` running in the group, its parent now
+    launchd, each signalled 2 to 8 ms after the start; through the tip's
+    `run()` 3 of 400 at load about 100, through the repair's 0 of 400 at load
+    about 117 (`before-after.mjs`). Chosen: `asker` lists the group (POSIX
+    `ps -A -o pid= -o pgid=`, `groupMembers`) and sends SIGTERM to each
+    process itself, and the stop lists the group again every `LIST_POLL_MS`
+    (100 ms) while it waits, so a process that joined the group after a list
+    is asked as soon as it is seen; the SIGKILL that follows a group still
+    there after `COMMAND_STOP_MS` goes to the group again at every look. Each
+    process is sent SIGTERM once and never twice: a second SIGTERM ends at
+    once a program the first asked to stop in its own time (Chrome's handler
+    goes back to the default after the first). A list that fails is said in
+    the stop's words, never hidden: after a first failed list the group is
+    signalled as one, which can miss a fork, and no list is tried after a
+    failed one. The proof needs no race: a command whose TERM trap starts a
+    process and leaves puts that process in the group after the signal went
+    out, the very state a missed fork leaves; the tip's stop said KILLED at
+    5,024 ms, the repair's "was sent SIGTERM and left" at 158 ms (BRED-61).
+    `COMMAND_STOP_MS`, `KILLED` and every bound are unchanged. Refused: a
+    second SIGTERM to the whole group, which reaches again every process the
+    first one reached; a longer wait, which the 30 s sleep outlasts; a test
+    that slows the writer's pass until its shell has forked. Cost and what
+    stays outside: L-BRED23-24.
+26. **D-7152: a real browser's row takes the 30 s settle cap as the
+    machine's only when its server answered at once every request still in
+    flight (check r9, blocking 1: "/speed/ warm: 1 loads still had a request
+    in flight after 30 s").** In the route test `/speed/` is the stand-in's
+    fallback shell, and every request it makes (`/feeds.json`, the reporter,
+    the app entry) the stand-in answers in full the moment it is asked. On M
+    a warm load of it still had a request in flight at the settle's 30 s cap,
+    at load 36/58/54, and the test before it in that run took 40.9 s against
+    10.6 s on X, one of the harness's 30 s bounds more: the browser was
+    starved in that window. Not reproduced on demand, with scratch
+    diagnostics that print every unanswered request of a false settle: the
+    route test alone 36 of 36 at load 40 to 52; 42 runs of 25 cold and 26
+    warm loads, about 2,140 loads at load 82 to 112, 18 runs of them beside
+    20 busy processes; three whole web suites at once at load 52 to 78: no
+    load ran out the cap. The cause recorded is the test's: it judged the
+    cap as the page's fault although nothing the page asked was left
+    unanswered by its server, and nothing in the failure said what was in
+    flight. Chosen: the harness names what held the cap (`tab.unanswered`,
+    the load's `pending`, `inFlightNames`, "... after 30 s: GET /feeds.json"),
+    which the operator's sheet says too, and `measuredRow` takes a capped
+    load as the machine's clock only when the stand-in (`browserStandIn`'s
+    `answers`) answers every request it names at once; one it holds open
+    (`/hang`, `/stall`, the never-loading entry, `/later` past its first
+    asks, `/sources.json` under `hangSources`), or a cap that names none, is
+    the page's and refused as before. Four tests fail on the tip's harness,
+    the row check with the landing gate's own message, and pass after
+    (BRED-62). The 30 s cap and every other judgement are unchanged. Not
+    changed, and stated in L-BRED23-25: a load that does not end within the
+    30 s load bound, or whose renderer answers no command within 30 s, is
+    still NOT MEASURED and fails a real-browser test by name; neither
+    happened in the landing gate. Refused: a longer cap; running the test
+    again until a run settles; taking every cap as the machine's.
+27. **D-7152: the Speed page's own-line test waits for what it compares
+    (this repair's own run of `web/tests/speed.test.js` at load 21 to 57:
+    "Chrome reports first content", no first-contentful-paint entry yet).**
+    The test read the browser's paint entry and the line's figures as soon as
+    the harness's load returned, whose waits (a paint within 2 s, a 300 ms
+    quiet) a renderer slowed by the machine runs past; the page's fetch 100 ms
+    after its load can start after that quiet too. It now waits in the page,
+    at most 30 s, for the first-contentful-paint entry and for the line drawn
+    after that fetch, then makes every comparison it made before; a page that
+    never paints or never draws its line fails at the wait by name. No bound
+    of the harness is changed (BRED-63).
+
+**Addenda, 5 Nov 2026 (BASE-REDS-1023 repair 10; check r10 of 4 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r10.json`, verdict fail on two items,
+both brought in by repair 9).** The block is still used, so each is an
+addendum to the entry it extends; nothing above is edited.
+
+28. **D-7152: a writer the speed sheet had to kill fails the sheet whatever
+    the list of its group said (check r10, B1).** Addendum 25's stop says a
+    kill as `KILLED` followed by why the group could not be listed, when it
+    could not; the sheet still failed a writer only when the stop's words
+    were `KILLED` exactly, so a kill under a `ps` that failed, or that did
+    not answer within `LIST_WAIT_MS`, was only a note, and the sheet passed.
+    Reproduced on the tip's code with a test that puts a `ps` first on the
+    test process's `PATH`: one that exits 1, and one that sleeps 3 s; under
+    each, the writer `trap '' TERM; while :; do sleep 1; done` was killed
+    and the sheet gave no failure, `ok` true, the kill only in its notes.
+    Chosen: `run().stop()` answers `{said, killed}` (`Stopped`), `killed`
+    true exactly when the group had to be sent SIGKILL, and the sheet fails
+    a writer on `killed`, its failure keeping the stop's words with the
+    list's reason; a stop that did not kill is a note as before, and the
+    `--restart` bound says the same words. The fact is kept apart from its
+    wording, so no reason added to the words can turn a kill into a pass
+    again. Every bound and word is unchanged (BRED-64; L-BRED23-24, which
+    now also states a process that leaves the group with `setpgid` or
+    `setsid`, check r10's follow-up E5, a limit its own test pins: such a
+    process is neither asked nor killed, and the stop says the group left).
+    Refused: reading the kill from the start of the words, which the next
+    change of wording can break again.
+29. **D-7152: a real browser's row takes the settle cap as the machine's
+    only for requests asked of its own stand-in that it answers in full
+    within `STAND_IN_AT_ONCE_MS` (check r10, B2).** Addendum 26's name of a
+    request in flight was `METHOD /path?query`: a request a page sent to
+    another host, on a path the stand-in serves, read as one to the stand-in
+    and was excused; and the stand-in counted `/slow.css` asked to wait any
+    number of ms under 30,000 as answered at once, while its own doc left
+    `/slow.css` out. Reproduced on the tip's code with the new test: both
+    excused. Chosen: the harness names a request `METHOD
+    origin/path?query`, never its fragment or a user name and password
+    (`askedAs`), which the operator's sheet says too; `browserStandIn`'s
+    `answers` takes only an `http:` request to its own origin, on a route it
+    neither holds open (`/stall`, `/hang`, the never-loading entry,
+    `/later`, `/sources.json` under `hangSources`) nor drops (`/broken`,
+    never answered in full), and `/slow.css` only when asked to wait a
+    number of ms no more than `STAND_IN_AT_ONCE_MS`, 1,000 ms, a thirtieth
+    of the cap, so every request it excuses had been answered at least 29 s
+    before the cap ran out; `measuredRow` refuses every other cap and names
+    after the failure each request not answered so. A request to another
+    origin, a `blob:` or a websocket never reached the stand-in, so nothing
+    it knows can excuse it. The 30 s cap and every other judgement are
+    unchanged (BRED-65; L-BRED23-25). Refused: comparing paths only; a
+    larger margin, which would excuse a request answered late in the cap.
 
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 

@@ -7,13 +7,20 @@ import { address, calendarRows, monthRows, read, readAll, share, stockRows, tick
 
 const panel = readFileSync(new URL('../src/routes/ingest/panels/FeedChecks.svelte', import.meta.url), 'utf8');
 
-/** A fake `ask` answering from a table of `url -> [status, body]`, logging every url. */
+/**
+ * A fake `ask` answering from a table of `url -> [status, body]`, logging every url.
+ * @param {Record<string, [number, any]>} table
+ * @returns {{ ask: (url: string) => Promise<Response>, asked: string[] }}
+ */
 function fake(table) {
+  /** @type {string[]} */
   const asked = [];
+  /** @param {string} url */
   const ask = async (url) => {
     asked.push(url);
     const [status, body] = table[url] ?? [404, { error: `no fixture for ${url}` }];
-    return { ok: status >= 200 && status < 300, status, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) };
+    // Only the three fields `read` reads: a stand-in, not a whole Response.
+    return /** @type {Response} */ (/** @type {unknown} */ ({ ok: status >= 200 && status < 300, status, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) }));
   };
   return { ask, asked };
 }
@@ -49,9 +56,9 @@ test('a refusal is shown in the server words, and garbage is named', async () =>
   });
   const missing = await readAll(ask, '/feed-checks.json', { month: '2025-05' });
   assert.equal(missing.ok, false);
-  assert.match(missing.error, /answered 404: holds no feed-reconcile version of 2025-05/);
-  assert.match((await read(ask, '/bad?limit=1&offset=0')).error, /no JSON/);
-  assert.match((await readAll(ask, '/nototal', {})).error, /named no total/);
+  assert.match(missing.error ?? '', /answered 404: holds no feed-reconcile version of 2025-05/);
+  assert.match((await read(ask, '/bad?limit=1&offset=0')).error ?? '', /no JSON/);
+  assert.match((await readAll(ask, '/nototal', {})).error ?? '', /named no total/);
 });
 
 test('a share is exact and a nothing-compared share is a dash', () => {

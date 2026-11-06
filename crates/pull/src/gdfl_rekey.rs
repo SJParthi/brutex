@@ -437,6 +437,7 @@ impl Withdrawn {
 
     /// One `superseded` line on line `at`, refused if it re-targets a key or
     /// supersedes a retired one. O(1): three hash probes.
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     fn admit_superseded(&mut self, record: SupersededRecord, at: usize) -> Result<(), String> {
         let key = (record.underlying, record.old);
         let first = self.line_of.get(&key).copied().unwrap_or(at);
@@ -491,6 +492,7 @@ impl Withdrawn {
     /// One `retired` line on line `at`, refused if the key is superseded or
     /// already retired with another account. An identical second `retired`
     /// line of one key is the same fact twice and reads once. O(1).
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     fn admit_retired(&mut self, record: RetiredRecord, at: usize) -> Result<(), String> {
         let key = (record.underlying, record.key);
         let first = self.line_of.get(&key).copied().unwrap_or(at);
@@ -1308,6 +1310,7 @@ fn settled_contract(expiry: Day, strike: i64, side: OptionSide) -> Option<Contra
 /// ledger withdraws nothing) and the bars of the moves into a held target
 /// month (O(those bars); none on a store whose re-key has not been cut
 /// short and whose targets are free).
+/// Timed by `pull::gdfl_rekey::tests::plan_cost_per_key_is_flat_in_the_number_of_keys` and `pull::gdfl_rekey::tests::census_step_cost_is_one_load_per_plan_flat_per_entry` (gate 12, D-7149).
 #[must_use]
 pub fn plan(survey: &Survey, ledger: &Withdrawn) -> Plan {
     let mut ladders: HashMap<(Symbol, Day), Vec<i64>> =
@@ -1461,6 +1464,7 @@ fn copied_months(
 /// One key's verdict, read against what the ledger already records of it
 /// ([`plan`]'s doc, the three bullets). O(1): two hash probes, and a third
 /// only for a key the ledger holds.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn against_ledger(out: &mut Plan, key: &Stored, verdict: Verdict, ledger: &Withdrawn) {
     let superseded = ledger.superseded(key.underlying, key.contract);
     let retired = ledger.retired(key.underlying, key.contract);
@@ -2268,6 +2272,7 @@ fn apply_within(
 /// takes the lock itself; this only moves a stall the plan can foresee
 /// ahead of the writes. A plan with nothing to write takes nothing and
 /// creates nothing. One lock wait, O(1) in the store.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn ledger_lock_free(
     root: &Path,
     plan: &Plan,

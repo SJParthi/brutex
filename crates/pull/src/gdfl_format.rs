@@ -55,7 +55,8 @@ pub(crate) fn first_sight(seen: &mut HashSet<[u8; 32]>, digest: [u8; 32]) -> boo
 /// The durable ALERT keyed by the digest is R4-05's
 /// (`vendor_format_changed`, `pull::alerts::KINDS`): this build holds no such
 /// kind, so no queue record is written here, and the cut link of 18 Oct
-/// 2026 leaves the kind to that package. O(1): one lock, one probe.
+/// 2026 leaves the kind to that package. O(1): one lock, one probe
+/// (UNVERIFIED: no test times it, L-BRED23-09).
 #[must_use]
 pub fn note_format_changed(tree: &str, day: Day, member: &str, shape: &HeaderShape) -> bool {
     note_shape(tree, day, member, shape, "header_unknown")

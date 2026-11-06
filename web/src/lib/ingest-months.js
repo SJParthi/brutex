@@ -182,7 +182,7 @@ export function wholeUnlisted(bySymbol, symbol) {
  * @param {ReturnType<typeof feedSpan>} span
  * @param {string} from the window's first day, ISO
  * @param {string} to the window's last day, ISO
- * @returns {{ from: string, to: string, beforePct: number, livePct: number, afterPct: number } | null}
+ * @returns {{ from: string, to: string, openEnd: boolean, beforePct: number, livePct: number, afterPct: number } | null}
  *   `null` when the feed states no archive span or the window is not a span
  */
 export function archiveLane(span, from, to) {

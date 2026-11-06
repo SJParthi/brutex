@@ -2277,6 +2277,7 @@ fn peer_month(
 /// Whether the peer's one-second month holds any second of IST day
 /// `number`: two `first_at_or_after` lookups, O(1) a day. A month held with
 /// none of the day is a GDFL day not imported, not a day nobody traded.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn peer_holds_day(peer: &Month, number: u32) -> Result<bool, String> {
     let at = |ts: i64| {
         peer.file
@@ -3601,7 +3602,9 @@ pub struct MergeOutcome {
     pub stopped: bool,
     /// The most runs' live locks this merge held open at once: never more
     /// than [`LIVE_LOCKS_AT_ONCE`], whatever the number of runs waiting
-    /// (IA-9 repair 2).
+    /// (IA-9 repair 2). Each run's are one lock file, or two when the store
+    /// holds the old layout's folder ([`spool::OLD_LIVE_DIR`], BASE-REDS-1023
+    /// repair 4), so the descriptors are at most twice the bound.
     pub live_locks_peak: u64,
     /// Spool files that could not be removed: path and words.
     pub not_removed: Vec<(PathBuf, String)>,
@@ -3891,15 +3894,16 @@ fn runs_end(spools: &[SpoolId], runs: usize) -> usize {
 }
 
 /// The spools of `spools` whose run is not spooling, in the order given,
-/// and the live lock of each such run, held until the caller drops them: one
+/// and the live locks of each such run, held until the caller drops them: one
 /// [`spool::live_probe`] per run (O(runs), each O(1)). A run still spooling,
 /// or whose lock would not open, keeps its spools waiting; a lock that would
 /// not open is named in `faults`, never read as free.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn not_live(
     root: &Path,
     spools: Vec<SpoolId>,
     faults: &mut Vec<String>,
-) -> (Vec<SpoolId>, Vec<store::flock::Flock<std::fs::File>>) {
+) -> (Vec<SpoolId>, Vec<spool::LiveLocks>) {
     let mut free: HashMap<u64, bool> = HashMap::with_capacity(4);
     let mut held = Vec::with_capacity(4);
     let mut out = Vec::with_capacity(spools.len());

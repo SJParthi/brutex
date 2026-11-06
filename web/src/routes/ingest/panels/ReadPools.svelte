@@ -71,7 +71,7 @@
 
 <div class="pools">
   {#if line}<p class="line" class:bad={tables?.fault}>{line}</p>{/if}
-  {#if tables && !tables.fault}
+  {#if tables && tables.fault === null}
     <p class="line dim">
       {tables.cores} cores; a full pool is waited on for {tables.waitMs} ms{#if tables.patienceMs !== null}, a
         writer on a month for {tables.patienceMs} ms{/if}. Counts since this server started.

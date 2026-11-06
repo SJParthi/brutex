@@ -541,6 +541,7 @@ fn a_nul_tail_after_a_power_cut_is_closed_and_named() {
 /// close written before D-3317 carries no `run=` and is kept as such. The
 /// incremental reader keeps them as the whole load does. Every line is
 /// invented.
+/// The proof is this test, `pull::gdfl_import::ia2_tests::the_journal_keeps_each_keys_hole_reason_first_landing_and_last_done` (gate 12, D-7149).
 #[test]
 fn the_journal_keeps_each_keys_hole_reason_first_landing_and_last_done() {
     let store = scratch("history");

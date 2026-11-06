@@ -774,44 +774,89 @@ fn mkfifo(at: &Path) {
     assert!(made.success(), "mkfifo made {}", at.display());
 }
 
+/// Runs `check` on `stub` on its own thread, with a hook that renames
+/// `swapped` over the stub between the moment the check is asked and its
+/// open. Returns the answer if it came within `bound` (`None` if it did not),
+/// and how long it took from the check's start. A check still waiting at the
+/// bound is released by opening the stub for writing, so the suite never
+/// hangs.
+fn check_after_swap(
+    stub: &Path,
+    swapped: &Path,
+    check: fn(&Path) -> bool,
+    bound: std::time::Duration,
+) -> (Option<bool>, std::time::Duration) {
+    let (started, start) = std::sync::mpsc::channel();
+    let (told, answer) = std::sync::mpsc::channel();
+    let checking = {
+        let (stub, swapped) = (stub.to_path_buf(), swapped.to_path_buf());
+        std::thread::spawn(move || {
+            stub_hook::set(move |at: &Path| {
+                std::fs::rename(&swapped, at).expect("the swap");
+            });
+            let _ = started.send(());
+            let _ = told.send(check(&stub));
+        })
+    };
+    start.recv().expect("the check started");
+    let began = std::time::Instant::now();
+    let got = answer.recv_timeout(bound).ok();
+    let took = began.elapsed();
+    if got.is_none() {
+        // Release the open that waits, so the suite does not hang; then fail.
+        let _ = std::fs::OpenOptions::new().write(true).open(stub);
+    }
+    checking.join().expect("the check ends");
+    (got, took)
+}
+
 /// **A FIFO SWAPPED IN AFTER THE LOOK NEVER BLOCKS THE STUB CHECK**: the
 /// hook renames a FIFO over the stub between the moment the check is asked
 /// and its open (where the old `lstat` looked). The check runs on a thread;
-/// its answer must come within 100 ms, and must be `false`. Before R3-19 the
-/// `File::open` that followed the `lstat` waited for a writer that never
-/// came: the receive timed out, and the test then opens the FIFO for writing
-/// so the thread ends, and fails.
+/// its answer must be `false`, and must come within 100 ms or 20 times the
+/// same check's time with a regular file swapped in the same way in the same
+/// run, whichever is the longer. Before R3-19 the `File::open` that followed
+/// the `lstat` waited for a writer that never came: the receive timed out,
+/// the test opens the FIFO for writing so the thread ends, and fails.
+///
+/// The baseline is what keeps a loaded machine from reading as a block
+/// (BASE-REDS-1023, 27 Oct 2026): the 100 ms alone timed out once with the
+/// whole gate suite running, where the rename and the open on the store's
+/// disk took longer than the bound with no FIFO waiting at all. A check that
+/// waits for a writer never answers, so no bound of any size lets it pass.
 #[test]
 fn a_fifo_swapped_in_after_the_look_never_blocks_the_stub_check() {
     let scratch = Scratch::new("STUBFIFO");
     let root = scratch.root();
     let stub = manifest_path(root, Vendor::Gdfl);
+
+    // The same-run baseline: a regular file that is not a stub, swapped in
+    // the same way. It cannot block, so it is waited for without a bound.
+    std::fs::write(&stub, sealed_stub(Vendor::Gdfl)).unwrap();
+    let plain = root.join("swapped.plain");
+    std::fs::write(&plain, b"not a stub").unwrap();
+    let (plain_answer, plain_took) =
+        check_after_swap(&stub, &plain, holds_sealed_stub, std::time::Duration::MAX);
+    assert_eq!(
+        plain_answer,
+        Some(false),
+        "a short regular file is not a stub"
+    );
+
     std::fs::write(&stub, sealed_stub(Vendor::Gdfl)).unwrap();
     assert!(holds_sealed_stub(&stub), "the stub itself is a stub");
     let fifo = root.join("swapped.fifo");
     mkfifo(&fifo);
-    let (started, start) = std::sync::mpsc::channel();
-    let (told, answer) = std::sync::mpsc::channel();
-    let checking = {
-        let (stub, fifo) = (stub.clone(), fifo.clone());
-        std::thread::spawn(move || {
-            stub_hook::set(move |at: &Path| {
-                std::fs::rename(&fifo, at).expect("the FIFO swapped in");
-            });
-            let _ = started.send(());
-            let _ = told.send(holds_sealed_stub(&stub));
-        })
-    };
-    start.recv().expect("the check started");
-    let got = answer.recv_timeout(std::time::Duration::from_millis(100));
-    if got.is_err() {
-        // Release the open that waits, so the suite does not hang; then fail.
-        let _ = std::fs::OpenOptions::new().write(true).open(&stub);
-    }
-    checking.join().expect("the check ends");
-    assert!(
-        !got.expect("answered within 100 ms, never waiting on the FIFO"),
-        "a FIFO is not a stub"
+    let bound = plain_took
+        .saturating_mul(20)
+        .max(std::time::Duration::from_millis(100));
+    let (got, took) = check_after_swap(&stub, &fifo, holds_sealed_stub, bound);
+    assert_eq!(
+        got,
+        Some(false),
+        "a FIFO is not a stub, and the check never waits on it: no answer \
+         within {bound:?} (the regular file's swap took {plain_took:?}; this \
+         one {took:?})"
     );
 }
 
@@ -1128,4 +1173,31 @@ fn the_kept_publish_on_a_copy_of_a_real_epoch_measured() {
          {FRESH} invented keys: p50 {p50} us, p99 {p99} us, max {max} us; the first day's \
          whole read {whole} us"
     );
+}
+
+/// **THE HARNESS CATCHES A CHECK THAT WAITS** (BASE-REDS-1023 repair 3,
+/// verify r3's side no test took): the stub check's pre-R3-19 shape, an open
+/// after the look that waits for a writer when a FIFO was swapped in, does
+/// not answer within its bound, and [`check_after_swap`] releases it by
+/// opening the FIFO for writing, so the suite ends and the caller reads no
+/// answer, which is how the FIFO test fails on that shape.
+#[test]
+fn a_check_that_waits_on_a_swapped_fifo_reads_as_no_answer_and_is_released() {
+    fn opens_and_waits(at: &Path) -> bool {
+        stub_hook::before_open(at);
+        std::fs::File::open(at).is_ok()
+    }
+    let scratch = Scratch::new("STUBWAITS");
+    let root = scratch.root();
+    let stub = manifest_path(root, Vendor::Gdfl);
+    std::fs::write(&stub, sealed_stub(Vendor::Gdfl)).unwrap();
+    let fifo = root.join("swapped.fifo");
+    mkfifo(&fifo);
+    let bound = std::time::Duration::from_millis(200);
+    let (got, took) = check_after_swap(&stub, &fifo, opens_and_waits, bound);
+    assert_eq!(
+        got, None,
+        "a check that waits for a writer never answers in its bound"
+    );
+    assert!(took >= bound, "{took:?}");
 }

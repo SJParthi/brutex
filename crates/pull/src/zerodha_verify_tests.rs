@@ -4778,10 +4778,129 @@ fn an_orphan_log_is_stray_and_a_full_spool_refuses_the_append() {
     assert!(words.to_string().contains("nothing was appended"));
     let busy = SpoolError::Busy {
         run: 41,
+        lock: spool::live_lock_path(Path::new(""), 41),
         holder: "a test holder".to_owned(),
     };
     assert_eq!(busy.code(), "run_live_busy");
-    assert!(busy.to_string().contains("verify/live/41.lock"));
+    assert!(busy.to_string().contains("verify/running/41.lock"));
+}
+
+/// **THE OLD LIVE-LOCK FOLDER IS HONOURED BOTH WAYS** (BASE-REDS-1023
+/// repair 4, check r4's V4-1). A writer of the build before D-7148 holds its
+/// run's lock in the old layout's folder (`verify`, then `live`) alone, and
+/// the real store held that folder on 30 and 31 Oct 2026 (49 run locks,
+/// listed read-only). A lock held there, as that writer holds it, leaves the
+/// run's spools waiting and the run named live, never merged under it; let
+/// go, they merge. A writer of THIS build, in a store that holds the old
+/// folder, holds its run's lock there too, so a merger of the old build sees
+/// the run live, and lets it go with the writer. A store without the old
+/// folder never gets one; a lock there that would not open is named, never
+/// read as free; and a run's locks are counted as the files they are.
+#[test]
+fn the_old_live_lock_folder_is_honoured_both_ways() {
+    let on = regular();
+    let id = |run: u64| SpoolId {
+        run,
+        segment: Segment::Index,
+        timeframe: Timeframe::MINUTE_1,
+        month: on.year_month().unwrap(),
+    };
+    let old_dir = |root: &Path| {
+        spool::OLD_LIVE_DIR
+            .iter()
+            .fold(root.to_path_buf(), |at, segment| at.join(segment))
+    };
+    let append = |root: &Path, run: u64, key: &str| {
+        let writer = SpoolWriter::new(root, run, Mode::ZerodhaMerge, 1);
+        writer
+            .append(
+                Segment::Index,
+                Timeframe::MINUTE_1,
+                &[spooled(on, key, Code::Match, 0)],
+            )
+            .unwrap();
+        writer
+    };
+    // A WRITER OF THE OLD BUILD: its run's record spooled, its lock held in
+    // the old folder alone.
+    let root = scratch("OldLayout");
+    drop(append(&root, 51, "NSE-INDEX-ZZOLDA"));
+    std::fs::create_dir_all(old_dir(&root)).unwrap();
+    let old_writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(old_dir(&root).join("51.lock"))
+        .unwrap();
+    old_writer.try_lock().unwrap();
+    let first = merge_all(&root, None, None).unwrap();
+    assert_eq!(
+        (first.spools_merged, first.generations, first.waiting),
+        (0, 0, 1),
+        "{first:?}"
+    );
+    assert_eq!(
+        first.live.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(),
+        [(51, 1)]
+    );
+    assert!(first.faults.is_empty(), "{:?}", first.faults);
+    assert_eq!(
+        looked_up(&root, Timeframe::MINUTE_1, on, "NSE-INDEX-ZZOLDA"),
+        None
+    );
+    drop(old_writer);
+    let after = merge_all(&root, None, None).unwrap();
+    assert_eq!(
+        (after.spools_merged, after.generations, after.waiting),
+        (1, 1, 0),
+        "{after:?}"
+    );
+    assert_eq!(
+        looked_up(&root, Timeframe::MINUTE_1, on, "NSE-INDEX-ZZOLDA"),
+        Some(Code::Match)
+    );
+    // A WRITER OF THIS BUILD beside the old folder: an old merger's probe of
+    // the old lock finds it held, and free once the writer goes.
+    let writer = append(&root, 52, "NSE-INDEX-ZZOLDB");
+    let old_merger = std::fs::File::open(old_dir(&root).join("52.lock")).unwrap();
+    assert!(
+        matches!(
+            old_merger.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ),
+        "a merger of the old build reads run 52 as live"
+    );
+    drop(writer);
+    assert!(old_merger.try_lock().is_ok(), "free once the writer goes");
+    drop(old_merger);
+    match spool::live_probe(&root, 52).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 2),
+        spool::Live::Spooling(holder) => panic!("run 52 read as live: {holder}"),
+    }
+    // A STORE WITHOUT THE OLD FOLDER never gets one.
+    let fresh = scratch("NewLayoutOnly");
+    drop(append(&fresh, 53, "NSE-INDEX-ZZNEWC"));
+    let merged = merge_all(&fresh, None, None).unwrap();
+    assert_eq!((merged.spools_merged, merged.waiting), (1, 0), "{merged:?}");
+    assert_eq!(spool::old_live_lock_path(&fresh, 53), None);
+    assert!(!old_dir(&fresh).exists());
+    match spool::live_probe(&fresh, 53).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 1),
+        spool::Live::Spooling(holder) => panic!("run 53 read as live: {holder}"),
+    }
+    // A LOCK IN THE OLD FOLDER THAT WOULD NOT OPEN (a folder where it goes).
+    let odd = scratch("OldLockFolder");
+    std::fs::create_dir_all(old_dir(&odd).join("54.lock")).unwrap();
+    let mut faults = Vec::new();
+    let (free, held) = super::not_live(&odd, vec![id(54)], &mut faults);
+    assert!(free.is_empty() && held.is_empty());
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(
+        faults[0].starts_with("run 54's live lock would not open, so its spools wait: "),
+        "{}",
+        faults[0]
+    );
 }
 
 /// A verdict record counts the details that follow it (IA-9 repair 1, the
@@ -5155,4 +5274,660 @@ fn a_busy_merge_names_its_lock_and_holder_apart() {
             .contains("holds verify/merge.lock (held by a test holder);"),
         "{busy}"
     );
+}
+
+/// **A RESUMED WRITER, A DEAD LIVE LOCK AND A REFUSED `flock`, EACH BY NAME**
+/// (BASE-REDS-1023 repair 3, verify r3's sides no test took). A resumed
+/// writer of a spool that holds its HEADER ALONE (a run stopped after making
+/// it) appends straight after the header; one whose tail is details all the
+/// way back to the header (the verdict record before them cut out) walks that
+/// window to its start and appends after it, writing nothing over. A run
+/// whose live lock would not open (a file where `verify/running` goes) keeps
+/// its spools waiting, named in the faults, never read as free; and the
+/// host's refusal of the lock's `flock` is an error by name, never free.
+#[test]
+fn a_resumed_writer_a_dead_live_lock_and_a_refused_flock_are_each_named() {
+    let on = regular();
+    let id = |run: u64| SpoolId {
+        run,
+        segment: Segment::Index,
+        timeframe: Timeframe::MINUTE_1,
+        month: on.year_month().unwrap(),
+    };
+    let header = usize::try_from(spool::HEADER_LEN).unwrap();
+    let record = usize::try_from(spool::RECORD_LEN).unwrap();
+    // HEADER ALONE.
+    let root = scratch("BareHeader");
+    let before = SpoolWriter::new(&root, 35, Mode::ZerodhaMerge, 1);
+    before
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &[spooled(on, "NSE-INDEX-A", Code::Match, 1)],
+        )
+        .unwrap();
+    drop(before);
+    let path = id(35).path(&root);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(spool::HEADER_LEN)
+        .unwrap();
+    let after = SpoolWriter::new(&root, 35, Mode::ZerodhaMerge, 1);
+    after
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &[spooled(on, "NSE-INDEX-B", Code::Match, 1)],
+        )
+        .unwrap();
+    drop(after);
+    let read = spool::read_spool(&path, &id(35)).unwrap();
+    let keys: Vec<String> = read.records.iter().map(|r| r.key.to_string()).collect();
+    assert_eq!(keys, ["NSE-INDEX-B"], "appended straight after the header");
+    assert_eq!(std::fs::read(&path).unwrap().len(), header + record);
+    // A TAIL OF DETAILS: a verdict record with two details, the verdict cut.
+    let root = scratch("DetailTail");
+    let mut with = spooled(on, "NSE-INDEX-A", Code::Match, 1);
+    with.details.push(Detail {
+        kind: 4,
+        payload: vec![1; 8],
+    });
+    with.details.push(Detail {
+        kind: 5,
+        payload: vec![2; 8],
+    });
+    let before = SpoolWriter::new(&root, 36, Mode::ZerodhaMerge, 1);
+    before
+        .append(Segment::Index, Timeframe::MINUTE_1, &[with])
+        .unwrap();
+    drop(before);
+    let path = id(36).path(&root);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        bytes.len(),
+        header + 3 * record,
+        "a verdict and two details"
+    );
+    let mut cut = bytes[..header].to_vec();
+    cut.extend_from_slice(&bytes[header + record..]);
+    std::fs::write(&path, &cut).unwrap();
+    let after = SpoolWriter::new(&root, 36, Mode::ZerodhaMerge, 1);
+    after
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &[spooled(on, "NSE-INDEX-B", Code::Match, 1)],
+        )
+        .unwrap();
+    drop(after);
+    let grown = std::fs::read(&path).unwrap();
+    assert_eq!(grown.len(), header + 3 * record, "after the two details");
+    assert_eq!(&grown[..cut.len()], &cut[..], "nothing written over");
+    // A LIVE LOCK THAT WOULD NOT OPEN.
+    let root = scratch("DeadLive");
+    std::fs::create_dir_all(root.join("verify")).unwrap();
+    std::fs::write(root.join("verify").join("running"), b"a file, not a folder").unwrap();
+    let mut faults = Vec::new();
+    let (free, held) = super::not_live(&root, vec![id(37)], &mut faults);
+    assert!(free.is_empty() && held.is_empty());
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(
+        faults[0].starts_with("run 37's live lock would not open, so its spools wait: "),
+        "{}",
+        faults[0]
+    );
+    // THE HOST'S REFUSAL OF THE `flock` itself.
+    let refused = spool::probed(
+        Path::new("verify/running/38.lock"),
+        Err(std::fs::TryLockError::Error(std::io::Error::other(
+            "refused by the host",
+        ))),
+    );
+    assert!(
+        matches!(&refused, Err(SpoolError::Io { action: "lock", .. })),
+        "{refused:?}"
+    );
+}
+
+// ------------------------------------------- BASE-REDS-1023 repair 5 --
+
+/// One run's spool, written through a store whose `verify/<real>` is the
+/// real folder and `verify/<link>` a link to it, then followed to its merge:
+/// the case [`the_old_folder_as_a_link_to_the_new_is_one_live_lock`] names.
+fn spool_through_aliased_live_folders(tag: &str, (real, link): (&str, &str), run: u64) {
+    let on = regular();
+    let key = format!("NSE-INDEX-ZZALIAS{run}");
+    let root = scratch(tag);
+    let verify = root.join("verify");
+    std::fs::create_dir_all(verify.join(real)).unwrap();
+    std::os::unix::fs::symlink(real, verify.join(link)).unwrap();
+    let old_name = spool::OLD_LIVE_DIR
+        .iter()
+        .fold(root.clone(), |at, segment| at.join(segment))
+        .join(format!("{run}.lock"));
+    // THE WRITER TAKES THE ONE FILE ONCE and appends at once.
+    let writer = SpoolWriter::new(&root, run, Mode::ZerodhaMerge, 1);
+    let started = std::time::Instant::now();
+    let appended = writer.append(
+        Segment::Index,
+        Timeframe::MINUTE_1,
+        &[spooled(on, &key, Code::Match, 0)],
+    );
+    let took = started.elapsed();
+    assert!(
+        appended.is_ok(),
+        "{tag}: the append was refused after {took:?}: {}",
+        appended
+            .as_ref()
+            .map_or_else(ToString::to_string, |_| String::new())
+    );
+    assert!(
+        took < spool::LIVE_WAIT / 2,
+        "{tag}: waited {took:?} on itself"
+    );
+    // While the writer lives the run is live, held by THIS process; a
+    // merger of the old build, opening the old name, finds it held too.
+    match spool::live_probe(&root, run).unwrap() {
+        spool::Live::Spooling(holder) => assert!(
+            holder.starts_with("held by this process (pid "),
+            "{tag}: {holder}"
+        ),
+        spool::Live::Taken(_) => panic!("{tag}: run {run} read as free while its writer lives"),
+    }
+    let old_merger = std::fs::File::open(&old_name).unwrap();
+    assert!(
+        matches!(
+            old_merger.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ),
+        "{tag}: a merger of the old build reads run {run} as live"
+    );
+    drop(old_merger);
+    let during = merge_all(&root, None, None).unwrap();
+    assert_eq!(
+        (during.spools_merged, during.waiting, during.live.len()),
+        (0, 1, 1),
+        "{tag}: {during:?}"
+    );
+    drop(writer);
+    // A WRITER OF THE OLD BUILD, holding the lock by the old name alone:
+    // the run is live, and its spools wait.
+    let old_writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&old_name)
+        .unwrap();
+    old_writer.try_lock().unwrap();
+    assert!(
+        matches!(
+            spool::live_probe(&root, run).unwrap(),
+            spool::Live::Spooling(_)
+        ),
+        "{tag}: an old writer's hold through the old name is a live run"
+    );
+    let held = merge_all(&root, None, None).unwrap();
+    assert_eq!(
+        (held.spools_merged, held.waiting, held.live.len()),
+        (0, 1, 1),
+        "{tag}: {held:?}"
+    );
+    drop(old_writer);
+    // LET GO: a merger takes the run's one lock file once, and merges it.
+    match spool::live_probe(&root, run).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 1, "{tag}"),
+        spool::Live::Spooling(holder) => panic!("{tag}: run {run} read as live: {holder}"),
+    }
+    let merged = merge_all(&root, None, None).unwrap();
+    assert_eq!(
+        (merged.spools_merged, merged.waiting, merged.live.len()),
+        (1, 0, 0),
+        "{tag}: {merged:?}"
+    );
+    assert!(merged.faults.is_empty(), "{tag}: {:?}", merged.faults);
+    assert_eq!(
+        looked_up(&root, Timeframe::MINUTE_1, on, &key),
+        Some(Code::Match),
+        "{tag}"
+    );
+}
+
+/// **ONE FOLDER UNDER TWO NAMES IS ONE LIVE LOCK** (BASE-REDS-1023 repair
+/// 5, check r5's E10): the old layout's folder (`verify`, then `live`) as a
+/// link to [`spool::LIVE_DIR`]. The two lock paths of a run are then one
+/// file, and `flock(2)` locks a file, each open of it a holder: repair 4's
+/// writer locked it twice, waited [`spool::LIVE_WAIT`] on itself and was
+/// refused `run_live_busy` naming its own pid as another process, and a
+/// merger read the run live for ever. Now the file is taken once: the append
+/// goes at once, the run is live while its writer (or a writer of the old
+/// build, by the old name) holds it, and merges once let go.
+#[test]
+fn the_old_folder_as_a_link_to_the_new_is_one_live_lock() {
+    spool_through_aliased_live_folders("AliasLiveToRunning", ("running", "live"), 61);
+}
+
+/// The reverse alias of
+/// [`the_old_folder_as_a_link_to_the_new_is_one_live_lock`]: the new folder
+/// as a link to the old one (`verify/running` -> `live`), the alias a store
+/// holding only the old folder, as the real store does, invites.
+#[test]
+fn the_new_folder_as_a_link_to_the_old_is_one_live_lock() {
+    spool_through_aliased_live_folders("AliasRunningToLive", ("live", "running"), 65);
+}
+
+/// **EVERY SPOOL REFUSAL IN ITS OWN WORDS** (BASE-REDS-1023 repair 5, check
+/// r5's coverage of `SpoolError`'s `Display`): each refusal as production
+/// code builds it, read by its code and its words as a page or a log reads
+/// it: a header that is another run's (`spool_header_refused`, from the
+/// writer) or fails its CRC (from the reader); a merge log whose first
+/// record fails its CRC (`merge_log_damaged`); a run past `u32::MAX`, which
+/// no record can carry (`record_refused`, nothing written); a link at a
+/// spool's name (`not_regular`, never followed).
+#[test]
+fn every_spool_refusal_is_said_in_its_own_words() {
+    let on = regular();
+    let id = |run: u64| SpoolId {
+        run,
+        segment: Segment::Index,
+        timeframe: Timeframe::MINUTE_1,
+        month: on.year_month().unwrap(),
+    };
+    let one = |key: &str| [spooled(on, key, Code::Match, 0)];
+    let said = |why: &SpoolError, code: &str| {
+        let text = why.to_string();
+        assert_eq!(why.code(), code, "{text}");
+        text
+    };
+    // ANOTHER RUN'S HEADER at this run's spool name: the writer refuses it.
+    let root = scratch("WordsOfRefusals");
+    let own = SpoolWriter::new(&root, 81, Mode::ZerodhaMerge, 1);
+    own.append(
+        Segment::Index,
+        Timeframe::MINUTE_1,
+        &one("NSE-INDEX-ZZWORDA"),
+    )
+    .unwrap();
+    drop(own);
+    let theirs = id(82).path(&root);
+    std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+    std::fs::copy(id(81).path(&root), &theirs).unwrap();
+    let thief = SpoolWriter::new(&root, 82, Mode::ZerodhaMerge, 1);
+    let refused = thief
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &one("NSE-INDEX-ZZWORDB"),
+        )
+        .unwrap_err();
+    let text = said(&refused, "spool_header_refused");
+    assert!(
+        text.starts_with(&format!(
+            "spool_header_refused: {}: it is run 81's spool of ",
+            theirs.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("not this run's: only the run whose id names a spool appends to it"),
+        "{text}"
+    );
+    drop(thief);
+    // A HEADER THAT FAILS ITS CRC: the reader refuses it.
+    let mut bytes = std::fs::read(id(81).path(&root)).unwrap();
+    bytes[3] ^= 0xFF;
+    let refused = spool::decode_header(&bytes, &theirs).unwrap_err();
+    assert_eq!(
+        said(&refused, "spool_header_refused"),
+        format!(
+            "spool_header_refused: {}: its CRC-32C does not match",
+            theirs.display()
+        )
+    );
+    // A MERGE LOG WHOSE FIRST RECORD FAILS ITS CRC.
+    let log = root.join("words.vsp.merged");
+    let mut read = spool::read_log(&log).unwrap();
+    for n in [1, 2] {
+        let record = LogRecord {
+            day: n,
+            generation: n,
+            state: LogState::Committed,
+            exchange: 1,
+        };
+        spool::append_log(&log, &mut read, record).unwrap();
+    }
+    flip(&log, 3);
+    let refused = spool::read_log(&log).unwrap_err();
+    let text = said(&refused, "merge_log_damaged");
+    assert!(
+        text.starts_with(&format!("merge_log_damaged: {} record 0 ", log.display())),
+        "{text}"
+    );
+    assert!(text.ends_with("; the spool is refused by name"), "{text}");
+    // A RUN PAST u32::MAX: no record of it fits the format, nothing is
+    // written.
+    let past = u64::from(u32::MAX) + 1;
+    let wide = SpoolWriter::new(&root, past, Mode::ZerodhaMerge, 1);
+    let refused = wide
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &one("NSE-INDEX-ZZWORDC"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        said(&refused, "record_refused"),
+        format!("record_refused: run {past} is past u32::MAX")
+    );
+    assert!(!id(past).path(&root).exists(), "nothing written");
+    drop(wide);
+    // A LINK AT A SPOOL'S NAME is never followed.
+    let linked = id(83).path(&root);
+    std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(id(81).path(&root), &linked).unwrap();
+    let follower = SpoolWriter::new(&root, 83, Mode::ZerodhaMerge, 1);
+    let refused = follower
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &one("NSE-INDEX-ZZWORDD"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        said(&refused, "not_regular"),
+        format!(
+            "not_regular: {} is not a regular file (never followed)",
+            linked.display()
+        )
+    );
+}
+
+/// **A WRITER'S WAIT ENDS IN A REFUSAL BY NAME** (BASE-REDS-1023 repair 5,
+/// check r5's coverage of `SpoolWriter::take_one`). Every arm of one try
+/// ([`spool::tried`]): the lock taken; held, under [`spool::LIVE_WAIT`], to
+/// try again; held at it, `run_live_busy` naming the lock and its holder;
+/// the host's refusal of the `flock`, `io` by name, never read as free. And
+/// [`spool::one_file`]: one file, two files, and each side's `fstat` refused
+/// by name, never read as two files.
+#[test]
+fn every_arm_of_a_writers_try_and_of_the_one_file_check_is_named() {
+    let root = scratch("TriedArms");
+    let path = spool::live_lock_path(&root, 70);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = std::sync::Arc::new(std::fs::File::create(&path).unwrap());
+    let lock = store::flock::Flock::try_lock(std::sync::Arc::clone(&file), path.clone()).unwrap();
+    let ms = std::time::Duration::from_millis;
+    assert!(matches!(
+        spool::tried(70, &path, Ok(lock), ms(0)),
+        Ok(Some(_))
+    ));
+    assert!(matches!(
+        spool::tried(
+            70,
+            &path,
+            Err(std::fs::TryLockError::WouldBlock),
+            spool::LIVE_WAIT.saturating_sub(ms(1))
+        ),
+        Ok(None)
+    ));
+    match spool::tried(
+        70,
+        &path,
+        Err(std::fs::TryLockError::WouldBlock),
+        spool::LIVE_WAIT,
+    ) {
+        Err(SpoolError::Busy { run, lock, holder }) => {
+            assert_eq!((run, lock), (70, path.clone()));
+            assert!(holder.starts_with("held by "), "{holder}");
+        }
+        other => panic!("a wait at LIVE_WAIT was not refused busy: {other:?}"),
+    }
+    let refused = spool::tried(
+        70,
+        &path,
+        Err(std::fs::TryLockError::Error(std::io::Error::other(
+            "refused by the host",
+        ))),
+        ms(0),
+    );
+    match refused {
+        Err(why @ SpoolError::Io { action: "lock", .. }) => assert_eq!(
+            why.to_string(),
+            format!("io: lock {}: refused by the host", path.display())
+        ),
+        other => panic!("the host's refusal was not named: {other:?}"),
+    }
+    // THE ONE-FILE CHECK.
+    let second = root.join("other.lock");
+    std::fs::write(&second, b"").unwrap();
+    let (held, beside) = (path.as_path(), second.as_path());
+    let stat = std::fs::metadata::<&Path>;
+    assert!(spool::one_file((stat(held), held), (stat(held), held)).unwrap());
+    assert!(!spool::one_file((stat(held), held), (stat(beside), beside)).unwrap());
+    let host = || -> std::io::Result<std::fs::Metadata> {
+        Err(std::io::Error::other("fstat refused by the host"))
+    };
+    for (refused, named) in [
+        (
+            spool::one_file((host(), held), (stat(beside), beside)),
+            held,
+        ),
+        (
+            spool::one_file((stat(held), held), (host(), beside)),
+            beside,
+        ),
+    ] {
+        match refused {
+            Err(why @ SpoolError::Io { action: "stat", .. }) => assert_eq!(
+                why.to_string(),
+                format!("io: stat {}: fstat refused by the host", named.display())
+            ),
+            other => panic!("a refused fstat was not named: {other:?}"),
+        }
+    }
+}
+
+/// **A PROBE NAMES THE HOST'S REFUSAL OF EITHER LIVE LOCK, HOLDING NOTHING
+/// AFTER** (BASE-REDS-1023 repair 5; D3 on the repair's first tip found the
+/// old lock's refusal in [`spool::live_probe`] reached by no test). Through
+/// [`spool::live_probe_with`], on a store whose old layout's folder is a
+/// folder of its own (a run's two lock files): the host refuses the `flock`
+/// of the lock under [`spool::LIVE_DIR`], then, the new one taken, of the
+/// old one. Each probe is refused `io: lock <that lock>` by name, never read
+/// as free or as live, and the lock it took goes with it: a probe that asks
+/// the host itself finds the run free, with both its files.
+#[test]
+fn a_probe_names_the_hosts_refusal_of_either_live_lock() {
+    let root = scratch("ProbeHostRefusal");
+    let old = spool::OLD_LIVE_DIR
+        .iter()
+        .fold(root.clone(), |at, segment| at.join(segment));
+    std::fs::create_dir_all(&old).unwrap();
+    for refused_at in [spool::live_lock_path(&root, 80), old.join("80.lock")] {
+        let host = |file: std::sync::Arc<std::fs::File>, at: PathBuf| {
+            if at == refused_at {
+                Err(std::fs::TryLockError::Error(std::io::Error::other(
+                    "refused by the host",
+                )))
+            } else {
+                store::flock::Flock::try_lock(file, at)
+            }
+        };
+        match spool::live_probe_with(&root, 80, host) {
+            Err(why @ SpoolError::Io { action: "lock", .. }) => assert_eq!(
+                why.to_string(),
+                format!("io: lock {}: refused by the host", refused_at.display())
+            ),
+            other => panic!("{refused_at:?}: the refusal was not named: {other:?}"),
+        }
+    }
+    match spool::live_probe(&root, 80).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 2),
+        spool::Live::Spooling(holder) => panic!("run 80 read as live: {holder}"),
+    }
+}
+
+/// **A LIVE LOCK HELD PAST THE WAIT IS REFUSED BUSY, BY NAME** (BASE-REDS-1023
+/// repair 5, check r5's coverage of `SpoolWriter::take_one`), through the
+/// writer itself, for each of a run's two locks at once (one wait of
+/// [`spool::LIVE_WAIT`] for both): run 71's lock under [`spool::LIVE_DIR`]
+/// held by another holder (one that leaves no note, as a writer of an older
+/// build), and run 72's lock in the old layout's folder, a folder of its
+/// own, held so while its new lock is free. Each writer waits the whole
+/// wait, then is refused `run_live_busy` naming the lock that stayed held,
+/// appends nothing, and holds nothing after: run 72's new lock is free
+/// again, and the run is still live while its old lock is held.
+#[test]
+fn a_live_lock_held_past_the_wait_is_refused_busy_by_name() {
+    let on = regular();
+    let hold = |path: &Path| {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap();
+        file.try_lock().unwrap();
+        file
+    };
+    let new_root = scratch("BusyNewLock");
+    let new_lock = spool::live_lock_path(&new_root, 71);
+    std::fs::create_dir_all(new_lock.parent().unwrap()).unwrap();
+    let new_holder = hold(new_lock.as_path());
+    let old_root = scratch("BusyOldLock");
+    let old_dir = spool::OLD_LIVE_DIR
+        .iter()
+        .fold(old_root.clone(), |at, segment| at.join(segment));
+    std::fs::create_dir_all(&old_dir).unwrap();
+    let old_lock = old_dir.join("72.lock");
+    let old_holder = hold(old_lock.as_path());
+    let wait = move |root: PathBuf, run: u64| {
+        std::thread::spawn(move || {
+            let writer = SpoolWriter::new(&root, run, Mode::ZerodhaMerge, 1);
+            let started = std::time::Instant::now();
+            let refused = writer.append(
+                Segment::Index,
+                Timeframe::MINUTE_1,
+                &[spooled(
+                    on,
+                    &format!("NSE-INDEX-ZZBUSY{run}"),
+                    Code::Match,
+                    0,
+                )],
+            );
+            // The refusal alone: an append that went is `None`, read as not
+            // refused below (no closure here runs only on a pass).
+            (refused.err(), started.elapsed())
+        })
+    };
+    let waits = [
+        (wait(new_root.clone(), 71), new_lock.clone(), 71),
+        (wait(old_root.clone(), 72), old_lock.clone(), 72),
+    ];
+    for (waited, held, run) in waits {
+        let (refused, took) = waited.join().unwrap();
+        assert!(took >= spool::LIVE_WAIT, "run {run} waited only {took:?}");
+        match refused {
+            Some(SpoolError::Busy {
+                run: busy,
+                lock,
+                holder,
+            }) => {
+                assert_eq!((busy, &lock), (run, &held));
+                assert!(
+                    holder.starts_with("held by another process that left no note in the lock"),
+                    "{holder}"
+                );
+                let text = SpoolError::Busy {
+                    run: busy,
+                    lock,
+                    holder,
+                }
+                .to_string();
+                assert!(
+                    text.starts_with(&format!(
+                        "run_live_busy: run {run}'s live lock {} stayed held for {} s (",
+                        held.display(),
+                        spool::LIVE_WAIT.as_secs()
+                    )) && text.ends_with("); nothing was appended"),
+                    "{text}"
+                );
+            }
+            other => panic!("run {run}'s writer was not refused busy: {other:?}"),
+        }
+    }
+    let spools = |root: &Path| spool::waiting(root).unwrap().spools.len();
+    assert_eq!(
+        (spools(&new_root), spools(&old_root)),
+        (0, 0),
+        "nothing appended"
+    );
+    // Run 72's writer let its new lock go; its old lock, still held, keeps
+    // the run live.
+    let after = std::fs::File::open(spool::live_lock_path(&old_root, 72)).unwrap();
+    assert!(after.try_lock().is_ok(), "run 72's new lock is free again");
+    drop(after);
+    assert!(matches!(
+        spool::live_probe(&old_root, 72).unwrap(),
+        spool::Live::Spooling(_)
+    ));
+    drop((new_holder, old_holder));
+    match spool::live_probe(&old_root, 72).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 2),
+        spool::Live::Spooling(holder) => panic!("run 72 read as live: {holder}"),
+    }
+}
+
+/// **A LIVE PROBE IS A FIXED NUMBER OF CALLS IN EVERY LAYOUT, MEASURED**
+/// (BASE-REDS-1023 repair 5; docs/06-limits.md L-BRED23-18): n = 200 probes
+/// of one free run in each of the three layouts a store can hold, a hundred
+/// other runs' lock files beside it: no old folder (one open, one `flock`),
+/// the old folder a folder of its own (two opens, two `fstat`s, two
+/// `flock`s), and the old folder a link to the new one (two opens, two
+/// `fstat`s, one `flock`). Each probe answers what its layout holds; each
+/// layout's p50, p99 and max are printed (`--nocapture`): the count of calls
+/// is the code's, the figures the machine's.
+#[test]
+fn a_live_probe_is_a_fixed_number_of_calls_in_every_layout() {
+    let separate = scratch("ProbeTwoFolders");
+    let old = spool::OLD_LIVE_DIR
+        .iter()
+        .fold(separate.clone(), |at, segment| at.join(segment));
+    std::fs::create_dir_all(old).unwrap();
+    let aliased = scratch("ProbeAliased");
+    std::fs::create_dir_all(aliased.join("verify").join("running")).unwrap();
+    std::os::unix::fs::symlink("running", aliased.join("verify").join("live")).unwrap();
+    for (tag, root, files) in [
+        ("no old folder", scratch("ProbeNewOnly"), 1),
+        ("the old folder a folder of its own", separate, 2),
+        ("the old folder a link to the new", aliased, 1),
+    ] {
+        for other in 1_000..1_100 {
+            drop(spool::live_probe(&root, other).unwrap());
+        }
+        let mut took = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let started = std::time::Instant::now();
+            let probe = spool::live_probe(&root, 7).unwrap();
+            took.push(started.elapsed());
+            match probe {
+                spool::Live::Taken(locks) => assert_eq!(locks.files(), files, "{tag}"),
+                spool::Live::Spooling(holder) => panic!("{tag}: a free run read as live: {holder}"),
+            }
+        }
+        took.sort_unstable();
+        // Tenths of a microsecond, in integers (no float arithmetic here).
+        let us = |at: usize| {
+            let tenths = took[at].as_nanos() / 100;
+            format!("{}.{}", tenths / 10, tenths % 10)
+        };
+        println!(
+            "L-BRED23-18 live_probe, {tag} ({files} file(s)): n {} p50 {} us p99 {} us max {} us",
+            took.len(),
+            us(took.len() / 2),
+            us(took.len() * 99 / 100),
+            us(took.len() - 1)
+        );
+    }
 }

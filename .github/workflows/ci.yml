@@ -439,6 +439,67 @@ jobs:
           "$gt" gate-1f prepare "$work"
           st=0; xargs -0 -r "$scan" browser < "$work/rs.z" > "$work/browser" || st=$?
           "$gt" gate-1f verdict "$work" "$st"
+      - name: Gate 1h — no crate test reads a path into web/
+        run: |
+          set -euo pipefail
+          # GATE 1E SAYS THIS AFTER A WHOLE BUILD; THIS SAYS IT IN SECONDS.
+          # CLAUDE.md section 2: `cargo test` must pass on a machine with no
+          # `web/` build ever run, and gate 1e builds and tests a worktree of
+          # this commit with `web/` deleted. Two tests of
+          # crates/api/src/bars_export.rs read web/src/lib/db/bars-plan.js and
+          # export.js through env!("CARGO_MANIFEST_DIR") joined to
+          # "../../web", so 1e was red on 14 of 16 Mac runs from 19 Oct, and
+          # only its full build could say so (the assurance attack of 29 Oct
+          # 2026, RA-01/RO-08; BASE-REDS-1023 repair 3, D-7154 addendum).
+          #
+          # `source_scan web-reads` lexes the TEST code of every tracked .rs
+          # under crates/ -- whole files under tests/, benches/ and
+          # examples/, src/ files only a test module mounts, the items of
+          # the rest a cfg naming `test` where it can hold governs
+          # (#[cfg(test)], all(test, ..), any(test, ..), an inner #![cfg]
+          # to the end of its block) and every #[test], #[tokio::test] or
+          # #[bench] item -- and the Rust of every doc comment (each example
+          # rustdoc compiles: a fence it reads as Rust, `ignore` and `no_run`
+          # too, or an indented block, its hidden `# ` lines shown). It
+          # refuses a statement that climbs with `..` into `web`, a `web`
+          # segment beside a repository anchor (a `..`, CARGO_MANIFEST_DIR,
+          # file!(), current_dir, or a name bound to one), a `web` segment
+          # JOINED onto a helper whose value is the repository root (the
+          # tree's own repo(), workspace_root() and read(relative), found
+          # over the whole tree and followed through every call: check r4
+          # of 30 Oct, V4-2), a name bound to a path into web/ by the test
+          # or by a const or static of the crate's production code, or an
+          # expansion of a production macro_rules! whose body reads one;
+          # every concat! is joined, every stringify! read as its text and
+          # every literal decoded first, and `web` is read in any case (the
+          # Mac's volume is case-blind). A tracked link under crates/ whose
+          # target lands in web/, or in a folder that holds it (the
+          # repository root or above), is refused too. Its own tests run in
+          # gate 0. A move into web/tests (as bars_export's cross-check did,
+          # web/tests/export-agrees-with-the-server.test.js) is the fix.
+          #
+          # WHAT IT CANNOT SEE (docs/06-limits.md L-BRED23-17): a path
+          # assembled at run time from pieces none of which names web (or
+          # read from a file, or from a variable other than
+          # CARGO_MANIFEST_DIR); a test that calls production code which
+          # reads web/ at run time, or a production helper whose value is
+          # already a path into web/ (default_web_dir()); a helper reached
+          # through a value instead of called by its name (a function
+          # pointer, a closure in a field, a trait object) or by a
+          # turbofish; a helper of another file called by its bare name
+          # after a `use`, or a method of a type of another file (path calls
+          # are read anywhere); a helper whose only root is a lower-case
+          # const or static; the text a #[doc = ..] attribute supplies, and an
+          # indented example inside a list item; a root taken from
+          # current_exe(), canonicalize(".") or CARGO_TARGET_TMPDIR, and a
+          # bare "web" segment bound to a name of its own and joined beside a
+          # climb or an anchor later (check r5's E1, E2: named, not refused);
+          # and code a build script or a procedural macro writes. Gate 1e
+          # still runs for all of them.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          work=$(mktemp -d)
+          git ls-files -z > "$work/tracked.z"
+          "$scan" web-reads "$work/tracked.z"
       - name: Gate 1c — no literal credential path
         run: |
           set -euo pipefail
@@ -1790,14 +1851,15 @@ jobs:
           #     println! 3: the rename-lineage counts and the p50/p99/max of
           #     detect, `LineageRun::load`, `LineageRun::day` and the split
           #     probe.
-          #   pull/src/gdfl_nfo_tests.rs eprintln! 12: the decoded, stored,
+          #   pull/src/gdfl_nfo_tests.rs eprintln! 18: the decoded, stored,
           #     re-keyed, refused and resettled counts of the GDFL NFO decode
-          #     tests.
+          #     tests, and (IA-4, 24 Oct; BASE-REDS-1023) the tick store's
+          #     option files that end in a bare CR or with no newline.
           declared="$declared api/src/dayflags.rs:println!:2
           pull/src/alerts_tests.rs:println!:5
           pull/src/calendar.rs:eprintln!:1
           pull/src/gdfl_lineage_tests.rs:println!:5
-          pull/src/gdfl_nfo_tests.rs:eprintln!:13
+          pull/src/gdfl_nfo_tests.rs:eprintln!:18
           pull/src/gdfl_wp12e_tests.rs:println!:3"
           # FIVE MORE, the same kind, from WP-62 (merged after the 12 Oct
           # run; declared by GF-1 on 14 Oct 2026). All are in api's
@@ -1954,6 +2016,74 @@ jobs:
           #     parent gave it.
           declared="$declared api/src/bars_sort.rs:println!:1
           api/src/render.rs:println!:2"
+          # TWENTY-SEVEN MORE FILES, the same kind, from the packages merged
+          # 17 to 23 Oct 2026 that did not run this gate (R3-19, AG-05, AG-06,
+          # SC-4, PREC-1, R3-17, R3-24, R3-30, IA-2, IA-9, IA-16, GDFL v3,
+          # the lot table, the minute-gap measure, the Dropbox import, the
+          # disk projection; declared by BASE-REDS-1023, D-7147, each read
+          # first). Every print is a measurement line (n, p50, p99, max, or a
+          # count a hand-run sample reads back) printed beside what its test
+          # asserts, inside a module mounted under `#[cfg(test)]` (a
+          # `*_tests.rs` file by `#[path]`, or the `mod tests` of the file
+          # named): `api/src/audit.rs` (the n = 400 `append_synced` timing),
+          # `api/src/disk_route.rs` (the df comparison and the measure
+          # timings), `pull/src/riskfree.rs` (the gap-table lookup timing)
+          # and `store/src/file.rs` (the ENOSPC offset L-PREC1-01 re-takes)
+          # are each inside that file's test module, and
+          # `api/src/audit_lock_wait_measure.rs` is mounted
+          # `#[cfg(test)] #[path]` by `api::audit`. No production path
+          # reaches any of them.
+          declared="$declared api/src/audit.rs:eprintln!:1
+          api/src/audit_lock_wait_measure.rs:println!:3
+          api/src/bars_window_route_tests.rs:eprintln!:1
+          api/src/census_epoch_link_tests.rs:eprintln!:1
+          api/src/disk_route.rs:println!:3
+          api/src/disk_route_seal_tests.rs:eprintln!:1
+          cli/src/minute_gaps_measure_tests.rs:println!:16
+          cli/src/results_line_tests.rs:println!:1
+          cli/src/upkeep_command_tests.rs:println!:2
+          costs/src/lot_table_tests.rs:println!:1
+          pull/src/audit_ledger_tests.rs:println!:2
+          pull/src/census_store_kept_tests.rs:eprintln!:5
+          pull/src/census_store_link_tests.rs:eprintln!:1
+          pull/src/census_store_tests.rs:eprintln!:1
+          pull/src/disk_projection_tests.rs:println!:3
+          pull/src/gdfl_dropbox_tests.rs:println!:2
+          pull/src/gdfl_ia16_tests.rs:println!:2
+          pull/src/gdfl_import_ia2_tests.rs:println!:5
+          pull/src/gdfl_rekey_tests.rs:eprintln!:9
+          pull/src/gdfl_run_ia2_tests.rs:println!:11
+          pull/src/gdfl_v3_tests.rs:eprintln!:9
+          pull/src/reference_data_tests.rs:eprintln!:2
+          pull/src/riskfree.rs:eprintln!:1
+          store/src/file.rs:eprintln!:1
+          store/src/file_write_door_tests.rs:println!:1
+          store/src/flock_patient_tests.rs:println!:1
+          store/src/sealed_codec_tests.rs:eprintln!:2"
+          # DATA-2 (merged 23 Oct after the block above; declared by
+          # BASE-REDS-1023, D-7147 addendum, read first): the
+          # four prints of `cli/src/tick_second_check_tests.rs` are the
+          # n = 1,000 p50 / p99 / max lines of `take_lock`, `inside` and the
+          # link and archive guards, and the n = 400 status_of lookup
+          # timing BASE-REDS-1023 added, printed beside what each test asserts.
+          # The file is mounted `#[cfg(test)] #[path]` by
+          # `cli::tick_second_check`; no production path reaches it.
+          declared="$declared cli/src/tick_second_check_tests.rs:println!:4"
+          # ONE MORE FILE, the same kind (BASE-REDS-1023 repair 3, TST-01 of
+          # the assurance attack of 29 Oct 2026): the four prints of
+          # `api/src/audit_lock_wait_tests.rs` are the APPEND_WAIT lines (n,
+          # p50, p99 and max of eight appenders' waits, and their refusals)
+          # of the eight-appender test and of the 1x/10x/100x measurement,
+          # the code-4 barrier's count of refusals by the bound, and the
+          # hand-off test's (repair 7), printed beside what each test asserts.
+          # The file is mounted `#[cfg(test)] #[path]` by `api::audit`; no
+          # production path reaches it.
+          declared="$declared api/src/audit_lock_wait_tests.rs:eprintln!:4"
+          # ONE MORE FILE, the same kind (BASE-REDS-1023 repair 7): the n = 200
+          # p50, p99 and max of a roll of 64 rows in `api/src/speed_tests.rs`,
+          # for docs/06-limits.md L-BRED23-23, printed beside what the test
+          # asserts. The file is mounted `#[cfg(test)] #[path]` by `api::speed`.
+          declared="$declared api/src/speed_tests.rs:eprintln!:1"
           # ONE MORE FILE, the same kind, from IA-10c (declared at its repair
           # round 1, 23 Oct 2026, D-6268): `pull/src/landing_run_tests.rs`
           # println! 8, all in the `#[ignore]`d `ia10c_timings`, inside the
@@ -1995,6 +2125,34 @@ jobs:
           #     its probes at 1, 100 and 1,000 snapshots (L-R428-13).
           declared="$declared pull/src/fnowork_futures_tests.rs:println!:2
           pull/src/master_snapshots_tests.rs:println!:3"
+          # SEVEN MORE FILES, the same kind, from the packages merged 24 to 26
+          # Oct 2026 that did not run this gate (CLOUD-MUTAPIB, DATA-1w, R4-22;
+          # declared by BASE-REDS-1023 at its merge of 26 Oct, D-7147 addendum,
+          # each read first). Every one is mounted only under `#[cfg(test)]`
+          # by `#[path]`, so no production path reaches any of them:
+          #   api/src/feed_checks_tests.rs println! 1 (DATA-1w): the n, p50,
+          #     p99 and max line of the feed-checks timing, beside its assert.
+          #   api/src/server_cloud_mutant_tests_{a,c,d,e}.rs println! 6, 2, 2,
+          #     11 (CLOUD-MUTAPIB): the `CLOUDx-...` marker lines a child test
+          #     process prints for its parent test to read back (port, armed,
+          #     checked, begin and end markers), and the blank line before each.
+          #   pull/src/gdfl_format_change_tests.rs eprintln! 1 and
+          #     pull/src/gdfl_series_code_tests.rs eprintln! 1 (R4-22): the
+          #     measured p50, p99, max and n of the header and series-code
+          #     readers, printed beside what each test asserts.
+          #   core/src/alias.rs println! 1 (R4-22): the lineage lookup's p50,
+          #     p99, max at 18 and 27 rows inside its `mod tests`. It was an
+          #     eprintln!, which made `core` a crate that writes to stderr with
+          #     no telemetry dependency (clause B); a test measurement line
+          #     belongs on stdout like core's other two, so it moved there.
+          declared="$declared api/src/feed_checks_tests.rs:println!:1
+          api/src/server_cloud_mutant_tests_a.rs:println!:6
+          api/src/server_cloud_mutant_tests_c.rs:println!:2
+          api/src/server_cloud_mutant_tests_d.rs:println!:2
+          api/src/server_cloud_mutant_tests_e.rs:println!:11
+          core/src/alias.rs:println!:1
+          pull/src/gdfl_format_change_tests.rs:eprintln!:1
+          pull/src/gdfl_series_code_tests.rs:eprintln!:1"
           # THREE MORE FILES, one kind, declared by R4-26 (repair 4, 26 Oct
           # 2026; its decisions D-6892, D-7195 to D-7197): the printed lines
           # of measured tests in
@@ -2017,6 +2175,14 @@ jobs:
           declared="$declared pull/src/corporate_actions_tests.rs:println!:2
           cli/src/basis_runs_tests.rs:println!:1
           api/src/basis_route_tests.rs:println!:1"
+          # ONE MORE FILE, the same kind (BASE-REDS-1023 repair 5, D-7148
+          # addendum 8): the one print of `pull/src/zerodha_verify_tests.rs`
+          # is the n = 200 p50 / p99 / max line of each live-lock layout in
+          # `a_live_probe_is_a_fixed_number_of_calls_in_every_layout`
+          # (L-BRED23-18), printed beside what the test asserts. The file is
+          # mounted `#[cfg(test)] #[path]` by `pull::zerodha_verify`; no
+          # production path reaches it.
+          declared="$declared pull/src/zerodha_verify_tests.rs:println!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -2037,9 +2203,17 @@ jobs:
           # stderr writer of a run (design round 5, SF-7): a line a day of a
           # `gdfl-import` run, ignoring its own failure, never `eprintln!`.
           # Every line it says is also in the run's events and progress record.
+          # ONE MORE (IA-2, merged 20 Oct 2026; declared by BASE-REDS-1023,
+          # D-7147): `pull/src/gdfl_run_start.rs` names `stdout()` once, in
+          # `StdioGate::claimed`, the two-phase start's child half: the one
+          # `claimed run=<id> kind=<kind>` line the api controller reads from
+          # its child's pipe before it answers go or release. A protocol line,
+          # never a diagnostic: the claim itself is in the runs ledger, and a
+          # release before start emits `run released before start`.
           declared_handles='api/src/server.rs:handle:3
           cli/src/gdfl_import_command.rs:handle:1
-          cli/src/main.rs:handle:2'
+          cli/src/main.rs:handle:2
+          pull/src/gdfl_run_start.rs:handle:1'
           # Both sides are compared as sorted lists of non-empty words, so an
           # empty declaration and an empty measurement are equal on the healthy
           # case (the shell had to normalise a blank `printf` line by hand).
@@ -4951,7 +5125,10 @@ jobs:
           # under web/src, sorted, exactly as `find -name ... | sort` did, and
           # refuses an empty list before the program does.
           "$RUNNER_TEMP/gates-jobs" w5-files > "$RUNNER_TEMP/w5-files.txt"
-          xargs -d '\n' node web/ci/css-comments.mjs < "$RUNNER_TEMP/w5-files.txt"
+          # One file a line, handed over NUL-delimited: `xargs -d` is GNU only,
+          # and the Mac gate run (BSD xargs) refused the step while every file
+          # it names passed (BASE-REDS-1023, D-7154). Same files, same order.
+          tr '\n' '\0' < "$RUNNER_TEMP/w5-files.txt" | xargs -0 node web/ci/css-comments.mjs
 
       - name: Gate W6 — the masters script spends no vendor request on load
         run: |

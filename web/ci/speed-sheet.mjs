@@ -166,7 +166,7 @@
  */
 import http from 'node:http';
 import https from 'node:https';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -969,6 +969,147 @@ export const COMMAND_STOP_MS = 5_000;
 export const KILLED = `was sent SIGTERM and, still running ${COMMAND_STOP_MS} ms later, SIGKILL`;
 
 /**
+ * How {@link run}'s stop ended a command's process group: `said`, the words
+ * that follow "its process group" ({@link KILLED} for a kill, each followed
+ * by why the group's processes could not be listed when they could not), and
+ * `killed`, whether the group had to be sent SIGKILL, kept apart from the
+ * words (BASE-REDS-1023 repair 10; check r10, B1: the sheet read a kill from
+ * the words being {@link KILLED} exactly, so a kill whose list failed or
+ * answered past {@link LIST_WAIT_MS}, which says why after it, passed).
+ *
+ * @typedef {{said: string, killed: boolean}} Stopped
+ */
+
+/** How often a stop lists its command's group again while it waits for it to leave, ms: each list is one `ps`. */
+export const LIST_POLL_MS = 100;
+
+/** How long one list of the processes may take before it is said to have failed, ms. */
+export const LIST_WAIT_MS = 2_000;
+
+/**
+ * The pids in process group `pgid` of a table `ps -A -o pid= -o pgid=`
+ * printed: one process a line, its pid and its group's id. A line of any
+ * other shape is no process.
+ *
+ * @param {string} table
+ * @param {number} pgid
+ * @returns {number[]}
+ */
+export function membersIn(table, pgid) {
+  /** @type {number[]} */
+  const pids = [];
+  for (const line of table.split('\n')) {
+    const [pid, group, extra] = line.trim().split(/\s+/);
+    if (extra === undefined && group === String(pgid) && /^[1-9]\d*$/.test(pid)) pids.push(Number(pid));
+  }
+  return pids;
+}
+
+/**
+ * The processes of group `pgid` now, read from the system's table with
+ * POSIX `ps -A -o pid= -o pgid=` (this Mac's and the Linux runner's `ps`
+ * alike), within {@link LIST_WAIT_MS}. Never throws: why the table could not
+ * be read is returned instead. A process that has ended and is not reaped
+ * yet is listed too; a signal to it does nothing.
+ *
+ * @param {number} pgid
+ * @returns {Promise<{pids: number[]} | {why: string}>}
+ */
+export function groupMembers(pgid) {
+  return new Promise((resolve) => {
+    execFile('ps', ['-A', '-o', 'pid=', '-o', 'pgid='], { timeout: LIST_WAIT_MS, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      if (error) resolve({ why: error.killed ? `ps did not answer within ${LIST_WAIT_MS} ms` : `ps failed: ${error.message.split('\n')[0]}` });
+      else resolve({ pids: membersIn(String(stdout), pgid) });
+    });
+  });
+}
+
+/**
+ * Sends `signal` to `target` (a pid, or minus a group's id); whether it was
+ * sent. Never throws: a process that has left cannot be signalled, and that
+ * is not this caller's failure.
+ *
+ * @param {number} target
+ * @param {NodeJS.Signals} signal
+ */
+export function signalPid(target, signal) {
+  try {
+    process.kill(target, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ONE SIGTERM FOR EVERY PROCESS OF A GROUP, ONE FORKED AS THE GROUP WAS
+ * SIGNALLED INCLUDED (BASE-REDS-1023 repair 9; the D1 landing gate, 3 Nov
+ * 2026, load 36/58/54: the `--writer` `echo the-writer-printed; sleep 30` was
+ * killed, so a sheet that should have passed failed). A signal sent to a
+ * process group on this Mac misses a process whose parent is forking it at
+ * that instant: the parent is signalled, the child is not in the group yet,
+ * and nothing sends it again (Linux restarts such a fork; this kernel does
+ * not). Measured on the Mac on 4 Nov (scratch/repair-BASE-REDS-1023-r9,
+ * forkrace-1.log): SIGTERM to the group of that command 0 to 120 ms after its
+ * start, 300 runs, 8 at once, load 23 to 36: 3 left a `sleep 30` running in
+ * the group, its shell ended by the SIGTERM and its parent now launchd, each
+ * signalled 2 to 8 ms after the start, as the shell forked.
+ *
+ * So the group is LISTED ({@link groupMembers}) and each process in it is sent
+ * the signal itself; listed again by `pass` while the stop waits, a process
+ * seen for the first time is sent it then. EACH PROCESS ONCE, NEVER TWICE: a
+ * second SIGTERM ends some programs at once (a handler that falls back to
+ * the default, as Chrome's does) that the first asked to stop in their own
+ * time. A process that forks while it is being signalled leaves its child to
+ * the next list, never unasked.
+ *
+ * A LIST THAT FAILS IS SAID, never hidden: the first one sends the signal to
+ * the group as one (which can miss a fork, and is said so), a later one
+ * leaves the processes already asked as they are; no list is tried after
+ * one failed. `unlisted()` says why ('' while every list was read).
+ *
+ * @param {number} pgid the group's id (its leader's pid)
+ * @param {{list?: (pgid: number) => Promise<{pids: number[]} | {why: string}>, kill?: (target: number, signal: NodeJS.Signals) => boolean}} [deps]
+ */
+export function asker(pgid, deps = {}) {
+  const list = deps.list ?? groupMembers;
+  const kill = deps.kill ?? signalPid;
+  /** Every pid sent the signal. @type {Set<number>} */
+  const asked = new Set();
+  let unlisted = '';
+  let lists = 0;
+  return {
+    asked,
+    unlisted: () => unlisted,
+    /**
+     * Lists the group and sends `signal` to every process in it not sent it
+     * before; the pids sent it now.
+     *
+     * @param {NodeJS.Signals} signal
+     * @returns {Promise<number[]>}
+     */
+    async pass(signal) {
+      if (unlisted !== '') return [];
+      lists += 1;
+      const got = await list(pgid);
+      if ('why' in got) {
+        if (lists === 1) {
+          kill(-pgid, signal);
+          unlisted = `its processes could not be listed (${got.why}), so the group was sent ${signal} as one, which misses a process forked at that instant`;
+        } else unlisted = `its processes could not be listed again (${got.why}), so a process that joined it after the last list was not sent ${signal}`;
+        return [];
+      }
+      const fresh = got.pids.filter((pid) => !asked.has(pid));
+      for (const pid of fresh) {
+        asked.add(pid);
+        kill(pid, signal);
+      }
+      return fresh;
+    }
+  };
+}
+
+/**
  * Every command this process started that has not exited yet. If the sheet
  * ends first — it exits, throws, or is sent SIGINT, SIGTERM or SIGHUP — each
  * one's process group is sent that signal (SIGTERM on an exit), as a command
@@ -1051,8 +1192,17 @@ export function heading(fd, line) {
  * by SIGTERM`, `could not be started: ...`. What it prints goes to `log`
  * ({@link openCommandLog}), never to the sheet's own stdout or stderr.
  * `stop()` ends its group — SIGTERM,
- * then SIGKILL past {@link COMMAND_STOP_MS}, each wait bounded — and says how,
- * after "its process group".
+ * then SIGKILL past {@link COMMAND_STOP_MS}, each wait bounded — and answers
+ * how ({@link Stopped}): what to say after "its process group", and whether
+ * it had to kill, whatever else it says (repair 10).
+ *
+ * THE SIGTERM REACHES EVERY PROCESS OF THE GROUP ONCE (repair 9, see
+ * {@link asker}): the group is listed and each process sent it, then listed
+ * again every {@link LIST_POLL_MS} while the stop waits, so a process forked
+ * as the signal went out, which a signal to the group misses on this Mac, is
+ * asked as soon as it is seen. The SIGKILL goes to the group again at every
+ * look until none is left, the same race closed for it. `deps` replaces how
+ * the group is listed and signalled (a test's process table).
  *
  * NEVER THE SHEET'S OWN STDERR (verify r9, 26 Oct): it was given the sheet's
  * fd 2. With the reader of that stream gone, the command died of SIGPIPE at
@@ -1064,12 +1214,18 @@ export function heading(fd, line) {
  *
  * @param {string} command
  * @param {number} log the commands' log, for its stdout and its stderr
- * @returns {{child: import('node:child_process').ChildProcess, wait: Promise<number | string>, stop: () => Promise<string>}}
+ * @param {Parameters<typeof asker>[1]} [deps]
+ * @returns {{child: import('node:child_process').ChildProcess, wait: Promise<number | string>, stop: () => Promise<Stopped>}}
  */
-export function run(command, log) {
+export function run(command, log, deps = {}) {
+  // THE GUARDS FIRST, THEN THE SPAWN (BASE-REDS-1023 repair 1): installed
+  // after it, a SIGTERM that came in between ended the sheet by its default
+  // action and the detached group was never signalled (a `sleep 1000` left
+  // running under load). Installed first, the signal is only queued until
+  // this call returns, by when the command is in COMMANDS.
+  guardCommands();
   const child = spawn(command, { shell: true, stdio: ['ignore', log, log], detached: true });
   COMMANDS.add(child);
-  guardCommands();
   let exited = false;
   /** @type {Promise<number | string>} */
   const wait = new Promise((resolve) => {
@@ -1090,11 +1246,18 @@ export function run(command, log) {
     clearTimeout(t);
     return ended;
   };
-  /** Whether every process of its group left within `ms`. @param {number} ms */
-  const groupLeft = async (ms) => {
+  /**
+   * Whether every process of its group left within `ms`; `again`, when
+   * given, is called at every look while some are left.
+   *
+   * @param {number} ms
+   * @param {() => void} [again]
+   */
+  const groupLeft = async (ms, again) => {
     const until = performance.now() + ms;
     while (groupRunning(child.pid)) {
       if (performance.now() >= until) return false;
+      again?.();
       await sleep(GROUP_POLL_MS);
     }
     return true;
@@ -1102,16 +1265,49 @@ export function run(command, log) {
   return {
     child,
     wait,
+    /** @returns {Promise<Stopped>} */
     async stop() {
       const running = !exited && child.pid !== undefined;
-      if (!running && !groupRunning(child.pid)) return 'had already left';
-      signalGroup(child, 'SIGTERM');
-      if ((!running || (await exitsWithin(COMMAND_STOP_MS))) && (await groupLeft(COMMAND_STOP_MS))) return 'was sent SIGTERM and left';
-      // Bounded too: a process the kernel cannot end yet is waited on no longer than the rest.
-      signalGroup(child, 'SIGKILL');
+      if (!running && !groupRunning(child.pid)) return { said: 'had already left', killed: false };
+      const ask = asker(/** @type {number} */ (child.pid), deps);
+      await ask.pass('SIGTERM');
+      // While the stop waits, the group is listed again every LIST_POLL_MS
+      // and a process seen for the first time is asked too (a fork the
+      // signal missed); the loop ends with the wait, its list in flight read.
+      let asking = true;
+      /** @type {() => void} */
+      let wake = () => undefined;
+      /** @type {ReturnType<typeof setTimeout> | undefined} */
+      let nap;
+      const passes = (async () => {
+        while (asking) {
+          await new Promise((resolve) => {
+            wake = () => resolve(undefined);
+            nap = setTimeout(wake, LIST_POLL_MS);
+          });
+          if (asking) await ask.pass('SIGTERM');
+        }
+      })();
+      let left;
+      try {
+        left = (!running || (await exitsWithin(COMMAND_STOP_MS))) && (await groupLeft(COMMAND_STOP_MS));
+      } finally {
+        asking = false;
+        clearTimeout(nap);
+        wake();
+        await passes;
+      }
+      const why = ask.unlisted() === '' ? '' : ` (${ask.unlisted()})`;
+      if (left) return { said: `was sent SIGTERM and left${why}`, killed: false };
+      // Bounded too: a process the kernel cannot end yet is waited on no
+      // longer than the rest. SIGKILL is sent to the group again at every
+      // look, so a process forked as it went out is killed at the next.
+      const killGroup = () => void (deps.kill ? deps.kill(-(/** @type {number} */ (child.pid)), 'SIGKILL') : signalGroup(child, 'SIGKILL'));
+      killGroup();
       await exitsWithin(COMMAND_STOP_MS);
-      await groupLeft(COMMAND_STOP_MS);
-      return KILLED;
+      await groupLeft(COMMAND_STOP_MS, killGroup);
+      // Killed, whatever the list said: why it could not be read follows the words, never stands for them.
+      return { said: `${KILLED}${why}`, killed: true };
     }
   };
 }
@@ -1135,7 +1331,7 @@ export async function restartWithin(command, ms, log) {
   const got = await Promise.race([cmd.wait, new Promise((resolve) => (t = setTimeout(() => resolve(late), ms)))]);
   clearTimeout(t);
   if (got !== late) return /** @type {number | string} */ (got);
-  return `did not exit within ${ms} ms (--restart-wait-ms), so its process group ${await cmd.stop()}`;
+  return `did not exit within ${ms} ms (--restart-wait-ms), so its process group ${(await cmd.stop()).said}`;
 }
 
 /**
@@ -1617,10 +1813,13 @@ export async function runSheet(args, deps = {}) {
     // ITS WHOLE GROUP, BOUNDED: a SIGTERM to its shell alone left what the
     // shell started still writing after the sheet ended (verify r5 follow-up).
     const how = await writer.stop();
-    log(`speed sheet: the --writer command's process group ${how}`);
+    log(`speed sheet: the --writer command's process group ${how.said}`);
     // A WRITER KILLED IS SAID IN THE SHEET (verify r6 follow-up, 24 Oct): it was said on stderr only.
-    if (how === KILLED) failures.push(`the --writer command's process group ${how}: what it was writing was ended by force, not asked to stop`);
-    else notes.push(`the --writer command's process group ${how} at the end of the warm+writer pass`);
+    // AND FAILS IT WHATEVER ITS LIST SAID (BASE-REDS-1023 repair 10; check r10, B1): the kill was read
+    // from the words being KILLED exactly, so a kill whose list failed or answered late, which says why
+    // after them, was a note and the sheet passed. The failure keeps those words, the list's reason too.
+    if (how.killed) failures.push(`the --writer command's process group ${how.said}: what it was writing was ended by force, not asked to stop`);
+    else notes.push(`the --writer command's process group ${how.said} at the end of the warm+writer pass`);
   }
   if (args.restart === null) notMeasured.push(`first after restart: no --restart command was given (${args.restarts} restarts asked)`);
   else {
@@ -1872,11 +2071,14 @@ export async function runSheet(args, deps = {}) {
   }
   // THE COMMANDS' LOG IS NAMED IN THE SHEET, and this run's hold on it let go:
   // a process a command left running keeps its own.
-  if (kept !== null && 'fd' in kept) {
-    closeSync(kept.fd);
-    if (kept.names.size > 0) notes.push(`what the ${[...kept.names].join(' and ')} command${kept.names.size > 1 ? 's' : ''} printed is kept in ${kept.path}, each run under a line that names it`);
+  // `kept` is set inside `loggedFor`, a closure, so the checker narrows it
+  // to its `null` initialiser here; read it again under its declared type.
+  const held = /** @type {{fd: number, path: string, names: Set<string>} | {why: string} | null} */ (kept);
+  if (held !== null && 'fd' in held) {
+    closeSync(held.fd);
+    if (held.names.size > 0) notes.push(`what the ${[...held.names].join(' and ')} command${held.names.size > 1 ? 's' : ''} printed is kept in ${held.path}, each run under a line that names it`);
   }
-  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes, ...(kept !== null && 'fd' in kept ? { commandLog: kept.path } : {}) };
+  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes, ...(held !== null && 'fd' in held ? { commandLog: held.path } : {}) };
 }
 
 /** @param {number} ms */

@@ -215,6 +215,7 @@ enum Side {
 /// its cost apart from the acquisition is measured by AG-06 within the
 /// journal append (`docs/06-limits.md` L-AG06-10) and by no bench alone
 /// (L-R308-02).
+/// UNVERIFIED as a cost on its own: no bench times the registry apart from the journal append (L-R308-02; BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 static HOLDERS: Mutex<Option<HashMap<u64, Held>>> = Mutex::new(None);
 
 /// The registry, whoever panicked while holding it: every update is one

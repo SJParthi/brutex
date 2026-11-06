@@ -49,7 +49,10 @@
 //!
 //! Per request: one `stat` of the folder, one map probe per month or year on
 //! the page, O(limit) rows. The first ask of a version parses it once,
-//! O(its bytes) (`feed_checks_files`). The calendar is O(1) per year and
+//! O(its bytes) (`feed_checks_files`); the page's cost not growing with the
+//! month's shares is measured by
+//! `feed_checks_tests::a_held_month_answers_in_time_that_does_not_grow_with_its_shares`.
+//! The calendar is O(1) per year (UNVERIFIED: no test times it, L-BRED23-09) and
 //! O(days of the year) for its list, a constant. Measured in
 //! `docs/06-limits.md` L-D1W-01.
 

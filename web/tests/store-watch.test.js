@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { compileModule } from 'svelte/compiler';
+import { untilTicks } from './in-turn.js';
 
 async function storeModule() {
   const source = await readFile(new URL('../src/lib/store.svelte.js', import.meta.url), 'utf8');
@@ -93,11 +94,15 @@ test('the generation watch HEADs the census, keeps the answer, and stops when re
   assert.equal(module.store.head.error, null);
   const release = module.watchCensus('example', 5);
   generation = 64;
-  await new Promise((done) => setTimeout(done, 40));
+  // THE ORDER, NOT THE CLOCK (BASE-REDS-1023 repair 6, check r6): this slept 40 ms and counted, and a stalled machine
+  // fits one 5 ms period in 40 ms ('the watch asked 1 time(s) in 40 ms at a 5 ms period'). Two more asks and the answer
+  // kept is what the watch owes, so that is what is waited for, in timer ticks; a watch that stops asking ends the wait
+  // at its bound, and fails here.
+  const asks = await untilTicks(() => asked.length >= 3 && module.store.head.lag?.generation === 64);
   release();
   release();
   const count = asked.length;
-  assert.ok(count >= 3, `the watch asked ${count - 1} time(s) in 40 ms at a 5 ms period`);
+  assert.ok(asks && count >= 3, `the watch asked ${count - 1} time(s) at a 5 ms period, and the answer kept is ${module.store.head.lag?.generation}`);
   assert.ok(asked.every((line) => line === 'HEAD /store.json?feed=example'), asked.join(' | '));
   assert.equal(module.store.head.lag.generation, 64);
   await new Promise((done) => setTimeout(done, 25));

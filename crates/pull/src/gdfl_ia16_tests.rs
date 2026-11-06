@@ -367,6 +367,89 @@ fn decisive_takes_every_other_open_cause_before_a_hole() {
     );
 }
 
+/// THE ONE-PASS RANKING (gate 11 rule 6, BASE-REDS-1023, D-7150): census,
+/// then run, then an open cause that is no hole, then a hole, then the first
+/// failure, each the EARLIEST of its rank, whatever order the day named them
+/// in; every permutation of five failures gives the same answer, and a list
+/// of closing causes alone, or none, gives its first, or nothing.
+#[test]
+fn the_decisive_failure_is_ranked_census_run_open_then_hole() {
+    let census = staged_at(Cause::open(Stage::Census, "census_lock"), "census");
+    let run = staged_at(Cause::open(Stage::Run, "disk_full"), "file");
+    let busy = staged_at(
+        Cause::open(Stage::File, FailKind::MonthBusy.code()),
+        "NIFTY",
+    );
+    let hole = staged_at(
+        Cause::open(Stage::File, FailKind::NotHeld.code()),
+        "BANKNIFTY",
+    );
+    let vendor = staged_at(Cause::vendor("price_refused"), "SBIN");
+    let all = [&census, &run, &busy, &hole, &vendor];
+    // Every rotation and its reverse of the five.
+    for start in 0..all.len() {
+        for reverse in [false, true] {
+            let mut order: Vec<Staged> = (0..all.len())
+                .map(|i| all[(start + i) % all.len()].clone())
+                .collect();
+            if reverse {
+                order.reverse();
+            }
+            assert_eq!(
+                decisive(&order).map(|one| one.cause.code),
+                Some("census_lock")
+            );
+            let no_census: Vec<Staged> = order
+                .iter()
+                .filter(|one| one.cause.stage != Stage::Census)
+                .cloned()
+                .collect();
+            assert_eq!(
+                decisive(&no_census).map(|one| one.cause.code),
+                Some("disk_full")
+            );
+            let no_run: Vec<Staged> = no_census
+                .iter()
+                .filter(|one| one.cause.stage != Stage::Run)
+                .cloned()
+                .collect();
+            assert_eq!(
+                decisive(&no_run).map(|one| one.cause.code),
+                Some("month_busy")
+            );
+            let no_busy: Vec<Staged> = no_run
+                .iter()
+                .filter(|one| one.cause.code != "month_busy")
+                .cloned()
+                .collect();
+            assert_eq!(
+                decisive(&no_busy).map(|one| one.cause.code),
+                Some("needs_month_generation")
+            );
+        }
+    }
+    // The earliest of a rank wins: two busy months, the first named.
+    let other_busy = staged_at(
+        Cause::open(Stage::File, FailKind::MonthBusy.code()),
+        "FINNIFTY",
+    );
+    let two = [vendor.clone(), other_busy.clone(), busy.clone()];
+    assert_eq!(
+        decisive(&two).map(|one| one.failure.instrument.as_str()),
+        Some(other_busy.failure.instrument.as_str())
+    );
+    // Closing causes alone: the first. None: nothing.
+    let closing = [
+        vendor.clone(),
+        staged_at(Cause::vendor("row_refused"), "TCS"),
+    ];
+    assert_eq!(
+        decisive(&closing).map(|one| one.cause.code),
+        Some("price_refused")
+    );
+    assert!(decisive(&[]).is_none());
+}
+
 // ── FM-067: a passed day is a named hole, never read in a loop ─────────────
 
 /// A month that holds days 1 and 3 refuses day 2 through the append door.
@@ -880,6 +963,91 @@ fn restated_option_day_read_again_with_other_bars_is_named_once() {
         );
         assert_eq!(journal(&store), before, "no line");
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// ROW 3 THROUGH THE RUN ITSELF (BASE-REDS-1023 repair 5, check r5's
+/// coverage of `admit`): an OPTION contract-day whose last close is `done`
+/// under definition 2, no longer current for options, offered again by a run
+/// that asks to skip restated days (`skip_restated`, D-4885). The day is
+/// counted in `restated_skipped` and passed over before the calendar gate:
+/// not a file is read, nothing is named restated or resumed, and the journal
+/// gains no line. Asked by a run that does not skip them, the same day is
+/// read again (D-2822, as
+/// `restated_option_day_read_again_with_other_bars_is_named_once` shows).
+/// Every row is invented.
+#[test]
+fn a_restated_day_a_run_asks_to_skip_is_counted_and_never_read() {
+    // The scratch tag of FM-095's restated day, the day this test restates
+    // too (declared for gate 1d; `scratch` makes each root its own).
+    let root = scratch("ia16-fm095-restated");
+    let stem = "NIFTY04APR2422000CE";
+    let world = root.join("world");
+    world_of(
+        &world,
+        &[(
+            d1(),
+            Tree::Options,
+            vec![(
+                entry_of(Tree::Options, d1(), stem),
+                option_file(stem, d1(), "101.5"),
+            )],
+        )],
+    );
+    let store = root.join("S");
+    let only = ["NIFTY".to_owned()];
+    let run = |options: RunOptions<'_>| {
+        import_with(
+            &world,
+            (ImportKind::Options, d1(), d1()),
+            (&store, &only),
+            options,
+        )
+        .unwrap()
+    };
+    let got = run(RunOptions::default());
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    assert_eq!(got.restated_skipped, 0, "{got:?}");
+    // The day's `done` as definition 2 wrote it.
+    let current = format!("definition={BAR_DEFINITION}");
+    let text: String = journal(&store)
+        .lines()
+        .map(|line| {
+            let line = if line.starts_with("done options 2024-04-01 NIFTY ") {
+                assert!(line.contains(&current), "{line}");
+                line.replace(&current, "definition=2")
+            } else {
+                line.to_owned()
+            };
+            line + "\n"
+        })
+        .collect();
+    std::fs::write(journal_path(&store), &text).unwrap();
+    let skipped = run(RunOptions {
+        skip_restated: true,
+        ..RunOptions::default()
+    });
+    assert_eq!(skipped.restated_skipped, 1, "{skipped:?}");
+    assert_eq!(skipped.files, 0, "{skipped:?}");
+    assert_eq!(
+        (
+            skipped.days_skipped,
+            skipped.days_refused,
+            skipped.days_closed
+        ),
+        (0, 0, 0),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped.restated.is_empty() && skipped.resumed.is_empty(),
+        "{skipped:?}"
+    );
+    assert!(skipped.failures.is_empty(), "{skipped:?}");
+    assert_eq!(journal(&store), text, "no line");
+    // Not asked to skip, the run reads the day again.
+    let read = run(RunOptions::default());
+    assert_eq!(read.restated_skipped, 0, "{read:?}");
+    assert_eq!(read.restated, vec![d1()], "{read:?}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2046,6 +2214,20 @@ fn the_unfiled_stems_are_ranked_by_closeness_to_the_swept_name() {
     crate::gdfl_import::keep_nearest(&mut kept, 1, "g");
     assert_eq!(kept.len(), 4);
     assert!(!kept.iter().any(|(_, stem)| stem == "g"), "{kept:?}");
+}
+
+/// The closeness count without a sort (gate 11 rule 4, BASE-REDS-1023,
+/// D-7150): each DISTINCT letter pair of the symbol the stem holds counts
+/// once, however often either repeats; the values the sorted count gave.
+#[test]
+fn closeness_counts_each_distinct_pair_once() {
+    let c = crate::gdfl_import::closeness;
+    assert_eq!(c("NIFTY BANK", "BANKNIFTY"), 7, "BA AN NK NI IF FT TY");
+    assert_eq!(c("NIFTY IT", "BANKNIFTY"), 4, "NI IF FT TY");
+    assert_eq!(c("AA", "AAAA"), 1, "one distinct pair, repeated");
+    assert_eq!(c("ABABAB", "ABAB"), 2, "AB and BA once each");
+    assert_eq!(c("B", "BANKNIFTY"), 0, "a one-letter stem holds no pair");
+    assert_eq!(c("x.y-z", "XYZ"), 2, "punctuation aside: XY, YZ");
 }
 
 // ── CMP-13: an option file that kept its good rows ─────────────────────────

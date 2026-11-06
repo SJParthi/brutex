@@ -590,6 +590,75 @@ fn a_windows_max_is_never_below_its_slowest_request() {
     );
 }
 
+/// **A ROLL THAT HAS RETURNED HAS EVERY EARLIER ROLL'S LINES WRITTEN**
+/// (BASE-REDS-1023 repair 7). The first roll's write waits for word that the
+/// second has returned. With lines written after the lock, as they were, the
+/// word comes while the line is unwritten; held across the write, the second
+/// roll cannot return first, so the wait runs out, on any machine, and only
+/// then does the first roll end.
+#[test]
+fn a_roll_that_has_returned_has_every_earlier_rolls_lines_written() {
+    let speed = Speed::new(0, 4);
+    speed.record("/held", Kind::Route, 3, Outcome::Answered, 0);
+    let (frozen, is_frozen) = std::sync::mpsc::channel::<()>();
+    let (second_ended, has_second_ended) = std::sync::mpsc::channel::<()>();
+    let table = &speed;
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(move || {
+            let mut early = Vec::new();
+            let lines = table.roll_writing(MINUTE_MS, true, |line| {
+                let _asked = frozen.send(());
+                let word = has_second_ended.recv_timeout(std::time::Duration::from_millis(200));
+                early.push((line.route.clone(), word.is_ok()));
+            });
+            (lines, early)
+        });
+        is_frozen.recv().unwrap();
+        let second = table.roll_writing(2 * MINUTE_MS, true, |_line| {});
+        let _told = second_ended.send(());
+        (first.join().unwrap(), second)
+    });
+    assert_eq!(
+        first,
+        (1, vec![("/held".to_owned(), false)]),
+        "the second roll returned while the first's line was unwritten"
+    );
+    assert_eq!(second, 0, "the first roll froze the row's one count");
+}
+
+/// A roll over a table of 64 asked rows, n = 200 timed rolls: every row's line
+/// reaches `write` each time, and the time is printed (L-BRED23-23). The write
+/// is a count here: one log line's own cost is the sink's, measured there.
+#[test]
+fn a_roll_writes_one_line_for_each_asked_row_at_a_cost_it_prints() {
+    let speed = Speed::new(0, 64);
+    let mut took = Vec::with_capacity(200);
+    for roll in 1..=200_u64 {
+        for row in 0..64 {
+            speed.record(
+                &format!("/roll/{row}"),
+                Kind::Route,
+                3,
+                Outcome::Answered,
+                0,
+            );
+        }
+        let mut lines = 0;
+        let began = std::time::Instant::now();
+        let counted = speed.roll_writing(roll * MINUTE_MS, false, |_line| lines += 1);
+        took.push(began.elapsed());
+        assert_eq!((counted, lines), (64, 64), "roll {roll}");
+    }
+    took.sort_unstable();
+    let at = |rank: usize| took.get(rank).copied().unwrap_or_default();
+    eprintln!(
+        "roll of 64 rows, n = 200: p50 {:?}, p99 {:?}, max {:?}",
+        at(99),
+        at(197),
+        at(199)
+    );
+}
+
 /// **TWO FREEZES AT ONCE NEVER COUNT BACKWARDS** (R3-14). The minute thread
 /// and the shutdown flush can roll together. Without `Speed::rolling` two
 /// rolls could interleave on a row: the first freezes its counts and waits

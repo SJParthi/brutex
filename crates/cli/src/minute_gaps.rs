@@ -273,6 +273,7 @@ impl Cut {
 
 /// The admission rule of a list of cuts, as one O(1) probe per bar: a map from
 /// each cut day to its first withheld bar-open. Built once per span.
+/// Proved by `causal_tests::the_admission_probe_and_the_fold_pairs_agree` and timed per bar by `measure_tests::admission_cost_per_bar_and_month`, the two test modules this file mounts (gate 12, D-7149; named by module so the file names no `crate` path to itself, which `runner`'s D-0694 record reads).
 #[derive(Clone, Debug, Default)]
 pub struct Admission {
     from: std::collections::HashMap<i64, i64>,
@@ -502,6 +503,7 @@ pub fn days_with_interior_gaps(minutes: &[Candle]) -> Vec<i64> {
 /// it, or by the calendar alone, and the cut is AT the hole, so no row before
 /// the hole depends on it. One `kind_of` per day (O(1), at most nine
 /// comparisons) and O(1) per bar.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn first_interior_holes(minutes: &[Candle]) -> Vec<(i64, i64)> {
     let mut holes: Vec<(i64, i64)> = Vec::new();
     let mut previous: Option<&Candle> = None;
@@ -565,6 +567,7 @@ fn day_open_micros(day: i64) -> i64 {
 /// first minute when `earlier` is `None` (the day's first held bar). `None`
 /// when the session expects nothing later. At most [`pull::calendar::MAX_WINDOWS`]
 /// windows, so O(1).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn first_expected_after(session: pull::calendar::Session, earlier: Option<i64>) -> Option<i64> {
     session
         .windows
@@ -741,6 +744,7 @@ pub fn tighten(cuts: &mut Vec<Cut>, cut: Cut) -> bool {
 /// Returns the kept bars and the number removed. One [`Admission`] probe per
 /// bar: a hash lookup of the bar's day, O(1) however many days are cut, so the
 /// loop is O(bars) (the reasoning the old day SET gave, kept).
+/// Proved by `causal_tests::the_admission_probe_and_the_fold_pairs_agree` and timed per bar by `measure_tests::admission_cost_per_bar_and_month`, the two test modules this file mounts (gate 12, D-7149; named by module so the file names no `crate` path to itself, which `runner`'s D-0694 record reads).
 #[must_use]
 pub fn withhold(bars: &[Candle], cuts: &[Cut]) -> (Vec<Candle>, u64) {
     if cuts.is_empty() {

@@ -23,8 +23,8 @@
 //!   the bar before it is in the window that closed (`calendar::Session`
 //!   holds up to [`crate::calendar::MAX_WINDOWS`] windows a day);
 //! * a bar outside every window of its day is never padded;
-//! * an index minute is never padded: an index does not trade, so its flat
-//!   minute is the level not moving, not a vendor's filler. The rule is
+//! * an index minute is never padded: an index does not trade, so its
+//!   flat minute is the level not moving, not a vendor's filler. The rule is
 //!   applied by SEGMENT (cash), not by vendor name; GDFL never derives
 //!   (`ingest::derives_for`), so in the derive path today it reaches Zerodha's
 //!   minutes only.
@@ -44,6 +44,8 @@
 //! # Cost
 //!
 //! [`is_padded`] is one comparison of four prices and a volume: O(1) a bar.
+//! Timed per minute at 1x, 10x and 100x by C-PD-01 and C-PD-02, run by
+//! `crates/pull/benches/ratio.rs` (gate 8, gate 12).
 //! [`Walk::step`] adds one window lookup over at most
 //! [`crate::calendar::MAX_WINDOWS`] windows. [`per_day`] is one pass over a
 //! month's minutes with one calendar lookup a day.
@@ -67,13 +69,13 @@ use crate::calendar::DayKind;
 /// # use store::format::{Bar, OI_NULL};
 /// let traded = Bar { ts_micros: 0, open: 101, high: 104, low: 99, close: 103,
 ///                    volume: 7, open_interest: OI_NULL };
-/// let flat = Bar { ts_micros: 60_000_000, open: 103, high: 103, low: 103,
+/// let carry = Bar { ts_micros: 60_000_000, open: 103, high: 103, low: 103,
 ///                  close: 103, volume: 0, open_interest: OI_NULL };
-/// assert!(is_padded(&traded, &flat, true));
+/// assert!(is_padded(&traded, &carry, true));
 /// // Across a session break it is the first bar of its window: never padded.
-/// assert!(!is_padded(&traded, &flat, false));
+/// assert!(!is_padded(&traded, &carry, false));
 /// // A flat minute WITH volume traded, at one price.
-/// assert!(!is_padded(&traded, &Bar { volume: 1, ..flat }, true));
+/// assert!(!is_padded(&traded, &Bar { volume: 1, ..carry }, true));
 /// ```
 #[must_use]
 pub const fn is_padded(prev: &Bar, bar: &Bar, same_session: bool) -> bool {
@@ -139,7 +141,8 @@ impl Walk {
 
     /// Judges `bar`, on IST epoch day `day` and in window `window` of that
     /// day's session ([`window_of`]), against the bar stepped before it, and
-    /// remembers it. O(1).
+    /// remembers it. O(1): timed per minute by C-PD-01 and C-PD-02, run by
+    /// `crates/pull/benches/ratio.rs`.
     pub fn step(&mut self, bar: &Bar, day: i64, window: Option<usize>) -> bool {
         let padded = self.previous.is_some_and(|before| {
             let same_session = window.is_some() && before.day == day && before.window == window;

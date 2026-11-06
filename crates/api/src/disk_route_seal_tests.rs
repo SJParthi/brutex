@@ -432,6 +432,7 @@ fn a_receipt_that_cannot_be_read_and_a_census_with_nothing_to_seal() {
 /// on this shared host a bound in the default suite measures the load, not
 /// the code; the cost is a fixed set of calls per vendor, named on
 /// [`census_view`], and the printed p50, p99 and max go to docs/06-limits.md.
+/// The proof is this test, `api::server::disk_route::seal_tests::the_seal_check_is_measured_per_vendor_and_the_answer_is_stable` (gate 12, D-7149).
 #[test]
 fn the_seal_check_is_measured_per_vendor_and_the_answer_is_stable() {
     const N: usize = 200;

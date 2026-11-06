@@ -20,29 +20,37 @@ export const ROUTE_FIELDS = Object.freeze(['answered', 'busy', 'being_written', 
 /** @param {unknown} n */
 const count = (n) => Number.isSafeInteger(n) && /** @type {number} */ (n) >= 0;
 
+/** @typedef {{ pool: string, slots: number, running: number, waiting: number, answered: number, busy: number, cancelled: number }} PoolRow */
+/** @typedef {{ route: string, answered: number, busy: number, being_written: number, cancelled: number, refused: number, failed: number, asked: number }} RouteRow */
+/** @typedef {{ fault: null, cores: number, waitMs: number, patienceMs: number | null, pools: PoolRow[], routes: RouteRow[], say: string }} PoolTables */
+
 /**
  * @param {any} body the parsed `/pools.json` answer
- * @returns {{ fault: string } | {
- *   fault: null,
- *   cores: number,
- *   waitMs: number,
- *   patienceMs: number | null,
- *   pools: { pool: string, slots: number, running: number, waiting: number, answered: number, busy: number, cancelled: number }[],
- *   routes: { route: string, answered: number, busy: number, being_written: number, cancelled: number, refused: number, failed: number, asked: number }[],
- *   say: string
- * }}
+ * @returns {{ fault: string } | PoolTables}
  */
 export function poolTables(body) {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return { fault: '/pools.json did not answer an object.' };
   if (!Array.isArray(body.pools)) return { fault: '/pools.json carries no pools list.' };
   if (!Array.isArray(body.routes)) return { fault: '/pools.json carries no routes list.' };
   if (!count(body.cores) || !count(body.wait_ms)) return { fault: '/pools.json names no core count or wait.' };
+  // EACH ROW IS BUILT FIELD BY FIELD (BASE-REDS-1023, D-7154): a row spread
+  // from `Object.fromEntries` typed as `{ pool }` alone, and gate W3 counted
+  // every reader of a counter it could not see.
+  /** @type {PoolRow[]} */
   const pools = [];
   for (const [i, row] of body.pools.entries()) {
     if (typeof row?.pool !== 'string' || row.pool === '') return { fault: `/pools.json pool row ${i} has no name.` };
     const missing = POOL_FIELDS.find((f) => !count(row[f]));
     if (missing) return { fault: `/pools.json pool ${row.pool} has no count for ${missing}.` };
-    pools.push({ pool: row.pool, ...Object.fromEntries(POOL_FIELDS.map((f) => [f, row[f]])) });
+    pools.push({
+      pool: row.pool,
+      slots: row.slots,
+      running: row.running,
+      waiting: row.waiting,
+      answered: row.answered,
+      busy: row.busy,
+      cancelled: row.cancelled
+    });
   }
   // THE FRONT END'S ROW (R3-08 repair 2): pages and assets match no route,
   // so the server counts them under one name that is no path and says which
@@ -50,14 +58,23 @@ export function poolTables(body) {
   // soon as a browser has loaded the page that asks, and refusing it hid both
   // tables behind a fault on every real server.
   const frontEnd = typeof body.front_end === 'string' && body.front_end !== '' ? body.front_end : null;
+  /** @type {RouteRow[]} */
   const routes = [];
   for (const [i, row] of body.routes.entries()) {
     const named = typeof row?.route === 'string' && (row.route.startsWith('/') || row.route === frontEnd);
     if (!named) return { fault: `/pools.json route row ${i} names no route.` };
     const missing = ROUTE_FIELDS.find((f) => !count(row[f]));
     if (missing) return { fault: `/pools.json route ${row.route} has no count for ${missing}.` };
-    const counts = Object.fromEntries(ROUTE_FIELDS.map((f) => [f, row[f]]));
-    routes.push({ route: row.route, ...counts, asked: ROUTE_FIELDS.reduce((sum, f) => sum + row[f], 0) });
+    routes.push({
+      route: row.route,
+      answered: row.answered,
+      busy: row.busy,
+      being_written: row.being_written,
+      cancelled: row.cancelled,
+      refused: row.refused,
+      failed: row.failed,
+      asked: ROUTE_FIELDS.reduce((sum, f) => sum + row[f], 0)
+    });
   }
   // THE ROUTES THAT WERE TURNED AWAY FIRST: busy, being written and
   // cancelled are what this table is for; ties by route, so the order is the
