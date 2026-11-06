@@ -262,3 +262,141 @@ fn a_record_that_will_not_decode_says_so_and_a_whole_reason_is_served_or_named()
         assert_eq!(parsed["note_whole_error"], error, "{out}");
     }
 }
+
+/// What `body` answers for `site` and `feed` at `page`, as JSON.
+fn body_of(site: &Site, feed: Vendor, page: usize) -> serde_json::Value {
+    let today = Day::new(2026, 11, 6).expect("a day");
+    serde_json::from_str(&body(
+        site,
+        feed,
+        page,
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_793_900_000),
+        Ok(today),
+    ))
+    .expect("JSON")
+}
+
+/// **A TORN OR UNREADABLE JOURNAL IS SAID ON THE PAGE, A NUMBERED PAGE IS READ
+/// IN SILENCE, AND A CENSUS FILE THAT CANNOT BE STAT'ED IS NAMED**
+/// (BASE-COV-API repair 3, D-8661). `body` over a site's journal, the route
+/// with a numbered page, and `committed_at` over census paths. Extremes: a
+/// journal of three whole records and five bytes past them (`TORN WRITE`, its
+/// three records still counted); a folder where the journal goes (its read
+/// refused by name in the scope, the newest runs and the page, no run
+/// listed); a page asked as a number through the route
+/// (answered 200); a page asked as a word (answered too, the word ignored); a
+/// census path under a file (`could not be stat'ed`, no commit time); a
+/// census path inside a symbolic link loop (the same); no census file at all
+/// (`no census file at`); and, at once, the torn journal asked for a page
+/// past its last (clamped to the last, the trouble still said), and a census
+/// path under a file that is also named absent (stat'ed, refused, no time);
+/// out of the box, a journal of five bytes and no whole record.
+#[tokio::test]
+async fn a_torn_journal_is_said_a_numbered_page_is_silent_and_an_unstatable_census_is_named() {
+    let (root, journal) = journal_of("audit-json-torn", 3);
+    let site = Site::load(&root.join("missing-masters"), &root);
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal.path)
+            .expect("the journal");
+        file.write_all(&[0xAB; 5])
+            .expect("five bytes past the records");
+    }
+    for page in [0, 99] {
+        let answer = body_of(&site, Vendor::Zerodha, page);
+        let scope = &answer["journal"];
+        assert_eq!(scope["records"], 3, "{answer}");
+        assert_eq!(
+            scope["page"], 0,
+            "page {page} clamped to the last: {answer}"
+        );
+        assert!(
+            scope["trouble"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("TORN WRITE — 5 byte(s)")),
+            "{answer}"
+        );
+    }
+    let loaded: crate::server::Loaded = std::sync::Arc::new(site);
+    for query in ["feed=zerodha&page=2", "feed=zerodha&page=two"] {
+        let uri: axum::http::Uri = format!("/audit.json?{query}").parse().expect("a uri");
+        let (status, _, answer) =
+            audit_json(axum::extract::State(std::sync::Arc::clone(&loaded)), uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{query}: {answer}");
+    }
+
+    // FIVE BYTES AND NO WHOLE RECORD; A FOLDER WHERE THE JOURNAL GOES.
+    let (bare, _none) = journal_of("audit-json-five-bytes", 0);
+    let path = audit::Journal::at(&bare).path;
+    std::fs::create_dir_all(path.parent().expect("a folder")).expect("mkdir");
+    std::fs::write(&path, [0xCD; 5]).expect("five bytes");
+    let five = body_of(
+        &Site::load(&bare.join("missing-masters"), &bare),
+        Vendor::Zerodha,
+        0,
+    );
+    assert_eq!(five["journal"]["records"], 0, "{five}");
+    assert!(
+        five["journal"]["trouble"]
+            .as_str()
+            .is_some_and(|why| why.starts_with("TORN WRITE — 5 byte(s)")),
+        "{five}"
+    );
+    std::fs::remove_file(&path).expect("removed");
+    std::fs::create_dir_all(&path).expect("a folder at the journal's name");
+    // A FOLDER IS NO JOURNAL: its read is refused, and the refusal is said
+    // in the scope, the newest runs and the page, never an empty list alone.
+    let folder = body_of(
+        &Site::load(&bare.join("missing-masters"), &bare),
+        Vendor::Zerodha,
+        0,
+    );
+    for (field, said) in [
+        (
+            "feed_scope.error",
+            &folder["journal"]["feed_scope"]["error"],
+        ),
+        ("last_runs_error", &folder["last_runs_error"]),
+        ("runs_error", &folder["runs_error"]),
+    ] {
+        assert!(
+            said.as_str()
+                .is_some_and(|why| why.contains("Is a directory")),
+            "{field}: {folder}"
+        );
+    }
+    assert_eq!(folder["last_runs"], serde_json::json!([]), "{folder}");
+    assert_eq!(folder["runs"], serde_json::json!([]), "{folder}");
+
+    // A CENSUS FILE THAT CANNOT BE STAT'ED.
+    let file = bare.join("a-file");
+    std::fs::write(&file, b"a file").expect("a file");
+    let looped = bare.join("loop");
+    std::os::unix::fs::symlink(&looped, &looped).expect("a link to itself");
+    let census = |path: std::path::PathBuf| crate::census::VendorCensus {
+        vendor: Vendor::Gdfl,
+        path,
+        state: crate::census::Census::Absent,
+    };
+    for (path, why) in [
+        (file.join("gdfl.man"), "could not be stat'ed"),
+        (looped.join("gdfl.man"), "could not be stat'ed"),
+        (bare.join("no-such.man"), "no census file at"),
+    ] {
+        let committed = committed_at(&census(path.clone()));
+        assert_eq!(committed.at, None, "{path:?}");
+        assert_eq!(committed.basis, "none", "{path:?}");
+        assert!(
+            committed
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains(why)),
+            "{path:?}: {:?}",
+            committed.note
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&bare);
+}

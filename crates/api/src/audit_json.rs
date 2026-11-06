@@ -2003,10 +2003,8 @@ mod tests {
         assert!(got[0].starts_with("SYM"), "newest first: {got:?}");
         assert!(got[3].contains("api.kite.trade"), "{got:?}");
         assert!(got[6].starts_with("zerodha_nse_checked"), "{got:?}");
-        assert!(
-            !got.iter()
-                .any(|s| s.contains("groww") || s == "Reference indices")
-        );
+        assert!(!got.iter().any(|s| s.contains("groww")), "{got:?}");
+        assert!(!got.iter().any(|s| s == "Reference indices"), "{got:?}");
         let parsed: serde_json::Value = serde_json::from_str(&zerodha).unwrap();
         let scope = &parsed["journal"]["feed_scope"];
         assert_eq!(scope["records"], 7);

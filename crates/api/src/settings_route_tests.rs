@@ -1100,3 +1100,139 @@ async fn the_settings_read_off_the_worker_is_the_settings_read() {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// **A SAVE IS CHECKED BY THE WINDOW IT LEAVES IN FORCE AND NAMES THE KEY IT
+/// MOVED, A READER THAT HAS SEEN FURTHER IS KEPT, AND A STAMP NO DAY HOLDS IS
+/// SAID AS ITS NUMBER** (BASE-COV-API repair 3, D-8661). Through `change`,
+/// `with_reader` and the helpers directly. Extremes: an offered feed set as
+/// the feed `/db` opens on (saved: the check passes it); a feed that is not
+/// offered (refused by name); `window.from` unset under a saved
+/// `window.to` that ends before the default first day (refused, naming
+/// `window.from`); `window.to` alone set before the default first day
+/// (refused, naming `window.to`); a nested save inside a read, whose reader
+/// has seen one generation further than the outer one (the further reader
+/// kept, never the outer); a stamp at `i64::MAX` and one at `i64::MIN` (said
+/// as their numbers); the feed table's own recorded window (both defaults
+/// stated, so no "no window" sentence and no check with an end missing); and,
+/// at once, the unset `window.from` beside a `window.to` the same save sets
+/// (refused, naming `window.from`), and the offered feed set with a window in
+/// force (saved); out of the box, the stamp 0 (1970-01-01 05:30:00 IST).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every key a save's check may name, beside the reader it is kept by"
+)]
+fn a_save_names_the_key_it_moved_and_a_reader_that_has_seen_further_is_kept() {
+    let body = |expected: u64, change: &str| {
+        format!(r#"{{"expected":{expected},"changed_by":"probe","reason":"r",{change}}}"#)
+    };
+    let offered = pull::vendor::Feed::ALL
+        .into_iter()
+        .find(|feed| feed.descriptor().offer.is_offered())
+        .expect("an offered feed")
+        .wire();
+    let open = Key::OpenFeed.name();
+    let store = root("save-names-its-key");
+    let (status, answer) = change(
+        &store,
+        &body(0, &format!(r#""set":{{"{open}":"{offered}"}}"#)),
+    );
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let (status, answer) = change(
+        &store,
+        &body(1, &format!(r#""set":{{"{open}":"nosuchfeed"}}"#)),
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["key"], open, "{answer}");
+
+    // A WINDOW ENDING BEFORE THE DEFAULT FIRST DAY: `window.from` unset
+    // under it, and `window.to` set alone before it.
+    let (status, answer) = change(
+        &store,
+        &body(
+            1,
+            r#""set":{"window.from":"1990-01-01","window.to":"1990-06-29"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let (status, answer) = change(&store, &body(2, r#""unset":["window.from"]"#));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["key"], "window.from", "{answer}");
+    let (status, answer) = change(
+        &store,
+        &body(
+            2,
+            r#""unset":["window.from"],"set":{"window.to":"1990-07-31"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["key"], "window.from", "{answer}");
+    let fresh = root("save-names-window-to");
+    let (status, answer) = change(&fresh, &body(0, r#""set":{"window.to":"1990-01-31"}"#));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["key"], "window.to", "{answer}");
+    assert!(!settings::path_of(&fresh, 1).exists(), "no byte written");
+    let (status, answer) = change(
+        &fresh,
+        &body(0, &format!(r#""set":{{"{open}":"{offered}"}}"#)),
+    );
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // A READER THAT HAS SEEN FURTHER IS KEPT: a save nested inside a read.
+    let outer = with_reader(&store, |reader, error| {
+        assert_eq!(error, None);
+        let seen = reader.highest();
+        let (status, answer) = change(&store, &body(seen, r#""set":{"window.to":"1990-08-31"}"#));
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        seen
+    });
+    assert_eq!(outer, 2, "the outer read saw two generations");
+    assert_eq!(
+        map().get(&store).map(Reader::highest),
+        Some(3),
+        "the nested save's reader, which saw the third, is the one kept"
+    );
+
+    // STAMPS: two no day holds, said as their numbers; and the epoch.
+    assert_eq!(ist_text(i64::MAX), i64::MAX.to_string());
+    assert_eq!(ist_text(i64::MIN), i64::MIN.to_string());
+    assert_eq!(ist_text(0), "1970-01-01 05:30:00 IST");
+
+    // THE FEED TABLE RECORDS A WINDOW: both defaults are stated (the row
+    // "no window is recorded" and a check with an end missing need a table
+    // that records none).
+    for key in [Key::WindowFrom, Key::WindowTo] {
+        let (value, source) = default_of(key);
+        assert!(value.is_some(), "{key:?}: {source}");
+        assert!(!source.contains("no window is recorded"), "{source}");
+    }
+    let _ = std::fs::remove_dir_all(&store);
+    let _ = std::fs::remove_dir_all(&fresh);
+}
+
+/// **EVERY CREDENTIAL FIELD A FEED NAMES IS ONE THE CHARTER RECORDS** (BASE-COV-API
+/// repair 3, D-8661): `credential_fields` adds a feed's `key_field` only
+/// when the charter's four do not already hold it, and this build's feed
+/// table names none outside them, so the list is the charter's four, each
+/// once. A feed that named a fifth field would turn this red and reach the
+/// row that adds it. Extremes: the four charter fields, each once; every
+/// HTTP feed's `key_field`, each among them; a feed with no `key_field`
+/// (adds nothing); the list read twice (the same, built once); and, at once,
+/// a feed whose `key_field` is a charter field beside one with none; out of
+/// the box, the field list's own order, the charter's.
+#[test]
+fn every_credential_field_a_feed_names_is_one_the_charter_records() {
+    let fields = credential_fields();
+    assert_eq!(fields, CHARTER_FIELDS.as_slice());
+    assert!(std::ptr::eq(fields, credential_fields()), "built once");
+    let mut none = 0;
+    for feed in pull::vendor::Feed::ALL {
+        if let pull::vendor::Transport::Http(spec) = &feed.descriptor().transport {
+            match spec.auth.key_field {
+                Some(field) => assert!(CHARTER_FIELDS.contains(&field), "{feed:?}: {field}"),
+                None => none += 1,
+            }
+        }
+    }
+    assert!(none > 0, "a feed with no key field is in the table");
+}
