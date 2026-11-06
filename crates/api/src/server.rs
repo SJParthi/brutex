@@ -21387,13 +21387,13 @@ mod tests {
     /// `expiry_flags` carrying its cadence is that the ROW decides, so a test
     /// making up its own pairing would be testing the fixture.
     fn dhan_rolling() -> pull::vendor::RollingSpec {
-        match pull::vendor::Feed::Dhan.descriptor().transport {
-            pull::vendor::Transport::Http(spec) => spec
-                .fno
-                .by_offset()
-                .expect("Dhan is addressed by strike offset"),
-            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
-        }
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(spec) = transport else {
+            panic!("this feed is HTTP");
+        };
+        spec.fno
+            .by_offset()
+            .expect("Dhan is addressed by strike offset")
     }
 
     /// a test of the dated table rather than of a constant.
@@ -22793,9 +22793,8 @@ mod tests {
     /// A window an instrument answered with no body: the smallest thing
     /// `BrokerRun::absorb_landed` takes.
     fn answered_window(instrument: &str) -> BrokerWindow {
-        let pull::vendor::Transport::Http(spec) =
-            pull::vendor::Feed::Zerodha.descriptor().transport
-        else {
+        let transport = pull::vendor::Feed::Zerodha.descriptor().transport;
+        let pull::vendor::Transport::Http(spec) = transport else {
             panic!("HTTP descriptor");
         };
         let on = day(2024, 10, 4);
@@ -29647,13 +29646,14 @@ mod tests {
     /// narrow list reachable at all.
     #[test]
     fn the_stock_strike_width_is_reachable_and_narrower_than_the_index_one() {
-        let rolling = match pull::vendor::Feed::Dhan.descriptor().transport {
-            pull::vendor::Transport::Http(spec) => spec
-                .fno
-                .by_offset()
-                .expect("Dhan is addressed by strike offset"),
-            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(spec) = transport else {
+            panic!("this feed is HTTP");
         };
+        let rolling = spec
+            .fno
+            .by_offset()
+            .expect("Dhan is addressed by strike offset");
 
         let index = rolling.offsets_for(rolling.index_word);
         let stock = rolling.offsets_for(rolling.stock_word);
@@ -31175,8 +31175,8 @@ mod tests {
     /// One expression now, one number.
     #[test]
     fn the_rolling_walk_plans_every_ordinal_the_descriptor_declares() {
-        let pull::vendor::Transport::Http(dhan) = pull::vendor::Feed::Dhan.descriptor().transport
-        else {
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(dhan) = transport else {
             panic!("Dhan is an HTTP feed");
         };
         let rolling = dhan
@@ -31239,9 +31239,8 @@ mod tests {
     #[test]
     fn the_futures_route_refuses_options_and_minutes_by_name() {
         let day = |y, m, d| Day::new(y, m, d).expect("a real day");
-        let pull::vendor::Transport::Http(spec) =
-            pull::vendor::Feed::Zerodha.descriptor().transport
-        else {
+        let transport = pull::vendor::Feed::Zerodha.descriptor().transport;
+        let pull::vendor::Transport::Http(spec) = transport else {
             panic!("Zerodha is an HTTP feed");
         };
         let route = spec
@@ -32738,13 +32737,12 @@ mod tests {
         // 429 BACKS OFF EXPONENTIALLY AND TELLS THE GOVERNOR.
         let mut waits = Vec::new();
         for attempt in 1..THROTTLE_ATTEMPTS {
-            match step(Some(429), false, None, attempt, 0) {
-                Step::Again { wait_ms, throttled } => {
-                    assert!(throttled, "a 429 is the governor's cue");
-                    waits.push(wait_ms);
-                }
-                other => panic!("attempt {attempt} of a 429 gave {other:?}"),
-            }
+            let stepped = step(Some(429), false, None, attempt, 0);
+            let Step::Again { wait_ms, throttled } = stepped else {
+                panic!("attempt {attempt} of a 429 gave {stepped:?}");
+            };
+            assert!(throttled, "a 429 is the governor's cue");
+            waits.push(wait_ms);
         }
         assert_eq!(waits, vec![1_000, 2_000, 4_000, 8_000, 16_000]);
         assert!(
@@ -34508,9 +34506,9 @@ mod tests {
             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\ntoo busy\n",
         ])));
 
-        let shipped = match pull::vendor::Feed::Dhan.descriptor().transport {
-            pull::vendor::Transport::Http(spec) => spec,
-            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(shipped) = transport else {
+            panic!("this feed is HTTP");
         };
         let spec = pull::vendor::HttpSpec {
             base_url: Box::leak(url.into_boxed_str()),
@@ -34622,9 +34620,9 @@ mod tests {
         // hole.
         let (url, reached) = loopback_script(Box::leak(Box::new([framed(HOLLOW), framed(BODY)])));
 
-        let shipped = match pull::vendor::Feed::Dhan.descriptor().transport {
-            pull::vendor::Transport::Http(spec) => spec,
-            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(shipped) = transport else {
+            panic!("this feed is HTTP");
         };
         let spec = pull::vendor::HttpSpec {
             base_url: Box::leak(url.into_boxed_str()),
@@ -34862,9 +34860,9 @@ mod tests {
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");
-        let spec = match pull::vendor::Feed::Dhan.descriptor().transport {
-            pull::vendor::Transport::Http(spec) => spec,
-            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(spec) = transport else {
+            panic!("this feed is HTTP");
         };
         let nifty = brutex_core::instrument::InstrumentKey::index(
             brutex_core::instrument::Exchange::Nse,
@@ -35020,9 +35018,8 @@ mod tests {
         let (url, reached) = loopback_vendor(
             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\ntoo busy\n",
         );
-        let pull::vendor::Transport::Http(shipped) =
-            pull::vendor::Feed::Dhan.descriptor().transport
-        else {
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(shipped) = transport else {
             panic!("this feed authenticates, so its transport is HTTP")
         };
         let spec = pull::vendor::HttpSpec {
