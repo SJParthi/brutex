@@ -4809,8 +4809,8 @@ mod tests {
 
         // DHAN'S IS ROLLING. The expected value is rebuilt from the descriptor
         // and the clock, so this test restates no vendor fact of its own.
-        let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Dhan.descriptor().transport
-        else {
+        let transport = pull::vendor::Feed::Dhan.descriptor().transport;
+        let pull::vendor::Transport::Http(spec) = transport else {
             panic!("Dhan is an HTTP feed");
         };
         let pull::vendor::HistoryFloor::Rolling { years } = spec.history_floor else {
@@ -7481,6 +7481,60 @@ mod tests {
         store_writable(&occupied, "dhan").expect("a different vendor, a different path");
     }
 
+    /// **A PROBE NAME THE HOST REFUSES FOR ITS OWN REASON KEEPS THE HOST'S
+    /// WORDS** (BASE-COV-API-AS3). Only `AlreadyExists` gains the sentence
+    /// about something holding the probe's name; any other refusal at the
+    /// open is passed on as the host said it, under the probe path, and
+    /// nothing is left in the root. Driven by a vendor word whose probe file
+    /// name runs past the 255-byte name limit of the host's filesystem.
+    /// Extremes: a name one byte past the limit; a name four times past it;
+    /// a name past it in multi-byte characters; and, at once, an over-long
+    /// name beside an occupied probe name in the same root, each refused
+    /// for its own reason; out of the box, the longest name that still fits
+    /// is accepted and removed.
+    #[test]
+    fn a_probe_name_the_host_refuses_keeps_the_hosts_own_words() {
+        let root = crate::scratch::path("autopilot-probe-long-name");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a writable root");
+        let room = 255 - STORE_PROBE_PREFIX.len();
+        let long = |n: usize| "v".repeat(n);
+        // Past the limit in bytes AND in characters, so a filesystem that
+        // counts either refuses each.
+        for vendor in [long(room + 1), long(4 * 255), "é".repeat(room + 1)] {
+            let why = store_writable(&root, &vendor).expect_err("a name past the limit");
+            assert!(why.contains(STORE_PROBE_PREFIX), "the probe path: {why}");
+            assert!(
+                !why.contains("something already holds the probe's name"),
+                "not the AlreadyExists sentence: {why}"
+            );
+        }
+        std::fs::create_dir_all(root.join(format!("{STORE_PROBE_PREFIX}groww")))
+            .expect("an occupied probe name");
+        let held = store_writable(&root, "groww").expect_err("an occupied name");
+        let past = store_writable(&root, &long(room + 1)).expect_err("a name past the limit");
+        assert!(
+            held.contains("something already holds the probe's name"),
+            "{held}"
+        );
+        assert!(
+            !past.contains("something already holds the probe's name"),
+            "{past}"
+        );
+        store_writable(&root, &long(room)).expect("the longest name that fits");
+        let left: Vec<_> = std::fs::read_dir(&root)
+            .expect("the root lists")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(
+            left,
+            [std::ffi::OsString::from(format!(
+                "{STORE_PROBE_PREFIX}groww"
+            ))],
+            "nothing but the occupied name is left"
+        );
+    }
+
     /// **THE WRITE PROBE NEVER WRITES THROUGH A LINK AT ITS NAME, AND REMOVES
     /// NOTHING IT DID NOT MAKE** (cloud-attack-law-20261016, lens 4; PREC-1,
     /// D-5408). It opened the name with `File::create`, which follows a symlink
@@ -8174,7 +8228,8 @@ mod cloud_mutant_tests {
         assert!(
             found
                 .iter()
-                .any(|one| one.symbol.as_str() == "NIFTY" && one.exchange == Exchange::Nse),
+                .filter(|one| one.symbol.as_str() == "NIFTY")
+                .any(|one| one.exchange == Exchange::Nse),
             "{found:?}"
         );
     }
@@ -8599,24 +8654,23 @@ mod cloud_mutant_tests {
     fn the_served_autopilot_reads_its_switch_from_the_environment() {
         const CASE: &str = "BRUTEX_CLOUD_AUTOPILOT_CASE";
         let name = "autopilot::cloud_mutant_tests::the_served_autopilot_reads_its_switch_from_the_environment";
-        match std::env::var(CASE).as_deref() {
-            Ok("run") => {
-                assert!(flies_on_startup());
-                assert!(!Control::serving().is_paused(), "run flies");
+        // (case, flies on startup, the served control starts paused, why)
+        const CASES: [(&str, bool, bool, &str); 4] = [
+            ("run", true, false, "run flies"),
+            ("pause", false, true, "pause stays paused"),
+            ("unset", false, true, "no word stays paused"),
+            ("run-read-only", true, true, "read-only grounds it"),
+        ];
+        match std::env::var(CASE) {
+            Ok(case) => {
+                let Some(&(_, flies, paused, why)) =
+                    CASES.iter().find(|(named, ..)| *named == case)
+                else {
+                    panic!("unknown case {case}");
+                };
+                assert_eq!(flies_on_startup(), flies, "{case}: {why}");
+                assert_eq!(Control::serving().is_paused(), paused, "{case}: {why}");
             }
-            Ok("pause") => {
-                assert!(!flies_on_startup());
-                assert!(Control::serving().is_paused(), "pause stays paused");
-            }
-            Ok("unset") => {
-                assert!(!flies_on_startup());
-                assert!(Control::serving().is_paused(), "no word stays paused");
-            }
-            Ok("run-read-only") => {
-                assert!(flies_on_startup());
-                assert!(Control::serving().is_paused(), "read-only grounds it");
-            }
-            Ok(other) => panic!("unknown case {other}"),
             Err(_) => {
                 let os = std::ffi::OsStr::new;
                 for (case, env) in [
@@ -8907,9 +8961,11 @@ mod cloud_mutant_tests {
                  \"close\":[24500.50],\"volume\":[250],\"timestamp\":[1785728700]}"
             }
         });
-        let vendor = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("the fake serves");
-        });
+        // The serve future itself: it never returns before the abort below,
+        // so no line after its `await` exists to be left unrun.
+        let vendor = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
 
         let root = crate::scratch::path("autopilot-cloud-tick-reached");
         let _ = std::fs::remove_dir_all(&root);

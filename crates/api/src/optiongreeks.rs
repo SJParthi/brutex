@@ -925,3 +925,7 @@ pub async fn greeks_json(
         Err(why) => not_admitted("a greeks read", &why),
     }
 }
+
+#[cfg(test)]
+#[path = "optiongreeks_cover_tests.rs"]
+mod cover_tests;

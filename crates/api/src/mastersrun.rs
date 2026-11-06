@@ -977,6 +977,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em}";
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
+    clippy::panic,
     reason = "the same exception every test module in this workspace takes: a \
               test that cannot panic cannot fail."
 )]
@@ -1092,6 +1093,7 @@ mod tests {
             std::sync::Arc::new(crate::server::Site::load(&dir, root));
         let mode = std::env::var(REFRESH_MODE).expect("the child's transport");
         let said = std::env::var(REFRESH_SAYS).expect("the child's credential words");
+        let from = crate::emitted::mark();
         let (status, _, body) = match mode.as_str() {
             "down" => block_on(super::refresh_over(&site, &dir, &Down, &NoWait)),
             "short" => block_on(super::refresh_over(&site, &dir, &Short, &NoWait)),
@@ -1152,8 +1154,63 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("the refusal's words");
         assert!(refusal.contains(&said), "{mode}: no {said:?} in {refusal}");
+        the_summary_says_what_the_page_says(from, &parsed, &mode);
         the_doors_that_find_the_masters(&site, &mode, &said);
         std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
+    }
+
+    /// The refresh child's one summary record, read beside the page it wrote:
+    /// the level the outcome earns (`Warn` when some of the masters landed,
+    /// `Error` when none did; a whole refresh needs the credential, L-BCA-6),
+    /// and the three counts and the wait the page's own rows add up to.
+    fn the_summary_says_what_the_page_says(from: u64, page: &serde_json::Value, mode: &str) {
+        let rows = page
+            .get("landed")
+            .and_then(serde_json::Value::as_array)
+            .expect("the rows");
+        let written = rows
+            .iter()
+            .filter(|row| row.get("written") == Some(&serde_json::json!(true)))
+            .count() as u64;
+        let waited: u64 = rows
+            .iter()
+            .filter_map(|row| row.get("waited_ms").and_then(serde_json::Value::as_u64))
+            .sum();
+        let summary = crate::emitted::landed(
+            from,
+            "api.masters",
+            "the instrument masters were refreshed from the browser",
+        );
+        let [record] = summary.as_slice() else {
+            panic!("{mode}: one summary record: {summary:?}");
+        };
+        // Both sides run: the `answers` children land the public masters, the
+        // `down` and `short` children land none.
+        let level = if written > 0 {
+            telemetry::Level::Warn
+        } else {
+            telemetry::Level::Error
+        };
+        assert_eq!(record.level, level, "{mode}: {record:?}");
+        assert!(
+            crate::emitted::counts(record, "landed", written),
+            "{mode}: {record:?}"
+        );
+        // No row is skipped once the credentialed leg has run: the credential
+        // refusal replaces the public pass's skip with an attempt that did
+        // not land.
+        assert!(
+            crate::emitted::counts(record, "skipped", 0),
+            "{mode}: {record:?}"
+        );
+        assert!(
+            crate::emitted::counts(record, "asked", masters::SOURCES.len() as u64),
+            "{mode}: {record:?}"
+        );
+        assert!(
+            crate::emitted::counts(record, "waited_ms", waited),
+            "{mode}: {record:?}"
+        );
     }
 
     /// The refresh child's two doors that find the masters directory themselves.
@@ -1175,9 +1232,13 @@ mod tests {
                         std::sync::Arc::clone(site),
                     ))),
                 ),
+                // THE HANDLER ITSELF, to its end: `refresh` hands its work
+                // to `detached`, whose task answers before any fetch.
                 (
                     "refresh",
-                    block_on(super::refresh_work(std::sync::Arc::clone(site))),
+                    block_on(super::refresh(axum::extract::State(std::sync::Arc::clone(
+                        site,
+                    )))),
                 ),
             ] {
                 assert_eq!(
@@ -1321,9 +1382,11 @@ mod tests {
             std::fs::read_to_string(masters::path_of(&dir, &source)).expect("landed"),
             a_master()
         );
-        let named = match tried.attempts.first().expect("primary attempt").got {
-            masters::Got::Refused { ref detail, .. } => detail.clone(),
-            ref other => format!("not a refusal: {other:?}"),
+        let masters::Got::Refused {
+            detail: ref named, ..
+        } = tried.attempts.first().expect("primary attempt").got
+        else {
+            panic!("the primary attempt is a refusal: {tried:?}");
         };
         assert!(named.contains(&kept.display().to_string()), "{named}");
     }
@@ -1378,11 +1441,13 @@ mod tests {
             pull::master_snapshots::EVENT_TARGET,
             "an incomplete master snapshot entry is held and never read",
         );
+        let levels: Vec<telemetry::Level> = named
+            .iter()
+            .filter(|record| crate::emitted::says(record, "entry", cut))
+            .map(|record| record.level)
+            .collect();
         assert!(
-            named
-                .iter()
-                .any(|record| record.level == telemetry::Level::Warn
-                    && crate::emitted::says(record, "entry", cut)),
+            levels.contains(&telemetry::Level::Warn),
             "one Warn record names the cut body: {named:?}"
         );
         // AND THE SNAPSHOT'S OWN LINE COUNTS IT.
@@ -1394,8 +1459,8 @@ mod tests {
         assert!(
             written
                 .iter()
-                .any(|record| crate::emitted::says(record, "kind", "instruments")
-                    && crate::emitted::counts(record, "incomplete", 1)),
+                .filter(|record| crate::emitted::says(record, "kind", "instruments"))
+                .any(|record| crate::emitted::counts(record, "incomplete", 1)),
             "{written:?}"
         );
     }
@@ -1586,7 +1651,7 @@ mod tests {
             landed
                 .iter()
                 .filter(|(_, l, _)| l.is_ok())
-                .all(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written())),
+                .all(|(_, l, _)| l.as_ref().is_ok_and(Landed::is_written)),
             "every source this transport carried must have landed"
         );
     }
@@ -1671,7 +1736,7 @@ mod tests {
         assert!(
             !landed
                 .iter()
-                .any(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written())),
+                .any(|(_, l, _)| l.as_ref().is_ok_and(Landed::is_written)),
             "none of them landed"
         );
     }
@@ -1842,17 +1907,14 @@ mod tests {
         let dir = scratch("no-answer");
         let (landed, tried) = block_on(obtain(&Dead, &NoWait, &dir, &masters::SOURCES[0]));
 
-        // AN ASSERTION AND THEN AN `if let`, rather than a `match` with an
-        // `unreachable!` arm. That arm would be a region no run can enter, and
-        // this workspace holds a 100% coverage floor — see `docs/06-limits.md`.
-        assert!(
-            matches!(landed, Landed::Refused(_)),
-            "nothing answered, so nothing can be written: {landed:?}"
-        );
-        if let Landed::Refused(ref why) = landed {
-            assert!(why.contains("dhan_scrip.csv"), "names the file: {why}");
-            assert!(why.contains("no route to host"), "and the cause: {why}");
-        }
+        // A `let ... else` WHOSE `else` FAILS THE TEST, rather than an `if let`
+        // that would skip its checks when the shape is wrong: the failing arm is
+        // the `panic!`, the one side the coverage reading counts as (F).
+        let Landed::Refused(ref why) = landed else {
+            panic!("nothing answered, so nothing can be written: {landed:?}");
+        };
+        assert!(why.contains("dhan_scrip.csv"), "names the file: {why}");
+        assert!(why.contains("no route to host"), "and the cause: {why}");
         assert_eq!(tried.attempts.len(), masters::ATTEMPTS_PER_URL as usize);
     }
 
@@ -2229,10 +2291,8 @@ mod tests {
         ] {
             let found: Vec<_> = attempts
                 .iter()
-                .filter(|record| {
-                    crate::emitted::says(record, "url", url)
-                        && crate::emitted::counts(record, "attempt", number)
-                })
+                .filter(|record| crate::emitted::says(record, "url", url))
+                .filter(|record| crate::emitted::counts(record, "attempt", number))
                 .collect();
             assert_eq!(found.len(), 1, "attempt {number}: {attempts:?}");
             assert!(
@@ -2255,6 +2315,231 @@ mod tests {
             assert!(
                 found.iter().all(|record| record.level == level),
                 "{needle}: {found:?}"
+            );
+        }
+    }
+
+    /// **A REFETCH THAT CHANGED NOTHING IS SAID AS ONE, AND A RE-PRIMED STEP
+    /// IS NAMED ON THE PAGE** (BASE-COV-API-AS3). The log's per-source line
+    /// tells "new bytes" from "the same bytes again", at `Info` both, and the
+    /// ledger the page reads labels a refusal that sent the ladder back to its
+    /// session `refused_repriming`, apart from the retrying and the settled
+    /// kinds. Extremes: a landing of zero bytes; a landing of `usize::MAX`
+    /// bytes; a ledger whose only step is a re-prime with no status; a ledger
+    /// of all three refusal kinds at once, with a body and a refused prime
+    /// between them; out of the box, a re-prime step whose URL is empty.
+    #[test]
+    fn a_refetch_that_changed_nothing_and_a_reprimed_step_are_each_named() {
+        use masters::{Attempt, Fetched, Got, Verdict};
+        let source = &masters::SOURCES[0];
+        let from = crate::emitted::mark();
+        for bytes in [0, 922_301, usize::MAX] {
+            super::record(
+                source,
+                &Ok(Landed::Written {
+                    bytes,
+                    changed: false,
+                }),
+                &Fetched::default(),
+            );
+        }
+        let unchanged = crate::emitted::landed(
+            from,
+            "api.masters.source",
+            "the master was refetched and had not changed",
+        );
+        for bytes in [0, 922_301, usize::MAX] {
+            let needle = format!("{bytes} bytes");
+            let found: Vec<_> = unchanged
+                .iter()
+                .filter(|record| crate::emitted::says(record, "detail", &needle))
+                .map(|record| record.level)
+                .collect();
+            assert!(
+                found.contains(&telemetry::Level::Info),
+                "{needle}: {unchanged:?}"
+            );
+        }
+
+        let step = |url: &str, number: u32, got: Got| Attempt {
+            url: url.to_owned(),
+            number,
+            waited_ms: 0,
+            got,
+        };
+        let refused = |status: Option<u16>, verdict: Verdict| Got::Refused {
+            status,
+            detail: "as3".to_owned(),
+            verdict,
+        };
+        let alone = Fetched {
+            body: None,
+            attempts: vec![step(
+                "https://as3.invalid/a",
+                1,
+                refused(None, Verdict::Reprime),
+            )],
+            snapshot: None,
+        };
+        let json = outcome_json(source, &Ok(Landed::Refused("as3".to_owned())), &alone);
+        assert!(
+            json.contains(r#""got":"refused_repriming","status":null"#),
+            "{json}"
+        );
+        let every = Fetched {
+            body: None,
+            attempts: vec![
+                step(
+                    "https://as3.invalid/b",
+                    1,
+                    refused(Some(503), Verdict::Again),
+                ),
+                step(
+                    "https://as3.invalid/b",
+                    2,
+                    Got::PrimeRefused {
+                        detail: "as3".to_owned(),
+                    },
+                ),
+                step(
+                    "https://as3.invalid/b",
+                    3,
+                    refused(Some(401), Verdict::Reprime),
+                ),
+                step("https://as3.invalid/b", 4, Got::Body { bytes: 9 }),
+                step(
+                    "https://as3.invalid/b",
+                    5,
+                    refused(Some(404), Verdict::Never),
+                ),
+            ],
+            snapshot: None,
+        };
+        let json = outcome_json(source, &Ok(Landed::Refused("as3".to_owned())), &every);
+        for word in [
+            r#""got":"refused_retrying","status":503"#,
+            r#""got":"prime_refused","status":null"#,
+            r#""got":"refused_repriming","status":401"#,
+            r#""got":"body","status":9"#,
+            r#""got":"refused_settled","status":404"#,
+        ] {
+            assert!(json.contains(word), "{word}: {json}");
+        }
+        let empty = Fetched {
+            body: None,
+            attempts: vec![step("", 1, refused(Some(403), Verdict::Reprime))],
+            snapshot: None,
+        };
+        let json = outcome_json(source, &Ok(Landed::Refused("as3".to_owned())), &empty);
+        assert!(
+            json.contains(
+                r#"{"url":"","number":1,"waited_ms":0,"got":"refused_repriming","status":403"#
+            ),
+            "{json}"
+        );
+    }
+
+    /// **A RELOAD THAT WOULD LOSE A READABLE FEED IS REFUSED, AT `Error`, AND
+    /// THE PARSE IN USE STANDS** (BASE-COV-API-AS3). A site parsed over a
+    /// readable Dhan master, re-parsed over a folder with no master, keeps
+    /// what it holds: `reload` answers the refusal and logs it as the reload
+    /// that could not happen. The fixture every landing test leans on is
+    /// checked against the column guard for each vendor that publishes one,
+    /// Zerodha's included, which no public refresh lands. Extremes: a folder
+    /// with no master at all; a folder whose only master is empty; and, at
+    /// once, both re-parses over the same site; out of the box, a "folder"
+    /// that is a file.
+    #[test]
+    fn a_reload_that_would_lose_a_readable_feed_is_refused_and_logged() {
+        for vendor in [
+            brutex_core::vendor::Vendor::Dhan,
+            brutex_core::vendor::Vendor::Groww,
+            brutex_core::vendor::Vendor::Zerodha,
+        ] {
+            let source = masters::SOURCES
+                .iter()
+                .find(|source| source.vendor == Some(vendor))
+                .expect("each vendor publishes a master");
+            let body = a_master_for(vendor);
+            assert!(
+                masters::validated_body(source, &body).is_ok(),
+                "{vendor:?}: {body}"
+            );
+        }
+        let dir = scratch("reload-refused");
+        std::fs::write(masters::path_of(&dir, &masters::SOURCES[0]), a_master())
+            .expect("a Dhan master");
+        let site: crate::server::Loaded =
+            std::sync::Arc::new(crate::server::Site::load(&dir, &dir));
+        let held = site.universe().generation;
+        let none = scratch("reload-refused-none");
+        let emptied = scratch("reload-refused-emptied");
+        std::fs::write(masters::path_of(&emptied, &masters::SOURCES[0]), b"")
+            .expect("an empty Dhan master");
+        let file = scratch("reload-refused-file").join("not-a-folder");
+        std::fs::write(&file, b"a file").expect("a file where the folder goes");
+        for folder in [&none, &emptied, &file] {
+            let from = crate::emitted::mark();
+            let refused = super::reload(&site, folder);
+            let Err(ref why) = refused else {
+                panic!("{}: {refused:?}", folder.display());
+            };
+            assert!(why.contains("previous universe retained"), "{why}");
+            let said = crate::emitted::landed(
+                from,
+                "api.masters.reload",
+                "the universe could NOT be re-parsed, so the previous one still stands",
+            );
+            // The refusal's leading words: the sink cuts a long value at
+            // `telemetry::MAX_STR_VALUE_BYTES`, never its first words.
+            let levels: Vec<_> = said
+                .iter()
+                .filter(|record| {
+                    crate::emitted::says(record, "detail", "previous universe retained")
+                })
+                .map(|record| record.level)
+                .collect();
+            assert!(levels.contains(&telemetry::Level::Error), "{said:?}");
+            assert_eq!(site.universe().generation, held, "the parse in use stands");
+        }
+    }
+
+    /// **A REFRESH TASK THAT DOES NOT RETURN IS A 500 THAT SAYS WHERE THE
+    /// OUTCOME IS** (BASE-COV-API-AS3). `detached` awaits its task; a task
+    /// that panics is a `JoinError`, and the answer names it and points at
+    /// `/masters/status.json` and `/logs` rather than claiming anything
+    /// landed. Extremes: a task that panics before its first await; one that
+    /// panics after yielding; out of the box, a panic whose message is empty.
+    #[test]
+    fn a_refresh_task_that_does_not_return_is_a_500_that_says_where_to_look() {
+        let answers = [
+            block_on(super::detached(async { panic!("the refresh task broke") })),
+            block_on(super::detached(async {
+                tokio::task::yield_now().await;
+                panic!("the refresh task broke after yielding")
+            })),
+            block_on(super::detached(async { panic!("") })),
+        ];
+        for (status, headers, body) in answers {
+            assert_eq!(
+                status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "{body}"
+            );
+            assert_eq!(headers, super::json_headers());
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            assert_eq!(parsed.get("landed"), Some(&serde_json::json!([])), "{body}");
+            let refusal = parsed
+                .get("refusal")
+                .and_then(serde_json::Value::as_str)
+                .expect("the refusal's words");
+            assert!(
+                refusal.starts_with("the refresh task did not return ("),
+                "{refusal}"
+            );
+            assert!(
+                refusal.ends_with("); /masters/status.json and /logs say what landed"),
+                "{refusal}"
             );
         }
     }
