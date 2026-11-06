@@ -143,10 +143,12 @@ fn opt(v: Option<i128>) -> String {
     v.map_or_else(|| "n/a".to_owned(), |x| x.to_string())
 }
 
-/// One candidate line.
+/// One candidate line: `c id day T symbol side outcome`, then for a filled one
+/// `entry-second entry-price qty exit-second exit-price kind fallback late first-stop
+/// last-stop trail-no-ratio gross headline clock net`.
 fn candidate_line(id: usize, r: &Record) -> String {
     let c = &r.candidate;
-    let head = format!("{id} {} {} {} {}", c.day.label(), hms(c.t), c.symbol, c.side.label());
+    let head = format!("c {id} {} {} {} {}", c.day.label(), hms(c.t), c.symbol, c.side.label());
     let Some(t) = r.trade else {
         let word = match c.outcome {
             Outcome::NotFilled => "not-filled",
@@ -158,7 +160,7 @@ fn candidate_line(id: usize, r: &Record) -> String {
     let s = t.sim;
     let from = if t.priced.from == Clock::Dated { "dated" } else { "today" };
     format!(
-        "{head} filled entry={} {} qty={} exit={} {} kind={} fallback={} late={} stop={}..{} trail-no-ratio={} gross={} headline={} from={from} net={} | dated-worst {} | today-worst {} | dated-precise {} | today-precise {}",
+        "{head} filled {} {} {} {} {} {} {} {} {} {} {} {} {} {from} {}",
         hms(s.entry.second),
         s.entry.price,
         s.qty,
@@ -173,11 +175,20 @@ fn candidate_line(id: usize, r: &Record) -> String {
         t.gross,
         t.priced.headline,
         t.net,
+    )
+}
+
+/// One admitted candidate's charges: `f id`, the dated clock's worst lines and total, the
+/// today clock's worst lines and total, then both clocks' official totals.
+fn fees_line(id: usize, r: &Record) -> Option<String> {
+    let t = r.trade?;
+    Some(format!(
+        "f {id} dated-worst {} today-worst {} dated-precise {} today-precise {}",
         lines_text(&t.priced.dated_worst),
         lines_text(&t.priced.today_worst),
         t.priced.dated_precise.total(),
         t.priced.today_precise.total(),
-    )
+    ))
 }
 
 fn per_kind(counts: &[u64; 6]) -> String {
@@ -279,6 +290,15 @@ pub fn render_outputs(out_run: &Output) -> String {
         let _ = writeln!(out, "candidates {short} {k} count={}", list.len());
         for (id, r) in list.iter().enumerate() {
             let _ = writeln!(out, "{}", candidate_line(id, r));
+        }
+        let admitted: std::collections::BTreeSet<usize> = out_run
+            .rows
+            .iter()
+            .filter(|row| row.key.set == *set && row.key.k == *k)
+            .flat_map(|row| row.admitted.iter().copied())
+            .collect();
+        for line in admitted.iter().filter_map(|id| list.get(*id).and_then(|r| fees_line(*id, r))) {
+            let _ = writeln!(out, "{line}");
         }
     }
     for row in &out_run.rows {

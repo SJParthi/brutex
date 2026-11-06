@@ -43,6 +43,7 @@ pub mod account;
 pub mod benchkit;
 pub mod book;
 pub mod candles;
+pub mod catalogue;
 pub mod cond;
 pub mod costs;
 pub mod daymask;

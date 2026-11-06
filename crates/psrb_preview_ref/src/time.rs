@@ -166,6 +166,12 @@ impl Month {
         Self(self.0 - 1)
     }
 
+    /// The month `n` months later (earlier when negative).
+    #[must_use]
+    pub const fn plus(self, n: i32) -> Self {
+        Self(self.0 + n)
+    }
+
     /// The first day of the month, `None` outside the supported years.
     #[must_use]
     pub fn first_day(self) -> Option<Day> {

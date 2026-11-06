@@ -150,6 +150,13 @@ impl DayPlan {
         self
     }
 
+    /// Keeps only the first `count` minutes (360: an auction-eligible day ending 15:14).
+    #[must_use]
+    pub fn truncate(mut self, count: u32) -> Self {
+        self.minutes.retain(|i, _| *i < count);
+        self
+    }
+
     /// The stored day.
     #[must_use]
     pub fn build(&self) -> StockDay {

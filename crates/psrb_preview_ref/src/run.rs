@@ -197,26 +197,16 @@ struct Signal {
 
 /// The facts of a stock's trading span, or the refusal that leaves it out.
 fn spans(market: &Market, stock: &Stock, facts: &mut StockFacts) -> Option<((Day, Day), Month)> {
+    // The month sets are `BTreeSet`s, strictly rising by construction, so the lists'
+    // order refusals cannot arise here; only the start-month refusal (Q1) can.
     let zerodha: Vec<Month> = stock.zerodha_months.iter().copied().collect();
     let gdfl: Vec<Month> = stock.gdfl_months.iter().copied().collect();
-    let span = match trading_span(&zerodha, &gdfl, &market.window, &market.calendar) {
-        Ok(found) => found?,
-        Err(why) => {
-            facts.refused = Some(why);
-            return None;
-        }
-    };
+    let span = trading_span(&zerodha, &gdfl, &market.window, &market.calendar).ok().flatten()?;
     facts.span = Some(span);
-    match warmup_start(&zerodha, span.0.month()) {
-        Ok(warm) => {
-            facts.warmup = Some(warm);
-            Some((span, warm))
-        }
-        Err(why) => {
-            facts.refused = Some(why);
-            None
-        }
-    }
+    let warm = warmup_start(&zerodha, span.0.month());
+    facts.refused = warm.err();
+    facts.warmup = warm.ok();
+    Some((span, warm.ok()?))
 }
 
 /// Phase A for one stock: every candidate of every (rule set, timeframe).
