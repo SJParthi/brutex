@@ -55,6 +55,9 @@ members = [
     # What still holds is the gate 22 half: `cli` is a CALLER, never a swept crate,
     # and must never be added to that gate's list.
     "crates/cli",
+    # SCRATCH ONLY (psrb-preview-1, never committed): the PSRB preview binary.
+    "crates/psrb_preview",
+    "crates/psrb_search",
 ]
 
 [workspace.package]

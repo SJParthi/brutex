@@ -241,6 +241,17 @@ impl Ema {
         i64::try_from(self.scaled.div_euclid(SCALE)).ok()
     }
 
+    /// The average held scaled by [`SCALE`]: the state [`Ema::value`] floors to
+    /// paisa, and 0 before the first candle. A whole-paisa price `p` is above the
+    /// average exactly when `p · SCALE > scaled()`, and below it exactly when
+    /// `p · SCALE < scaled()`. Against `value()` only the first is exact: a price
+    /// equal to the floor of an average that is not a whole paisa is below the
+    /// average, and `value()` calls it equal (PSRB-STRAT, D-8613).
+    #[must_use]
+    pub const fn scaled(&self) -> i128 {
+        self.scaled
+    }
+
     /// True once `period` candles have been folded.
     ///
     /// Until then the average is the mean of fewer than `period` prices — a fact

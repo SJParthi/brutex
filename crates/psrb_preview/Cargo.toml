@@ -1,0 +1,19 @@
+[package]
+name         = "psrb_preview"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "SCRATCH PREVIEW, never committed: one fixed PSRB backtest over the F&O stocks (state/psrb-preview-20261106/PREVIEW-SPEC.md)."
+
+[dependencies]
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+store       = { path = "../store", version = "0.1.0" }
+pull        = { path = "../pull", version = "0.1.0" }
+costs       = { path = "../costs", version = "0.1.0" }
+indicators  = { path = "../indicators", version = "0.1.0" }
+rayon       = { workspace = true }
+
+[lints]
+workspace = true

@@ -932,6 +932,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "psrb_preview"
+version = "0.1.0"
+dependencies = [
+ "core",
+ "costs",
+ "indicators",
+ "pull",
+ "rayon",
+ "store",
+]
+
+[[package]]
+name = "psrb_search"
+version = "0.1.0"
+dependencies = [
+ "core",
+ "costs",
+ "indicators",
+ "pull",
+ "rayon",
+ "store",
+ "vocab",
+]
+
+[[package]]
 name = "pull"
 version = "0.1.0"
 dependencies = [
