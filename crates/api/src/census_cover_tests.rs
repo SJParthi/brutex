@@ -219,10 +219,12 @@ fn a_vendors_census_is_refused_where_its_v4_folder_cannot_be_told() {
     let kind = |located: Located| match located {
         Located::Single(_) => "single".to_owned(),
         Located::Partitioned(_) => "partitioned".to_owned(),
-        Located::Refused(_, Census::Unreadable { reason, fault }) => {
+        Located::Refused(_, other) => {
+            let Census::Unreadable { reason, fault } = &other else {
+                panic!("a refusal is unreadable: {other:?}");
+            };
             format!("refused {fault:?}: {reason}")
         }
-        Located::Refused(_, other) => panic!("a refusal is unreadable: {other:?}"),
     };
     assert_eq!(kind(locate(&root, Vendor::Groww)), "single");
     let v4 = pull::manifest::v4_root(&root);
@@ -487,10 +489,10 @@ impl Written {
 
 /// The census's held half, or a failure naming what it was instead.
 fn manifests_of(census: &VendorCensus) -> &Manifests {
-    match census.state {
-        Census::Held { ref manifest } => manifest,
-        Census::Absent | Census::Unreadable { .. } => panic!("not held: {}", census.note()),
-    }
+    let Census::Held { ref manifest } = census.state else {
+        panic!("not held: {}", census.note());
+    };
+    manifest
 }
 
 /// **A SINGLE FILE THAT HOLDS ONE PARTITION'S EPOCH IS REFUSED, NEVER READ AS
@@ -643,8 +645,10 @@ fn a_read_back_from_a_cut_or_foreign_file_is_refused_never_guessed() {
 /// copied into the other slot; another vendor's census written over the file;
 /// an index partition's epoch written over the single file (read whole, and
 /// refused); a partition rewritten at another capacity; a partition rewritten
-/// as its own compaction (another lineage); a header that counts an entry the
-/// file was cut before; a base read degraded; and, forged after a partition's
+/// as its own compaction (another lineage); the newest generation committed
+/// as an older version's header; a header that counts past its own limit; a
+/// header that counts an entry the file was cut before; a base read
+/// degraded; and, forged after a partition's
 /// last entry, a key of another segment, a key whose rows went down, one whose
 /// last bar went back, a new key the header does not count, and one whose
 /// rows the header does not count; at once, a rewritten last entry beside an
@@ -928,7 +932,9 @@ impl std::fmt::Write for Refusing {
 /// `Part::same_read`, `Manifests::same_read` and `VendorCensus::same_read`,
 /// each false on the one field that differs. Extremes: two whole reads of one
 /// unchanged file (continued, not the same read); the last entry rewritten
-/// in place; the file replaced by rename; the file removed; parts of two
+/// in place; the file cut to its header; a header whose generation is below
+/// its entry count (no lineage at all); the file replaced by rename; the
+/// file removed; parts of two
 /// segments; epoch 1 and the epoch 2 after it; an epoch rewritten in place
 /// as its compaction (another lineage); a degraded read on either side; an
 /// empty census read twice; two single files at two roots; a tail kept
@@ -1158,10 +1164,10 @@ fn a_partition_or_file_the_host_will_not_read_body() {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).expect("mode set");
     };
     let refused = |census: &VendorCensus| -> (String, Fault) {
-        match &census.state {
-            Census::Unreadable { reason, fault } => (reason.clone(), *fault),
-            Census::Held { .. } | Census::Absent => panic!("not refused: {}", census.note()),
-        }
+        let Census::Unreadable { reason, fault } = &census.state else {
+            panic!("not refused: {}", census.note());
+        };
+        (reason.clone(), *fault)
     };
     let denied = Fault::Io(std::io::ErrorKind::PermissionDenied);
     let floor = pull::manifest::capacity_floor(Segment::Index);

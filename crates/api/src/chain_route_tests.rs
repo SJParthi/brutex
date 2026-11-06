@@ -912,3 +912,317 @@ fn a_chain_beside_a_writer_says_being_written_never_spot_unreadable() {
     assert_eq!(body["chains"][0]["spot"], SPOT, "{body}");
     assert_eq!(body["chains"][0]["atm"], 410_000, "{body}");
 }
+
+/// **A LEDGER RECORD THIS BUILD CANNOT KEY IS UNREAD, AN ALIAS IS READ, AND A
+/// MARK MOVES ONLY WHAT ITS OWN RECORDS NAME** (BASE-COV-API repair 3,
+/// D-8661). `LineageIndex::of` and `LineageIndex::mark`, driven directly.
+/// Extremes: a lineage record whose new key is struck at 0 paisa, which the
+/// ledger's own reader accepts and the option reader refuses (parsed, not
+/// keyed: unread); an expiry alias record (read, no rung moved); an empty
+/// line (passed over, neither read nor unread); a plain rename (read); a mark
+/// asked for an underlying the ledger never names (nothing moves); a renamed
+/// key whose side was first stored at the ex-date's first instant, not before
+/// it (still marked, held by nothing); a renamed key's other side, first
+/// stored before the ex-date (marked the same); the reused key with no first
+/// stamp (never marked); and, at once, both keys of one record struck at 0
+/// (one unread line, never two), and every side of two strikes marked in one
+/// pass with only the renamed strike's sides moved; out of the box, a strike
+/// of 0 paisa.
+#[test]
+fn a_ledger_record_this_build_cannot_key_is_unread_and_a_mark_moves_only_its_own() {
+    let zedco = Symbol::new("ZEDCO").expect("a symbol");
+    let contract = |text: &str| Contract::parse(text).expect("a contract");
+    let ex = Day::new(2018, 9, 20).expect("a day");
+    let rename = |old: &str, new: &str| {
+        LineageRecord {
+            underlying: zedco,
+            old: contract(old),
+            new: contract(new),
+            ex_date: ex,
+            factor: (2, 1),
+            lot_old: 500,
+            lot_new: 1_000,
+            oi_unadjusted_until: 0,
+        }
+        .line()
+    };
+    let alias = pull::expiry_alias::AliasRecord {
+        underlying: Some(zedco),
+        stated: Day::new(2018, 9, 27).expect("a day"),
+        settled: Day::new(2018, 9, 26).expect("a day"),
+        kind: pull::expiry_alias::AliasKind::ClosedDay,
+        first_day: Day::new(2018, 9, 3).expect("a day"),
+        contracts: 3,
+    }
+    .line();
+    let lines = [
+        rename("2018-09-27-0-CE", "2018-09-27-0-PE"),
+        rename("2018-09-27-410000-CE", "2018-09-27-0-CE"),
+        alias,
+        String::new(),
+        rename("2018-09-27-400000-CE", "2018-09-27-200000-CE"),
+    ];
+    for line in &lines[..2] {
+        assert!(
+            LineageRecord::parse(line).is_some(),
+            "the ledger reads its own line: {line}"
+        );
+    }
+    let index = LineageIndex::of(&lines.join("\n"));
+    assert_eq!(
+        (index.records, index.unread),
+        (2, 2),
+        "the alias and the plain rename read; each record struck at 0 unread once"
+    );
+
+    let expiry = Expiry::new(2018, 9, 27).expect("an expiry");
+    let ex_day = i64::from(ex.days_from_epoch());
+    let from = ex_start_micros(ex_day);
+    let side = |first: Option<i64>| Side {
+        first,
+        adjusted: Vec::new(),
+    };
+    let fresh = || {
+        vec![
+            Strike {
+                paisa: 200_000,
+                call: side(None),
+                put: side(None),
+            },
+            Strike {
+                paisa: 400_000,
+                call: side(Some(from)),
+                put: side(Some(from - MICROS)),
+            },
+        ]
+    };
+    // AN UNDERLYING THE LEDGER NEVER NAMES: nothing moves, nothing is asked.
+    let mut other = fresh();
+    index.mark(
+        Symbol::new("OTHERCO").expect("a symbol"),
+        expiry,
+        &mut other,
+        &mut |_, _, _| unreachable!("no listed key"),
+    );
+    assert_eq!(other, fresh());
+    // ZEDCO: the renamed 4,000 CE first stored at the ex-date's first instant
+    // (not before it) is marked; its put, first stored before it, too; the
+    // reused 2,000 CE with no first stamp is not.
+    let mut marked = fresh();
+    index.mark(zedco, expiry, &mut marked, &mut |_, _, _| {
+        unreachable!("no listed key")
+    });
+    assert_eq!(
+        marked[0],
+        fresh()[0],
+        "the reused key, never stored, moves nothing"
+    );
+    assert_eq!(marked[1].call.adjusted, vec![(ex_day, None)]);
+    assert_eq!(marked[1].put.adjusted, vec![(ex_day, None)]);
+}
+
+/// **A LISTED KEY'S FIRST STAMP IS READ FROM ITS OWN MONTHS, A MONTH AT A
+/// TIME, AND A MONTH THAT WILL NOT READ IS A NAMED FAULT** (BASE-COV-API
+/// repair 3, D-8661). `first_stored_from`, driven directly over month files
+/// written here. Extremes: a first month holding only bars before the
+/// instant asked (passed over), an absent month after it (passed over) and
+/// the expiry's month holding the first bar after it (answered); an instant
+/// after the last bar of the expiry's month (none, no fault); an instant in
+/// a month past the expiry's (none, no month opened); a key with no month
+/// file at all (none, no fault); a month file that is not a bar file
+/// (refused: none, the fault names the file); an instant at exactly a bar's
+/// stamp (that bar); and, at once, an unreadable month before a readable
+/// one (the fault stops the walk: none, never the later bar), and an
+/// instant one microsecond after the expiry month's last bar (none); out of
+/// the box, the instant `i64::MIN`, which no calendar places.
+#[test]
+fn a_listed_keys_first_stamp_is_read_month_by_month_and_a_month_that_will_not_read_is_named() {
+    let root = crate::scratch::path("chain-first-stored");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let key = |text: &str| OptionKey {
+        root: &root,
+        feed: Vendor::Gdfl,
+        exchange: "NSE",
+        underlying: "ZEDCO",
+        contract: Contract::parse(text).expect("a contract"),
+        timeframe: Timeframe::SECOND_1,
+    };
+    let expiry = Expiry::new(2018, 11, 29).expect("an expiry");
+    let (early, late) = (ist(2018, 9, 3, 9, 20, 0), ist(2018, 11, 5, 9, 20, 0));
+    write_option(
+        &root,
+        "ZEDCO",
+        "2018-11-29-400000-PE",
+        month(2018, 9),
+        &[(early, 1_005)],
+    );
+    write_option(
+        &root,
+        "ZEDCO",
+        "2018-11-29-400000-PE",
+        month(2018, 11),
+        &[(late, 1_006)],
+    );
+    let mut faults = Vec::new();
+    let mut first =
+        |text: &str, from: i64| first_stored_from(&key(text), from, expiry, &mut faults);
+    let pe = "2018-11-29-400000-PE";
+    assert_eq!(
+        first(pe, ist(2018, 9, 20, 0, 0, 0) * MICROS),
+        Some(late * MICROS)
+    );
+    assert_eq!(
+        first(pe, early * MICROS),
+        Some(early * MICROS),
+        "at a bar's stamp"
+    );
+    assert_eq!(first(pe, (late + 1) * MICROS), None, "after the last bar");
+    assert_eq!(
+        first(pe, late * MICROS + 1),
+        None,
+        "one microsecond after it"
+    );
+    assert_eq!(
+        first(pe, ist(2018, 12, 3, 9, 15, 0) * MICROS),
+        None,
+        "past the expiry"
+    );
+    assert_eq!(first(pe, i64::MIN), None, "an instant no calendar places");
+    assert_eq!(
+        first("2018-11-29-390000-PE", early * MICROS),
+        None,
+        "no file"
+    );
+    // A MONTH THAT IS NOT A BAR FILE, before a readable one.
+    let ce = "2018-11-29-410000-CE";
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "FNO",
+        symbol: "ZEDCO",
+        contract: Some(Contract::parse(ce).expect("a contract")),
+        timeframe: Timeframe::SECOND_1,
+        month: month(2018, 10),
+        file: FileKind::Bars,
+    })
+    .expect("a path")
+    .to_path_buf(&root);
+    std::fs::create_dir_all(path.parent().expect("a folder")).expect("mkdir");
+    std::fs::write(&path, b"not a bar file").expect("written");
+    write_option(&root, "ZEDCO", ce, month(2018, 11), &[(late, 2_006)]);
+    assert_eq!(first(ce, ist(2018, 10, 1, 9, 15, 0) * MICROS), None);
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(
+        faults[0].contains(&path.display().to_string()),
+        "the fault names the file: {faults:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **THE CHAIN SAYS ITS LEDGER AS IT WAS READ, READS A LISTED PUT FROM ITS
+/// OWN MONTHS, AND OPENS A SPOT MONTH ONCE FOR EVERY INSTANT IN IT**
+/// (BASE-COV-API repair 3, D-8661). `/chain.json` through `answer`, then
+/// `render_instant` driven directly. Extremes: a ledger whose every line
+/// reads (`read`, no unread line); a ledger that is not UTF-8 (`unreadable`,
+/// its reason said, every instant still answered); a stitched record listing
+/// a put first stored before its ex-date (its first stamp read from its own
+/// month file, after the ex-date); two instants in one spot month (both
+/// answered off one open); a ladder position past the strikes it indexes
+/// (no row written for it); a ladder over no strikes at all (an empty list);
+/// and, at once, the listed put and the two instants in one answer, and the
+/// unreadable ledger with two instants; out of the box, a ledger of one
+/// byte that is not UTF-8.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one census and spot, three ledgers, and the instants each is read at"
+)]
+fn the_chain_says_its_ledger_reads_a_listed_put_and_opens_a_spot_month_once() {
+    let built = fixture("chain-ledger-states", &census_rows());
+    let ledger = pull::gdfl_lineage::lineage_path(&built.store_root);
+    std::fs::create_dir_all(ledger.parent().expect("imports/")).expect("mkdir");
+    let nifty = Symbol::new("NIFTY").expect("a symbol");
+    let ex = Day::new(2018, 9, 17).expect("a day");
+    // THE 4,100 PE, first stored 2018-09-10, listed again from the ex-date:
+    // its own month file holds its first bar after it.
+    let listed = StitchedRecord {
+        underlying: nifty,
+        key: Contract::parse("2019-03-28-410000-PE").expect("a contract"),
+        ex_date: ex,
+        before: None,
+        after: None,
+    }
+    .line();
+    let relisted = ist(2018, 9, 18, 9, 30, 0);
+    write_option(
+        &built.store_root,
+        "NIFTY",
+        "2019-03-28-410000-PE",
+        month(2018, 9),
+        &[(ist(2018, 9, 10, 10, 0, 0), 1_005), (relisted, 1_015)],
+    );
+    std::fs::write(&ledger, &listed).expect("a ledger");
+    let two = format!("{BASE}&expiry=2019-03-28&at={},{}", t1(), t1() + 60);
+    let (status, body) = ask(&built, &two);
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["lineage"]["state"], "read", "{body}");
+    assert_eq!(body["lineage"]["records"], 1);
+    assert_eq!(body["lineage"]["unread_lines"], 0);
+    let chains = body["chains"].as_array().expect("chains");
+    assert_eq!(chains.len(), 2, "both instants of the one month: {body}");
+    assert_eq!(chains[0]["spot"], SPOT, "{body}");
+    assert_eq!(
+        chains[1]["spot_why"], "no_spot_bar",
+        "no bar a minute later, read off the same open: {body}"
+    );
+    for chain in chains {
+        let put = chain["strikes"]
+            .as_array()
+            .expect("strikes")
+            .iter()
+            .find(|strike| strike["strike"] == 410_000)
+            .expect("the 4,100 strike");
+        assert_eq!(
+            put["pe_first"], relisted,
+            "the listed put's first stamp is its own month's, after the ex-date: {chain}"
+        );
+    }
+
+    // A LEDGER THAT IS NOT UTF-8: said, and every instant still answered.
+    std::fs::write(&ledger, [0xFF]).expect("a ledger");
+    let (status, body) = ask(&built, &two);
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["lineage"]["state"], "unreadable", "{body}");
+    assert!(
+        body["lineage"]["error"]
+            .as_str()
+            .is_some_and(|why| why.contains("not UTF-8")),
+        "{body}"
+    );
+    assert_eq!(body["chains"].as_array().expect("chains").len(), 2);
+
+    // A LADDER POSITION PAST ITS STRIKES writes no row; no strikes, none.
+    let asked = Asked::parse(&format!("{BASE}&expiry=2019-03-28&at={}", t1())).expect("asked");
+    for (stored, rows) in [(vec![0, 5], 1), (vec![], 0)] {
+        let ladder = Ladder {
+            stored,
+            atm: None,
+            step_local: None,
+            refusal: Some(("spot_unreadable", "a test's ladder".to_owned())),
+        };
+        let strikes = [Strike {
+            paisa: 400_000,
+            call: Side::default(),
+            put: Side::default(),
+        }];
+        let mut out = String::new();
+        render_instant(&mut out, &asked, &strikes, &ladder, t1() * MICROS, None);
+        let rendered: Value = serde_json::from_str(&out).expect("an instant");
+        assert_eq!(
+            rendered["strikes"].as_array().expect("strikes").len(),
+            rows,
+            "{out}"
+        );
+    }
+}

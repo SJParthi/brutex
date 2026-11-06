@@ -2012,11 +2012,11 @@ fn a_delta_names_only_what_moved_and_an_unread_contract_is_counted_once() {
     }
 
     // THE DELTA'S KEYS: the CE once and the unread key, no INDEX key.
-    let changes = part_of(&after, Segment::Fno)
+    let appended = part_of(&after, Segment::Fno)
         .expect("a part")
         .changed_since(generation)
         .expect("the appends since");
-    let changed = Changed::of(&changes, Segment::Fno);
+    let changed = Changed::of(&appended, Segment::Fno);
     assert_eq!(changed.keys.len(), 2, "{:?}", changed.keys);
     assert!(
         changed.keys.iter().all(|key| key.segment == Segment::Fno),
@@ -2441,10 +2441,6 @@ fn the_route_says_a_refused_delta_and_refused_rows_and_two_spellings_are_never_s
 /// two refused reads, the kept and the asked; out of the box, a feed whose
 /// census file is fourteen bytes of plain text.
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one site: the two builders, then the refused reads kick is asked to build over"
-)]
 fn a_second_builder_waits_for_the_first_and_a_refused_read_starts_no_build() {
     use super::super::census_cache::{self, slow_read};
     let site: crate::server::Loaded = Arc::new(site_holding("facets-two-builders", &chain()));
