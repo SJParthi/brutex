@@ -458,6 +458,15 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
         .await;
         assert_eq!(status, StatusCode::OK, "{again}");
         assert_eq!(again["source_id"], kept["source_id"], "{again}");
+        // A KEPT CANDLE READER ANSWERS ONLY ITS OWN ROOT (BASE-COV-API-AS3):
+        // the same source and pin asked under another root drop it, and that
+        // root's open refuses rather than serving the kept source.
+        let elsewhere = crate::indexstopcandlesjson::render_at(
+            &root.join("another-root"),
+            &format!("identity={source}&pin={source_pin}&setting=0&kind=source"),
+        )
+        .expect_err("no source is saved under another root");
+        assert!(elsewhere.contains("another-root"), "{elsewhere}");
     });
 }
 

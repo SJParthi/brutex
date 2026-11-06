@@ -120,6 +120,91 @@ async fn a_month_whose_sidecar_is_lost_answers_one_run_and_a_count() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// The child of [`a_month_asked_while_every_store_read_slot_is_held_is_asked_again`].
+const ASKED_AGAIN_CHILD: &str = "BRUTEX_TEST_OPS_MONTH_ASKED_AGAIN_CHILD";
+
+/// The store-read pool's `busy` count, as `/pools.json` serves it.
+async fn store_read_busy() -> u64 {
+    let (_, _, body) = crate::detail::pools_json().await;
+    let body: serde_json::Value = serde_json::from_str(&body).expect("pools JSON");
+    body["pools"]
+        .as_array()
+        .expect("pools")
+        .iter()
+        .find(|row| row["pool"] == "store_read")
+        .and_then(|row| row["busy"].as_u64())
+        .expect("the store-read pool and its busy count are served")
+}
+
+/// **A MONTH ASKED WHILE EVERY STORE-READ SLOT IS HELD IS ASKED AGAIN, AND
+/// ANSWERED ONCE A SLOT FREES** (BASE-COV-API-AS3). [`month_get`]'s retry,
+/// which the other tests here reach only when another test happens to hold
+/// the pool, driven on purpose: in a child of this binary, so no other test's
+/// read waits behind the held pool. Every slot is held; the ask waits out its
+/// admission wait and is refused (the pool counts one `busy`), naps, and asks
+/// again; the slots are freed only after that refusal is counted, so the next
+/// ask is admitted and the month is served whole.
+/// Extremes: every store-read slot held at the first ask; an ask refused only
+/// after its whole admission wait; and, at once, the slots freed while the
+/// refused ask naps or waits again; out of the box — a month of one bar.
+#[test]
+fn a_month_asked_while_every_store_read_slot_is_held_is_asked_again() {
+    const NAME: &str = "server::ops_safety_tests::a_month_asked_while_every_store_read_slot_is_held_is_asked_again";
+    if let Some(proof) = std::env::var_os(ASKED_AGAIN_CHILD) {
+        let proof = PathBuf::from(proof);
+        let (root, site) = site_over("ops-month-asked-again");
+        write_month(&root, YearMonth::new(2025, 5).expect("m"), 1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let before = store_read_busy().await;
+            let crowd = crate::detail::crowd(crate::detail::Named::StoreRead);
+            let asking = tokio::spawn(async move {
+                month_get(
+                    &site,
+                    "feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&month=2025-05",
+                )
+                .await
+            });
+            // On this one thread the ask has not started when the count is
+            // first read, and it cannot be refused before its admission wait
+            // ends: the loop naps at least once, and ends at the refusal.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while store_read_busy().await == before {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the held pool never refused the ask"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            drop(crowd);
+            let (status, body) = asking.await.expect("the ask joins");
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            assert_eq!(parsed["bars"].as_array().map(Vec::len), Some(1), "{body}");
+            assert_eq!(
+                store_read_busy().await,
+                before + 1,
+                "one refusal, then the answer"
+            );
+        });
+        let _ = fs::remove_dir_all(&root);
+        fs::write(proof.join("child-ran"), b"asked again").expect("the child's proof");
+        return;
+    }
+    let proof = crate::scratch::path("ops-month-asked-again-proof");
+    let _ = fs::remove_dir_all(&proof);
+    fs::create_dir_all(&proof).expect("a proof root");
+    let _ = crate::isolated::rerun(NAME, &[(ASKED_AGAIN_CHILD, proof.as_os_str())]);
+    assert_eq!(
+        fs::read(proof.join("child-ran")).ok().as_deref(),
+        Some(&b"asked again"[..])
+    );
+    let _ = fs::remove_dir_all(&proof);
+}
+
 /// **EVERY 429 SAYS WHEN TO RETRY, AND EVERY ANSWER NAMES ITS BUILD (DB-B51,
 /// DB-B71).** The outermost layer stamps both, so no refusal escapes either:
 /// a seek, scan, imports or folder 429 sent no `Retry-After` before.

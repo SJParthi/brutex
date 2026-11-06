@@ -2017,12 +2017,11 @@ async fn a_read_stops_when_its_reader_leaves() {
         })
         .await
         .expect("the client thread");
-        // At most two seconds; the count is asserted below either way.
-        let _waited = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while crate::detail::route_tally("/verify.json").cancelled == route_before {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
+        // At most two seconds, then the test fails by name.
+        super::cloud_mutant_tests_c::eventually(
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            || crate::detail::route_tally("/verify.json").cancelled != route_before,
+        )
         .await;
     })
     .await;

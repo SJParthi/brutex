@@ -193,6 +193,14 @@ fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     body.map_err(|why| why.to_string())
 }
 
+/// [`render`] at a root the handler never passes: it always passes
+/// [`crate::server::store_dir`], which one process fixes once, so only a test
+/// can ask the kept reader for a second root.
+#[cfg(test)]
+pub(crate) fn render_at(root: &Path, query: &str) -> Result<Value, String> {
+    render(root, &Asked::parse(query)?)
+}
+
 fn project(reader: &View<'_>, asked: &Asked) -> Result<Value, String> {
     let meta = reader.metadata();
     let direction = match reader.direction() {

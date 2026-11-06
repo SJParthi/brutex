@@ -170,8 +170,10 @@ impl Drop for FakeVendor {
 }
 
 /// Waits until `done` holds, asking every 250 ms; past `deadline` the test
-/// fails by name.
-async fn eventually(deadline: std::time::Instant, mut done: impl FnMut() -> bool) {
+/// fails by name. Shared with the server's other test modules, so a wait
+/// whose condition already holds when it is first asked leaves no side of
+/// its own unrun.
+pub(super) async fn eventually(deadline: std::time::Instant, mut done: impl FnMut() -> bool) {
     while !done() {
         assert!(
             std::time::Instant::now() < deadline,
