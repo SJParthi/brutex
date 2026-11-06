@@ -55,6 +55,11 @@ members = [
     # What still holds is the gate 22 half: `cli` is a CALLER, never a swept crate,
     # and must never be added to that gate's list.
     "crates/cli",
+    # PSRB-PREVIEW-REF (cloud branch cloud/psrb-preview-ref-20261106 only): an
+    # independent reference model of the PSRB preview backtest for differential
+    # testing, depending on nothing. reports/psrb-preview-20261106/ holds its
+    # report and golden files.
+    "crates/psrb_preview_ref",
 ]
 
 [workspace.package]

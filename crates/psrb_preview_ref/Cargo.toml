@@ -1,0 +1,33 @@
+[package]
+name         = "psrb_preview_ref"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "An independent reference model of the PSRB preview backtest (6 Nov 2026), written from the kit's text alone, run on synthetic data only, for differential testing of the Mac tool. Depends on nothing."
+
+# ---------------------------------------------------------------------------
+# THIS SECTION IS DELIBERATELY EMPTY AND STAYS EMPTY.
+#
+# Independence is the point of this crate. It names no workspace crate (not
+# `indicators`, not `costs`, not `pull`): every reading, fill, charge and
+# account rule is rewritten here from reports/psrb-preview-20261106/ and the
+# design documents it cites, so a defect shared with the tool under test can
+# only come from a shared reading of the text, never from shared code. It also
+# names no registry crate: the generator, the property tests and the ratio
+# bench are std only.
+# ---------------------------------------------------------------------------
+[dependencies]
+
+[lints]
+workspace = true
+
+# The O(1) ratio harness, the workspace's own form: a plain binary with no
+# framework. `test = true` so `cargo test` runs it once in SMOKE mode (one short
+# pass per row, never gating); `cargo bench` passes `--bench` and measures in
+# full. TEST-PLAN.md section 3.
+[[bench]]
+name    = "ratio"
+harness = false
+test    = true
