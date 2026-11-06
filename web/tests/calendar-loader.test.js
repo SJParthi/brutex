@@ -34,16 +34,33 @@ function harness() {
 
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
+/**
+ * Event-loop turns until `ready()` holds, at most `turns` of them: an ORDER,
+ * never a wall-clock wait (BASE-REDS-1023, D-7152). A 10 ms `settle` raced
+ * the answer's body read on a loaded machine ("B is read once A is out of
+ * the way" failed, then passed 1568 of 1568 twice on unchanged code); the
+ * number of turns a chain of promises and stream reads takes does not
+ * depend on how busy the CPU is.
+ * @param {() => boolean} ready
+ */
+const until = async (ready, turns = 10_000) => {
+  for (let turn = 0; turn < turns && !ready(); turn += 1) {
+    await new Promise((r) => setImmediate(r));
+  }
+  return ready();
+};
+
 test('a slower answer for the previous feed never replaces the current feed\'s calendar', async () => {
   const { loader, applied, reply, answer } = harness();
   void loader.load('A');
-  await settle();
+  assert.ok(await until(() => answer.has('A')), 'A is asked');
   void loader.load('B');
   await settle();
   reply('A', 19_000); // A's read was revoked; the transport ignored the abort.
-  await settle();
-  assert.ok(answer.has('B'), 'B is read once A is out of the way');
+  assert.ok(await until(() => answer.has('B')), 'B is read once A is out of the way');
+  const before = applied.length;
   reply('B', 20_000);
+  assert.ok(await until(() => applied.length > before), 'B\'s answer is applied');
   await settle();
   const last = applied[applied.length - 1];
   assert.equal(last.first, '2024-10-04', 'B\'s calendar stands');
@@ -54,11 +71,11 @@ test('a slower answer for the previous feed never replaces the current feed\'s c
 });
 
 test('a feed change clears the calendar to "not loaded" at once, and no feed says so', async () => {
-  const { loader, applied, reply } = harness();
+  const { loader, applied, reply, answer } = harness();
   void loader.load('A');
-  await settle();
+  assert.ok(await until(() => answer.has('A')), 'A is asked');
   reply('A', 19_000);
-  await settle();
+  assert.ok(await until(() => applied.some((c) => c.first === '2022-01-08')), 'A is applied');
   assert.equal(applied[applied.length - 1].first, '2022-01-08');
   void loader.load('B');
   assert.equal(applied[applied.length - 1].owed.size, 0, 'A\'s calendar does not stand under B');

@@ -42,9 +42,10 @@
 //! [`SecondChecks::status_of`] is then one hash probe for the symbol, one
 //! subtraction for the day and one 20-byte read from memory: O(1), measured
 //! by every run that writes a version (its timings file) and named in
-//! `docs/06-limits.md` (L-T2S-09).
+//! `docs/06-limits.md` (L-T2S-09); proved against a one-symbol baseline by
+//! `cli::tick_second_check::tests::a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use pull::session::Day;
@@ -121,10 +122,13 @@ impl Status {
         }
     }
 
-    /// The status a code names.
+    /// The status a code names: code `c` is `ALL[c - 1]`, one bounds-checked
+    /// read. The codes are `ALL`'s order, which the const item after this
+    /// `impl` proves at compile time.
     #[must_use]
     pub fn from_code(code: u8) -> Option<Self> {
-        Self::ALL.into_iter().find(|s| s.code() == code)
+        let at = usize::from(code.checked_sub(1)?);
+        Self::ALL.get(at).copied()
     }
 
     /// The status a CSV `status` cell names: its word before any `:`.
@@ -183,10 +187,13 @@ impl Source {
         }
     }
 
-    /// The source a code names.
+    /// The source a code names: code `c` is `ALL[c - 1]`, one bounds-checked
+    /// read. The codes are `ALL`'s order, which the const item after this
+    /// `impl` proves at compile time.
     #[must_use]
     pub fn from_code(code: u8) -> Option<Self> {
-        Self::ALL.into_iter().find(|s| s.code() == code)
+        let at = usize::from(code.checked_sub(1)?);
+        Self::ALL.get(at).copied()
     }
 
     /// The CSV word.
@@ -200,12 +207,40 @@ impl Source {
         }
     }
 
-    /// The source a CSV word names.
+    /// The source a CSV word names, by the same four words [`Self::word`]
+    /// writes (`every_code_and_word_of_the_index_reads_back_in_one_step` reads
+    /// every source back through both).
     #[must_use]
     pub fn of_word(word: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|s| s.word() == word)
+        match word {
+            "archive_member" => Some(Self::ArchiveMember),
+            "tickstore_day" => Some(Self::TickstoreDay),
+            "unrecorded" => Some(Self::Unrecorded),
+            "archive_not_the_landing_source" => Some(Self::NotTheLandingSource),
+            _ => None,
+        }
     }
 }
+
+/// `Status::from_code` and `Source::from_code` read `ALL[code - 1]`: that is
+/// right only while each table is in code order, 1 first. A reordered or
+/// renumbered table fails the build here, never a lookup at run time; a
+/// table that gains or loses an entry fails it too, at the destructuring.
+const _: () = {
+    let [a, b, c, d, e, f, g, h] = Status::ALL;
+    assert!(
+        a.code() == 1
+            && b.code() == 2
+            && c.code() == 3
+            && d.code() == 4
+            && e.code() == 5
+            && f.code() == 6
+            && g.code() == 7
+            && h.code() == 8
+    );
+    let [p, q, r, s] = Source::ALL;
+    assert!(p.code() == 1 && q.code() == 2 && r.code() == 3 && s.code() == 4);
+};
 
 /// One share-day's answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,11 +407,21 @@ pub fn encode(
     csv_digest: [u8; 32],
 ) -> Result<Vec<u8>, String> {
     let (first, days) = year_span(year)?;
-    let mut names: Vec<&str> = cells.iter().map(|(s, _, _)| *s).collect();
+    // One hash insert per cell gathers the distinct symbols; only those are
+    // sorted (the table's on-disk order), and each cell then finds its row
+    // by one hash probe, never by a search of the table.
+    let mut distinct: HashSet<&str> = HashSet::with_capacity(cells.len());
+    for (symbol, _, _) in cells {
+        distinct.insert(*symbol);
+    }
+    let mut names: Vec<&str> = distinct.into_iter().collect();
     names.sort_unstable();
-    names.dedup();
-    if let Some(bad) = names.iter().find(|n| n.contains('\n') || n.is_empty()) {
-        return Err(format!("{bad:?} cannot be an index symbol"));
+    let mut row_of: HashMap<&str, usize> = HashMap::with_capacity(names.len());
+    for (row, name) in names.iter().enumerate() {
+        if name.contains('\n') || name.is_empty() {
+            return Err(format!("{name:?} cannot be an index symbol"));
+        }
+        row_of.insert(name, row);
     }
     let table: String = names.iter().flat_map(|n| [*n, "\n"]).collect();
     let n_symbols = u32::try_from(names.len()).map_err(|_| "too many symbols".to_owned())?;
@@ -410,9 +455,9 @@ pub fn encode(
     let base = out.len();
     out.resize(base + cells_len, 0);
     for (symbol, day, status) in cells {
-        let row = names
-            .binary_search(symbol)
-            .map_err(|_| format!("{symbol} is not in the table"))?;
+        let row = *row_of
+            .get(symbol)
+            .ok_or_else(|| format!("{symbol} is not in the table"))?;
         let at = day
             .days_from_epoch()
             .checked_sub(first)

@@ -124,6 +124,7 @@ pub const BENCHES_OWED: &[Owed] = &[
             "/masters/refresh",
             "/page-report",
             "/pull/fno",
+            "/pull/quarantine",
             "/pull/recovery",
             "/pull/repair",
             "/pull/run",
@@ -203,6 +204,11 @@ pub const BENCHES_OWED: &[Owed] = &[
             "/masters",
             "/masters/status.json",
             "/pull",
+            // R4-18's plan (owed here by BASE-REDS-1023, 26 Oct 2026, D-7150
+            // addendum): one plan file and the months it names, O(plan + months
+            // named), bounded by the plan; the /ingest quarantine panel reads it,
+            // not /db. The press, `/pull/quarantine`, is a write (above).
+            "/pull/quarantine.json",
             "/pull/recovery.json",
             "/pull/repair.json",
             "/pull/run.json",

@@ -3490,3 +3490,30 @@ fn no_real_option_file_of_2018_ends_in_a_bare_cr() {
     );
     assert_eq!(bare_cr, 0, "a real file ends in a bare CR");
 }
+
+/// `header_trailing` asks the two known headers in order, two probes and no
+/// search (gate 11 rule 6, BASE-REDS-1023), and answers exactly what the
+/// search it replaced answered at every edge: either header bare, either
+/// header with 1 and with `MAX_TRAILING_EMPTY` empty fields, one past it,
+/// a non-empty trailing field, a CR left on, an empty line, a header cut
+/// short by one byte, and the two headers glued together.
+#[test]
+fn the_header_reader_answers_both_headers_at_every_trailing_edge() {
+    for known in [HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED] {
+        let with = |tail: &str| format!("{known}{tail}").into_bytes();
+        assert_eq!(header_trailing(known.as_bytes()), Some(0), "{known}");
+        assert_eq!(header_trailing(&with(",")), Some(1));
+        let most = ",".repeat(MAX_TRAILING_EMPTY);
+        assert_eq!(header_trailing(&with(&most)), Some(MAX_TRAILING_EMPTY));
+        assert_eq!(header_trailing(&with(&format!("{most},"))), None);
+        assert_eq!(header_trailing(&with(",x")), None);
+        assert_eq!(header_trailing(&with(", ")), None);
+        assert_eq!(header_trailing(&with("\r")), None);
+        let cut = &known.as_bytes()[..known.len() - 1];
+        assert_eq!(header_trailing(cut), None);
+    }
+    assert_eq!(header_trailing(b""), None);
+    let glued = format!("{HEADER_OPEN_INTEREST}{HEADER_OPEN_INTEREST_SPACED}");
+    assert_eq!(header_trailing(glued.as_bytes()), None);
+    assert_ne!(HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED);
+}

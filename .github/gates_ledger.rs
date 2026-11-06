@@ -1516,6 +1516,25 @@ const ALLOW_UNSIZED: Allow = &[
     // `OnceLock` builds it. Reason in docs/06-limits.md, "Gate 11 —
     // BASE-GATE11". Its F&O spans map is sized instead (rewritten).
     ("crates/pull/src/reference_data.rs", 2),
+    // BASE-REDS-1023, 24 Oct 2026 (D-7150 addendum): DATA-2, merged after
+    // the 23 Oct run. `Sources::open` keys its map by the DISTINCT archive
+    // paths the year's landings recorded (one per GDFL delivery a run met),
+    // filled once per run before any day is checked; the count is not known
+    // before that walk and the items it walks are the whole year's, so sizing
+    // to them would reserve ~100,000 slots for a handful. Its three other
+    // sets were pre-sized instead. Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: DATA-2".
+    ("crates/cli/src/tick_second_check.rs", 1),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): DATA-1w, merged after
+    // the 24 Oct run. `feed_checks_files.rs`: the four process caches
+    // (`FEED_LISTINGS`, `TICK_LISTINGS` keyed by folder, `FEED_MONTHS`,
+    // `TICK_YEARS` keyed by folder and month or year) start empty inside a
+    // `LazyLock` and gain one entry the first time a folder or a month is
+    // asked, at most the archive's months (about 100); a FeedMonth's `slots`
+    // starts empty before its rows are counted and gains one entry a share
+    // (at most the F&O pool). Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks_files.rs", 5),
 ];
 
 /// Rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -1703,6 +1722,18 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — BASE-GATE11". The calendar's sort of
     // its unmeasured days was rewritten instead.
     ("crates/costs/src/lot.rs", 1),
+    // BASE-REDS-1023, 24 Oct 2026 (D-7150 addendum): DATA-2's batch check,
+    // which no request reaches. tick_second_check.rs: the segment numbers of
+    // one year's folder listing (once per run), the unknown `--symbols`
+    // names (the operator's own list, once per run), and each day's segment
+    // lines and each version's whole-year lines (once per file written, the
+    // byte order a reader and a re-run compare). tick_second_index.rs: the
+    // DISTINCT symbols of one index (its on-disk table order, once per index
+    // written; a lookup is one hash probe), the segment numbers and the
+    // years of one folder listing (once per open). Reason and measured
+    // phases in docs/06-limits.md, "Gate 11 — BASE-REDS-1023: DATA-2".
+    ("crates/cli/src/tick_second_check.rs", 4),
+    ("crates/cli/src/tick_second_index.rs", 3),
     // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `CasFlags::refusals`
     // puts ONE request's refused days in day order, at most one a day of a
     // page of `PAGE_DAYS` = 92, once per request. Reason in
@@ -1720,6 +1751,20 @@ const ALLOW_SORT: Allow = &[
     // "Gate 11 — R4-28, declared at its merge", and L-R428-13. `Book::of`'s
     // sort was removed instead: it checks the order it is given.
     ("crates/pull/src/master_snapshots.rs", 3),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): DATA-1w and R4-18,
+    // merged after the 24 Oct run; no request reaches any of them.
+    // `feed_checks_files.rs`: `group_by_share` puts one month's shares in
+    // symbol order once per load of a year (at most the F&O pool).
+    // `store/src/quarantine.rs`: `stamps_of` orders one month's set-aside
+    // stamps once per door that offers it bars (at most the month's minutes,
+    // inside a pass already O(ledger)); `Summary::load` keeps an instrument's
+    // causes ordered (at most `Cause::ALL`, a compile-time table); `judge`
+    // and `apply_month` order the operator's named stamps and the owed ones
+    // once per month applied (at most the month's minutes), which `held_at`
+    // reads in one merge pass. Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks_files.rs", 1),
+    ("crates/store/src/quarantine.rs", 4),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1835,7 +1880,12 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/calendar_record.rs", 2),
     ("crates/api/src/census.rs", 1),
     ("crates/api/src/chain.rs", 2),
-    ("crates/api/src/dayflags.rs", 2),
+    // 2 -> 5, BASE-REDS-1023 (26 Oct, D-7150 addendum): R3-13 added four
+    // searches of one day's `(ImportKind, line)` pairs, at most one per
+    // `ImportKind` (a compile-time enum of four), once per record, and
+    // removed one; docs/06-limits.md, "Gate 11 — BASE-REDS-1023: the 24..26
+    // Oct merges".
+    ("crates/api/src/dayflags.rs", 5),
     // api/src/disk_route.rs 1 -> 0, tightened by BASE-GATE11 (D-6628): RUST-1
     // measures the disk in-process, so `parse_df`'s scan of one df line is gone.
     ("crates/api/src/gaps_route.rs", 1),
@@ -1857,7 +1907,11 @@ const ALLOW_SCAN: Allow = &[
     // site into the day file (its `gdfl_import.rs` entry is gone with it).
     ("crates/cli/src/gdfl_import_guard.rs", 2),
     ("crates/cli/src/watchdog_command.rs", 1),
-    ("crates/pull/src/gdfl_import_day.rs", 1),
+    // BASE-REDS-1023 (D-7150): `day::decisive` is one pass now, so the day
+    // file has no rule-6 site and its entry is gone; `keep_nearest`'s
+    // `position` walks at most `UNKNOWN_SHOWN` = 4 kept stems, a
+    // compile-time bound (docs/06-limits.md, "Gate 11 — BASE-REDS-1023").
+    ("crates/pull/src/gdfl_import.rs", 1),
     // GF-1, 18 Oct 2026: R4-06, merged after GF-1's run of 17 Oct; reason in
     // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
     // merged": the eight-word `NEVER_AUTOMATIC` table over a kind of at
@@ -1911,14 +1965,106 @@ const ALLOW_SCAN: Allow = &[
     // table of ten rungs, once per request. Reason in docs/06-limits.md,
     // "Gate 11 — R3-13".
     ("crates/api/src/dayflags_rules.rs", 1),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): the 24..26 Oct merges.
+    // `feed_checks.rs`: `NotTradable::ALL`, a compile-time table, once per
+    // request. `feed_checks_files.rs`: each of `FEED_KEPT`'s compile-time
+    // column names found once per load among a header this build checked
+    // equal to its own `COLUMNS`. `zerodha_quarantine.rs`: one validation
+    // pass over the plan's own stamps once per month applied, refusing the
+    // first before the listing day. `master_snapshots.rs`: `Change::ALL`, a
+    // compile-time table, once per diff line read. `store/src/quarantine.rs`:
+    // `Cause::ALL` and the three scopes, compile-time tables, once per
+    // ledger field; the ledger's line split (one pass over the bytes read,
+    // each byte once); and one validation pass over the named stamps in
+    // `judge`, once per month applied. Reason in docs/06-limits.md, "Gate 11
+    // — BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks.rs", 1),
+    ("crates/api/src/feed_checks_files.rs", 2),
+    ("crates/cli/src/zerodha_quarantine.rs", 1),
+    ("crates/pull/src/master_snapshots.rs", 1),
+    ("crates/store/src/quarantine.rs", 5),
 ];
 
-/// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
-/// saw, unread; each was opened and moved into `allow_scan` with its bound.
-/// The list stays, empty, so a future change to rule 6 that surfaces sites
-/// it cannot classify at once has a place that says so rather than a silent
-/// raise of `allow_scan`. It may only shrink, and it is at zero.
-const ALLOW_SCAN_UNREAD: Allow = &[];
+/// EMPTY SINCE D-1121 UNTIL D-7151. D-1115 pinned the 41 chained searches
+/// rule 6 first saw, unread; each was opened and moved into `allow_scan` with
+/// its bound. The list stayed, empty, so a future change to rule 6 that
+/// surfaces sites it cannot classify at once has a place that says so rather
+/// than a silent raise of `allow_scan`. It may only shrink.
+///
+/// D-7151 (BASE-REDS-1023, 23 Oct 2026) IS THAT CHANGE: rule 6 now reads
+/// `.into_iter()`, `.iter_mut()` and `.rev()` searches and `find_map`, and
+/// surfaced 108 sites in 63 production files that its old spelling never
+/// read. Each count below is that file's measured excess over `allow_scan`
+/// at e0668a4bd + this change, pinned UNREAD: no bound is claimed for any of
+/// them here. A later package opens each, moves it into `allow_scan` with
+/// its bound or removes the search, and lowers the count here; a NEW site in
+/// any file is refused, because the sum is exact. docs/06-limits.md
+/// L-BRED23-02 names the list and its owner.
+const ALLOW_SCAN_UNREAD: Allow = &[
+    ("crates/api/src/autopilot.rs", 2),
+    ("crates/api/src/bars_export.rs", 1),
+    ("crates/api/src/bars_route.rs", 3),
+    ("crates/api/src/bars_series.rs", 1),
+    ("crates/api/src/bars_sort.rs", 2),
+    ("crates/api/src/census.rs", 1),
+    ("crates/api/src/census_cache.rs", 2),
+    ("crates/api/src/chain.rs", 1),
+    ("crates/api/src/coverage.rs", 1),
+    ("crates/api/src/dayflags.rs", 5),
+    ("crates/api/src/import_journal.rs", 1),
+    ("crates/api/src/imports.rs", 3),
+    ("crates/api/src/ingest.rs", 5),
+    ("crates/api/src/logs.rs", 3),
+    ("crates/api/src/provenance.rs", 2),
+    ("crates/api/src/pullrun.rs", 4),
+    ("crates/api/src/scrub_route.rs", 2),
+    ("crates/api/src/server.rs", 3),
+    ("crates/api/src/settings_route.rs", 3),
+    ("crates/api/src/sweeprun.rs", 1),
+    ("crates/cli/src/census_recount.rs", 1),
+    ("crates/cli/src/feed_reconcile.rs", 1),
+    ("crates/cli/src/fold_audit.rs", 1),
+    ("crates/cli/src/gdfl_import_command.rs", 2),
+    ("crates/cli/src/index_consistency.rs", 2),
+    ("crates/cli/src/lib.rs", 1),
+    ("crates/cli/src/research_policy.rs", 3),
+    ("crates/cli/src/scrub_blocks.rs", 1),
+    ("crates/cli/src/series_identity.rs", 1),
+    ("crates/cli/src/srt_builder.rs", 1),
+    ("crates/cli/src/stored.rs", 1),
+    ("crates/cli/src/tix_rebuilder.rs", 1),
+    ("crates/cli/src/upkeep_command.rs", 1),
+    ("crates/costs/src/stack.rs", 1),
+    ("crates/pull/src/calendar.rs", 1),
+    ("crates/pull/src/census_store.rs", 1),
+    ("crates/pull/src/config.rs", 1),
+    ("crates/pull/src/expiry_alias.rs", 1),
+    ("crates/pull/src/fetch.rs", 1),
+    ("crates/pull/src/fno_membership.rs", 1),
+    ("crates/pull/src/gdfl_dropbox.rs", 2),
+    ("crates/pull/src/gdfl_import.rs", 2),
+    ("crates/pull/src/gdfl_import_journal.rs", 2),
+    ("crates/pull/src/gdfl_import_lineage.rs", 1),
+    ("crates/pull/src/gdfl_lineage.rs", 1),
+    ("crates/pull/src/gdfl_nfo.rs", 1),
+    ("crates/pull/src/gdfl_run.rs", 3),
+    ("crates/pull/src/http.rs", 1),
+    ("crates/pull/src/manifest.rs", 1),
+    ("crates/pull/src/masters.rs", 1),
+    ("crates/pull/src/reference_data.rs", 2),
+    ("crates/pull/src/rehearsal.rs", 1),
+    ("crates/pull/src/riskfree.rs", 1),
+    ("crates/pull/src/upkeep.rs", 2),
+    ("crates/pull/src/zerodha_spool.rs", 1),
+    ("crates/pull/src/zerodha_verify.rs", 4),
+    ("crates/runner/src/admission.rs", 1),
+    ("crates/runner/src/exit_grid_policy.rs", 1),
+    ("crates/store/src/catalog.rs", 1),
+    ("crates/store/src/provenance.rs", 2),
+    ("crates/store/src/settings.rs", 1),
+    ("crates/telemetry/src/level.rs", 1),
+    ("crates/telemetry/src/sink.rs", 5),
+];
 
 /// Rule 7: the ambiguous membership test.
 const ALLOW_MEMBER: Allow = &[
@@ -2038,7 +2184,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),
-    ("crates/pull/src/gdfl_import.rs", 1), // 3 -> 4, WP-12f merged after GF-1, GF-1 16 Oct; 4 -> 1, three moved to gdfl_import_journal.rs by R3-35, GF-1 17 Oct (docs/06-limits.md)
+    ("crates/pull/src/gdfl_import.rs", 3), // 3 -> 4, WP-12f merged after GF-1, GF-1 16 Oct; 4 -> 1, three moved to gdfl_import_journal.rs by R3-35, GF-1 17 Oct; 1 -> 3, BASE-REDS-1023: IA-16 and IA-9 (the three-entry REPAIRABLE_HOLES, the day's index files against SWEPT, the rescan's HashSet probe; docs/06-limits.md)
     ("crates/pull/src/gdfl_import_lineage.rs", 1),
     ("crates/pull/src/gdfl_import_quality.rs", 1),
     ("crates/pull/src/gdfl_lineage.rs", 4),
@@ -2092,6 +2238,21 @@ const ALLOW_MEMBER: Allow = &[
     // two comparisons, the shape rule 7 permits. Reason in
     // docs/06-limits.md, "Gate 11 — BASE-GATE11".
     ("crates/pull/src/reference_data.rs", 1),
+    // BASE-REDS-1023, 23 Oct 2026 (D-7150): IA-16, merged after
+    // BASE-GATE11. `Cause::is_hole` and `day::source_lost` probe the
+    // five-entry `HOLE_REASONS` and the two-entry `SOURCE_UNREACHED`
+    // compile-time tables, a bound rule 7 names; reason in
+    // docs/06-limits.md, "Gate 11 — BASE-REDS-1023".
+    ("crates/pull/src/gdfl_import_causes.rs", 1),
+    ("crates/pull/src/gdfl_import_day.rs", 1),
+    // BASE-REDS-1023, 24 Oct 2026 (D-7150 addendum): DATA-2. Each of the
+    // four is a probe rule 7 names: `symbol_cell`'s printable test is the
+    // RangeInclusive `(0x20..=0x7E)`, two comparisons; the day's filed
+    // auction prints are a `HashSet<(i64, i64, u64, u32)>`, the share
+    // listing's `--symbols` filter a `HashSet<String>` and the days the
+    // `--archive` already answered a `HashSet<String>`, one hash probe
+    // each. Reason in docs/06-limits.md, "Gate 11 — BASE-REDS-1023: DATA-2".
+    ("crates/cli/src/tick_second_check.rs", 4),
     // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `said_of` asks a
     // `HashSet` sized once by the month's sidecar records whether a day is
     // filed: one hash probe (it replaced a sort and a binary search). Reason
@@ -2104,6 +2265,23 @@ const ALLOW_MEMBER: Allow = &[
     // removed instead: the token index's own slot answers it. Reason in
     // docs/06-limits.md, "Gate 11 — R4-28, declared at its merge".
     ("crates/pull/src/master_snapshots.rs", 3),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): the 24..26 Oct merges.
+    // `feed_checks.rs` and `quarantine_route.rs`: a query field against the
+    // route's compile-time list of fields (at most six), once per field.
+    // `gdfl_format.rs`: `first_sight` asks a `HashSet` (one probe).
+    // `store/src/quarantine.rs`: a line's scope against the one to three
+    // scopes a caller names, and a cause against an instrument's causes (at
+    // most `Cause::ALL`); and four hash probes in `judge` (the `dropped`,
+    // `dropping`, held and named stamp sets this package built in place of
+    // three binary searches). `store/src/repair.rs`: `outside_quarantine`
+    // asks the set-aside stamps, a `HashSet` built once, one probe an offered
+    // bar (in place of a binary search). Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks.rs", 1),
+    ("crates/api/src/quarantine_route.rs", 1),
+    ("crates/pull/src/gdfl_format.rs", 1),
+    ("crates/store/src/quarantine.rs", 6),
+    ("crates/store/src/repair.rs", 1),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {
@@ -2201,11 +2379,35 @@ fn rule5d(r: &str) -> bool {
     })
 }
 
-/// Rule 6: `\.iter\(\)\.(find|position|rposition)\(`.
+/// Rule 6: `\.(iter|into_iter|iter_mut)\(\)(\.rev\(\))?\.(find|find_map|position|rposition)\(`.
+///
+/// THE SPELLINGS WIDENED (BASE-REDS-1023, D-7151). It read only
+/// `.iter().find/position/rposition(`, so the same linear search written
+/// over an owned or a mutable iterator, reversed, or as `find_map` passed
+/// unseen (BASE-GATE11's merge agent, verify-BASE-GATE11-r1). It still
+/// cannot see `.any(`/`.all(` (a predicate over a compile-time table is the
+/// common, bounded use and the workspace holds hundreds) or a hand-written
+/// loop; both are named in docs/06-limits.md L-BRED23-02.
+///
+/// THE OPENERS ARE THE REGEX'S PARTS, NOT A HAND LIST (repair 1, D-7151
+/// addendum). A hand list of five openers left out `.iter_mut().rev().`,
+/// which the regex above names (verify-BASE-REDS-1023-r1, attacks A1 and
+/// A11). Each base is read, then the one optional `.rev()`, then `.` and a
+/// search word, so the matcher and its doc cannot disagree again;
+/// `gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not` checks
+/// every base crossed with every search word, reversed or not.
 fn rule6(r: &str) -> bool {
-    [".iter().find(", ".iter().position(", ".iter().rposition("]
-        .iter()
-        .any(|w| r.contains(w))
+    const BASES: [&str; 3] = [".iter()", ".into_iter()", ".iter_mut()"];
+    const REV: &str = ".rev()";
+    const SEARCHES: [&str; 4] = ["find(", "find_map(", "position(", "rposition("];
+    BASES.iter().any(|base| {
+        r.match_indices(base).any(|(at, _)| {
+            let tail = &r[at + base.len()..];
+            let tail = tail.strip_prefix(REV).unwrap_or(tail);
+            tail.strip_prefix('.')
+                .is_some_and(|t| SEARCHES.iter().any(|s| t.starts_with(s)))
+        })
+    })
 }
 
 /// Rule 7: `\.contains\(&`.
@@ -2286,7 +2488,7 @@ fn disarms(scope: &[(String, &Line)]) -> Vec<String> {
     for (file, l) in scope {
         let t = ltrim(&l.text);
         if d <= 0 {
-            if !(t.starts_with(ALLOW_ATTR) || t.starts_with("#[expect(")) {
+            if !opens_disarm(t) {
                 continue;
             }
             acc = t.to_owned();
@@ -2445,6 +2647,21 @@ const DENIED_LINTS: [&str; 6] = [
 /// The opening of an allow attribute, in pieces so this file never carries
 /// one whole.
 const ALLOW_ATTR: &str = concat!("#[", "allow(");
+
+/// The opening of an INNER allow attribute, `#![allow(`, in pieces too.
+const ALLOW_INNER: &str = concat!("#![", "allow(");
+
+/// Whether `t` (leading blanks dropped) opens an allow or an expect
+/// attribute, outer or INNER (BASE-REDS-1023, D-7151): a file-level
+/// inner allow of `clippy::unwrap_used` at the top of a production file
+/// disarms the lint for the whole file, and rule 5c read only the outer
+/// `#[` forms, so it passed unseen (verify-BASE-GATE11-r1).
+fn opens_disarm(t: &str) -> bool {
+    t.starts_with(ALLOW_ATTR)
+        || t.starts_with("#[expect(")
+        || t.starts_with(ALLOW_INNER)
+        || t.starts_with("#![expect(")
+}
 
 /// `^LINT[[:space:]]*=[[:space:]]*"deny"`.
 fn denies(manifest: &str, lint: &str) -> bool {
@@ -3741,6 +3958,119 @@ mod tests {
         assert!(g11(&[("crates/a/src/x.rs", &src)], &lists()).0);
     }
 
+    /// BASE-REDS-1023 (D-7151): the two gaps verify-BASE-GATE11-r1 named.
+    /// An INNER allow or expect of a denied lint, one line or many, is a
+    /// rule 5c disarm like an outer one, and a harmless inner allow is not;
+    /// rule 6 reads a search over an owned, a mutable or a reversed
+    /// iterator, and `find_map`, as it reads `.iter().find(`, and still
+    /// passes the predicates and maps it was never about.
+    #[test]
+    fn gate11_reads_an_inner_allow_and_every_spelling_of_a_linear_search() {
+        let inner = concat!("#![", "allow(");
+        for src in [
+            format!("{inner}clippy::unwrap_used)]\nfn a() {{}}\n"),
+            format!("{inner}\n    clippy::panic,\n    reason = \"x\"\n)]\nfn a() {{}}\n"),
+            "#![expect(clippy::expect_used, reason = \"x\")]\nfn a() {}\n".to_owned(),
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", &src)], &lists());
+            assert!(!ok, "{src}");
+            assert!(text.contains("rule 5c: 1 occurrence(s)"), "{src}\n{text}");
+        }
+        let clean = format!("{inner}dead_code)]\nfn a() {{}}\n");
+        assert!(g11(&[("crates/a/src/x.rs", &clean)], &lists()).0);
+        // The lint on a later line than the opening one, with a line between
+        // that closes nothing: the depth is the SUM of the lines' brackets,
+        // so the attribute is read whole to its `)]` (BASE-REDS-1023 repair
+        // 3, verify r3's M2 survivor `+=` read as `*=`).
+        let late = format!(
+            "{ALLOW_ATTR}\n    reason = \"x\",\n    clippy::unwrap_used,\n)]\nfn a() {{}}\n"
+        );
+        let (ok, text) = g11(&[("crates/a/src/x.rs", &late)], &lists());
+        assert!(!ok, "{late}");
+        assert!(text.contains("rule 5c: 1 occurrence(s)"), "{text}");
+        // A line that NAMES a denied lint and opens no attribute is not a
+        // disarm: a comment, and a string in code (verify r3's M2 survivor
+        // `opens_disarm` read as `true`).
+        for named in [
+            "// clippy::unwrap_used is denied at the workspace root\nfn a() {}\n",
+            "fn a() -> &'static str {\n    \"clippy::panic\"\n}\n",
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", named)], &lists());
+            assert!(ok, "{named}: {text}");
+        }
+        for hit in [
+            "let p = xs.into_iter().find(|x| x.ok());\n",
+            "let p = xs.into_iter().position(|x| x.ok());\n",
+            "let p = xs.iter_mut().find(|x| x.ok());\n",
+            "let p = xs.iter().rev().find(|x| x.ok());\n",
+            "let p = xs.into_iter().rev().position(|x| x.ok());\n",
+            "let p = xs.iter().find_map(|x| x.ok());\n",
+            "let p = xs.into_iter().rposition(|x| x.ok());\n",
+        ] {
+            refused(hit, "6");
+        }
+        for clean in [
+            "let p = xs.into_iter().map(f);\n",
+            "let p = xs.iter().rev().map(f);\n",
+            "let p = xs.iter_mut().for_each(f);\n",
+            "let p = xs.iter().finder();\n",
+            "let p = xs.iter().any(f);\n",
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", clean)], &lists());
+            assert!(ok, "{clean}: {text}");
+        }
+        // A formatted chain of the new spellings folds into one record.
+        let src = "fn a() {\n    let p = xs\n        .into_iter()\n        .rev()\n        .find(f);\n}\n";
+        let (ok, text) = g11(&[("crates/a/src/x.rs", src)], &lists());
+        assert!(!ok);
+        assert!(text.contains("rule 6: 1 occurrence(s)"), "{text}");
+    }
+
+    /// BASE-REDS-1023 repair 1 (D-7151 addendum, verify-BASE-REDS-1023-r1
+    /// attacks A1 and A11): rule 6's own regex reads
+    /// `(iter|into_iter|iter_mut)(.rev())?` and the openers are now built
+    /// from those parts, so a reversed MUTABLE iterator is a search like the
+    /// other five openers, on one line or over a formatted chain, for every
+    /// search word. Every opener crossed with every search word is checked,
+    /// so a part added to one list and not the other fails here.
+    #[test]
+    fn gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not() {
+        for base in ["iter", "into_iter", "iter_mut"] {
+            for rev in ["", ".rev()"] {
+                for search in ["find", "find_map", "position", "rposition"] {
+                    let one = format!("let p = xs.{base}(){rev}.{search}(|x| **x == 3);\n");
+                    refused(&one, "6");
+                    let split = format!(
+                        "fn a() {{\n    let p = xs\n        .{base}()\n{}        .{search}(f);\n}}\n",
+                        if rev.is_empty() {
+                            ""
+                        } else {
+                            "        .rev()\n"
+                        }
+                    );
+                    let (ok, text) = g11(&[("crates/a/src/x.rs", &split)], &lists());
+                    assert!(!ok, "{split}");
+                    assert!(text.contains("rule 6: 1 occurrence(s)"), "{split}\n{text}");
+                }
+            }
+        }
+        // The reversal is optional, never a wildcard: another adapter between
+        // the opener and the search is not this rule's spelling (named in
+        // docs/06-limits.md L-BRED23-12), a near word is not a search, and a
+        // search word the regex's `\.` does not lead is not a call.
+        for clean in [
+            "let p = xs.iter_mut().rev().map(f);\n",
+            "let p = xs.iter_mut().rev().rev_find(f);\n",
+            "let p = xs.iter_mut().rev().finder();\n",
+            "let p = xs.iter_mut().reverse().find(f);\n",
+            "let p = xs.iter_mut().rev()find(f);\n",
+            "let p = xs.iter()position(f);\n",
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", clean)], &lists());
+            assert!(ok, "{clean}: {text}");
+        }
+    }
+
     #[test]
     fn gate11_counts_an_assert_only_inside_a_function() {
         let src = "const _: () = {\n    assert!(N > 0);\n};\npub const ONE: u8 = 1;\nfn f() {\n    assert!(x);\n}\n";
@@ -3811,7 +4141,10 @@ mod tests {
                 assert!(seen.insert(*p), "{p} listed twice");
             }
         }
-        assert!(ALLOW_SCAN_UNREAD.is_empty());
+        // It may only shrink (D-1121): empty until D-7151 pinned the 108
+        // sites in 63 files the widened rule 6 surfaced, unread; never more.
+        let unread: usize = ALLOW_SCAN_UNREAD.iter().map(|(_, n)| *n).sum();
+        assert!(unread <= 108 && ALLOW_SCAN_UNREAD.len() <= 63, "{unread}");
         assert!(
             ALLOW_PENDING
                 .iter()

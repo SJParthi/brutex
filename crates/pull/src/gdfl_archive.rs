@@ -204,6 +204,7 @@ const ZIP64_RECORD_SIZE_FIELD: u64 = 44;
 /// `end_at`, and states the size of a record with no extensible data;
 /// `None` otherwise, when the locator's stated offset is the only word on
 /// it. Two reads, O(1).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn zip64_record_at<B: ReadAt>(span: &Span<'_, B>, end_at: u64) -> Result<Option<u64>, CmRefusal> {
     let Some(at) = end_at.checked_sub(20 + ZIP64_RECORD_LEN) else {
         return Ok(None);
@@ -223,6 +224,7 @@ fn zip64_record_at<B: ReadAt>(span: &Span<'_, B>, end_at: u64) -> Result<Option<
 /// where the prefix would put it is not a prefix: the walk that follows
 /// refuses it by what it finds (a record cut short, a size that does not
 /// match), as does one stated to run past `actual`. One 4-byte read, O(1).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn unprefixed<B: ReadAt>(
     span: &Span<'_, B>,
     actual: u64,
@@ -2487,5 +2489,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **THE END OF A ZIP, EVERY SIDE OF ITS TWO CHECKS**
+    /// (BASE-REDS-1023 repair 3, verify r3's sides no test took): an end
+    /// record nearer the start than a locator and a ZIP64 record can be
+    /// holds no ZIP64 record; bytes there without its signature hold none
+    /// either; and a directory stated short of where the next record starts
+    /// that holds no entry at all is a prefix by its count alone.
+    #[test]
+    fn a_short_tail_a_tail_without_the_zip64_record_and_an_empty_prefixed_directory() {
+        let bytes = vec![0_u8; 200];
+        let span = Span::of(&bytes, 200);
+        assert!(matches!(
+            zip64_record_at(&span, 20 + ZIP64_RECORD_LEN - 1),
+            Ok(None)
+        ));
+        assert!(matches!(zip64_record_at(&span, 150), Ok(None)));
+        assert!(matches!(
+            unprefixed(&span, 100, (10, 20, 0)),
+            Err(CmRefusal::ArchivePrefixed { bytes: 70 })
+        ));
+        assert!(
+            unprefixed(&span, 100, (10, 90, 0)).is_ok(),
+            "a directory that ends where the next record starts is not a prefix"
+        );
     }
 }

@@ -75,6 +75,8 @@
 //! `classify` at 1x/10x/100x the minute count, beside the rows that already
 //! exist for the manifest.
 
+use std::collections::HashMap;
+
 use brutex_core::isin::Isin;
 
 use crate::calendar::{self, Calendar, DayKind};
@@ -159,7 +161,7 @@ impl Reason {
 /// store. A session owed by nobody cannot be filled by a retry, a repair or
 /// another vendor, and counting it lost is what sent the operator after bars
 /// NSE never traded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotOwed {
     /// NSE independently documents that this exact symbol and ISIN did not
     /// trade that day: the interval and its two sources, as
@@ -550,23 +552,30 @@ impl Ledger {
     /// the days and the minutes it covers: what a page names beside the loss,
     /// so it states every class and its source rather than a bare total.
     ///
-    /// One pass over the runs, at most a few distinct answers (one interval
-    /// per documented interruption, one listing day, one removal day, unread):
-    /// O(runs), bounded by [`MAX_GAPS`].
+    /// One pass over the runs, bounded by [`MAX_GAPS`]: O(1) per run. Each
+    /// run finds its answer's row by one hash probe (BASE-REDS-1023, gate 11
+    /// rule 6, D-7147 addendum of 27 Oct 2026): a search through the answers
+    /// seen so far would cost each run the number of distinct answers, which
+    /// the data sets (one per listing day, removal day or interval) and not a
+    /// table, so a ledger of [`MAX_GAPS`] runs with as many answers was
+    /// quadratic. Proved by
+    /// `pull::gaps::not_owed_tests::not_owed_costs_the_same_with_one_answer_and_with_max_gaps_answers`.
     #[must_use]
     pub fn not_owed(&self) -> Vec<Excused> {
-        let mut out: Vec<Excused> = Vec::new();
+        let mut out: Vec<Excused> = Vec::with_capacity(NOT_OWED_KINDS);
+        let mut row_of: HashMap<NotOwed, usize> = HashMap::with_capacity(NOT_OWED_KINDS);
         for gap in &self.gaps {
             let Reason::NotOwed(why) = gap.reason else {
                 continue;
             };
-            if let Some(seen) = out.iter_mut().find(|seen| seen.why == why) {
+            if let Some(seen) = row_of.get(&why).and_then(|&row| out.get_mut(row)) {
                 if seen.last_day != gap.day {
                     seen.days = seen.days.saturating_add(1);
                     seen.last_day = gap.day;
                 }
                 seen.minutes = seen.minutes.saturating_add(gap.minutes());
             } else {
+                row_of.insert(why, out.len());
                 out.push(Excused {
                     why,
                     days: 1,
@@ -579,6 +588,11 @@ impl Ledger {
         out
     }
 }
+
+/// The four kinds of [`NotOwed`]: the starting size of [`Ledger::not_owed`]'s
+/// answer and its index, which grow past it only when the data holds more
+/// distinct answers than kinds.
+const NOT_OWED_KINDS: usize = 4;
 
 /// One not-owed answer of a [`Ledger`], and how much of it the ledger holds
 /// ([`Ledger::not_owed`]).

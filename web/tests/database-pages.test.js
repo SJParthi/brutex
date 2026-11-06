@@ -171,7 +171,7 @@ test('past the tries the grid quotes the server’s being-written sentence, neve
   let calls = 0;
   await assert.rejects(
     readWindowPage('feed=gdfl', 1, signal(), async () => { calls += 1; return old(); }, async () => {}),
-    (error) => /being written, ask again.*pid 7, thread import-1/.test(String(error?.message)) && !/HTTP 503/.test(String(error?.message))
+    (/** @type {any} */ error) => /being written, ask again.*pid 7, thread import-1/.test(String(error?.message)) && !/HTTP 503/.test(String(error?.message))
   );
   assert.equal(calls, SATURATED_TRIES);
 });

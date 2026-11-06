@@ -2762,3 +2762,54 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// **A REFRESH THAT NAMES A RESTATED DAY KEEPS IT RESTATED** (BASE-REDS-1023
+/// repair 3, verify r3's side no test took): a journal loaded with a
+/// whole-tree `done` of an auction-era share day under definition 3 answers
+/// the day restated past the append; a refresh that reads a later `begin` of
+/// a names key of the same day derives that day again, and it is still
+/// restated, as a load of every line says.
+#[test]
+fn a_refresh_that_names_a_restated_day_keeps_it_restated() {
+    let root = scratch("Wp12fRefreshRestated");
+    std::fs::create_dir_all(root.join("imports")).unwrap();
+    let path = journal_path(&root);
+    let on = day(2026, 8, 4);
+    std::fs::write(
+        &path,
+        format!(
+            "begin stocks {on} *\ndone stocks {on} * definition=3 files=1 seconds=1 failures=0\n"
+        ),
+    )
+    .unwrap();
+    let mut journal = Journal::load(path.clone()).unwrap();
+    let key = format!("stocks {on} *");
+    assert!(restated_past_append(
+        &journal,
+        &unheld,
+        ImportKind::Stocks,
+        &key,
+        on
+    ));
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "begin stocks {on} SYM001").unwrap();
+    }
+    journal.refresh().unwrap();
+    assert!(
+        restated_past_append(&journal, &unheld, ImportKind::Stocks, &key, on),
+        "still restated after the refresh derived the day again"
+    );
+    let reloaded = Journal::load(path).unwrap();
+    assert!(restated_past_append(
+        &reloaded,
+        &unheld,
+        ImportKind::Stocks,
+        &key,
+        on
+    ));
+}

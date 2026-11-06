@@ -22,7 +22,10 @@ import {
   EXPORT_CAP
 } from '../src/lib/db/bars-plan.js';
 
-/** The value of `pub const <name>: <type> = <digits>;` in a Rust file. */
+/**
+ * The value of `pub const <name>: <type> = <digits>;` in a Rust file.
+ * @param {string} file @param {string} name
+ */
 function rustConst(file, name) {
   const text = readFileSync(new URL(`../../crates/api/src/${file}`, import.meta.url), 'utf8');
   const pattern = new RegExp(`^pub const ${name}: [a-z0-9]+ = ([0-9_]+);$`, 'm');
@@ -32,13 +35,13 @@ function rustConst(file, name) {
 }
 
 test('each ceiling the browser copies equals the constant /settings.json serves', () => {
-  for (const [copy, file, name] of [
+  for (const [copy, file, name] of /** @type {[number, string, string][]} */ ([
     [LOCAL_SORT_BUDGET, 'settings_route.rs', 'BROWSER_SORT_BUDGET'],
     [EXPORT_CAP, 'settings_route.rs', 'EXPORT_CAP'],
     [WINDOW_PAGE_MAX, 'bars.rs', 'MAX_WINDOW_LIMIT'],
     [MAX_WINDOW_MONTHS, 'bars.rs', 'MAX_WINDOW_MONTHS'],
     [MAX_SERIES, 'bars_series.rs', 'MAX_SERIES']
-  ]) {
+  ])) {
     const served = rustConst(file, name);
     assert.ok(Number.isSafeInteger(served) && served > 0, `${name}: ${served}`);
     assert.equal(copy, served, `bars-plan.js holds ${copy} where ${name} is ${served}`);

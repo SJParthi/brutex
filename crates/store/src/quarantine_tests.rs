@@ -1991,3 +1991,43 @@ fn a_month_dropped_then_recorded_whole_counts_every_bar_and_names_every_cause() 
     assert_eq!((row.months, row.whole_months, row.bars), (1, 1, 6));
     assert_eq!(row.causes, vec![Cause::ForeignLevel, Cause::ZeroPrice]);
 }
+
+/// **A FEED NEVER QUARANTINED IS EMPTY, AND TWO MONTHS OF ONE SHARE ARE ONE
+/// ROW** (BASE-REDS-1023 repair 3, verify r3's sides no test took): with no
+/// index image and no ledger, the snapshot and the summary load empty, not
+/// refused; then two months recorded whole for one share fold into one
+/// instrument row of two months whose causes are set by the first month and
+/// kept by the second.
+#[test]
+fn a_feed_never_quarantined_is_empty_and_two_months_of_one_share_are_one_row() {
+    let store = Store::new("never-then-two");
+    let snapshot = Snapshot::load(&store.root, Vendor::Zerodha).expect("an empty snapshot");
+    assert_eq!(snapshot.len(), 0);
+    assert!(snapshot.get(minute("QFIXW", march())).is_none());
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("an empty summary");
+    assert!(summary.instrument("NSE", "CASH", "QFIXW").is_none());
+    let rows = [bar(0, 60)];
+    let april = YearMonth::new(2018, 4).expect("2018-04");
+    for month in [march(), april] {
+        record(
+            &store.root,
+            &Record {
+                path: minute("QFIXW", month),
+                scope: Scope::WholeMonth,
+                cause: Cause::BeforeListing,
+                stamps: &[],
+                bars: 1,
+                revision: 0,
+                source_digest: digest_of(&rows),
+                who: "t",
+                reason: "two months of one share",
+            },
+        )
+        .expect("records");
+    }
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("a summary");
+    let row = summary.instrument("NSE", "CASH", "QFIXW").expect("flagged");
+    assert_eq!((row.months, row.whole_months, row.bars), (2, 2, 2));
+    assert_eq!(row.causes, vec![Cause::BeforeListing]);
+    assert!(summary.month(minute("QFIXW", april)).is_some());
+}

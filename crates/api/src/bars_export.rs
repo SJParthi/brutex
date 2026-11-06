@@ -1156,15 +1156,6 @@ mod tests {
         lines.split_off(1)
     }
 
-    /// A file of `web/`, read as text: the browser's own statement of a
-    /// fact the server must agree with.
-    fn web(path: &str) -> String {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../web")
-            .join(path);
-        std::fs::read_to_string(&at).unwrap_or_else(|why| panic!("{}: {why}", at.display()))
-    }
-
     /// The next frame of an export body.
     fn next_frame(
         body: &mut ExportBody,
@@ -1314,18 +1305,15 @@ mod tests {
     }
 
     /// THE CEILING IS THE BROWSER'S: a query of exactly that many rows is
-    /// written whole, one more is refused with its count before a byte.
+    /// written whole, one more is refused with its count before a byte. That
+    /// the browser's `EXPORT_CAP` is this number is checked on the web side,
+    /// `web/tests/export-agrees-with-the-server.test.js`, which reads this
+    /// file as text: a crate test that opened `web/` failed gate 1e, which
+    /// builds and tests the workspace with the front end moved aside
+    /// (CLAUDE.md §2; BASE-REDS-1023, D-7153).
     #[tokio::test]
     async fn the_ceiling_is_the_browsers_and_a_larger_query_is_refused_before_a_byte() {
-        let plan = web("src/lib/db/bars-plan.js");
-        let cap = plan
-            .lines()
-            .find_map(|line| line.strip_prefix("export const EXPORT_CAP = "))
-            .expect("the browser's EXPORT_CAP");
-        assert_eq!(
-            cap.trim_end_matches(';').replace('_', ""),
-            EXPORT_CEILING.to_string()
-        );
+        assert_eq!(EXPORT_CEILING, 20_000);
         let store = Store::new("ceiling");
         store.write("INDEX", None, 5, 0, 10_000);
         store.write("INDEX", None, 6, 0, 10_000);
@@ -1351,20 +1339,15 @@ mod tests {
         );
     }
 
-    /// The header is the browser's bar CSV header, word for word.
+    /// The header is the browser's bar CSV header, word for word. The
+    /// browser's `BAR_CSV_COLS` is compared with `COLUMNS` on the web side,
+    /// `web/tests/export-agrees-with-the-server.test.js` (gate 1e, D-7153);
+    /// here the header is the columns, in their order.
     #[test]
     fn the_columns_are_the_browsers_bar_csv_columns() {
-        let export = web("src/lib/db/export.js");
-        let (_, cols) = export
-            .split_once("export const BAR_CSV_COLS = [")
-            .expect("the browser's BAR_CSV_COLS");
-        let (cols, _) = cols.split_once("];").expect("its end");
-        let labels: Vec<&str> = cols
-            .split("label: '")
-            .skip(1)
-            .map(|rest| rest.split_once('\'').expect("a quoted label").0)
-            .collect();
-        assert_eq!(labels, COLUMNS);
+        assert_eq!(COLUMNS.first().copied(), Some("feed"));
+        assert_eq!(COLUMNS.get(1).copied(), Some("instrument"));
+        assert_eq!(COLUMNS.get(2).copied(), Some("month"));
         assert_eq!(header_record(), format!("{}\r\n", COLUMNS.join(",")));
         assert_eq!(COLUMNS.len() - OPTION_COLUMNS, 23);
         assert_eq!(COLUMNS[23], "spot_paisa");

@@ -259,8 +259,9 @@ fn every_cache_is_warm_or_says_warming_after_a_restart() {
                 .flat_map(|feed| WARMED.into_iter().skip(1).map(move |name| (name, *feed))),
         )
         .collect();
-    // EVERY CENSUS READ UNDER THIS ROOT PAUSES, so the warm is caught warming.
-    slow_read::set(&store.root, 300);
+    // EVERY CENSUS READ UNDER THIS ROOT IS HELD, so the warm is caught warming
+    // however long this test takes to look; zero, below, lets it go.
+    slow_read::set(&store.root, READ_HELD_MS);
     let site = store.site();
     assert!(!in_background(&site), "not before the start");
     start(&site, &feeds).expect("the warm thread starts");
@@ -276,7 +277,7 @@ fn every_cache_is_warm_or_says_warming_after_a_restart() {
     assert_eq!(
         row_of(&listed, CENSUS, Vendor::Gdfl).state,
         WarmState::Warming,
-        "GDFL's census read takes 300 ms"
+        "GDFL's census read is held"
     );
     let order: Vec<(&str, Vendor)> = listed.iter().map(|row| (row.name, row.vendor)).collect();
     assert_eq!(
@@ -300,6 +301,8 @@ fn every_cache_is_warm_or_says_warming_after_a_restart() {
     assert_eq!(body["caches"][0]["feed"], "gdfl", "the offered feeds lead");
     assert_eq!(body["caches"][0]["state"], "warming");
 
+    // LET THE READS GO: from now each takes what is left of 300 ms.
+    slow_read::set(&store.root, 300);
     let ready = wait_ready(&site);
     slow_read::set(&store.root, 0);
     for (name, vendor) in &expected {
@@ -385,24 +388,290 @@ fn twenty_restarts(store: &Store, feeds: &[Vendor], caches: usize) {
 /// **A CENSUS CHANGE NEVER BLOCKS A REQUEST** (R3-09; DB-G80, RA-032). The
 /// census changes beside 1,000 feed-list requests while every census read
 /// under the store pauses five seconds: no request waits for it. Each is
-/// answered from the previous read and says so, none takes 50 ms, no request
-/// thread reads the census, and once the background re-read lands the
-/// change is served, current.
+/// answered from the previous read and says so until the re-read lands, none
+/// takes 50 ms, no request thread reads the census, and once the background
+/// re-read lands the change is served, current.
+///
+/// THE 50 MS BOUND HOLDS IN ONE OF UP TO [`NEVER_BLOCKS_RUNS`] RUNS, EACH A
+/// STORE OF ITS OWN, AND IS UNCHANGED (BASE-REDS-1023 repair 1, D-7152
+/// addendum). One run at load 35-43 failed with "a request waited: p50
+/// 531µs, p99 3.80ms, max 53.5ms": a request the scheduler held off the core
+/// for 53 ms, while a request that waited for the census would have waited
+/// for its five-second read. Interference only adds time, and a design that
+/// makes a request wait for the read pays the five seconds in every run, so
+/// it fails them all; every other assertion holds in every run.
+///
+/// THE RUNS ARE [`NEVER_BLOCKS_APART`] APART (BASE-REDS-1023 repair 8). Since
+/// repair 7 ended the held read at zero a run lasts well under a second, so
+/// seven runs fell inside a few seconds and one burst of load failed them all
+/// (the verifier's connection storm: "a request waited in every run", max 63
+/// to 97 ms, and 0 of about 400 runs outside it). Each run that does not hold
+/// now waits the read's five seconds before the next, as every run did
+/// before, so the seven sample the machine across more than half a minute.
 #[tokio::test(flavor = "current_thread")]
 async fn a_census_change_never_blocks_a_request() {
-    let mut store = Store::new("never-blocks", 64);
+    let held = first_run_within(
+        Duration::from_millis(50),
+        NEVER_BLOCKS_RUNS,
+        NEVER_BLOCKS_APART,
+        one_change_beside_a_thousand_requests,
+    )
+    .await;
+    assert!(
+        held.is_ok(),
+        "a request waited in every run, (p50, p99, max) each: {held:?}"
+    );
+}
+
+/// How many runs [`a_census_change_never_blocks_a_request`] may make before
+/// it fails: each run that does not hold costs its own time, well under a
+/// second since its held read ends at zero, and [`NEVER_BLOCKS_APART`] more.
+pub(in crate::server) const NEVER_BLOCKS_RUNS: u32 = 7;
+
+/// How long [`a_census_change_never_blocks_a_request`] waits after a run that
+/// does not hold before the next: the census read's pause, which every run
+/// lasted until repair 7 ended that read at zero (L-BRED23-14). The cut test
+/// of `head_deadline_body_tests` spaces its runs by it too: a run of that test
+/// lasts about its 300 ms stall deadline, so its seven fell inside seconds.
+pub(in crate::server) const NEVER_BLOCKS_APART: Duration =
+    Duration::from_millis(NEVER_BLOCKS_READ_PAUSE_MS);
+
+/// A run's (p50, p99, max) of `took`, sorted: the 500th, 990th and last of
+/// 1,000, the same ranks scaled for any other count.
+fn ranks(took: &[Duration]) -> (Duration, Duration, Duration) {
+    let at = |per_mille: usize| {
+        took.get((took.len() * per_mille / 1_000).saturating_sub(1))
+            .copied()
+            .unwrap_or_default()
+    };
+    (at(500), at(990), at(1_000))
+}
+
+/// Runs `run` (its argument is the run's number, from 0) until one run's
+/// slowest time is under `bound`, at most `runs` times: that run's number,
+/// or every run's [`ranks`] when none held. Each run's times must come back
+/// sorted. A run that timed nothing measured nothing, so it never holds.
+/// After each run that does not hold it waits `apart`, so the runs sample the
+/// machine at instants at least that far apart and a burst of load shorter
+/// than their spread cannot fail them all. The /db view asks pass zero: a
+/// read held for a minute bounds them, and waiting would let it run out.
+pub(in crate::server) async fn first_run_within<F, R>(
+    bound: Duration,
+    runs: u32,
+    apart: Duration,
+    mut run: F,
+) -> Result<u32, Vec<(Duration, Duration, Duration)>>
+where
+    F: FnMut(u32) -> R,
+    R: std::future::Future<Output = Vec<Duration>>,
+{
+    let mut every = Vec::new();
+    for n in 0..runs {
+        let took = run(n).await;
+        let measured = ranks(&took);
+        if !took.is_empty() && measured.2 < bound {
+            return Ok(n);
+        }
+        every.push(measured);
+        tokio::time::sleep(apart).await;
+    }
+    Err(every)
+}
+
+/// [`first_run_within`] stops at the first run that holds, fails with every
+/// run's ranks when none does, and a time exactly at the bound does not hold.
+#[tokio::test(flavor = "current_thread")]
+async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with_every_run() {
+    let ms = Duration::from_millis;
+    let mut made = Vec::new();
+    let held = first_run_within(ms(50), 7, Duration::ZERO, |n| {
+        made.push(n);
+        let max = if n == 0 { ms(53) } else { ms(3) };
+        async move { vec![ms(1), max] }
+    })
+    .await;
+    assert_eq!(held, Ok(1));
+    assert_eq!(made, vec![0, 1], "no run after the one that held");
+    let blocked = first_run_within(ms(50), 7, Duration::ZERO, |_| async {
+        vec![ms(1), ms(5_000)]
+    })
+    .await;
+    assert_eq!(blocked, Err(vec![(ms(1), ms(1), ms(5_000)); 7]));
+    let at_bound = first_run_within(ms(50), 1, Duration::ZERO, |_| async { vec![ms(50)] }).await;
+    assert_eq!(at_bound, Err(vec![(ms(50), ms(50), ms(50))]));
+    let timed_nothing = first_run_within(ms(50), 2, Duration::ZERO, |_| async { Vec::new() }).await;
+    assert_eq!(
+        timed_nothing,
+        Err(vec![(Duration::ZERO, Duration::ZERO, Duration::ZERO); 2]),
+        "a run that timed no request measured nothing and does not hold"
+    );
+    let thousand: Vec<Duration> = (1..=1_000).map(Duration::from_micros).collect();
+    assert_eq!(
+        ranks(&thousand),
+        (
+            Duration::from_micros(500),
+            Duration::from_micros(990),
+            Duration::from_millis(1)
+        )
+    );
+}
+
+/// [`first_run_within`] waits `apart` after each run that does not hold, so
+/// no two of its runs start closer than that, and the run that holds ends the
+/// runs at once: a minute apart would show if it waited after that run too.
+#[tokio::test(flavor = "current_thread")]
+async fn the_runs_after_a_miss_are_apart_and_the_run_that_holds_ends_them_at_once() {
+    let ms = Duration::from_millis;
+    let mut began = Vec::new();
+    let held = first_run_within(ms(50), 3, ms(20), |n| {
+        began.push(Instant::now());
+        let max = if n < 2 { ms(53) } else { ms(3) };
+        async move { vec![max] }
+    })
+    .await;
+    assert_eq!(held, Ok(2));
+    let gaps: Vec<Duration> = began
+        .windows(2)
+        .map(|pair| pair[1].duration_since(pair[0]))
+        .collect();
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+    assert!(
+        gaps.iter().all(|gap| *gap >= ms(20)),
+        "each run after a miss began 20 ms or more after it: {gaps:?}"
+    );
+    let asked = Instant::now();
+    let at_once =
+        first_run_within(ms(50), 2, Duration::from_mins(1), |_| async { vec![ms(3)] }).await;
+    let took = asked.elapsed();
+    assert_eq!(at_once, Ok(0));
+    assert!(
+        took < Duration::from_secs(30),
+        "no wait after the run that held: {took:?}"
+    );
+}
+
+/// How long a read a test holds across what it asks can last: past any stall,
+/// and short enough that a request that waited for the read fails its bound
+/// inside a minute. The test ends the hold with zero ([`slow_read::pause`]).
+const READ_HELD_MS: u64 = 60_000;
+
+/// A read held for a minute ends when its test sets zero, and one a test has
+/// shortened ends with what is left of the shorter time.
+#[test]
+fn a_held_read_ends_when_its_test_lets_it_go() {
+    let root = crate::scratch::path("held-read");
+    let began = Instant::now();
+    for (let_go_with, took_at_least) in [(0, Duration::ZERO), (1, Duration::from_millis(1))] {
+        slow_read::set(&root, READ_HELD_MS);
+        let asked = Instant::now();
+        std::thread::scope(|scope| {
+            let read = scope.spawn(|| slow_read::pause(&root));
+            std::thread::sleep(Duration::from_millis(2));
+            slow_read::set(&root, let_go_with);
+            read.join().expect("the read");
+        });
+        assert!(asked.elapsed() >= took_at_least, "{let_go_with}");
+    }
+    slow_read::set(&root, 0);
+    assert!(
+        began.elapsed() < Duration::from_millis(READ_HELD_MS / 2),
+        "a read waited out its hold: {:?}",
+        began.elapsed()
+    );
+}
+
+/// How long every census read pauses in [`one_change_beside_a_thousand_requests`].
+const NEVER_BLOCKS_READ_PAUSE_MS: u64 = 5_000;
+
+/// One request's word on the census: whether it was stale, and how long
+/// after the change it answered (`None` before the change).
+type Said = (bool, Option<Duration>);
+
+/// Whether `said`, the requests of one run in order, is what a census read
+/// that pauses `pause` can answer: nothing stale before the change, stale from
+/// at most 100 requests after the 100th, and current again only once the
+/// pause is out, because only the re-read makes it current and it starts
+/// after the change. The first stale request's number, or what went wrong.
+///
+/// NOT A COUNT OF STALE ANSWERS (BASE-REDS-1023 repair 7): "at least 800 of
+/// 1,000" raced the five seconds against the requests, so a machine slower
+/// than 5.6 ms a request saw the re-read land inside the loop and failed a
+/// design that had waited for nothing (load about 300, four whole copies at
+/// once: 347 to 584 stale, each). At speed the two say the same: every
+/// request inside the pause, stale from the 200th at the latest.
+fn stale_until_the_read_lands(said: &[Said], pause: Duration) -> Result<usize, String> {
+    let mut first = None;
+    for (n, (stale, since)) in said.iter().enumerate() {
+        match (*stale, *since) {
+            (true, None) => return Err(format!("stale before the change, at {n}")),
+            (true, Some(_)) => {
+                first.get_or_insert(n);
+            }
+            (false, Some(since)) if first.is_some() && since < pause => {
+                return Err(format!(
+                    "current again at {n}, {since:?} after the change, inside the {pause:?} read"
+                ));
+            }
+            (false, _) => {}
+        }
+    }
+    first.filter(|n| *n <= 200).ok_or_else(|| {
+        format!("the requests after the change were answered from the previous read: {first:?}")
+    })
+}
+
+/// [`stale_until_the_read_lands`] on invented runs: each side of the rule, and
+/// the run the old count failed, whose re-read lands inside the loop.
+#[test]
+fn a_change_is_answered_stale_until_its_read_can_have_landed() {
+    let pause = Duration::from_secs(5);
+    let at = |ms| Some(Duration::from_millis(ms));
+    let before = (false, None);
+    let run = |first_stale: usize, then: &[Said]| -> Vec<Said> {
+        let mut said = vec![before; 100];
+        said.resize(first_stale, (false, at(1)));
+        said.extend_from_slice(then);
+        said
+    };
+    let answer = |said: &[Said]| stale_until_the_read_lands(said, pause);
+    assert_eq!(answer(&run(100, &vec![(true, at(1)); 900])), Ok(100));
+    assert_eq!(answer(&run(200, &vec![(true, at(2)); 800])), Ok(200));
+    let landed_in_the_loop = [(true, at(4_999)), (false, at(5_000)), (false, at(9_000))];
+    assert_eq!(answer(&run(100, &landed_in_the_loop)), Ok(100));
+    assert_eq!(
+        answer(&[(true, None)]),
+        Err("stale before the change, at 0".to_owned())
+    );
+    let too_late = answer(&run(201, &[(true, at(3))])).expect_err("the 201st");
+    assert!(
+        too_late.contains("from the previous read: Some(201)"),
+        "{too_late}"
+    );
+    let never = answer(&run(100, &vec![(false, at(1)); 900])).expect_err("never stale");
+    assert!(never.contains("from the previous read: None"), "{never}");
+    let early = answer(&run(100, &[(true, at(1)), (false, at(4_999))])).expect_err("inside");
+    assert!(early.contains("current again at 101"), "{early}");
+}
+
+/// One run of [`a_census_change_never_blocks_a_request`] over a store of its
+/// own, its every assertion but the bound held: its 1,000 request times,
+/// sorted.
+async fn one_change_beside_a_thousand_requests(run: u32) -> Vec<Duration> {
+    let mut store = Store::new(&format!("never-blocks-{run}"), 64);
     let site = store.site();
     start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
     let _ready = wait_ready(&site);
     let (before, freshness) = fno_generation(&site);
     assert_eq!(freshness, Freshness::Current);
 
-    slow_read::set(&store.root, 5_000);
+    slow_read::set(&store.root, NEVER_BLOCKS_READ_PAUSE_MS);
     let mark = store.reads().len();
     let mut took: Vec<Duration> = Vec::with_capacity(1_000);
-    let mut stale = 0_usize;
+    let mut said: Vec<Said> = Vec::with_capacity(1_000);
+    let mut changed = None;
     for n in 0..1_000 {
         if n == 100 {
+            changed = Some(Instant::now());
             store.append(&[row(option_key(10_000), 7)]);
         }
         let began = Instant::now();
@@ -413,24 +682,17 @@ async fn a_census_change_never_blocks_a_request() {
         took.push(began.elapsed());
         assert_eq!(code, axum::http::StatusCode::OK, "{body}");
         assert!(body.starts_with('['), "{body}");
-        if now.freshness().is_stale() {
-            stale += 1;
-            assert!(n >= 100, "stale before the change, at {n}");
-        }
+        said.push((
+            now.freshness().is_stale(),
+            changed.map(|at: Instant| at.elapsed()),
+        ));
     }
     slow_read::set(&store.root, 0);
     took.sort_unstable();
-    let p99 = took[989];
-    let max = took[999];
-    assert!(
-        max < Duration::from_millis(50),
-        "a request waited: p50 {:?}, p99 {p99:?}, max {max:?}",
-        took[499]
-    );
-    assert!(
-        stale >= 800,
-        "the requests after the change were answered from the previous read: {stale}"
-    );
+    assert_eq!(took.len(), 1_000, "every request was timed");
+    let pause = Duration::from_millis(NEVER_BLOCKS_READ_PAUSE_MS);
+    let answered = stale_until_the_read_lands(&said, pause);
+    assert!(answered.is_ok(), "{answered:?}");
     let reads = store.reads();
     assert!(
         reads[mark..]
@@ -440,20 +702,27 @@ async fn a_census_change_never_blocks_a_request() {
         &reads[mark..]
     );
 
-    // THE CHANGE LANDS: the background re-read is served, current.
+    // THE CHANGE LANDS: the background re-read is served, current, and it is
+    // exactly one generation on. Polled until current, then the generation
+    // asserted: the change made the census stale (`said` above), so the
+    // first current answer is the re-read's, and a census current at any
+    // other generation fails here as it used to fail at the deadline
+    // (BASE-REDS-1023 repair 3: no poll may hold a side no run takes).
     let deadline = Instant::now() + Duration::from_mins(1);
-    loop {
+    let generation = loop {
         let (generation, freshness) = fno_generation(&site);
-        if freshness == Freshness::Current && generation == before + 1 {
-            break;
+        if freshness == Freshness::Current {
+            break generation;
         }
         assert!(
             Instant::now() < deadline,
             "never current: {generation} {freshness:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let rows = warmth(&site);
+    };
+    assert_eq!(generation, before + 1, "the change is one generation on");
+    // The census is served before its row says so: the row is waited for.
+    let rows = wait_ready(&site);
     assert_eq!(row_of(&rows, CENSUS, Vendor::Gdfl).state, WarmState::Ready);
     assert_eq!(
         row_of(&rows, CENSUS, Vendor::Gdfl).generation,
@@ -462,6 +731,7 @@ async fn a_census_change_never_blocks_a_request() {
             .census()
             .and_then(census::VendorCensus::generation)
     );
+    took
 }
 
 /// **TWENTY IMPORTED OPTION DAYS REFRESH WITHOUT A WHOLE READ** (R3-09;
@@ -621,24 +891,38 @@ async fn serve_site(
     (addr, stop, server)
 }
 
-/// Every one of `views` asked once over `addr`: each answered within 900 ms,
-/// and every census-backed one saying `x-brutex-census-refreshing: <refreshing>`.
+/// Every one of `views` asked over `addr`: each answered within 900 ms in one
+/// of up to [`NEVER_BLOCKS_RUNS`] asks (L-BRED23-14's rule), every census-backed
+/// answer saying `x-brutex-census-refreshing: <refreshing>`. Asked again on a
+/// slow answer because a view on a stalled machine took 903 ms to 1.7 s with
+/// nothing to wait for (this repair's overload). A view that waited for a held
+/// read answers only once the read is out, and then says 0, so that ask fails
+/// on what it says, whatever the clock.
 async fn ask_every(addr: std::net::SocketAddr, views: &[String], refreshing: u8) {
     for view in views {
-        let began = Instant::now();
-        let reply = crate::server::tests::get(addr, view).await;
-        let took = began.elapsed();
-        assert!(answered(view, &reply), "{view}: {reply:.400}");
+        let held = first_run_within(
+            Duration::from_millis(900),
+            NEVER_BLOCKS_RUNS,
+            Duration::ZERO,
+            |_| async {
+                let began = Instant::now();
+                let reply = crate::server::tests::get(addr, view).await;
+                let took = began.elapsed();
+                assert!(answered(view, &reply), "{view}: {reply:.400}");
+                if census_backed(view) {
+                    assert!(
+                        reply.contains(&format!("x-brutex-census-refreshing: {refreshing}")),
+                        "{view} says how current it is: {reply:.600}"
+                    );
+                }
+                vec![took]
+            },
+        )
+        .await;
         assert!(
-            took < Duration::from_millis(900),
-            "{view} waited for the re-read: {took:?}"
+            held.is_ok(),
+            "{view} waited for the re-read in every ask: {held:?}"
         );
-        if census_backed(view) {
-            assert!(
-                reply.contains(&format!("x-brutex-census-refreshing: {refreshing}")),
-                "{view} says how current it is: {reply:.600}"
-            );
-        }
     }
 }
 
@@ -664,22 +948,28 @@ async fn no_db_view_reads_the_whole_census() {
     std::fs::write(&catalogue, "index_name,category\nNIFTY 50,broad\n").expect("invented");
     let nse = crate::indexmap::Published::read(&catalogue).expect("reads");
     let index_map = || {
-        let began = Instant::now();
-        let code = crate::indexmap::answer(&site, &nse, Vendor::Gdfl, Vec::new()).0;
-        assert_eq!(
-            code,
-            axum::http::StatusCode::OK,
-            "the index map's census half"
-        );
-        assert!(
-            began.elapsed() < Duration::from_millis(900),
-            "the index map waited"
-        );
+        first_run_within(
+            Duration::from_millis(900),
+            NEVER_BLOCKS_RUNS,
+            Duration::ZERO,
+            |_| async {
+                let began = Instant::now();
+                let code = crate::indexmap::answer(&site, &nse, Vendor::Gdfl, Vec::new()).0;
+                let took = began.elapsed();
+                assert_eq!(
+                    code,
+                    axum::http::StatusCode::OK,
+                    "the index map's census half"
+                );
+                vec![took]
+            },
+        )
     };
 
     let mark = store.reads().len();
     ask_every(addr, &views, 0).await;
-    index_map();
+    let held = index_map().await;
+    assert!(held.is_ok(), "the index map waited: {held:?}");
     assert_eq!(
         store.reads().len(),
         mark,
@@ -687,12 +977,15 @@ async fn no_db_view_reads_the_whole_census() {
         &store.reads()[mark..]
     );
 
-    // A CHANGE, AND A RE-READ THAT TAKES A SECOND.
-    slow_read::set(&store.root, 1_000);
+    // A CHANGE, AND A RE-READ HELD UNTIL EVERY VIEW HAS ANSWERED: with a second
+    // of pause, a machine that took a second over the views saw the read land
+    // half way, and a later view said, rightly, that it was current.
+    slow_read::set(&store.root, READ_HELD_MS);
     store.append(&[row(option_key(500), 3)]);
     let mark = store.reads().len();
     ask_every(addr, &views, 1).await;
-    index_map();
+    let held = index_map().await;
+    assert!(held.is_ok(), "the index map waited: {held:?}");
     let reads = store.reads();
     assert!(
         reads[mark..]

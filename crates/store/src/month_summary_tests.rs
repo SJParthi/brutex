@@ -610,8 +610,8 @@ fn image_at(version: u16, payload: &[u8]) -> Vec<u8> {
     image
 }
 
-/// Days 5 to 7 of May 2031 at one minute, every tenth minute of each a flat
-/// carry of the minute before: 1,125 rows, over the summary threshold.
+/// Days 5 to 7 of May 2031 at one minute, every tenth minute of each a
+/// flat carry of the minute before: 1,125 rows, over the summary threshold.
 fn carried_days() -> Vec<Bar> {
     let mut rows = Vec::new();
     for day in 5..=7 {
@@ -719,6 +719,22 @@ fn padded_minutes_are_carries_inside_a_window_after_its_first_held_minute() {
     backwards.fold(&open);
     assert_eq!(
         backwards.padded_on(day, &two),
+        Err(NotCounted::InvalidStamps)
+    );
+    // Counts that name a decreasing stamp and no invalid one: the fold never
+    // makes them (a decreasing stamp is an invalid one too), a section read
+    // back can carry them, and the guard's second half refuses them by name
+    // (BASE-REDS-1023 repair 3, verify r3's side no test took).
+    let mut decreasing_only = summary.clone();
+    decreasing_only.counts.invalid = 0;
+    decreasing_only.counts.decreasing = 1;
+    assert_eq!(
+        decreasing_only.padded_on(day, &two),
+        Err(NotCounted::InvalidStamps)
+    );
+    let read_back = MonthSummary::from_section(&decreasing_only.section()).unwrap();
+    assert_eq!(
+        read_back.padded_on(day, &two),
         Err(NotCounted::InvalidStamps)
     );
     for why in [

@@ -108,11 +108,11 @@ fn write_month(root: &Path, month: u8, day: i64) -> store::file::BarFile {
 }
 
 /// Serves the production router over `root` on a fresh loopback port while
-/// `body` runs, then stops it.
-async fn live<F, Fut>(root: &Path, body: F)
+/// `body` runs, then stops it and hands back what `body` gave.
+async fn live<F, Fut, T>(root: &Path, body: F) -> T
 where
     F: FnOnce(SocketAddr) -> Fut,
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = T>,
 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -133,12 +133,13 @@ where
             Ok::<(), std::io::Error>(())
         }),
     ));
-    body(addr).await;
+    let out = body(addr).await;
     let _ = stop.send(());
     served
         .await
         .expect("task")
         .expect("a graceful shutdown is not a failure");
+    out
 }
 
 /// One answer: its status code, whether its head carries `Retry-After`, and
@@ -203,18 +204,32 @@ const EVERY_POOLED_ROUTE: &[&str] = &[
     "/disk.json",
 ];
 
-/// `/feeds.json` asked `asked` times one after another while `clients`
-/// threads loop over `routes`: every answer's time, sorted, and how many
-/// requests the clients made meanwhile.
+/// The seek of the month a writer holds for the whole run, asked in a loop by
+/// [`HELD_MONTH_SEEKERS`] clients beside the 32 in the loaded phase: it
+/// waits the read's patience (`api::detail::READ_PATIENCE_MS`, 200 ms) where
+/// the pools hold it, so a worker that held it instead would be held 200 ms
+/// a seek.
+const HELD_MONTH: &[&str] = &[WINDOW_FEBRUARY];
+
+/// As many held-month seekers as the server has async workers (the test
+/// runtime's four), and half the store-read pool's eight slots, so R3-08's
+/// routes keep the other half.
+const HELD_MONTH_SEEKERS: usize = 4;
+
+/// `/feeds.json` asked `asked` times one after another while each group's
+/// clients loop over its routes (a group is its routes and its number of
+/// clients): every answer's time, sorted, and how many requests the clients
+/// made meanwhile.
 async fn feeds_beside(
     addr: SocketAddr,
-    routes: &'static [&'static str],
-    clients: usize,
+    groups: &[(&'static [&'static str], usize)],
     asked: usize,
 ) -> (Vec<Duration>, u64) {
     let stop = Arc::new(AtomicBool::new(false));
-    let looping: Vec<std::thread::JoinHandle<u64>> = (0..clients)
-        .map(|client| {
+    let looping: Vec<std::thread::JoinHandle<u64>> = groups
+        .iter()
+        .flat_map(|&(routes, clients)| (0..clients).map(move |client| (routes, client)))
+        .map(|(routes, client)| {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 let mut done = 0_u64;
@@ -222,9 +237,9 @@ async fn feeds_beside(
                 while !stop.load(Ordering::Acquire) {
                     let path = routes[next % routes.len()];
                     next += 1;
-                    if get_blocking(addr, path).is_some() {
-                        done += 1;
-                    }
+                    // Counted, not branched: a request with no answer adds
+                    // nothing (BASE-REDS-1023 repair 3, verify r3).
+                    done += u64::from(get_blocking(addr, path).is_some());
                 }
                 done
             })
@@ -272,16 +287,151 @@ async fn feeds_beside(
 /// cost the feed list no more than twice the control — a starved async
 /// worker (a file read on it) costs far more than that. Both figures are
 /// printed for `docs/06-limits.md`.
+///
+/// **A SEEK OF A MONTH A WRITER HOLDS, SO THAT A STARVED WORKER SHOWS**
+/// (BASE-REDS-1023 repair 2). The routes above read a five-bar month in
+/// microseconds, too little to starve anything: with `spawn_blocking` taken
+/// out of `api::detail`'s `admitted`, every pooled read on an async worker,
+/// this test passed 3 of 3 on its first run (p99 2.76 ms to 6.19 ms). So a
+/// writer holds February for the whole run, and in the loaded phase
+/// [`HELD_MONTH_SEEKERS`] more clients seek it beside the 32: the seek waits
+/// the read's 200 ms patience in the store-read pool, and the feed list's
+/// own pool never waits on it; on an async worker the same wait would hold
+/// that worker 200 ms a seek. The 32 clients' routes stay R3-08's, at their
+/// rate: in the round robin the seek held each of them 200 ms a turn and
+/// cut their requests from about 15,000 a phase to 363.
+///
+/// **THE BOUND HOLDS IN ONE OF UP TO [`FEEDS_FAST_RUNS`] RUNS, EACH ON A
+/// SERVER AND A STORE OF ITS OWN, AND IS UNCHANGED** (BASE-REDS-1023 repair
+/// 2, D-7152 addendum). A run is the control and the loaded phase above, back
+/// to back on one server, read by [`FeedsRun::holds`]: the 10 ms target and
+/// the twice-the-control ratio exactly as they were. One run at a time
+/// decided the test, and verify-BASE-REDS-1023-r2 saw it fail 3 of 7 api
+/// suites at load 19-26: "/feeds.json p99 35.14825ms (p50 1.341292ms, max
+/// 58.004542ms) ...; the control was 2.291708ms", while the passing runs had
+/// p99 2.5-6.0 ms. That p99 is the third-slowest of 200 answers, so three
+/// answers the host held off a core in the loaded phase alone failed the
+/// run, and the control, an earlier phase, never saw them. Interference only
+/// adds time and comes and goes; a worker held by the seeks of the held month
+/// is held in every run and fails all of them, each run's figures in the
+/// message. Every assertion that is not a time holds in every run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_feed_list_stays_fast_while_32_clients_loop_each_route() {
+    let _serial = SERIAL.lock().await;
+    let held = first_run_that_holds(FEEDS_FAST_RUNS, feeds_fast_run).await;
+    assert!(
+        held.is_ok(),
+        "/feeds.json missed its bound beside the file-reading routes in all {FEEDS_FAST_RUNS} \
+         runs, each run's (p50, p99, max) beside /health (the control) and beside every pooled \
+         route: {held:?}"
+    );
+}
+
+/// How many runs [`the_feed_list_stays_fast_while_32_clients_loop_each_route`]
+/// may make before it fails. A run takes about a second, and a run that holds
+/// ends the test.
+const FEEDS_FAST_RUNS: u32 = 7;
+
+/// The feed list's p99 target beside the file-reading routes (R3-08, NEW-04).
+const FEEDS_TARGET: Duration = Duration::from_millis(10);
+
+/// One run's figures, each (p50, p99, max) of the 200 `/feeds.json` answers:
+/// beside 32 clients looping `/health` (the control), and beside the same
+/// clients looping every pooled route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FeedsRun {
+    control: (Duration, Duration, Duration),
+    loaded: (Duration, Duration, Duration),
+}
+
+impl FeedsRun {
+    /// Whether the 10 ms target can be told from this host in this run: the
+    /// control's p99 is under half of it.
+    fn measurable(&self) -> bool {
+        self.control.1 * 2 < FEEDS_TARGET
+    }
+
+    /// Whether this run holds R3-08's bound, unchanged: when the target is
+    /// measurable, the p99 beside the file-reading routes is under it;
+    /// otherwise that p99 is at most twice the control's.
+    fn holds(&self) -> bool {
+        if self.measurable() {
+            self.loaded.1 < FEEDS_TARGET
+        } else {
+            self.loaded.1 <= self.control.1 * 2
+        }
+    }
+
+    /// The run's two verdicts as its line prints them: whether the target is
+    /// measurable on this host now, and whether the run holds the bound. One
+    /// method, so the stop-rule test reads every side a noisy run prints
+    /// (BASE-REDS-1023 repair 3, verify r3).
+    fn verdicts(&self) -> (String, &'static str) {
+        let measurable = if self.measurable() {
+            "the 10 ms target is measurable on this host now".to_owned()
+        } else {
+            format!(
+                "the 10 ms target is NOT MEASURABLE on this host now: the control alone is \
+                 {:?} at p99, half the budget or more",
+                self.control.1
+            )
+        };
+        let holds = if self.holds() {
+            "this run holds the bound"
+        } else {
+            "this run does NOT hold the bound"
+        };
+        (measurable, holds)
+    }
+}
+
+/// Runs `run` (its argument is the run's number, from 0) until one run
+/// [`FeedsRun::holds`], at most `runs` times: that run's number, or every
+/// run's figures when none held.
+async fn first_run_that_holds<F, R>(runs: u32, mut run: F) -> Result<u32, Vec<FeedsRun>>
+where
+    F: FnMut(u32) -> R,
+    R: Future<Output = FeedsRun>,
+{
+    let mut every = Vec::new();
+    for n in 0..runs {
+        let measured = run(n).await;
+        if measured.holds() {
+            return Ok(n);
+        }
+        every.push(measured);
+    }
+    Err(every)
+}
+
+/// One run of [`the_feed_list_stays_fast_while_32_clients_loop_each_route`]
+/// on a server and a store of its own, February held by a writer for the
+/// whole run: the control, a seek of February that must wait the read's
+/// patience and say "being written", then the loaded phase, the 32 clients
+/// looping every pooled route and [`HELD_MONTH_SEEKERS`] seeking February;
+/// every non-timing assertion held, the figures printed and handed back.
+async fn feeds_fast_run(run: u32) -> FeedsRun {
     const CLIENTS: usize = 32;
     const ASKED: usize = 200;
-    const TARGET: Duration = Duration::from_millis(10);
-    let _serial = SERIAL.lock().await;
-    let root = one_month("feeds-fast");
-    live(&root, |addr| async move {
-        let (control, by_control) = feeds_beside(addr, &["/health"], CLIENTS, ASKED).await;
-        let (took, loaded) = feeds_beside(addr, EVERY_POOLED_ROUTE, CLIENTS, ASKED).await;
+    let root = one_month(&format!("feeds-fast-{run}"));
+    let february = write_month(&root, 2, 19_754);
+    let measured = live(&root, |addr| async move {
+        let (control, by_control) = feeds_beside(addr, &[(&["/health"], CLIENTS)], ASKED).await;
+        let held = tokio::task::spawn_blocking(move || get_blocking(addr, WINDOW_FEBRUARY))
+            .await
+            .expect("the client thread")
+            .expect("an answer");
+        let patience = Duration::from_millis(api::detail::READ_PATIENCE_MS);
+        assert!(
+            held.status == 503 && held.retry_after && held.took >= patience,
+            "a seek of the held month waits the read's patience and says when: {held:?}"
+        );
+        let loaded_groups = [
+            (EVERY_POOLED_ROUTE, CLIENTS),
+            (HELD_MONTH, HELD_MONTH_SEEKERS),
+        ];
+        let (took, loaded) = feeds_beside(addr, &loaded_groups, ASKED).await;
+        assert!(loaded > CLIENTS as u64, "the clients looped: {loaded}");
         let figures = |sorted: &[Duration]| {
             (
                 quantile(sorted, 500),
@@ -289,41 +439,111 @@ async fn the_feed_list_stays_fast_while_32_clients_loop_each_route() {
                 sorted[sorted.len() - 1],
             )
         };
-        let (control_median, control_tail, control_worst) = figures(&control);
-        let (p50, p99, max) = figures(&took);
-        let measurable = control_tail * 2 < TARGET;
+        let measured = FeedsRun {
+            control: figures(&control),
+            loaded: figures(&took),
+        };
+        let (control_median, control_tail, control_worst) = measured.control;
+        let (p50, p99, max) = measured.loaded;
+        let (measurable, holds) = measured.verdicts();
         println!(
-            "R3-08 /feeds.json n={ASKED} sequential, fresh connections: beside {CLIENTS} clients \
-             looping /health ({by_control} requests by them) p50={control_median:?} \
-             p99={control_tail:?} max={control_worst:?}; beside {CLIENTS} clients looping every \
-             pooled route ({loaded} \
-             requests by them) p50={p50:?} p99={p99:?} max={max:?}; {}",
-            if measurable {
-                "the 10 ms target is measurable on this host now".to_owned()
-            } else {
-                format!(
-                    "the 10 ms target is NOT MEASURABLE on this host now: the control alone is \
-                     {control_tail:?} at p99, half the budget or more"
-                )
-            }
+            "R3-08 /feeds.json run {run} of at most {FEEDS_FAST_RUNS}, n={ASKED} sequential, \
+             fresh connections: beside {CLIENTS} clients looping /health ({by_control} requests \
+             by them) p50={control_median:?} p99={control_tail:?} max={control_worst:?}; beside \
+             {CLIENTS} clients looping every pooled route and {HELD_MONTH_SEEKERS} seeking the \
+             held month ({loaded} requests by them) \
+             p50={p50:?} p99={p99:?} max={max:?}; {measurable}; {holds}"
         );
-        assert!(loaded > CLIENTS as u64, "the clients looped: {loaded}");
-        if measurable {
-            assert!(
-                p99 < TARGET,
-                "/feeds.json p99 {p99:?} (p50 {p50:?}, max {max:?}) while {CLIENTS} clients loop \
-                 the file-reading routes; the control was {control_tail:?}"
-            );
-        } else {
-            assert!(
-                p99 <= control_tail * 2,
-                "/feeds.json p99 {p99:?} beside the file-reading routes is more than twice the \
-                 control's {control_tail:?}: the reads are starving the async workers"
-            );
-        }
+        measured
     })
     .await;
+    drop(february);
     let _ = std::fs::remove_dir_all(&root);
+    measured
+}
+
+/// [`first_run_that_holds`] stops at the first run that holds and fails with
+/// every run's figures when none does, and [`FeedsRun::holds`] is R3-08's
+/// rule unchanged: the 10 ms target strict while the control's p99 is under
+/// half of it, twice the control's p99 (inclusive) from half of it up. The
+/// noisy run is verify-BASE-REDS-1023-r2's failing run as it printed it, and
+/// one run of it alone failed the test (BASE-REDS-1023 repair 2).
+#[tokio::test(flavor = "current_thread")]
+async fn the_first_feed_run_that_holds_ends_the_runs_and_none_holding_fails_with_every_run() {
+    let nanos = Duration::from_nanos;
+    let millis = Duration::from_millis;
+    let figures = |control_p99: Duration, loaded_p99: Duration| FeedsRun {
+        control: (millis(1), control_p99, control_p99 * 2),
+        loaded: (millis(1), loaded_p99, loaded_p99 * 2),
+    };
+    let noisy = FeedsRun {
+        control: (nanos(1_000_000), nanos(2_291_708), nanos(4_000_000)),
+        loaded: (nanos(1_341_292), nanos(35_148_250), nanos(58_004_542)),
+    };
+    let clean = figures(nanos(2_291_708), millis(3));
+    let mut made = Vec::new();
+    let held = first_run_that_holds(FEEDS_FAST_RUNS, |n| {
+        made.push(n);
+        let measured = if n == 0 { noisy } else { clean };
+        async move { measured }
+    })
+    .await;
+    assert_eq!(held, Ok(1), "a noisy run, then one that holds");
+    assert_eq!(made, vec![0, 1], "no run after the one that held");
+    let starved = figures(millis(2), millis(40));
+    let blocked = first_run_that_holds(FEEDS_FAST_RUNS, |_| async move { starved }).await;
+    assert_eq!(
+        blocked,
+        Err(vec![starved; 7]),
+        "a starved worker fails every one of the seven runs"
+    );
+    assert!(noisy.measurable(), "the noisy run's control was 2.29 ms");
+    assert!(
+        !noisy.holds(),
+        "and its 35.1 ms p99 failed the 10 ms target"
+    );
+    // What each run's line says, every side (BASE-REDS-1023 repair 3).
+    assert_eq!(
+        noisy.verdicts(),
+        (
+            "the 10 ms target is measurable on this host now".to_owned(),
+            "this run does NOT hold the bound"
+        )
+    );
+    assert_eq!(clean.verdicts().1, "this run holds the bound");
+    let (measurable, holds) = figures(millis(5), millis(10)).verdicts();
+    assert_eq!(
+        measurable,
+        "the 10 ms target is NOT MEASURABLE on this host now: the control alone is 5ms at p99, \
+         half the budget or more"
+    );
+    assert_eq!(holds, "this run holds the bound");
+    let slow = figures(nanos(2_940_000), nanos(16_150_000));
+    assert!(!slow.holds(), "verify r2: 16.15 ms beside 2.94 ms");
+    let slower = figures(nanos(4_120_000), nanos(30_310_000));
+    assert!(!slower.holds(), "verify r2: 30.31 ms beside 4.12 ms");
+    let under_half = nanos(4_999_999);
+    assert!(figures(under_half, millis(1)).measurable());
+    assert!(figures(under_half, nanos(9_999_999)).holds());
+    assert!(
+        !figures(under_half, millis(10)).holds(),
+        "the target is strict"
+    );
+    assert!(
+        !figures(millis(5), millis(1)).measurable(),
+        "half is not under half"
+    );
+    assert!(
+        figures(millis(5), millis(10)).holds(),
+        "twice the control is allowed"
+    );
+    assert!(
+        !figures(millis(5), nanos(10_000_001)).holds(),
+        "no more than twice"
+    );
+    let load_50 = figures(nanos(9_100_000), nanos(11_100_000));
+    assert!(load_50.holds(), "R3-08's own figures at a load of 50");
+    assert!(!figures(millis(6), nanos(12_500_000)).holds());
 }
 
 /// **A CLOSED LOOP AT 16, 64 AND 256 CLIENTS: EVERY ANSWER SERVED OR REFUSED

@@ -537,6 +537,7 @@ pub fn current_id() -> Option<u64> {
 /// around work the API process runs beside other runs.
 ///
 /// O(1): one `compare_exchange` to take, one to release.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 #[must_use = "the run is released when the guard drops"]
 pub struct RunClaim<'sink> {
     sink: Option<&'sink telemetry::Sink>,
