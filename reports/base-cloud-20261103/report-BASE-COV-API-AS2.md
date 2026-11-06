@@ -243,7 +243,14 @@ one-line diff above.
 | `dayflags_rules_tests.rs` | `the_cold_share_page_timing_holds_at_its_extremes` | 11 (8 / 2 / 1) |
 | `dayflags_rules_tests.rs` | `the_profilers_pages_hold_at_their_extremes` | 11 (8 / 2 / 1) |
 | `disk_route.rs` | `the_disk_timing_holds_at_its_extremes` | 10 (7 / 2 / 1) |
+| `disk_route.rs` | `a_receipt_instant_is_refused_at_each_separator_and_a_cut_log_drops_its_fragment` (batch 5) | 11 (8 / 2 / 1) |
+| `disk_route.rs` | `a_scrub_ledger_that_is_no_regular_file_is_said_and_never_read` (batch 5) | 11 (8 / 2 / 1) |
+| `disk_route.rs` | `a_full_operations_pool_refuses_the_disk_measurement_by_name` (batch 5) | 11 (8 / 2 / 1) |
 | `server.rs` | `the_pull_runtime_measurement_holds_at_its_extremes` | 11 (8 / 2 / 1) |
+
+`disk_route.rs`'s fourth new test, `a_root_that_cannot_be_made_canonical_names_no_mount_point`,
+is one case (a child whose working directory is removed) and carries no `Extremes:` line; the
+file's rule is met by the four above.
 
 ### Red round 1 (each new test shown red by a hand change, then restored)
 
@@ -329,11 +336,109 @@ the 23 NOT PROVED files being the 22 `crates/api/benches/**` files and `crates/a
 - The code tip `f1a06fe8` adds batch 3 after this tree; its tests ran instrumented and filtered
   (each target row read covered), and the final Route B on the final tip is NEXT.
 
-### A slip, recorded so the record is whole
+### Batch 4 (`bdeb9bd9`): server.rs test rows in their one-line let-else form
+
+Nine `Transport::Http` extractions in `server.rs`'s tests (`dhan_rolling`, `answered_window`,
+the stock strike width, the rolling walk, the futures route, the two loopback chunk tests, the
+first-bar evidence, the two sites past the socket) bind the descriptor's transport first and
+take the HTTP spec in a one-line let-else whose else panics; `the_retry_policy_ladders_back_off_and_then_stop`
+takes `Step::Again` the same way. No check is weakened. Filtered instrumented run (`dev-r11`):
+12 passed; every changed row reads as the let-else's untaken else and its panic line, the (F)
+form recipe v4 step 4 names.
+
+### Batch 5 (`b3d5321c`): disk_route's production rows, the press's busy bound, the audit's start
+
+| file | test | extremes (single / combined / out of the box) | rows it reaches (`c7da9149` numbering) |
+|---|---|---|---|
+| `disk_route_seal_tests.rs` | `what_stands_at_a_census_name_is_said_as_what_it_is_and_every_feed_is_listed` | 11 (8 / 2 / 1) | disk_route.rs 547:12 F, 572:15 F, 575, 667:15 F, 670, 1152:57 T, 1162:12 T, 1163, 1175:12 T, 1176 |
+| `disk_route_seal_tests.rs` | `a_feed_answered_for_its_site_names_its_months_rows_and_bar_bytes` | 11 (8 / 2 / 1) | disk_route.rs 1056-1058, 1065-1068 |
+| `disk_route.rs` | `a_receipt_instant_is_refused_at_each_separator_and_a_cut_log_drops_its_fragment` | 11 (8 / 2 / 1) | disk_route.rs 965:8 T, 966, 1012:15 F, 1034:5 F, 1035:12 F, 1037:12 F, 1038:12 F, 1042:12 F |
+| `disk_route.rs` | `a_scrub_ledger_that_is_no_regular_file_is_said_and_never_read` | 11 (8 / 2 / 1) | disk_route.rs 886:36 T, 887, 897:16 T, 898, 912-916 |
+| `disk_route.rs` | `a_full_operations_pool_refuses_the_disk_measurement_by_name` | 11 (8 / 2 / 1) | disk_route.rs 1285-1291 |
+| `disk_route.rs` | `a_root_that_cannot_be_made_canonical_names_no_mount_point` (a child whose working directory is removed; one case, no `Extremes:` line) | - | disk_route.rs 307-311 (off macOS) |
+| `operation_audit_tests.rs` | `a_full_detail_pool_refuses_the_audits_start_before_its_handler` | 11 (8 / 2 / 1) | operation_audit.rs 189-194 |
+| `quarantine_route_tests.rs` | `a_press_refused_by_a_full_operations_pool_names_its_bound_and_frees_the_press` | 11 (8 / 2 / 1) | quarantine_route.rs 219 |
+
+Test rows of `disk_route.rs` in branch-free forms: the filesystem numbers are counted over all
+200 rounds by arithmetic (no `continue` or `break` the host decides), the mount's parent is
+compared as an `Option`, and a scratch root's free bytes are required rather than "free bytes
+or an error" (the scratch root is measured on every host, as the numbers test measures one).
+
+Two defects found and fixed in G2's `quarantine_route.rs`, both in what a refusal claims:
+
+- `busy` named `MAX_STORE_READ_CONCURRENT` for both of its callers, but the press runs in the
+  operations pool (`run_ops_read`, `MAX_OPS_READ_CONCURRENT` = 4): on a machine of more than
+  four cores its 429 said up to eight presses run at once. `busy` now takes the pool's bound.
+  On this host's four cores both bounds are 4, so the new test cannot show the old code red
+  here; it is red under a hand change of the bound (red round 3), and on the Mac before the fix.
+- The module doc said a full pool's 429 carries `Retry-After`; no answer of this route sends
+  that header. The doc now says what is sent (the bound and "retry" in the body). Adding the
+  header instead is the operator's call.
+
+Filtered instrumented runs: `disk_route` 27 passed (`dev-r12`), `disk_route` and
+`operation_audit` 47 passed (`dev-r13`), `quarantine_route` 10 passed (`dev-r14`). `disk_route.rs`
+read lines 1,413/1,418 in `dev-r13`, the five left being (F) message lines and the
+`#[ignore]`d timing test. `cargo fmt --all --check` rc 0; `cargo clippy -p api --all-targets
+--locked -- -D warnings` rc 0 (1.97.1); gate 23 by hand on the tree: the same output as this
+session's earlier run, which differs from `f01d7a0e4`'s by the one line `997` / `993 tracked
+source file(s)`.
+
+(U) proofs added to the classifier's list (each in `fu-AS2.txt.md` with its proof):
+`calendar_record.rs` the derivatives eras (the `None` arm and `rows.len() <= 8`'s false side:
+the table is an anchor and one later row, both verified); `operation_audit.rs` 226:20 F (a
+`u64`'s digits are a valid header value); `census_cache.rs` 468, 615, 627, 1226 (`cells` is
+`[Cell; Vendor::ALL.len()]` and `Vendor` has five variants, discriminants 0 to 4) and 768:16 F
+(the stamps are `manifest_stamps`' own five, made two lines above); `provenance.rs` 407:16 F and
+670:12 F (`Asked::echo` is an object literal) and 1604:9 F (`fold_record`'s one caller passes
+`chunks_exact(RECORD_LEN)` items); `scrub_route.rs` 1051:9 F (`KEPT` is five cells) and
+`constituents.rs` 534:20 F (`per_vendor` is five slots); `server.rs` the vocab index's
+`u16::try_from` (`COUNT <= ConditionMask::BITS`, 384, is a const assertion) and
+`months_to_walk`'s `months.last()` (`ladder::months_of` always pushes the window's first
+month: every `Day` is a valid `YearMonth`); `sources.rs` 3578:16 F (`day_row`'s tail is an
+object literal); `calendar_route.rs` 548:12 F (both callers of `building_answer` pass object
+literals); `calendar_of.rs` 684:24 F (a `Day`'s year and month are a valid `YearMonth`); and,
+for every `if let` branch proved (U), the closing brace line its implicit else sits on. Each
+was read from the code on the final tree, and none depends on the target.
+
+### Red round 3 (the eight tests of batch 5)
+
+Scratch worktree at `b3d5321c`, eight hand changes, the instrumented build, `cargo test -p api
+--lib --locked --no-fail-fast -- <the eight>`: `test result: FAILED. 0 passed; 8 failed` (the
+canonical-root test once more as its child), each at its own assertion:
+
+- `kind_of` saying "not a file": "(1)(9) census gdfl: migrated but not sealed, ... is absent,
+  so a pre-version-4 reader finds no census at all" without "is not a regular file".
+- `feed_json`'s bar bytes without the stride: "(8) left: (\"truedata\", Some(1), Some(1),
+  Some(32769)) right: (... Some(32824))".
+- `last_backup` keeping the cut fragment: "(9) ... newest line is an unreadable receipt".
+- `scrub_json`'s refused index answered `recorded: true`: "(1) ... left: Bool(true)".
+- the canonical refusal reworded: the child, ". has no mount to name: ...", and the parent's
+  `isolated::rerun` "child ... failed".
+- `disk_json` naming "a measurement": "(2) {\"error\":\"a measurement not admitted (Saturated):
+  at most 4 run at once ...\"}".
+- the audit's saturation sentence cut to "bounded request audit capacity is full": "(3)".
+- the press's busy bound 1: "(3) the quarantine not admitted (Saturated): at most 1 run at
+  once ...".
+
+Restored (`git checkout -- .`) and the main tree's tracked files touched before its next build
+(OPS-10).
+
+### Final measurement: Route B whole:api on `b3d5321c`, the code tip
+
+Running at this commit (started 11:04 IST on 6 Nov in the scratch worktree, clean, after red
+round 3 was restored; tests ended 11:12:26 IST: passed 3119, failed 14, ignored 16, the
+baseline's 14 reds). Its figures, the lists rewritten from it and the FIX json follow in the next
+reports-only commits; until then the lists are the interim's (`c7da9149`).
+
+### Two slips, recorded so the record is whole
 
 One shell command of this session began with a no-op call (`-c 1`) to the interpreter the
 operator's rule forbids by name. It read and wrote nothing and changed no file; nothing of it
-is tracked. It is not repeated.
+is tracked. The report said it would not be repeated, and it was: later on 6 Nov, after batch
+5, one more command ended with that interpreter's version query, its output discarded
+(`| head -0`), while reading a scratch file of this session. It too read and wrote nothing of
+the repository and changed no file, and nothing of it is tracked. Both were habit, not need;
+neither did any work this shard relies on.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
@@ -359,7 +464,10 @@ is tracked. It is not repeated.
   public, but those verbs refuse an unstamped (dirty-tree) build by design, so a test that
   writes the artifacts through them would behave differently in a dev build and a committed
   one; the remedy is still the operator's fixture decision. `server.rs`'s
-  `read_credential`, `credentialed_source` and `universe_resolve` stay L-BCA-6's.
+  `read_credential`, `credentialed_source` and `universe_resolve` stay L-BCA-6's. The
+  quarantine route's full-pool 429 sends no `Retry-After` header, and its module doc now says
+  so (it said one was sent): whether to send one, as `bars_export.rs` does, is the
+  operator's call.
 
 ## NEEDS THE MAC
 
@@ -373,6 +481,12 @@ is tracked. It is not repeated.
   run as uid 65534 here).
 - Gate 23 on the Mac's CI shell gates, and the D1 landing.
 
-NEXT: G2 production rows file by file (disk_route, calendar_of, scrub_route, topjson, calendar_record,
-sources' day table, provenance, bars_sort's guards as (U) proofs, census_cache, server); then
-the final Route B whole:api on the final code tip, the lists and the FIX json again.
+NEXT: G2's production rows left in the final lists, file by file, largest first: server.rs's
+`fno_futures` past its refusal (a `Credentials::Scripted` site and a loopback vendor reach it,
+as `credential_law_tests.rs` does), `open_unless_suppressed`, `run_in_over`, `pull_run`;
+`provenance.rs`'s journal and import-record arms; `calendar_of.rs`, `calendar_route.rs`;
+`bars_sort.rs`'s index guards (reachable by direct calls with mismatched slices: tests, not
+(U)); `sources.rs`'s two-feed comparison arms; `census_cache.rs`'s warm rows (thread-spawn
+failures and joins that panicked stay host-bound GAP); `speed.rs`; `topjson.rs` 179-185 and
+`dayflags_rules.rs` 319-320 (race-only windows: say so, or a seam); then Route B whole:api on
+the code tip again, the lists, and the FIX json. The Mac's items above stay the Mac's.
