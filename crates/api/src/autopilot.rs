@@ -8317,19 +8317,14 @@ mod cloud_mutant_tests {
         );
         assert!(said.contains("THAT ALLOWANCE IS NOW SPENT"), "{said}");
 
-        // A store halt with no probe armed says nothing at all.
+        // A store halt with no probe armed says nothing at all, and none of
+        // the three wrote anything: the store root is as empty as it began.
         feeds[0].probe = None;
         assert_eq!(probe_store_halts(&site, &mut feeds), "");
-        assert!(
-            std::fs::read_dir(&site.store_root)
-                .expect("read_dir")
-                .filter_map(Result::ok)
-                .all(|entry| !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(STORE_PROBE_PREFIX)),
-            "no probe file was written"
-        );
+        let written = std::fs::read_dir(&site.store_root)
+            .expect("read_dir")
+            .count();
+        assert_eq!(written, 0, "no probe file, nor any other, was written");
     }
 
     /// An empty universe whose read names no unavailable vendor says that no
