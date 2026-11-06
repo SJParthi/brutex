@@ -1118,10 +1118,6 @@ async fn the_settings_read_off_the_worker_is_the_settings_read() {
 /// (refused, naming `window.from`), and the offered feed set with a window in
 /// force (saved); out of the box, the stamp 0 (1970-01-01 05:30:00 IST).
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "every key a save's check may name, beside the reader it is kept by"
-)]
 fn a_save_names_the_key_it_moved_and_a_reader_that_has_seen_further_is_kept() {
     let body = |expected: u64, change: &str| {
         format!(r#"{{"expected":{expected},"changed_by":"probe","reason":"r",{change}}}"#)

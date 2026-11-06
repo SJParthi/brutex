@@ -371,8 +371,8 @@ async fn a_torn_journal_is_said_a_numbered_page_is_silent_and_an_unstatable_cens
     assert_eq!(folder["runs"], serde_json::json!([]), "{folder}");
 
     // A CENSUS FILE THAT CANNOT BE STAT'ED.
-    let file = bare.join("a-file");
-    std::fs::write(&file, b"a file").expect("a file");
+    let plain = bare.join("a-file");
+    std::fs::write(&plain, b"a file").expect("a file");
     let looped = bare.join("loop");
     std::os::unix::fs::symlink(&looped, &looped).expect("a link to itself");
     let census = |path: std::path::PathBuf| crate::census::VendorCensus {
@@ -381,7 +381,7 @@ async fn a_torn_journal_is_said_a_numbered_page_is_silent_and_an_unstatable_cens
         state: crate::census::Census::Absent,
     };
     for (path, why) in [
-        (file.join("gdfl.man"), "could not be stat'ed"),
+        (plain.join("gdfl.man"), "could not be stat'ed"),
         (looped.join("gdfl.man"), "could not be stat'ed"),
         (bare.join("no-such.man"), "no census file at"),
     ] {

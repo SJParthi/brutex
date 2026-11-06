@@ -2839,4 +2839,272 @@ mod tests {
         assert_eq!(month_after(month(9999, 12)), None);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A DELTA AT THE CALENDAR'S LAST MONTH, OVER NO CENSUS OR OVER PARTS
+    /// NAMED FOR THE WRONG SEGMENTS, A `since` OVER A CENSUS THAT WILL NOT
+    /// READ, A QUARANTINE LEDGER THAT WILL NOT READ AND A POISONED CACHE ARE
+    /// EACH ANSWERED BY THEIR OWN RULE** (BASE-COV-API repair 3, D-8661).
+    /// Extremes: a key appended at 9999-12, the calendar's last month (no
+    /// month after it to move); its neighbour at 9999-11 grown in the same
+    /// tail (moved, beside the month after it); a `since` asked of a census
+    /// that is absent (`409 since_shape`, no generation held); a partitioned
+    /// `since` naming as many parts as the census holds, one of them a segment
+    /// it holds no part for (`409 since_shape`); a `since` over a census file
+    /// that will not read (the census's own 503, never a delta); a folder
+    /// where the quarantine ledger goes (the whole expanded body refused 503 by
+    /// name); the behind cache poisoned by a thread that died holding it
+    /// (answered uncached, alike twice); and, at once, the 9999-12 key and its
+    /// grown neighbour in one delta, and the poisoned cache asked for a feed
+    /// whose import journal holds nothing; out of the box, the month 9999-12.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each refusal of the census route beside the read it refuses"
+    )]
+    fn a_delta_at_the_last_month_and_each_refused_read_answer_by_their_own_rule() {
+        let compact = store_wire::Format::Compact;
+        // THE CALENDAR'S LAST MONTH.
+        let nifty = series_at(Segment::Index, "NIFTY", Timeframe::DAY_1);
+        let (november, december) = (month(9999, 11), month(9999, 12));
+        let mut disk = Disk::single("last-month", &[held_at(nifty, november, 10, (5, 6))]);
+        let before = disk.read(None);
+        let generation = before.generation().expect("held");
+        disk.append(&[
+            held_at(nifty, december, 3, (6, 7)),
+            held_at(nifty, november, 12, (5, 8)),
+        ]);
+        let after = disk.read(Some(&before));
+        let delta = delta_of(&after, &generation.to_string(), "");
+        assert_eq!(
+            delta["rows"].as_array().map(Vec::len),
+            Some(2),
+            "the two months, each once: {delta}"
+        );
+
+        // A `since` OF AN ABSENT CENSUS, AND OF PARTS NAMED FOR WRONG SEGMENTS.
+        let absent = census::VendorCensus {
+            vendor: Vendor::Gdfl,
+            path: std::path::PathBuf::from("/nonexistent/store-route/gdfl.man"),
+            state: census::Census::Absent,
+        };
+        let (code, body) = refused(Some(&absent), compact, "1", "");
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_shape", "{body}");
+        assert!(
+            body["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("holds no census now")),
+            "{body}"
+        );
+        let parts = Disk::partitioned(
+            "wrong-parts",
+            &[
+                (
+                    Segment::Index,
+                    &[held_at(
+                        series_at(Segment::Index, "NIFTY", Timeframe::SECOND_1),
+                        month(2019, 3),
+                        10,
+                        (5, 6),
+                    )],
+                ),
+                (
+                    Segment::Fno,
+                    &[held_at(
+                        contract("NIFTY", "2019-03-28-1150000-CE"),
+                        month(2019, 3),
+                        20,
+                        (7, 8),
+                    )],
+                ),
+            ],
+        );
+        let read = parts.read(None);
+        let headers = census_headers_with(Some(&read), None);
+        let epoch = header(&headers, CENSUS_EPOCH_HEADER).to_owned();
+        let (code, body) = refused(Some(&read), compact, "INDEX=1,CASH=1", &epoch);
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_shape", "{body}");
+        assert!(
+            body["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("this census is partitioned")),
+            "{body}"
+        );
+
+        // THROUGH THE ROUTE: a census that will not read, then a quarantine
+        // ledger that will not read.
+        let dir = crate::server::tests::agreeing("store-refusals");
+        let site = crate::server::tests::site("store-refusals", &dir);
+        let get = |query: &str| {
+            let uri: axum::http::Uri = format!("/store.json?{query}").parse().expect("a uri");
+            let (code, headers, body) = store_response(
+                &site,
+                &axum::http::HeaderMap::new(),
+                &uri,
+                &axum::http::Method::GET,
+            );
+            (code, headers, String::from_utf8_lossy(&body).into_owned())
+        };
+        let manifest = pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl);
+        std::fs::write(&manifest, b"not a manifest").expect("written");
+        let (code, headers, body) = get("feed=gdfl&since=1");
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            !headers.contains_key(CENSUS_SINCE_HEADER),
+            "no delta is cut from a census that will not read: {headers:?}"
+        );
+        let mut held =
+            pull::manifest::Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+        gdfl_nifty(&mut held, 5);
+        std::fs::write(&manifest, held.image()).expect("written");
+        let ledger = store::quarantine::ledger_path(&site.store_root, Vendor::Gdfl);
+        std::fs::create_dir_all(&ledger).expect("a folder at the ledger's name");
+        let (code, _, body) = get("feed=gdfl");
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let refusal: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert!(
+            refusal["error"].as_str().is_some_and(|why| !why.is_empty()),
+            "{body}"
+        );
+
+        // THE BEHIND CACHE, POISONED BY A THREAD THAT DIED HOLDING IT.
+        let died = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _held = site.census_wire.behind.0.lock();
+                    panic!("a holder that dies with the cache locked");
+                })
+                .join()
+        });
+        assert!(died.is_err(), "the holder died");
+        assert!(
+            site.census_wire.behind.0.lock().is_err(),
+            "the cache is poisoned"
+        );
+        let first = behind(&site, Vendor::Gdfl);
+        let again = behind(&site, Vendor::Gdfl);
+        assert_eq!((first.days, first.kept), (again.days, again.kept));
+        assert_eq!(
+            first.unread, None,
+            "the journal read; only the cache refused"
+        );
+        assert_eq!(
+            first.days, 0,
+            "an import journal that holds nothing is behind by none"
+        );
+    }
+
+    /// **A DAY THE CENSUS REFUSED FOR TWO KINDS IS ONE DAY BEHIND, AND A
+    /// `since` NAMING A SEGMENT THE CENSUS HOLDS NO PART FOR IS REFUSED**
+    /// (BASE-COV-API repair 3, D-8661). The import journal's census-refused
+    /// days, counted distinct; then `delta_response` over a census of two
+    /// in-memory partitions (`Manifests::partitions`). Extremes: one day
+    /// closed census-refused for its options and its stocks (one day, never
+    /// two); a later day refused for its options alone (a second day); a day
+    /// done between them (none); a day refused at the vendor (not a census
+    /// day); a `since` naming both of a two-part census's segments (answered);
+    /// one naming a part's segment and one the census does not hold, as many
+    /// names as parts (`409 since_shape`); and, at once, the day refused for
+    /// two kinds beside the day done (still one day for it), and the
+    /// two-name `since` with its epochs right and one segment wrong (refused
+    /// for the segment, not the epochs); out of the box, a census of two
+    /// partitions where a read gives three.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one journal and one two-part census, each refusal beside its answer"
+    )]
+    fn a_day_refused_for_two_kinds_is_one_day_and_a_since_of_a_part_not_held_is_refused() {
+        let dir = crate::server::tests::agreeing("store-two-kinds");
+        let site = crate::server::tests::site("store-two-kinds", &dir);
+        let mut manifest =
+            pull::manifest::Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+        gdfl_nifty(&mut manifest, 375);
+        std::fs::write(
+            pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl),
+            manifest.image(),
+        )
+        .expect("a census on disk");
+        let journal = pull::gdfl_import::journal_path(&site.store_root);
+        std::fs::create_dir_all(journal.parent().expect("imports/")).expect("mkdir");
+        std::fs::write(
+            &journal,
+            "\
+                begin options 2019-11-15 *\n\
+                incomplete options 2019-11-15 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000\n\
+                begin stocks 2019-11-15 *\n\
+                incomplete stocks 2019-11-15 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000\n\
+                begin options 2019-11-18 *\n\
+                done options 2019-11-18 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+                begin options 2019-11-19 *\n\
+                incomplete options 2019-11-19 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000\n\
+                begin indices 2022-03-07 *\n\
+                refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=1791300000\n\
+            ",
+        )
+        .expect("a journal");
+        let held = behind(&site, Vendor::Gdfl);
+        assert_eq!(held.unread, None);
+        assert_eq!(
+            held.days, 2,
+            "2019-11-15 once, for both kinds, and 2019-11-19"
+        );
+        assert_eq!(
+            held.from,
+            Some(pull::session::Day::new(2019, 11, 15).expect("a day"))
+        );
+
+        // A CENSUS OF TWO IN-MEMORY PARTITIONS.
+        let part = |segment: Segment, rows: &[pull::manifest::Held]| {
+            let mut manifest =
+                pull::manifest::Manifest::partition_genesis(Vendor::Gdfl, segment, 4_096)
+                    .expect("a partition");
+            for row in rows {
+                let _append = manifest.record_held(*row).expect("records");
+            }
+            manifest
+        };
+        let march = month(2019, 3);
+        let two = census::VendorCensus {
+            vendor: Vendor::Gdfl,
+            path: std::path::PathBuf::from("/nonexistent/store-route/v4"),
+            state: census::Census::Held {
+                manifest: census::Manifests::partitions(vec![
+                    part(
+                        Segment::Index,
+                        &[held_at(
+                            series_at(Segment::Index, "NIFTY", Timeframe::SECOND_1),
+                            march,
+                            10,
+                            (5, 6),
+                        )],
+                    ),
+                    part(
+                        Segment::Fno,
+                        &[held_at(
+                            contract("NIFTY", "2019-03-28-1150000-CE"),
+                            march,
+                            20,
+                            (7, 8),
+                        )],
+                    ),
+                ]),
+            },
+        };
+        let headers = census_headers_with(Some(&two), None);
+        let epoch = header(&headers, CENSUS_EPOCH_HEADER).to_owned();
+        let compact = store_wire::Format::Compact;
+        let (code, body) = refused(Some(&two), compact, "INDEX=1,FNO=1", &epoch);
+        assert_eq!(code, axum::http::StatusCode::OK, "both parts named: {body}");
+        let (code, body) = refused(Some(&two), compact, "INDEX=1,CASH=1", &epoch);
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_shape", "{body}");
+        assert!(
+            body["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("names every part's generation")),
+            "{body}"
+        );
+    }
 }

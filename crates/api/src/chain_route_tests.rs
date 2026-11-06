@@ -1134,10 +1134,6 @@ fn a_listed_keys_first_stamp_is_read_month_by_month_and_a_month_that_will_not_re
 /// unreadable ledger with two instants; out of the box, a ledger of one
 /// byte that is not UTF-8.
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one census and spot, three ledgers, and the instants each is read at"
-)]
 fn the_chain_says_its_ledger_reads_a_listed_put_and_opens_a_spot_month_once() {
     let built = fixture("chain-ledger-states", &census_rows());
     let ledger = pull::gdfl_lineage::lineage_path(&built.store_root);
