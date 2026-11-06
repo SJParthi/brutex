@@ -73,16 +73,41 @@ struct HaltStore {
     root: PathBuf,
 }
 
+/// The fixture's root goes with it (BASE-REDS-1023 repair 5, check r5): a
+/// root kept by every run filled the temp folder with one per process, and
+/// one of them, under a pid macOS gave again, refused a later process's
+/// `create_dir`. A root that would not go is left in place: no later
+/// fixture can claim its name ([`HaltStore::new`]), and nothing reads it.
+impl Drop for HaltStore {
+    fn drop(&mut self) {
+        let _left_when_refused = fs::remove_dir_all(&self.root);
+    }
+}
+
 impl HaltStore {
     /// 2020-02-28 as warm-up, then every open session of March 2020 through
     /// the 23rd, each with its `1min`, `day` and `rung`-minute files.
+    ///
+    /// Its root is named by the pid, the wall clock's nanoseconds and this
+    /// process's counter, and `create_dir` makes it new or the fixture stops
+    /// by name: no earlier process can hold the name, since one under the
+    /// same pid (macOS reuses them) ran at another instant (BASE-REDS-1023
+    /// repair 5, check r5; the pid and counter alone collided in gate 1e).
     fn new(rungs: &[(Timeframe, usize)]) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
         let root = std::env::temp_dir().join(format!(
-            "brutex-halted-execution-fixture-{}-{}",
+            "brutex-halted-execution-fixture-{}-{nanos}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir(&root).expect("scratch");
+        let made = fs::create_dir(&root);
+        assert!(
+            made.is_ok(),
+            "{}: {made:?}: a scratch root no earlier process holds",
+            root.display()
+        );
         let store = Self { root };
         let mut index = 0_i64;
         let days = std::iter::once((2_u8, 28_u8)).chain((2..=23).map(|date| (3, date)));
@@ -316,5 +341,54 @@ fn a_coarse_rung_trade_never_prices_a_halted_minute() {
                 .iter()
                 .all(|minute| minute.ts_micros < from || minute.ts_micros > to)
         );
+    }
+}
+
+/// A NAME AN EARLIER PROCESS LEFT IS NEVER THIS FIXTURE'S, AND ITS OWN ROOT
+/// GOES WITH IT (BASE-REDS-1023 repair 5, check r5). Gate 1e failed once on
+/// `scratch: ... File exists` in [`a_coarse_rung_trade_never_prices_a_halted_minute`]:
+/// the root was named by the pid and this process's counter alone and never
+/// removed, and macOS reuses pids, so a root an earlier test process had
+/// made under the same pid (546 such folders in the temp folder on 31 Oct
+/// 2026, every one counter 0) refused the next one's `create_dir`. Here the
+/// names the next 64 fixtures of this process would have had under that rule
+/// are made first, as such leftovers are: the fixture still claims a root of
+/// its own, and that root is gone once the fixture is.
+#[test]
+fn a_root_an_earlier_process_left_is_never_claimed_and_the_fixtures_root_goes_with_it() {
+    let next = NEXT.load(Ordering::Relaxed);
+    let left: Vec<PathBuf> = (next..next + 64)
+        .map(|counter| {
+            std::env::temp_dir().join(format!(
+                "brutex-halted-execution-fixture-{}-{counter}",
+                std::process::id()
+            ))
+        })
+        .collect();
+    for name in &left {
+        fs::create_dir_all(name).expect("an earlier process's leftover, as it is left");
+    }
+    let store = HaltStore::new(&[]);
+    let root = store.root.clone();
+    assert!(
+        !left.contains(&root),
+        "a name an earlier process can hold: {}",
+        root.display()
+    );
+    assert!(
+        fs::read_dir(&root).expect("the fixture's root").count() > 0,
+        "the fixture wrote its store: {}",
+        root.display()
+    );
+    drop(store);
+    assert!(
+        !root.exists(),
+        "the fixture's root outlived it: {}",
+        root.display()
+    );
+    // The empty names this test made go; one an earlier process filled is
+    // not this test's and stays as it was (remove_dir refuses a full one).
+    for name in &left {
+        let _kept_when_not_empty = fs::remove_dir(name);
     }
 }

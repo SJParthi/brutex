@@ -62,7 +62,7 @@
 //! `an_unexplained_rate_gap_is_still_refused`).
 //!
 //! A gap row CONTINUES a clock; it never starts one (R3-30 repair 2,
-//! D-6247). It documents one scheduled auction, so it restarts the clock only
+//! D-7146). It documents one scheduled auction, so it restarts the clock only
 //! when the row before it was itself live and at most [`MAX_AGE_DAYS`] older:
 //! the clock still running on the gap's release day. A gap row after an
 //! unexplained hole (a result whose clock had already run out, or another gap
@@ -700,7 +700,7 @@ impl Series {
         // day after the first release.
         //
         // A gap row CONTINUES a clock and never starts one (R3-30 repair 2,
-        // D-6247): it is live only when the row before it was live and at
+        // D-7146): it is live only when the row before it was live and at
         // most MAX_AGE_DAYS older, the clock still running on the gap's
         // release day. An unlinked gap's days hold no auction slot, so they
         // are refused, and keep the gap's own slot so the refusal names it.
@@ -903,7 +903,8 @@ pub struct Replay {
 ///
 /// # Cost
 ///
-/// [`Series::parse`]'s, once, then one O(1) [`Series::on`] a day asked.
+/// [`Series::parse`]'s, once, then one O(1) [`Series::on`] a day asked, timed
+/// by `pull::riskfree::tests::a_carried_lookup_is_flat_in_the_table`.
 pub fn replay(
     text: &str,
     max_age_days: i32,
@@ -1793,6 +1794,7 @@ mod tests {
     /// O(1) AT p99 WITH THE GAP RULE (R3-30 repair 1): a lookup that carries
     /// a rate over a documented gap reads one more bounded slot, never a walk,
     /// so its tail is flat from 52 to 5,200 rows. Printed with n and method.
+    /// The proof is this test, `pull::riskfree::tests::a_carried_lookup_is_flat_in_the_table` (gate 12, D-7149).
     #[test]
     fn a_carried_lookup_is_flat_in_the_table() {
         let mut tails = Vec::new();

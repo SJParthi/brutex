@@ -621,6 +621,7 @@ pub fn encode_frame(
 /// decoding frame after frame into one buffer pays amortised O(1) a row
 /// (`docs/06-limits.md` L-SC-1). `reserve_exact` would turn every frame of
 /// that caller into a reallocation and a copy, quadratic over a month.
+/// The allocations are counted by `crates/pull/tests/allocation.rs` (gate 12, D-7149).
 pub fn decode_frame(
     frame: &[u8],
     crc: u32,

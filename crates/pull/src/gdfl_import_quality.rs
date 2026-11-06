@@ -568,8 +568,11 @@ pub struct Sampled {
 /// Of `sampled`, the indices whose line is among `news` -- what
 /// [`Ledger::news`] answered and the run appended (D-4928 item 7): a rescan
 /// names a sampled day when it writes the line that says so, and a later
-/// rescan of the same rows, which writes nothing, names nothing again. At
-/// most a day's indices against a day's lines.
+/// rescan of the same rows, which writes nothing, names nothing again. The
+/// lines' keys are one pre-sized hash set, so each sampled index is one
+/// probe: O(news + sampled), never their product (gate 11 rule 7,
+/// BASE-REDS-1023, D-7150; proved by
+/// `pull::gdfl_import::tests::wp11c::a_rescan_that_writes_no_new_line_names_no_sampled_day_again`).
 #[must_use]
 pub fn sampled_among(
     kind: ImportKind,
@@ -577,13 +580,15 @@ pub fn sampled_among(
     sampled: Vec<Sampled>,
     news: &[String],
 ) -> Vec<Sampled> {
-    let written: Vec<String> = news
-        .iter()
-        .filter_map(|line| keyed(line).map(|(key, _)| key))
-        .collect();
+    let mut written: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(news.len());
+    written.extend(
+        news.iter()
+            .filter_map(|line| keyed(line).map(|(key, _)| key)),
+    );
     sampled
         .into_iter()
-        .filter(|one| written.contains(&format!("{} {day} {}", kind.as_str(), one.scope)))
+        .filter(|one| written.contains(format!("{} {day} {}", kind.as_str(), one.scope).as_str()))
         .collect()
 }
 

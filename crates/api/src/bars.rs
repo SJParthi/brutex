@@ -392,6 +392,7 @@ pub fn absent_answered() -> u64 {
 
 /// Counts one absent month, and names it on the log the first time it is
 /// answered. O(1): one atomic add and one or two hash probes.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn note_absent(
     looked_for: &std::path::Path,
     vendor: Vendor,

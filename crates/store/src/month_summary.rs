@@ -839,7 +839,8 @@ impl MonthSummary {
     ///
     /// No bar is read. Per window, one scan of at most 23 words for its first
     /// held minute and one popcount over at most 23: O(1) for a day, whatever
-    /// the month holds.
+    /// the month holds. UNVERIFIED: no test times it at two month sizes
+    /// (docs/06-limits.md L-BRED23-07).
     pub fn padded_on(&self, day: i64, windows: &[(u16, u16)]) -> Result<u32, NotCounted> {
         if self.timeframe_secs != 60 {
             return Err(NotCounted::NotMinutes);

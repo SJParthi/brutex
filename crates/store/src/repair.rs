@@ -539,7 +539,7 @@ pub fn publish(
 /// # Cost
 ///
 /// O(held) to read and compare, bounded by [`row_ceiling`], plus
-/// [`publish`]'s write. Not O(1), and not on a read path.
+/// [`publish`]'s write. Linear in the month, and not on a read path.
 ///
 /// # Errors
 ///
@@ -625,10 +625,13 @@ fn outside_quarantine<'a>(
         SetAside::Nothing => Ok((std::borrow::Cow::Borrowed(offered), Vec::new())),
         SetAside::Whole(entry) => Err(RepairError::Quarantined(entry)),
         SetAside::Stamps(stamps) => {
+            // One hash probe an offered bar (BASE-REDS-1023, gate 11 rule 1):
+            // the set is built once, sized by the stamps set aside.
+            let aside: std::collections::HashSet<i64> = stamps.iter().copied().collect();
             let (kept, back): (Vec<Bar>, Vec<Bar>) = offered
                 .iter()
                 .copied()
-                .partition(|bar| stamps.binary_search(&bar.ts_micros).is_err());
+                .partition(|bar| !aside.contains(&bar.ts_micros));
             let held_back: Vec<i64> = back.iter().map(|bar| bar.ts_micros).collect();
             note_held_back(path, &held_back);
             Ok((std::borrow::Cow::Owned(kept), held_back))
@@ -1255,7 +1258,8 @@ const fn agrees(held: &Bar, offered: &Bar, policy: Policy) -> bool {
 /// makes at every held stamp: every field equal, except that where open
 /// interest is not a measurement for the instrument (`open_interest_applies`
 /// false: an index or a share, D-3322) a held `0` and an offered null are the
-/// same absence. O(1).
+/// same absence. O(1) UNVERIFIED: a fixed number of field compares, not timed
+/// (docs/06-limits.md L-BRED23-07).
 ///
 /// Public so that a caller which must ask the door's question before it hands
 /// the door a batch asks it in the door's own words, not in a copy of them:

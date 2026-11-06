@@ -537,6 +537,12 @@ fn the_horizon_alert_fires_seven_days_before_the_calendar_ends() {
     assert!(rates.alert());
     assert!(!loaded.horizons(rates_last - 8)[1].1.unwrap().alert());
     assert_eq!(loaded.horizon_alerts(rates_last - 8), []);
+    // Inside its alert window and not ended: said with the days left
+    // (BASE-REDS-1023 repair 3, verify r3's side no test took).
+    assert_eq!(
+        loaded.horizon_alerts(rates_last - 7),
+        [(Table::RiskFreeRate, "ends in 7 days".to_owned())]
+    );
     assert_eq!(
         loaded.horizon_alerts(rates_last + 1),
         [(Table::RiskFreeRate, "ended 1 days ago".to_owned())]

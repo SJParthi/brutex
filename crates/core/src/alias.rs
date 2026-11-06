@@ -1840,7 +1840,7 @@ mod tests {
             time(&|name| small.from_old(name).is_some() || small.to_new(name).is_some());
         let large_cost =
             time(&|name| large.from_old(name).is_some() || large.to_new(name).is_some());
-        eprintln!(
+        println!(
             "lineage lookup ns (p50, p99, max), n=200: 18 rows {small_cost:?}, 27 rows {large_cost:?}"
         );
         let worst = |table: &MemberIndex<128>, members: &[&str]| {

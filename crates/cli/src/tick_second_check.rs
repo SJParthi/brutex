@@ -1981,7 +1981,7 @@ pub(crate) fn check_day(
             groups.entry(group_of(item, day)).or_default().push(item);
         }
     }
-    let mut seen: HashSet<(String, Role)> = HashSet::new();
+    let mut seen: HashSet<(String, Role)> = HashSet::with_capacity(job.items.len());
     for (group, items) in &groups {
         match group {
             Group::Archive(path) => match sources.archives.get(path) {
@@ -2441,7 +2441,7 @@ fn extra_pass(
         }
     };
     let keeping = Keeping::new(&extra.archive);
-    let mut seen: HashSet<(String, Role)> = HashSet::new();
+    let mut seen: HashSet<(String, Role)> = HashSet::with_capacity(targets.len());
     for item in &targets {
         seen.insert((item.symbol.clone(), Role::Extra));
         let Ok(key) = InstrumentKey::cash(Exchange::Nse, &item.symbol) else {
@@ -2518,9 +2518,13 @@ fn store_only_row(ctx: &DayContext<'_>, item: &Item, label: Label, why: &str) ->
 /// Runs `job` over `0..n` on `workers` threads, each taking the next index;
 /// the answers in index order. A worker that panicked is named.
 ///
+/// EVERY WORKER IS JOINED before an answer is read (check r7): collecting the
+/// joins into a `Result` stopped at the first `Err`, so a second stopped worker
+/// stayed unjoined and `thread::scope` panicked in place of this refusal.
+///
 /// # Errors
 ///
-/// `"a worker stopped"` when a worker thread panicked.
+/// `"a worker stopped"` when any worker thread panicked.
 pub(crate) fn parallel<T: Send>(
     n: usize,
     workers: usize,
@@ -2544,9 +2548,13 @@ pub(crate) fn parallel<T: Send>(
                 })
             })
             .collect();
-        handles
+        let joined: Vec<_> = handles
             .into_iter()
-            .map(|h| h.join().map_err(|_| "a worker stopped".to_owned()))
+            .map(std::thread::ScopedJoinHandle::join)
+            .collect();
+        joined
+            .into_iter()
+            .map(|answers| answers.map_err(|_| "a worker stopped".to_owned()))
             .collect::<Result<Vec<_>, String>>()
     })?;
     for (at, answer) in answers.into_iter().flatten() {
@@ -3626,14 +3634,25 @@ fn take_lock(path: &Path) -> Result<std::fs::File, String> {
 }
 
 /// The run behind [`command_with`].
-#[expect(
-    clippy::too_many_lines,
-    reason = "one run in order: roots, lock, plan, sources, days, fold; each step is a call"
-)]
 fn run(
     ask: &Ask,
     env: &dyn Fn(&str) -> Option<OsString>,
     store: &dyn Fn() -> Result<PathBuf, String>,
+) -> Result<Report, String> {
+    run_with(ask, env, store, &check_day)
+}
+
+/// [`run`] with the day's check passed in: a worker that stops is the one
+/// refusal no input reaches, and a test hands it a check that stops.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one run in order: roots, lock, plan, sources, days, fold; each step is a call"
+)]
+fn run_with(
+    ask: &Ask,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    store: &dyn Fn() -> Result<PathBuf, String>,
+    day_check: &(dyn Fn(&Sources, &DayInputs<'_>, Day, &DayJob) -> DayOut + Sync),
 ) -> Result<Report, String> {
     let store = store()?;
     if inside(&ask.out, &store)? {
@@ -3683,9 +3702,13 @@ fn run(
     // The plan: the store's own days, each with its landing.
     let names = store_symbols(&store, ask.symbols.as_ref())?;
     let unknown_symbols: Vec<String> = ask.symbols.as_ref().map_or_else(Vec::new, |asked| {
+        // One hash probe per asked name against the held ones, never a
+        // search of the listing.
+        let mut held: HashSet<&str> = HashSet::with_capacity(names.len());
+        held.extend(names.iter().map(String::as_str));
         let mut missing: Vec<String> = asked
             .iter()
-            .filter(|name| names.binary_search(*name).is_err())
+            .filter(|name| !held.contains(name.as_str()))
             .cloned()
             .collect();
         missing.sort_unstable();
@@ -3764,7 +3787,7 @@ fn run(
     // The recorded archives that are the --archive file itself: a landing
     // from one of them is never compared with it twice. One resolution per
     // distinct recorded path.
-    let mut same_paths: HashSet<String> = HashSet::new();
+    let mut same_paths: HashSet<String> = HashSet::with_capacity(usize::from(extra));
     if let Some(path) = &ask.archive {
         let real = std::fs::canonicalize(path)
             .map_err(|w| format!("--archive {}: {w}", path.display()))?;
@@ -3775,6 +3798,7 @@ fn run(
                 _ => None,
             })
             .collect();
+        same_paths.reserve(recorded.len());
         for p in recorded {
             if std::fs::canonicalize(p).is_ok_and(|r| r == real) {
                 same_paths.insert(p.to_owned());
@@ -3898,7 +3922,7 @@ fn run(
                 return Ok(DayOut::default());
             };
             let day = Day::from_days(*d).map_err(|w| w.to_string())?;
-            let done = check_day(&sources, &inputs, day, job);
+            let done = day_check(&sources, &inputs, day, job);
             note_day(day, &done);
             // A row byte-identical to the one the year already holds for its
             // key (a retried failure that failed the same way) is not filed

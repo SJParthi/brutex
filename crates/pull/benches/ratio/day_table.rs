@@ -8,6 +8,7 @@
 //! Every byte is invented here, in memory: each day zip holds one folder
 //! entry and one small file of made-up rows, stored, as the vendor's outer
 //! archive stores its day zips. Nothing is written to disk.
+//! This bench, run by `crates/pull/benches/ratio.rs` (gate 12, D-7149).
 
 use pull::gdfl_archive::{Archive, crc32, day_zip_name};
 use pull::gdfl_cm::{CmKind, CmSource, day_folder_name};
@@ -104,6 +105,7 @@ fn archive(days: u32) -> Archive<Vec<u8>> {
 
 /// C-GI-04: one day's listing out of the outer archive, the middle day of
 /// each size, flat at 1x, 10x and 100x the days.
+/// This bench, run by `crates/pull/benches/ratio.rs` (gate 12, D-7149).
 pub(crate) fn day_lookup_is_flat() -> bool {
     let archives = [BASE_DAYS, BASE_DAYS * 10, BASE_DAYS * 100].map(|n| (n, archive(n)));
     let probe = |(n, a): &(u32, Archive<Vec<u8>>)| {

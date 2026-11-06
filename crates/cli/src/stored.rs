@@ -2481,6 +2481,7 @@ pub(crate) fn overnight_note(
 /// for one outside the charter's non-regular days: a whole regular session of
 /// one-minute bars and some, so a month ending on a special session is walked
 /// past and a month of nothing else is refused, never scanned whole.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 const PRIOR_WALK_CAP: u64 = 1_440;
 
 /// The last regular-session bar stored before `first_ts`'s month on the same
@@ -2632,7 +2633,8 @@ impl StoredSpanLoadBoundV1 {
 
 /// [`load_classified_with_ceiling`]'s quarantine refusal (R4-18), by name:
 /// the scope, the cause, the bars and where the ledger line is. O(1): one
-/// probe.
+/// probe, two positional reads
+/// (`quarantine_tests::a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired`).
 fn refuse_quarantined(
     root: &Path,
     path: StorePath<'_>,
@@ -3960,6 +3962,50 @@ mod tests {
     /// Writes `n` bars for NIFTY 1min 2026-08 under `vendor`, and returns the root.
     fn seeded(tag: &str, vendor: Vendor, n: i64) -> std::path::PathBuf {
         seeded_symbol(tag, vendor, "NIFTY", n)
+    }
+
+    /// **AN INTENT IS REFUSED TOO, AND SAID TO BE ONE** (R4-18 repair 2): a drop
+    /// ledgered and not yet finished is indexed as a drop of no bars, so the
+    /// month is refused from the intent on, and the refusal says why it names
+    /// no bar.
+    #[test]
+    fn a_drop_ledgered_and_not_finished_is_refused_as_an_intent() {
+        let r = seeded("intent", Vendor::Zerodha, 4);
+        let key = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("an index");
+        let ym = YearMonth::new(2026, 8).expect("a month");
+        let path = StorePath::for_key(
+            Vendor::Zerodha,
+            &key,
+            Timeframe::MINUTE_1,
+            ym,
+            FileKind::Bars,
+        )
+        .expect("a path");
+        let named = [bars(1)[0].ts_micros];
+        store::quarantine::record(
+            &r,
+            &store::quarantine::Record {
+                path,
+                scope: store::quarantine::Scope::Dropping,
+                cause: store::quarantine::Cause::ForeignLevel,
+                stamps: &named,
+                bars: 1,
+                revision: 0,
+                source_digest: store::quarantine::digest_of(&bars(4)),
+                who: "test",
+                reason: "invented: an intent whose drop never ran",
+            },
+        )
+        .expect("the intent");
+        let Err(LoadFailure::Refused(why)) =
+            load_classified(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8)
+        else {
+            panic!("a month under an intent is refused, never read");
+        };
+        assert!(
+            why.contains("0 bar(s) named, a drop ledgered and not yet finished"),
+            "{why}"
+        );
     }
 
     /// **A STORED SWEEP REFUSES A QUARANTINED MONTH BY NAME** (R4-18): the

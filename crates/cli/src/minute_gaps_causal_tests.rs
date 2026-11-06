@@ -407,6 +407,7 @@ fn the_causal_rule_at_its_extremes() {
 /// 2020-03-13 and 2020-03-23 `HALTS` windows. Every bucket that reaches past
 /// the halt's first whole minute is withheld on every rung; every bucket
 /// wholly before it is admitted; the exclusion names the halt.
+/// `flat` here is the invented price, not a cost; the test is `cli::minute_gaps::causal_tests::a_recorded_halt_withholds_from_its_start` (gate 12, D-7149).
 #[test]
 fn a_recorded_halt_withholds_from_its_start() {
     for (day, halt_from, expected) in [
@@ -494,6 +495,7 @@ fn the_causal_rule_has_its_own_policy_version() {
 
 /// The admission rule is one O(1) probe per bar however many days are cut, and
 /// the indicator fold's `(day, from)` pairs say the same thing.
+/// The proof is this test, `cli::minute_gaps::causal_tests::the_admission_probe_and_the_fold_pairs_agree` (gate 12, D-7149).
 #[test]
 fn the_admission_probe_and_the_fold_pairs_agree() {
     let day = day_of(2024, 4, 23);

@@ -29,7 +29,7 @@ export function monthVerdict(month) {
   if (month.being_written != null) return { word: 'being written', kind: 'absent' };
   if (month.absent_file != null) return { word: 'no file', kind: 'absent' };
   if ((month.invalid_timestamps ?? 0) > 0) return { word: 'invalid stamps', kind: 'bad' };
-  if (month.unreadable_records > 0) return { word: 'unreadable', kind: 'bad' };
+  if ((month.unreadable_records ?? 0) > 0) return { word: 'unreadable', kind: 'bad' };
   if (month.evidence_error != null) return { word: 'unverified', kind: 'absent' };
   if (month.truncated) return { word: 'incomplete', kind: 'absent' };
   if (month.unmeasured_minutes > 0) return { word: 'unmeasured', kind: 'absent' };

@@ -17249,8 +17249,6 @@ async fn same_origin_writes_only(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
-
     // DECIDED WHILE THE BORROW IS LIVE. `Next::run` takes the request by value,
     // so the verdict is an owned `String` and nothing of the request is held
     // across the move.
@@ -17261,6 +17259,38 @@ async fn same_origin_writes_only(
     let Some(why) = refusal else {
         return next.run(request).await;
     };
+    refused_after_draining(request, why).await
+}
+
+/// The `403` of a write refused before any handler read its body, sent once
+/// the body has been read, at most [`MAX_FORM_BYTES`] of it, and dropped.
+///
+/// **Why the body is read at all (BASE-REDS-1023, BRED23-F19, D-7152
+/// addendum).** The three early refusals ([`same_origin_writes_only`],
+/// [`refuse_writes`], [`refuse_unstamped_writes`]) are decided from the head
+/// alone. Answering then and closing left a body that was still on its way
+/// with nowhere to go: the client's next write met a closed socket, its kernel
+/// was answered with a reset, and the reset discarded the `403` the client had
+/// not yet read. The refusal was right and never arrived.
+///
+/// The drain costs O(body) once per refused request and never more than
+/// `MAX_FORM_BYTES` plus the one frame that crosses it, the bound every
+/// handler's extractor already has; a body that does not arrive is cut by
+/// [`BODY_READ_TIMEOUT`] as any body is (L-BRED23-08). A body past the bound
+/// is left unread from there on and still answered with the refusal (its
+/// client can still lose the answer, and the bound says why), and nothing of
+/// the body is kept or parsed. A body that STALLS is not answered with the
+/// refusal: verify-BASE-REDS-1023-r3's attack E10 saw `408 Request Timeout`
+/// once `BODY_READ_TIMEOUT` ran out (not reproduced by repair 3, which sends
+/// no POST; this sentence used to say the drain never changes the answer).
+async fn refused_after_draining(
+    request: axum::extract::Request,
+    why: String,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    // The outcome is not the answer: `Ok` is a body read to its end, `Err` one
+    // past the bound or cut by its deadline, and the refusal stands for both.
+    let _drained = axum::body::to_bytes(request.into_body(), MAX_FORM_BYTES).await;
     (
         axum::http::StatusCode::FORBIDDEN,
         [(
@@ -17329,18 +17359,9 @@ async fn refuse_writes(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
     match read_only_refusal(request.method(), read_only) {
         None => next.run(request).await,
-        Some(why) => (
-            axum::http::StatusCode::FORBIDDEN,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            why,
-        )
-            .into_response(),
+        Some(why) => refused_after_draining(request, why).await,
     }
 }
 
@@ -17457,18 +17478,9 @@ async fn refuse_unstamped_writes(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
     match unstamped_refusal(request.method(), why) {
         None => next.run(request).await,
-        Some(why) => (
-            axum::http::StatusCode::FORBIDDEN,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            why,
-        )
-            .into_response(),
+        Some(why) => refused_after_draining(request, why).await,
     }
 }
 
@@ -26322,7 +26334,7 @@ mod tests {
         for path in ["/pull/spot", "/pull/fno"] {
             let crawled = get(addr, path).await;
             assert!(
-                crawled.contains("405"),
+                status_line(&crawled).contains("405"),
                 "GET {path} must not be a route at all: {crawled}"
             );
             assert!(
@@ -26428,7 +26440,7 @@ mod tests {
 
         // 6. A MISSING ASSET IS A 404 AND NEVER HTML.
         let missing = get(addr, "/assets/missing.js").await;
-        assert!(missing.contains("404"), "{missing}");
+        assert!(status_line(&missing).contains("404"), "{missing}");
         assert!(
             !missing.contains("<!doctype"),
             "a missing script must not answer with a page: {missing}"
@@ -26519,6 +26531,40 @@ mod tests {
     /// One command line, owned.
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The status line of one raw HTTP response, and nothing else.
+    ///
+    /// **A status code is asserted here, never against the whole response.**
+    /// Every response carries `x-brutex-build: <40 hex characters>`, and a
+    /// commit hash holds any three decimal digits often enough: at
+    /// `77a635e2e7c8d61d746a2b993fc62cd4130b0102` the header held `413`, and
+    /// `!response.contains("413")` failed gate 1e on a 403 answer that was
+    /// right (BASE-REDS-1023, BRED23-F15). The same defect was fixed once
+    /// before for a process id in a scratch path; this is the general cure.
+    fn status_line(response: &str) -> &str {
+        response.lines().next().unwrap_or_default()
+    }
+
+    /// The gate 1e failure of 24 Oct, replayed on the exact header it hit: the
+    /// whole response holds `413` and the status line does not. An empty
+    /// response has an empty status line, so no code is ever read off nothing.
+    #[test]
+    fn a_status_code_is_read_off_the_status_line_and_never_off_the_build_header() {
+        let response = "HTTP/1.1 403 Forbidden\r\n\
+             x-brutex-build: 77a635e2e7c8d61d746a2b993fc62cd4130b0102\r\n\
+             content-length: 553\r\n\r\nREFUSED";
+        assert!(
+            response.contains("413"),
+            "the hazard is real: the hash holds the digits"
+        );
+        assert_eq!(status_line(response), "HTTP/1.1 403 Forbidden");
+        assert!(!status_line(response).contains("413"));
+        assert_eq!(status_line(""), "");
+        assert_eq!(
+            status_line("HTTP/1.1 404 Not Found"),
+            "HTTP/1.1 404 Not Found"
+        );
     }
 
     /// Sends one form POST and reads the whole response.
@@ -26630,8 +26676,14 @@ mod tests {
                 &format!("{local_origin}Sec-Fetch-Site: cross-site\r\n"),
             )
             .await;
-            assert!(hostile_huge.contains("403 Forbidden"), "{hostile_huge}");
-            assert!(!hostile_huge.contains("413"), "{hostile_huge}");
+            assert!(
+                status_line(&hostile_huge).contains("403 Forbidden"),
+                "{hostile_huge}"
+            );
+            assert!(
+                !status_line(&hostile_huge).contains("413"),
+                "{hostile_huge}"
+            );
             assert!(!hostile_huge.contains("NOT STARTED"), "{hostile_huge}");
 
             // AND THE OLDER SIGNAL, for a client that sends no fetch metadata.
@@ -26690,6 +26742,139 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// One raw POST whose head and body travel as two writes `pause` apart, as
+    /// an unbuffered client's `write!` sends them, then read to its end.
+    /// Returns what was read, or the kind of the first error met.
+    async fn post_head_then_body(
+        addr: SocketAddr,
+        head: String,
+        body: String,
+        pause: std::time::Duration,
+    ) -> Result<String, std::io::ErrorKind> {
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read as _;
+            let mut s = std::net::TcpStream::connect(addr).expect("connect");
+            s.write_all(head.as_bytes()).map_err(|e| e.kind())?;
+            std::thread::sleep(pause);
+            s.write_all(body.as_bytes()).map_err(|e| e.kind())?;
+            let mut buf = String::new();
+            s.read_to_string(&mut buf)
+                .map(|_| buf)
+                .map_err(|e| e.kind())
+        })
+        .await
+        .expect("the client thread must not panic")
+    }
+
+    /// **A WRITE REFUSED BEFORE ITS BODY IS READ STILL REACHES ITS CLIENT**
+    /// (BASE-REDS-1023, BRED23-F19, BRED-19, D-7152 addendum).
+    ///
+    /// The three early refusals (cross-origin, read-only, unstamped) answered
+    /// `403` from the head alone and closed. A client whose body was still on
+    /// its way then wrote into a closed socket, the kernel answered that body
+    /// with a reset, and the reset discarded the `403` it had not read yet:
+    /// macOS gate 31 failed
+    /// `speed::tests::a_served_request_is_counted_under_its_matched_path` on
+    /// `ConnectionReset` (25 Oct, load about 45), its cross-site
+    /// `POST /page-report` sent by `write!`, which writes each formatted piece
+    /// separately. Here the body follows the head 300 ms later, so the server
+    /// has always answered first: without the drain every case below loses its
+    /// answer, with it none can. Three bodies (one byte, a form, and exactly
+    /// the most this server reads), through the served router.
+    #[tokio::test]
+    async fn a_write_refused_before_its_body_is_read_still_reaches_its_client() {
+        with_server("refusal-drain", |addr| async move {
+            let host = format!("localhost:{}", addr.port());
+            for body in [
+                "x".to_owned(),
+                "target=nifty&from=2024-01-01&to=2024-01-02".to_owned(),
+                format!("pad={}", "x".repeat(MAX_FORM_BYTES - 4)),
+            ] {
+                let head = format!(
+                    "POST /pull/spot HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n\
+                     Sec-Fetch-Site: cross-site\r\n\
+                     Content-Type: application/x-www-form-urlencoded\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let n = body.len();
+                let answer =
+                    post_head_then_body(addr, head, body, std::time::Duration::from_millis(300))
+                        .await
+                        .unwrap_or_else(|kind| {
+                            panic!("a {n}-byte refused body lost its answer to {kind:?}")
+                        });
+                assert_eq!(status_line(&answer), "HTTP/1.1 403 Forbidden", "{answer}");
+                assert!(
+                    answer.contains("Sec-Fetch-Site says this one came from somewhere else"),
+                    "{answer}"
+                );
+            }
+        })
+        .await;
+    }
+
+    /// A request body of fixed frames that counts the bytes a reader took.
+    struct FramesBody {
+        frames: std::collections::VecDeque<usize>,
+        taken: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl http_body::Body for FramesBody {
+        type Data = axum::body::Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            let next = self.frames.pop_front().map(|n| {
+                self.taken.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+                Ok(http_body::Frame::data(axum::body::Bytes::from(vec![
+                    b'x';
+                    n
+                ])))
+            });
+            std::task::Poll::Ready(next)
+        }
+    }
+
+    /// The drain itself, with no socket: the refusal reads the body to its
+    /// end when it fits [`MAX_FORM_BYTES`], answers the same `403` with the
+    /// same text whatever the drain met (no body, one byte, exactly the bound,
+    /// one byte past it), and reads no further than the frame that crossed the
+    /// bound, so a body past it is never read whole.
+    #[tokio::test]
+    async fn a_refusal_reads_its_body_to_the_end_within_the_bound_and_answers_the_same() {
+        for (frames, wanted) in [
+            (vec![], 0),
+            (vec![1], 1),
+            (vec![MAX_FORM_BYTES / 2, MAX_FORM_BYTES / 2], MAX_FORM_BYTES),
+            (vec![MAX_FORM_BYTES, 1, 4096], MAX_FORM_BYTES + 1),
+        ] {
+            let taken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let request = axum::extract::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/pull/spot")
+                .body(axum::body::Body::new(FramesBody {
+                    frames: frames.into(),
+                    taken: taken.clone(),
+                }))
+                .expect("a request");
+            let answer = refused_after_draining(request, "REFUSED: test".to_owned()).await;
+            assert_eq!(answer.status(), axum::http::StatusCode::FORBIDDEN);
+            assert_eq!(
+                taken.load(std::sync::atomic::Ordering::SeqCst),
+                wanted,
+                "the drain reads to the end within the bound, and stops at the frame past it"
+            );
+            let text = axum::body::to_bytes(answer.into_body(), 1024)
+                .await
+                .expect("the refusal's own text");
+            assert_eq!(&text[..], b"REFUSED: test");
+        }
     }
 
     /// **THE SAME-ORIGIN RULE, ARM BY ARM, WITHOUT A SOCKET.**
@@ -27176,8 +27361,11 @@ mod tests {
                 over.contains("not inclusive"),
                 "and the correction is stated, not performed in silence: {over}"
             );
+            // The one spelling this page writes (its NOT STARTED receipt):
+            // the second the assertion also took was a side no run reached
+            // (BASE-REDS-1023 repair 3, verify r3).
             assert!(
-                over.contains("no vendor was contacted") || over.contains("no vendor is contacted"),
+                over.contains("no vendor was contacted"),
                 "and it says nothing ran: {over}"
             );
 
@@ -27188,7 +27376,7 @@ mod tests {
                 "target=equities&granularity=1day&from=2022-01-08&to=2022-01-08",
             )
             .await;
-            assert!(one.contains("503"), "{one}");
+            assert!(status_line(&one).contains("503"), "{one}");
             assert!(one.contains("<td>1</td>"), "one calendar day: {one}");
             assert!(one.contains("2022-01-09"), "and the wire date: {one}");
 
@@ -27260,7 +27448,10 @@ mod tests {
                  &vendor=truedata",
             )
             .await;
-            assert!(expired.contains("503"), "expired is acceptable: {expired}");
+            assert!(
+                status_line(&expired).contains("503"),
+                "expired is acceptable: {expired}"
+            );
             assert!(expired.contains("NIFTY"), "canonicalised: {expired}");
             assert!(expired.contains("2020-01-31"), "the wire date: {expired}");
 

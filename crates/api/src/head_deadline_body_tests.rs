@@ -21,6 +21,7 @@
     clippy::panic
 )]
 
+use super::census_cache::warm_tests::{NEVER_BLOCKS_APART, NEVER_BLOCKS_RUNS, first_run_within};
 use super::{ConnectionLimits, HeadDeadline, HeadState, Slot, Slots, serve_limited};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -47,6 +48,20 @@ const PACE: Duration = Duration::from_millis(10);
 /// The byte at position `i` of every body this server sends.
 fn pattern(i: usize) -> u8 {
     u8::try_from(i % 251).unwrap()
+}
+
+/// The pattern bytes of the longest body any of these tests asks for, made once
+/// and before a server starts, so a handler's answer takes no work.
+///
+/// Each handler made its body per request: 16 MiB through one iterator, on the
+/// runtime the head clock runs on. Under instrumentation that took longer than
+/// the head deadline [`T`], and the client saw `ConnectionReset` and an empty
+/// body with no defect in the server (BASE-REDS-1023 repair 6, check r6's
+/// follow-up); on a loaded machine it was the same race with less room. What
+/// these tests time is the server's writes, never the fixture's arithmetic.
+fn patterned() -> &'static axum::body::Bytes {
+    static BODY: std::sync::OnceLock<axum::body::Bytes> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| (0..BIG).map(pattern).collect::<Vec<u8>>().into())
 }
 
 /// A finite body of `total` pattern bytes, sent in 64 KiB frames with no
@@ -79,11 +94,12 @@ impl http_body::Body for Chunks {
 fn app() -> axum::Router {
     use axum::extract::Path;
     use axum::routing::get;
+    let _made_before_the_server_starts = patterned();
     axum::Router::new()
         .route("/ok", get(|| async { "ok" }))
         .route(
             "/big/{n}",
-            get(|Path(n): Path<usize>| async move { (0..n).map(pattern).collect::<Vec<u8>>() }),
+            get(|Path(n): Path<usize>| async move { patterned().slice(..n) }),
         )
         .route(
             "/chunked/{n}",
@@ -258,6 +274,14 @@ fn lines(from: u64, message: &str, tag: &str) -> Vec<telemetry::Record> {
 /// count equals `Content-Length`, and the kept-alive socket then serves a
 /// second request. Before D-4975 the connection closed one deadline after the
 /// first byte with most of the body unsent.
+///
+/// THE SECOND REQUEST IS ON THE WIRE BEFORE THE FIRST RESPONSE ENDS (BASE-REDS-1023
+/// repair 6). It was sent after this client had read the last byte and checked
+/// all 16 MiB, but the head clock starts when the server hands its last byte to
+/// the socket, so the client's own reading of what the kernel still held and
+/// its own check ran on that clock: under instrumentation at load 80 the idle
+/// socket closed first, as an idle socket must, and `said` was empty. The
+/// socket still has to outlive the body to answer.
 #[tokio::test]
 async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
     let (addr, stop) = start(limits(T, 8)).await;
@@ -271,6 +295,10 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
     assert!(head.starts_with("HTTP/1.1 200 OK"), "{head:?}");
     let length = content_length(&head);
     assert_eq!(length, BIG);
+    client
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
     let (body, closed) = paced(&mut client, rest, length, CHUNK, PACE).await;
     let took = began.elapsed();
     assert!(
@@ -284,10 +312,6 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
         took >= T * 4,
         "the body drained in {took:?}: too fast to prove a slow reader is safe"
     );
-    client
-        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        .await
-        .unwrap();
     let (said, closed) = drain(&mut client, T * 10).await;
     assert!(
         closed && said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
@@ -304,14 +328,41 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
 /// the request, its `200`, its declared length and the bytes that went, which
 /// are fewer; no "closed by the client" line is written for it. Before D-4975
 /// the close came at the same time but nothing was logged.
+///
+/// THE UPPER BOUND HOLDS IN ONE OF UP TO [`NEVER_BLOCKS_RUNS`] RUNS (L-BRED23-14's
+/// rule, BASE-REDS-1023 repair 7): 1.15 s against 1 s in one whole copy under
+/// this repair's overload, a slot the cut had freed and the machine had not yet
+/// answered on. A reader that is never cut holds its slot past the next client's
+/// six seconds in every run; every other assertion holds in every run. A run
+/// that does not hold waits [`NEVER_BLOCKS_APART`] before the next (repair 8):
+/// a run lasts about the 300 ms deadline, so seven unspaced runs fell inside
+/// seconds, where one burst of load could fail them all.
 #[tokio::test]
 async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
     let _sink = crate::emitted::sink();
+    let held = first_run_within(
+        T + SLACK,
+        NEVER_BLOCKS_RUNS,
+        NEVER_BLOCKS_APART,
+        one_stopped_reader,
+    )
+    .await;
+    assert!(
+        held.is_ok(),
+        "a stopped reader held its slot in every run, (p50, p99, max) each: {held:?}"
+    );
+}
+
+/// One run of [`a_reader_that_stops_reading_is_closed_and_logged_as_cut`] on a
+/// server of its own, its every assertion but the upper bound held: when the
+/// slot came back.
+async fn one_stopped_reader(run: u32) -> Vec<Duration> {
     let from = crate::emitted::mark();
+    let mark = format!("test=stops{run}");
     let (addr, stop) = start(limits(T, 1)).await;
     let mut reader = connect(addr).await;
     reader
-        .write_all(format!("GET /big/{BIG}?test=stops HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+        .write_all(format!("GET /big/{BIG}?{mark} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
         .await
         .unwrap();
     let (head, rest) = head(&mut reader).await;
@@ -329,17 +380,13 @@ async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
         freed + EARLY >= T,
         "the slot came back at {freed:?}, before a stall deadline"
     );
-    assert!(
-        freed < T + SLACK,
-        "a stopped reader held its slot for {freed:?}"
-    );
     let (body, closed) = paced(&mut reader, rest, length, 1 << 20, Duration::ZERO).await;
     assert!(
         closed && body.len() < length,
         "{} of {length} bytes",
         body.len()
     );
-    let cut = lines(from, "response cut", "test=stops");
+    let cut = lines(from, "response cut", &mark);
     assert_eq!(cut.len(), 1, "{cut:?}");
     let line = &cut[0];
     assert!(crate::emitted::counts(line, "status", 200), "{line:?}");
@@ -360,8 +407,9 @@ async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
         went > 0 && went < u64::try_from(BIG).unwrap(),
         "{went} bytes written"
     );
-    assert!(lines(from, "response closed by the client", "test=stops").is_empty());
+    assert!(lines(from, "response closed by the client", &mark).is_empty());
     let _ = stop.send(());
+    vec![freed]
 }
 
 /// A CUT `/db` READ IS NOT COUNTED SERVED. Behind the console's own
@@ -376,14 +424,15 @@ async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
 async fn a_cut_db_read_is_taken_back_out_of_its_served_count() {
     let _sink = crate::emitted::sink();
     let from = crate::emitted::mark();
+    let _made_before_the_server_starts = patterned();
     let router = axum::Router::new()
         .route(
             "/store.json",
-            axum::routing::get(|| async { (0..BIG).map(pattern).collect::<Vec<u8>>() }),
+            axum::routing::get(|| async { patterned().clone() }),
         )
         .route(
             "/other",
-            axum::routing::get(|| async { (0..BIG).map(pattern).collect::<Vec<u8>>() }),
+            axum::routing::get(|| async { patterned().clone() }),
         )
         .layer(axum::middleware::from_fn(crate::logs::note_request));
     let (addr, stop) = start_app(limits(T, 8), router).await;
@@ -765,7 +814,9 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
     let length = 8 << 20;
     let began = Instant::now();
     let mut readers = Vec::new();
+    let (read_one, mut reads) = tokio::sync::mpsc::channel(2);
     for _ in 0..2 {
+        let read_one = read_one.clone();
         readers.push(tokio::spawn(async move {
             let mut client = connect(addr).await;
             client
@@ -773,6 +824,7 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
                 .await
                 .unwrap();
             let (head, rest) = head(&mut client).await;
+            read_one.send(()).await.unwrap();
             let (body, closed) = paced(&mut client, rest, content_length(&head), CHUNK, PACE).await;
             assert!(!closed, "cut after {} bytes", body.len());
             assert_pattern(&body);
@@ -781,7 +833,12 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
             done
         }));
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // THE ORDER, NOT A SLEEP (BASE-REDS-1023 repair 6): this slept 100 ms and
+    // assumed both readers held their slots by then. A head read says so, and a
+    // reader that fails before its head drops its sender, so this fails too.
+    drop(read_one);
+    reads.recv().await.unwrap();
+    reads.recv().await.unwrap();
     let mut next = TcpStream::connect(addr).await.unwrap();
     next.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await

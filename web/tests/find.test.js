@@ -17,6 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { costsInTurn, said } from './in-turn.js';
 
 import { build, probe, symbolCount, MAX_PREFIX } from '../src/lib/find.js';
 import { MAX_PREFIX as PREFIX_BOUND } from '../src/lib/prefix.js';
@@ -172,45 +173,20 @@ test('a symbol shorter than the bound is indexed to its own length', () => {
 
 /* ── what it costs ────────────────────────────────────────────────────── */
 
-/**
- * Nanoseconds for one call, best of several runs to shed noise. The same
- * shape `prefix.test.js` uses, so the two numbers are comparable.
- *
- * @param {number} reps
- * @param {() => unknown} op
- * @returns {number}
+/*
+ * THE TWO SIDES OF A RATIO ARE TIMED IN TURN, the same way `prefix.test.js` times them (BASE-REDS-1023 repair 6, check
+ * r6; tests/in-turn.js), so the two numbers stay comparable. Each side was a minimum over 60 trials, one side after the
+ * other: 60 because each crate's `benches/ratio.rs` takes that many and gate 8's comment states the budget (five failed on
+ * a GitHub runner at 3.34× against a 3.0 ceiling, in a job that took 1,344 ms for work measured at 288 to 366 ms
+ * locally). A minimum converges on the uncontended floor as trials rise, which is why more samples and not a higher
+ * ceiling keep the assertion intact: 3.0 is what separates a `Map.get` whose constant grew from a lookup that scales.
+ * But sides measured one after the other still let a stall land on one side only. Now each round samples both, each
+ * side keeps its minimum, and the rounds end once the bound holds (120 at most, so 120 samples a side, twice the
+ * budget). The two censuses are built once outside this and dominate the wall clock; the probes are nanoseconds.
  */
-function cost(reps, op) {
-  let best = Infinity;
-  // SIXTY TRIALS, NOT FIVE, AND THE NUMBER IS THE WORKSPACE'S OWN.
-  //
-  // `crates/*/benches/ratio.rs` takes a minimum over 60 trials and gate 8's
-  // comment states that budget outright. This took 5, which is the same
-  // technique at a twelfth of the sample, and it showed: the assertion below
-  // passes locally every time — measured 288, 306, 312 and 366 ms across four
-  // runs — and FAILED on a GitHub runner at 3.34× against a 3.0 ceiling, in a
-  // job that took 1,344 ms for the same work.
-  //
-  // A minimum converges on the uncontended floor as trials rise, so more of
-  // them is the fix that keeps the assertion intact. Raising the ceiling would
-  // have been the other option and is the wrong one: 3.0 is what separates a
-  // `Map.get` whose constant grew from a lookup that scales, and moving it to
-  // accommodate a noisy host discards exactly the distinction this test exists
-  // to draw.
-  //
-  // It costs almost nothing. The two censuses are built ONCE outside this
-  // function and dominate the wall clock; the probes themselves are nanoseconds.
-  for (let run = 0; run < 60; run += 1) {
-    op();
-    const t0 = process.hrtime.bigint();
-    for (let i = 0; i < reps; i += 1) op();
-    const ns = Number(process.hrtime.bigint() - t0) / reps;
-    if (ns < best) best = ns;
-  }
-  return best;
-}
+const under3x = (/** @type {number} */ big, /** @type {number} */ small) => big / small < 3;
 
-test('a miss costs the same at 750 symbols and at 75,000', () => {
+test('a miss costs the same at 750 symbols and at 75,000', (t) => {
   // THE PURE PROBE. No rows are materialised, so what is measured is the
   // `Map.get` alone — the part of this module that is genuinely O(1).
   // The ceiling is 3.0×, the figure `prefix.test.js` and
@@ -223,16 +199,16 @@ test('a miss costs the same at 750 symbols and at 75,000', () => {
   assert.equal(probe(ixS, small, 'QQQQ').length, 0);
   assert.equal(probe(ixL, large, 'QQQQ').length, 0);
 
-  const ratio =
-    cost(20_000, () => probe(ixL, large, 'QQQQ')) / cost(20_000, () => probe(ixS, small, 'QQQQ'));
+  const m = costsInTurn(20_000, () => probe(ixL, large, 'QQQQ'), () => probe(ixS, small, 'QQQQ'), under3x);
+  t.diagnostic(said('a miss at 75,000 symbols against 750', m));
   assert.ok(
-    ratio < 3,
-    `a missing fragment cost ${ratio.toFixed(2)}× more against a 100× catalogue — ` +
+    m.held,
+    `a missing fragment cost ${(m.first / m.second).toFixed(2)}× more against a 100× catalogue after ${m.rounds} rounds — ` +
       `it is one Map.get and must not scale with the census`
   );
 });
 
-test('the census can grow without the keystroke growing, at a fixed symbol count', () => {
+test('the census can grow without the keystroke growing, at a fixed symbol count', (t) => {
   // 750 names at one rung against the same 750 names at six rungs and three
   // segments: 750 rows against 13,500. The index is built over SYMBOLS, so the
   // probe that finds nothing must not notice.
@@ -243,15 +219,16 @@ test('the census can grow without the keystroke growing, at a fixed symbol count
   const ixF = build(fat, sym);
   assert.equal(symbolCount(ixT), symbolCount(ixF), 'same names, eighteen times the rows');
 
-  const ratio = cost(20_000, () => probe(ixF, fat, 'QQQQ')) / cost(20_000, () => probe(ixT, thin, 'QQQQ'));
+  const m = costsInTurn(20_000, () => probe(ixF, fat, 'QQQQ'), () => probe(ixT, thin, 'QQQQ'), under3x);
+  t.diagnostic(said('a miss over 13,500 rows against 750', m));
   assert.ok(
-    ratio < 3,
-    `eighteen times the rows made the probe ${ratio.toFixed(2)}× dearer — the index ` +
+    m.held,
+    `eighteen times the rows made the probe ${(m.first / m.second).toFixed(2)}× dearer after ${m.rounds} rounds — the index ` +
       `is over distinct symbols and must not track the row count`
   );
 });
 
-test('the one non-constant path is named, and it is bounded by the bucket', () => {
+test('the one non-constant path is named, and it is bounded by the bucket', (t) => {
   // Past MAX_PREFIX the probe filters the bucket it fetched. This pins that the
   // cost tracks the BUCKET and not the catalogue: two indexes of the same size,
   // one with every symbol crowded into a single gram bucket and one with them
@@ -269,17 +246,17 @@ test('the one non-constant path is named, and it is bounded by the bucket', () =
   const ixC = build(rc, sym);
   const ixS = build(rs, sym);
 
-  const crowdedCost = cost(2_000, () => probe(ixC, rc, 'ABCDZ'));
-  const spreadCost = cost(2_000, () => probe(ixS, rs, 'ABCDZ'));
+  const m = costsInTurn(2_000, () => probe(ixC, rc, 'ABCDZ'), () => probe(ixS, rs, 'ABCDZ'), (crowded, spreadOut) => crowded > spreadOut);
+  t.diagnostic(said('a long query over a crowded bucket against a spread one', m));
   assert.equal(probe(ixC, rc, 'ABCDZ').length, 0);
   assert.ok(
-    crowdedCost > spreadCost,
-    `the long-query filter should track the bucket it filters (crowded ${crowdedCost.toFixed(0)}ns ` +
-      `vs spread ${spreadCost.toFixed(0)}ns) — that is the documented non-constant path`
+    m.held,
+    `the long-query filter should track the bucket it filters (crowded ${m.first.toFixed(0)}ns ` +
+      `vs spread ${m.second.toFixed(0)}ns after ${m.rounds} rounds) — that is the documented non-constant path`
   );
 });
 
-test('materialising matched rows is linear in the MATCHES, and that is inherent', () => {
+test('materialising matched rows is linear in the MATCHES, and that is inherent', (t) => {
   // The honest half of the claim. Returning m rows costs m; no index changes
   // that. What this pins is that it costs m and NOT the census — the same
   // symbols at eighteen times the rows return eighteen times the rows for
@@ -293,10 +270,11 @@ test('materialising matched rows is linear in the MATCHES, and that is inherent'
   const hitF = probe(ixF, fat, 'X').length;
   assert.ok(hitT > 0 && hitF === hitT * 18, `expected ${hitT * 18} rows, got ${hitF}`);
 
-  const ratio = cost(2_000, () => probe(ixF, fat, 'X')) / cost(2_000, () => probe(ixT, thin, 'X'));
+  const m = costsInTurn(2_000, () => probe(ixF, fat, 'X'), () => probe(ixT, thin, 'X'), (big, small) => big / small < 18 * 3);
+  t.diagnostic(said('18x the rows returned against one', m));
   assert.ok(
-    ratio < 18 * 3,
-    `returning 18× the rows cost ${ratio.toFixed(1)}× — linear in the matches is ` +
+    m.held,
+    `returning 18× the rows cost ${(m.first / m.second).toFixed(1)}× after ${m.rounds} rounds — linear in the matches is ` +
       `expected and unavoidable; superlinear is not`
   );
 });

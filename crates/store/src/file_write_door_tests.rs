@@ -1090,14 +1090,45 @@ fn percentiles(samples: &mut [f64]) -> (f64, f64, f64) {
 
 #[test]
 fn the_write_door_costs_the_same_at_one_ten_and_a_hundred_times_the_bars() {
-    const N: usize = 2_000;
     let _sink_is_mine = crate::emits::hold_the_sink();
     // O(1) IN THE MONTH (CLAUDE.md §3 rule 4; operator's rule (1)): a
     // re-offer of 60 held bars and a refused late batch of 60 each cost one
     // time lookup and at most 60 record reads, whatever the month holds.
     // Measured on one warm writer handle per size, n = 2,000 each, times
     // printed; the assertion has margins for a loaded machine.
-    let mut p99s = Vec::new();
+    // UP TO THREE WHOLE MEASUREMENTS, STOPPING AT THE FIRST THAT HOLDS
+    // (BASE-REDS-1023, D-7152): one of them failed on unchanged code with
+    // the Mac's cores busy (a sealed open's median past three raw ones at
+    // one size). Interference only adds time, and a door that scans the
+    // month is slower at 100x in every measurement, so a regression still
+    // fails all three; the bounds ([`door_misses`]) are unchanged. The
+    // decisions are functions their own test drives with invented figures
+    // (BASE-REDS-1023 repair 3): a miss and a retry were sides no run took.
+    let held = first_measurement_that_holds(3, || door_misses(&measure_door()));
+    assert!(
+        held.is_ok(),
+        "three measurements failed; the last: {held:?}"
+    );
+}
+
+/// One size's figures of [`measure_door`], in microseconds: the sealed and
+/// the raw writer open's p50, and the sealed re-offer's and refusal's p99.
+#[derive(Clone, Copy, Debug)]
+struct DoorFigures {
+    size: u64,
+    open: f64,
+    raw_open: f64,
+    reoffer: f64,
+    refusal: f64,
+}
+
+/// One whole measurement of the write door at 2,250, 22,500 and 225,000
+/// bars: writer opens alternating between the sealed month and the same
+/// month raw (n = 200 each), then re-offers of 60 held bars to each and a
+/// refused late batch of 60 (n = 2,000 each); every figure printed.
+fn measure_door() -> Vec<DoorFigures> {
+    const N: usize = 2_000;
+    let mut figures = Vec::with_capacity(3);
     for size in [2_250u64, 22_500, 225_000] {
         let bars = seconds(size);
         let path = month_path(None);
@@ -1153,26 +1184,118 @@ fn the_write_door_costs_the_same_at_one_ten_and_a_hundred_times_the_bars() {
              {w99:.1} max {wmax:.1} us; refused late 60 n={N} p50 {s50:.1} p99 {s99:.1} max \
              {smax:.1} us"
         );
-        // THE MEDIAN IS ASSERTED FOR OPENS, THE p99 PRINTED: a writer open
-        // takes and notes the month's lock, and a stall of the shared machine
-        // in two of 200 opens moves the p99 of either form by milliseconds
-        // (about 8 ms in both forms on 20 Oct, L-SC4-02). The re-offer and
-        // the refusal are asserted at p99, over 2,000 calls each.
-        assert!(
-            o50 <= 3.0 * q50 + 1_000.0,
-            "{size}: a sealed writer open p50 {o50:.1} us against raw {q50:.1} us"
-        );
-        p99s.push((o50, r99, s99));
+        figures.push(DoorFigures {
+            size,
+            open: o50,
+            raw_open: q50,
+            reoffer: r99,
+            refusal: s99,
+        });
     }
-    let (small, large) = (p99s[0], p99s[2]);
+    figures
+}
+
+/// What one measurement misses of the door's unchanged bounds. THE MEDIAN IS
+/// ASSERTED FOR OPENS, THE p99 PRINTED: a writer open takes and notes the
+/// month's lock, and a stall of the shared machine in two of 200 opens moves
+/// the p99 of either form by milliseconds (about 8 ms in both forms on 20
+/// Oct, L-SC4-02). So: at every size a sealed open's p50 within 3 x the raw
+/// one's + 1,000 us; and the open p50, the re-offer p99 and the refusal p99
+/// at the largest size within 3 x the smallest size's + 1,000 us. No miss is
+/// an empty list.
+fn door_misses(sizes: &[DoorFigures]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for at in sizes {
+        if at.open > 3.0 * at.raw_open + 1_000.0 {
+            failed.push(format!(
+                "{}: a sealed writer open p50 {:.1} us against raw {:.1} us",
+                at.size, at.open, at.raw_open
+            ));
+        }
+    }
+    let (small, large) = (sizes[0], sizes[sizes.len() - 1]);
     for (what, at_1, at_100) in [
-        ("open p50", small.0, large.0),
-        ("re-offer p99", small.1, large.1),
-        ("refusal p99", small.2, large.2),
+        ("open p50", small.open, large.open),
+        ("re-offer p99", small.reoffer, large.reoffer),
+        ("refusal p99", small.refusal, large.refusal),
     ] {
-        assert!(
-            at_100 <= 3.0 * at_1 + 1_000.0,
-            "{what}: {at_100:.1} us at 100x against {at_1:.1} us at 1x"
-        );
+        if at_100 > 3.0 * at_1 + 1_000.0 {
+            failed.push(format!(
+                "{what}: {at_100:.1} us at 100x against {at_1:.1} us at 1x"
+            ));
+        }
     }
+    failed
+}
+
+/// Runs `measure` up to `runs` times and stops at the first that misses
+/// nothing: `Ok` with its number from 0, or `Err` with the last run's misses.
+fn first_measurement_that_holds(
+    runs: u32,
+    mut measure: impl FnMut() -> Vec<String>,
+) -> Result<u32, Vec<String>> {
+    let mut last = Vec::new();
+    for n in 0..runs {
+        last = measure();
+        if last.is_empty() {
+            return Ok(n);
+        }
+    }
+    Err(last)
+}
+
+/// Every side of the write door's measurement decisions, with invented
+/// figures (BASE-REDS-1023 repair 3, verify r3's sides no test took): figures
+/// within every bound miss nothing; e0668a4b's stalled open at 22,500 bars
+/// (3,022.7 us against raw 612.0 us) is a miss by name; figures at the
+/// largest size far past three times the smallest's and a millisecond miss
+/// all three ratios; a miss then a hold stops at the second run, and three
+/// misses fail with the last.
+#[test]
+fn the_door_measurement_misses_by_name_and_stops_at_the_first_that_holds() {
+    let fig = |size, open, raw_open, reoffer, refusal| DoorFigures {
+        size,
+        open,
+        raw_open,
+        reoffer,
+        refusal,
+    };
+    let flat = [
+        fig(2_250, 70.0, 200.0, 30.0, 10.0),
+        fig(22_500, 72.0, 210.0, 31.0, 10.0),
+        fig(225_000, 75.0, 250.0, 33.0, 11.0),
+    ];
+    assert!(door_misses(&flat).is_empty());
+    let stalled = [flat[0], fig(22_500, 3_022.7, 612.0, 31.0, 10.0), flat[2]];
+    assert_eq!(
+        door_misses(&stalled),
+        vec!["22500: a sealed writer open p50 3022.7 us against raw 612.0 us".to_owned()]
+    );
+    let scans = [
+        flat[0],
+        flat[1],
+        fig(225_000, 9_000.0, 25_000.0, 9_000.0, 9_000.0),
+    ];
+    assert_eq!(
+        door_misses(&scans),
+        vec![
+            "open p50: 9000.0 us at 100x against 70.0 us at 1x".to_owned(),
+            "re-offer p99: 9000.0 us at 100x against 30.0 us at 1x".to_owned(),
+            "refusal p99: 9000.0 us at 100x against 10.0 us at 1x".to_owned(),
+        ]
+    );
+    let mut runs = [vec!["a miss".to_owned()], Vec::new()].into_iter();
+    assert_eq!(
+        first_measurement_that_holds(3, || runs.next().unwrap_or_default()),
+        Ok(1)
+    );
+    let mut asked = 0;
+    assert_eq!(
+        first_measurement_that_holds(3, || {
+            asked += 1;
+            vec![format!("miss {asked}")]
+        }),
+        Err(vec!["miss 3".to_owned()])
+    );
+    assert_eq!(asked, 3, "three measurements, no fourth");
 }

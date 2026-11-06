@@ -1377,13 +1377,46 @@ mod tests {
         // four parallel mutation runs. Interference only adds time, so each
         // size's minimum is its least disturbed estimate; alternating spreads
         // a slow stretch over both. The 4x ceiling is unchanged.
+        //
+        // UP TO 31 PAIRS, STOPPING AT THE FIRST THAT HOLDS (BASE-REDS-1023,
+        // D-7152): seven pairs still failed on unchanged code with the Mac's
+        // fourteen cores busy (a run of samples that all land on a throttled
+        // or shared core). A lookup that scans the universe is about 40x
+        // slower at every pair, so no pair of minima ever brings it under 4x;
+        // interference only adds time, so more pairs can only remove a false
+        // failure, never pass a regression.
         let (mut fast, mut slow) = (u128::MAX, u128::MAX);
-        for _ in 0..7 {
+        for pair in 0..31 {
             fast = fast.min(sample(&a));
             slow = slow.min(sample(&b));
+            if settled(pair, fast, slow) {
+                break;
+            }
         }
         let grew =
             format!("the lookup grew with the universe: {fast} ns against {slow} ns, {sizes}");
         assert!(slow <= fast.saturating_mul(4).max(4), "{grew}");
+    }
+
+    /// Whether the pairs taken so far settle the lookup's ratio: seven at
+    /// least, and the minima within the unchanged 4x ceiling (a zero minimum
+    /// read as 1 ns). Interference only adds time, so a further pair can
+    /// only clear a false failure (BASE-REDS-1023, D-7152).
+    fn settled(pair: usize, fast: u128, slow: u128) -> bool {
+        pair >= 6 && slow <= fast.saturating_mul(4).max(4)
+    }
+
+    /// Every side of [`settled`] (BASE-REDS-1023 repair 3, verify r3: the
+    /// seventh pair outside 4x was a side no run took).
+    #[test]
+    fn seven_pairs_within_4x_settle_the_lookup_ratio_and_nothing_less_does() {
+        assert!(!settled(5, 10, 10), "six pairs never settle");
+        assert!(!settled(6, 10, 41), "a seventh pair outside 4x samples on");
+        assert!(settled(6, 10, 40), "4x is inside");
+        assert!(
+            settled(30, 0, 4),
+            "a zero minimum reads 1 ns, so 4 ns is 4x"
+        );
+        assert!(!settled(30, 0, 5));
     }
 }

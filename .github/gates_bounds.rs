@@ -296,7 +296,10 @@ fn claim_blocks(file: &str, src: &str) -> Vec<Block> {
     out
 }
 
-const NOTCLAIM: [&[u8]; 17] = [
+/// Nouns and phrases after which `flat` is a shape, not a cost. The last seven
+/// are the price-shape sense of R4-27 (INT-15, D-7270): a flat carry, a flat
+/// minute, flat at the close before it (BASE-REDS-1023, D-7149 addendum).
+const NOTCLAIM: [&[u8]; 24] = [
     b"struct",
     b"table",
     b"bar",
@@ -314,12 +317,23 @@ const NOTCLAIM: [&[u8]; 17] = [
     b"close",
     b"directory",
     b"directories",
+    b"carry",
+    b"carries",
+    b"minute",
+    b"zero-volume",
+    b"at the close",
+    b"at the carried price",
+    b"with no volume",
 ];
 
-/// `[Ff]lat` at `i`, then the end of `' '+` after it (`None` without one).
+/// `[Ff]lat` at `i`, then the end of `' '+` or of ONE `-` after it (`None`
+/// without either): `flat-carry` is `flat carry` (R4-27; BASE-REDS-1023).
 fn flat_spaces(b: &[u8], i: usize) -> Option<usize> {
     if !matches!(b.get(i), Some(b'F' | b'f')) || !has_at(b, i + 1, b"lat") {
         return None;
+    }
+    if b.get(i + 4) == Some(&b'-') {
+        return Some(i + 5);
     }
     let e = run(b, i + 4, |c| c == b' ');
     (e > i + 4).then_some(e)
@@ -328,7 +342,7 @@ fn flat_spaces(b: &[u8], i: usize) -> Option<usize> {
 /// The non-cost senses of `flat` and `worst case`, removed before the trigger
 /// runs, as six global substitutions in this order:
 ///   `[A-Za-z0-9_]::flat` -> ` `, `[Ff]lat[ ]*\(` -> ` (`,
-///   `[Ww]orst[ -][Cc]ase`, `[Ff]lat +NOUN s?` (the `notclaim` nouns),
+///   `[Ww]orst[ -][Cc]ase`, `[Ff]lat( +|-)NOUN s?` (the `notclaim` nouns),
 ///   `[Ff]lat +(JSON|json) object`, and
 ///   `(exactly|books the trade|came out|row-major and|is charged|A|trades?( was| were)?) [Ff]lat`.
 ///
@@ -1546,6 +1560,26 @@ mod tests {
             ", , poon"
         );
         assert_eq!(s("a flat JSON object here"), "a  here");
+        assert_eq!(s("a flat json object here"), "a  here");
+        // `flat_spaces` reads `[Ff]lat` and nothing else, and only with a
+        // blank or one `-` after it: `Xlat` and `Flax` are not the word, and
+        // `flatbar` has no blank (BASE-REDS-1023 repair 3, the two M2
+        // survivors of verify r3: `||` read as `&&`, `>` read as `>=`).
+        assert_eq!(
+            s("Xlat bar, Flax bar, flatbar"),
+            "Xlat bar, Flax bar, flatbar"
+        );
+        assert_eq!(s("a flatjson object"), "a flatjson object");
+        // Each of `claim_scrub`'s own reads holds its whole pattern
+        // (BASE-REDS-1023 repair 3: four mutants of verify r3's unsampled M2
+        // shards, found by a pre-check of every mutant): `Xlat (` and
+        // `Flax (` are not `flat (`; a `flat (` at the start of a line is
+        // read from its first byte; `worst c` is not `worst case`; and a
+        // `flat JSON` is a sense only with ` object` after it.
+        assert_eq!(s("Xlat (a), Flax (b)"), "Xlat (a), Flax (b)");
+        assert_eq!(s("flat (x)"), " (x)");
+        assert_eq!(s("the worst cost here"), "the worst cost here");
+        assert_eq!(s("a flat JSON file here"), "a flat JSON file here");
         assert_eq!(s("came out flat; is charged Flat; rA flat"), "; ; r");
         // A trade's outcome is not a cost (D-1930, D-1939).
         assert_eq!(
@@ -1560,6 +1594,42 @@ mod tests {
         assert!(is_claim("worst worst casecase"));
     }
 
+    /// The price-shape sense of `flat` (R4-27, INT-15, D-7270): a FLAT CARRY
+    /// is a minute whose four prices equal the close before it, a shape of a
+    /// bar and never a cost. R4-27's merge brought 21 such blocks, which the
+    /// trigger read as cost claims (BASE-REDS-1023, D-7149 addendum). The
+    /// cost sense stays a claim beside it, on the same line and alone.
+    #[test]
+    fn the_scrub_removes_the_price_shape_sense_of_a_flat_carry() {
+        for no in [
+            "every seventh minute a flat carry of the minute before",
+            "whether flat carries are tracked",
+            "the flat-carry bitmaps are present",
+            "Version 2's flat-carry flag",
+            "so its flat minute is not padding",
+            "a cash share's flat zero-volume minute that only",
+            "flat at the close of the candle before, volume zero",
+            "the fold wrote (flat at the carried price, volume zero)",
+            "a padded day flat with no volume",
+            "A flat minute WITH volume traded, at one price.",
+        ] {
+            assert!(!is_claim(no), "{no}");
+        }
+        for yes in [
+            "the padded count per day, flat per minute",
+            "a flat carry, and the walk is flat",
+            "flat-carry bits: the decode is flat",
+            "flat at 1x, 10x and 100x",
+            "flat-time",
+            "a flat carry walk: O(1)",
+        ] {
+            assert!(is_claim(yes), "{yes}");
+        }
+        let s = |t: &str| String::from_utf8(claim_scrub(t)).unwrap();
+        assert_eq!(s("a flat-carry flag"), "a  flag");
+        assert_eq!(s("flat carries, Flat minutes"), ", ");
+        assert_eq!(s("flat--carry"), "flat--carry");
+    }
     #[test]
     fn the_trigger_and_its_word_boundaries() {
         for yes in [

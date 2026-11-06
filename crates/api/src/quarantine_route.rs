@@ -26,7 +26,7 @@
 //! # Cost
 //!
 //! The plan: one plan file read and, per planned month, the month's bars —
-//! O(plan + months named), NOT O(1); bounded by the plan, which names only
+//! O(plan + months named), linear and not constant; bounded by the plan, which names only
 //! the quarantined months of one cause. The press adds the door's O(month)
 //! per month. Neither is on a read path a page polls.
 

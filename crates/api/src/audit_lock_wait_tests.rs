@@ -244,6 +244,58 @@ fn held_now(journal: &Journal) -> bool {
     !lock_is_free(journal)
 }
 
+/// Whether a sample that read "not this process" stays wrong through both
+/// re-checks: `recheck` answers (the lock is held, its note names no holder
+/// here) and is asked at most twice. Both answers are taken at every
+/// re-check before they are compared (BASE-REDS-1023 repair 8), where the
+/// re-check's `held_now(..) && wrong()` asked the second only while the lock
+/// was held: a lock let go inside the re-check's pause is a pass that a run
+/// of the hand-off test reaches only by timing, so the judgement keeps no
+/// side that hangs on it, and
+/// [`a_lock_let_go_inside_a_recheck_names_no_lost_holder`] drives every case
+/// of it by hand.
+fn still_unnamed(mut recheck: impl FnMut() -> (bool, bool)) -> bool {
+    (0..2).all(|_| recheck() == (true, true))
+}
+
+/// [`still_unnamed`] over scripted re-checks: only a lock held AND unnamed at
+/// both is the defect; one let go, or named, at either re-check is not, and
+/// a re-check that already cleared the sample is not asked again.
+#[test]
+fn a_lock_let_go_inside_a_recheck_names_no_lost_holder() {
+    let judged = |script: &[(bool, bool)]| {
+        let mut asked = 0;
+        let still = still_unnamed(|| {
+            asked += 1;
+            script[asked - 1]
+        });
+        (still, asked)
+    };
+    let (held_unnamed, let_go, named) = ((true, true), (false, true), (true, false));
+    assert_eq!(
+        judged(&[held_unnamed, held_unnamed]),
+        (true, 2),
+        "the defect"
+    );
+    assert_eq!(
+        judged(&[let_go]),
+        (false, 1),
+        "let go at the first re-check"
+    );
+    assert_eq!(
+        judged(&[held_unnamed, let_go]),
+        (false, 2),
+        "let go at the second"
+    );
+    assert_eq!(judged(&[named]), (false, 1), "named at the first re-check");
+    assert_eq!(
+        judged(&[held_unnamed, named]),
+        (false, 2),
+        "named at the second"
+    );
+    assert_eq!(judged(&[(false, false)]), (false, 1), "free and named");
+}
+
 #[test]
 fn the_holder_is_named_through_every_in_process_hand_off() {
     // AG-06 repair 1, the verifier's blocking item 2. A registry kept beside
@@ -256,6 +308,10 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
     // wrong both times while the lock stays held is the defect. Fails on the
     // build before the repair (the journal's appends never reached
     // `store::flock`'s registry, so every sample read "another process").
+    // Each record is asked once and its answer judged as the eight appenders'
+    // are: the sampler's attempts take the lock too, so under load a hand-off
+    // can meet the bound, and that named refusal is L-BRED23-16's stated limit,
+    // printed; a refusal inside the bound or with no name is a loss and fails.
     let (root, journal) = journal_with_one_record("hand-off");
     let journal = Arc::new(journal);
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -263,9 +319,12 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
         .map(|w| {
             let journal = Arc::clone(&journal);
             std::thread::spawn(move || {
-                (0..120)
-                    .filter(|i| journal.append(&closed(&format!("h{w}-{i}"))).is_err())
-                    .count()
+                refused_of((0..120).map(|i| {
+                    let asked = Instant::now();
+                    let answer = journal.append(&closed(&format!("h{w}-{i}")));
+                    (answer, asked.elapsed())
+                }))
+                .expect("a refusal is the bound's, never a loss")
             })
         })
         .collect();
@@ -283,13 +342,11 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
                 if !wrong() {
                     continue;
                 }
-                let still = (0..2).all(|_| {
+                let still = still_unnamed(|| {
                     std::thread::sleep(Duration::from_millis(1));
-                    held_now(&journal) && wrong()
+                    (held_now(&journal), wrong())
                 });
-                if still {
-                    unnamed += 1;
-                }
+                unnamed += u64::from(still);
             }
             (held, unnamed)
         })
@@ -300,7 +357,7 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
         .sum();
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let (held, unnamed) = sampler.join().expect("the sampler");
-    assert_eq!(refused, 0, "no append refused");
+    eprintln!("hand-off: {refused} of 480 appends refused by the bound, {held} samples held");
     assert!(
         held >= 50,
         "the sampler saw the lock held often enough to judge: {held}"
@@ -331,37 +388,163 @@ fn a_zero_bound_refuses_at_once() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// EIGHT APPENDERS AT ONCE LOSE NO RECORD UNNAMED (BASE-REDS-1023 repair 3,
+/// TST-01 of the assurance attack of 29 Oct 2026). Each of 800 records is
+/// appended ONCE, as every production caller of the plain append does: none
+/// asks again (`RunLedger::open`, `RunLedger::close`, the spot route's
+/// blocked record, `recorded_fact`, the member-failure receipt, `fno_opened`
+/// and the autopilot's tick record; `docs/06-limits.md` L-BRED23-16 lists
+/// them with what each does with the refusal). Each answer is [`judged`]: a
+/// success is on disk exactly once, and a refusal waited the whole bound and
+/// names it, which is what its caller surfaces; a refusal sooner (the
+/// `try_lock` build's, which refused at once) is a loss and fails here. The
+/// refusals are counted and printed with the waits' p50, p99 and max: under
+/// load the bound can be met, and that rate is a stated limit, never hidden
+/// by a retry. Round 2 asked again after a refusal, which no caller of this
+/// append does.
 #[test]
 fn eight_concurrent_appenders_lose_no_record() {
     let (root, journal) = journal_with_one_record("eight");
-    let journal = Arc::new(journal);
-    let barrier = Arc::new(Barrier::new(8));
-    let refused: usize = (0..8)
-        .map(|w| {
-            let (journal, barrier) = (Arc::clone(&journal), Arc::clone(&barrier));
-            std::thread::spawn(move || {
-                barrier.wait();
-                (0..100)
-                    .filter(|i| journal.append(&closed(&format!("w{w}-{i}"))).is_err())
-                    .count()
+    let appended = eight_appenders(&journal, "w");
+    assert_eq!(
+        appended.landed.len() + appended.refused.len(),
+        800,
+        "every record answered once"
+    );
+    assert_exactly(&journal, 1, &appended);
+    eprintln!("{}", wait_line("eight", 1, &appended));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// What eight appenders behind one barrier got for 100 records each, every
+/// answer [`judged`]: the sources that landed, the sources the bound
+/// refused, and each call's wait.
+struct Appended {
+    landed: Vec<String>,
+    refused: Vec<String>,
+    waits: Vec<Duration>,
+}
+
+/// Eight appenders behind one barrier, 100 plain appends each, each record
+/// asked once; a refusal that is not the bound's panics as a loss.
+fn eight_appenders(journal: &Journal, tag: &str) -> Appended {
+    let barrier = Barrier::new(8);
+    let answers: Vec<(String, bool, Duration)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..8)
+            .map(|w| {
+                let barrier = &barrier;
+                s.spawn(move || {
+                    barrier.wait();
+                    (0..100)
+                        .map(|i| {
+                            let source = format!("{tag}{w}-{i}");
+                            let asked = Instant::now();
+                            let answer = journal.append(&closed(&source));
+                            let waited = asked.elapsed();
+                            let landed = judged(answer, waited)
+                                .expect("a refusal is the bound's, never a loss");
+                            (source, landed, waited)
+                        })
+                        .collect::<Vec<_>>()
+                })
             })
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|h| h.join().expect("an appender"))
-        .sum();
-    assert_eq!(refused, 0, "no append refused");
-    let got = outcomes(&journal);
-    assert_eq!(got.len(), 801, "the seed and 800 records");
-    let mut sources: Vec<String> = got.into_iter().skip(1).map(|(_, s)| s).collect();
-    sources.sort();
-    sources.dedup();
-    assert_eq!(sources.len(), 800, "each record once, none torn or doubled");
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|h| h.join().expect("an appender"))
+            .collect()
+    });
+    let (landed, refused): (Vec<_>, Vec<_>) = answers.iter().partition(|(_, l, _)| *l);
+    Appended {
+        landed: landed.into_iter().map(|(s, _, _)| s.clone()).collect(),
+        refused: refused.into_iter().map(|(s, _, _)| s.clone()).collect(),
+        waits: answers.iter().map(|(_, _, w)| *w).collect(),
+    }
+}
+
+/// The sources of the newest `k` of `records`, read in pages as the journal
+/// serves them.
+fn newest_sources(journal: &Journal, records: u64, k: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip = 0;
+    while skip < k {
+        let page = journal.page(records, skip, k - skip).expect("a page");
+        assert!(!page.is_empty(), "a page of a non-empty rest");
+        skip += u64::try_from(page.len()).expect("small");
+        out.extend(
+            page.into_iter()
+                .map(|row| row.decoded.expect("every record decodes").source),
+        );
+    }
+    out
+}
+
+/// The journal holds its `held` records and then exactly the ones that
+/// landed, each once and whole; so no refused record is on disk.
+fn assert_exactly(journal: &Journal, held: usize, appended: &Appended) {
+    let landed = u64::try_from(appended.landed.len()).expect("small");
+    let records = journal.look().records();
+    assert_eq!(
+        records,
+        u64::try_from(held).expect("small") + landed,
+        "the held records and every answered success, nothing else"
+    );
     assert_eq!(
         std::fs::metadata(&journal.path).expect("metadata").len(),
-        801 * RECORD_LEN_U64
+        records * RECORD_LEN_U64,
+        "no record torn"
     );
-    let _ = std::fs::remove_dir_all(&root);
+    let mut newest = newest_sources(journal, records, landed);
+    newest.sort();
+    let mut want = appended.landed.clone();
+    want.sort();
+    assert_eq!(
+        newest, want,
+        "each answered success once, behind the held records"
+    );
+}
+
+/// The measurement line of one run of [`eight_appenders`]: n, p50, p99 and
+/// max of the waits in microseconds (nearest rank), and the refusals.
+fn wait_line(what: &str, held: usize, appended: &Appended) -> String {
+    let mut us: Vec<u128> = appended.waits.iter().map(Duration::as_micros).collect();
+    us.sort_unstable();
+    let at = |p: usize| us[(us.len() * p).div_ceil(100).max(1) - 1];
+    format!(
+        "APPEND_WAIT {what} held={held} n={} p50_us={} p99_us={} max_us={} refused={}",
+        us.len(),
+        at(50),
+        at(99),
+        at(100),
+        appended.refused.len()
+    )
+}
+
+/// TST-01 (3): the wait and the refusals of eight appenders, 100 records
+/// each, over a journal already holding 1,000, 10,000 and 100,000 records
+/// (1x, 10x, 100x), each answer [`judged`] and the journal checked as in
+/// [`eight_concurrent_appenders_lose_no_record`]. Prints one `APPEND_WAIT`
+/// line per size: those are the figures of `docs/06-limits.md`
+/// L-BRED23-16, with the load average of each run beside them. What holds
+/// at any load is asserted: no record lost unnamed at any size. The first
+/// append of each size also builds the journal's index from scratch under
+/// the lock (L-AG06-02), so the max holds that build.
+#[test]
+fn eight_appenders_at_one_ten_and_a_hundred_times_the_records_held() {
+    for held in [1_000_usize, 10_000, 100_000] {
+        let root = scratch(&format!("held-{held}"));
+        let journal = Journal::at(&root);
+        let images: Vec<u8> = (0..held)
+            .flat_map(|i| closed(&format!("held-{i}")).image())
+            .collect();
+        std::fs::create_dir_all(journal.path.parent().expect("the audit directory"))
+            .expect("the audit directory");
+        std::fs::write(&journal.path, images).expect("the held records");
+        let appended = eight_appenders(&journal, "m");
+        assert_exactly(&journal, held, &appended);
+        eprintln!("{}", wait_line("measure", held, &appended));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 /// 64 appenders at once, behind one barrier, with `bound`; answers each one's
@@ -455,9 +638,19 @@ fn a_reader_never_waits_on_the_append_bound() {
 /// it lost a record on every contended run; here it loses none. `fno_answer`
 /// and `fno_opened` are private to `server.rs` (batch-1 AF-04's file), so the
 /// three journal calls they make (`Journal::append`) are made directly.
+///
+/// EACH RECORD IS ASKED ONCE (BASE-REDS-1023 repair 3, TST-01), as those two
+/// callers do: neither asks again, and each puts a refusal into its answer
+/// ("Opened in the journal: NO — ..." and the "Recorded" fact). Under load
+/// (24 Oct 2026, load about 25, other builds fsyncing the drive) 7 of 900
+/// appends were refused after the other walk's fsynced append held the lock
+/// past `APPEND_LOCK_WAIT`: each such refusal must have waited the whole
+/// bound and name it ([`judged`]), and is then counted as refused, not lost;
+/// a refusal sooner (the `try_lock` build refused at once) is a loss and
+/// fails here. Every answered success is on disk and no refused record is.
 #[test]
 fn the_code_4_barrier_experiment_loses_no_record_in_300_runs() {
-    let mut lost = 0_usize;
+    let mut refused = 0_usize;
     for run in 0..300 {
         let root = scratch(&format!("barrier-{run}"));
         let journal = Journal::at(&root);
@@ -465,22 +658,167 @@ fn the_code_4_barrier_experiment_loses_no_record_in_300_runs() {
         let (a, b) = std::thread::scope(|s| {
             let a = s.spawn(|| {
                 barrier.wait();
-                let open = journal.append(&opened("gdfl")).is_ok();
-                let close = journal.append(&closed("gdfl")).is_ok();
-                usize::from(open) + usize::from(close)
+                [
+                    once(&journal, &opened("gdfl")),
+                    once(&journal, &closed("gdfl")),
+                ]
             });
             let b = s.spawn(|| {
                 barrier.wait();
-                usize::from(journal.append(&opened("zerodha")).is_ok())
+                [once(&journal, &opened("zerodha"))]
             });
             (a.join().expect("walk A"), b.join().expect("walk B"))
         });
-        let on_disk = usize::try_from(journal.look().records()).expect("small");
-        assert_eq!(on_disk, a + b, "run {run}: an answered success is on disk");
-        lost += 3 - on_disk;
+        let landed = a.iter().chain(&b).filter(|l| **l).count();
+        assert_eq!(
+            usize::try_from(journal.look().records()).expect("small"),
+            landed,
+            "run {run}: every answered success is on disk and no refused record is"
+        );
+        refused += 3 - landed;
         let _ = std::fs::remove_dir_all(&root);
     }
-    assert_eq!(lost, 0, "records lost in 300 contended runs");
+    eprintln!("CODE4_BARRIER runs=300 appends=900 refused_by_the_bound={refused}");
+}
+
+/// Whether a refusal that came `waited` after its ask is the bound doing its
+/// job: it waited at least `APPEND_LOCK_WAIT` and its text names the bound.
+/// A refusal sooner than the bound is the `try_lock` build's loss.
+fn a_refusal_is_the_bound(waited: Duration, why: &str) -> Result<(), String> {
+    if waited < APPEND_LOCK_WAIT {
+        return Err(format!(
+            "refused after {waited:?}, inside the {APPEND_LOCK_WAIT:?} bound: {why}"
+        ));
+    }
+    if !(why.contains("(APPEND_LOCK_WAIT)") && why.contains("refused rather than interleaved")) {
+        return Err(format!("a refusal that does not name its bound: {why}"));
+    }
+    Ok(())
+}
+
+/// One plain append's answer, `waited` after its ask, as its caller gets it:
+/// `Ok(true)` it landed, `Ok(false)` the bound refused it by name (what the
+/// caller surfaces), `Err` a loss ([`a_refusal_is_the_bound`]).
+fn judged(answer: Result<(), String>, waited: Duration) -> Result<bool, String> {
+    match answer {
+        Ok(()) => Ok(true),
+        Err(why) => a_refusal_is_the_bound(waited, &why).map(|()| false),
+    }
+}
+
+/// How many of `answers` (each a plain append's answer and its wait, in the
+/// order they were asked) the bound refused by name; the first that is a loss
+/// ends the count ([`judged`]).
+fn refused_of(
+    answers: impl IntoIterator<Item = (Result<(), String>, Duration)>,
+) -> Result<usize, String> {
+    answers
+        .into_iter()
+        .try_fold(0, |refused, (answer, waited)| {
+            judged(answer, waited).map(|landed| refused + usize::from(!landed))
+        })
+}
+
+/// Appends `record` once and answers whether it landed; a loss panics.
+fn once(journal: &Journal, record: &Record) -> bool {
+    let asked = Instant::now();
+    let answer = journal.append(record);
+    judged(answer, asked.elapsed()).expect("a refusal is the bound's, never a loss")
+}
+
+/// What `appended_within` writes for `record`, whatever its ordinal.
+fn image_of(record: &Record) -> impl FnOnce(u64) -> Vec<u8> + '_ {
+    move |_ordinal| record.image().to_vec()
+}
+
+/// A refusal inside the bound is a loss and one that waited the bound out is
+/// the bound's, named, with nothing of its record on disk; no caller of the
+/// plain append asks again, so neither does this test (BASE-REDS-1023
+/// repair 3, TST-01; round 2's `..._is_asked_again` asked again).
+#[test]
+fn a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_named() {
+    let named = "/j: cannot take the journal append lock for a x record (y) within its 1000 ms bound (APPEND_LOCK_WAIT): held; so this record was refused rather than interleaved";
+    // The `try_lock` build's shape: refused at once, or anywhere inside the bound.
+    assert!(a_refusal_is_the_bound(Duration::ZERO, named).is_err());
+    assert!(
+        a_refusal_is_the_bound(
+            APPEND_LOCK_WAIT.saturating_sub(Duration::from_nanos(1)),
+            named
+        )
+        .is_err()
+    );
+    // A whole bound waited, but the text names neither, or the bound alone.
+    assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT, "/j: held").is_err());
+    assert!(
+        a_refusal_is_the_bound(
+            APPEND_LOCK_WAIT,
+            "/j: within its 1000 ms bound (APPEND_LOCK_WAIT): held"
+        )
+        .is_err()
+    );
+    assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT, named).is_ok());
+    assert_eq!(judged(Ok(()), Duration::ZERO), Ok(true));
+    assert_eq!(judged(Err(named.to_owned()), APPEND_LOCK_WAIT), Ok(false));
+    assert!(judged(Err(named.to_owned()), Duration::ZERO).is_err());
+    assert!(judged(Err("/j: held".to_owned()), APPEND_LOCK_WAIT).is_err());
+    // On a real journal: a zero-bound refusal from a held lock is a loss, and
+    // an append that meets a hold longer than the bound is refused by name
+    // after the whole bound, nothing of it written.
+    let (root, journal) = journal_with_one_record("named");
+    let holder = hold(&journal);
+    let quick = closed("quick");
+    let asked = Instant::now();
+    let refused = journal
+        .appended_within(Duration::ZERO, &quick, image_of(&quick))
+        .expect_err("held: a zero bound refuses");
+    assert!(
+        a_refusal_is_the_bound(asked.elapsed(), &refused).is_err(),
+        "{refused}"
+    );
+    let (answer, waited) = std::thread::scope(|s| {
+        let waiter = s.spawn(|| {
+            let asked = Instant::now();
+            let answer = journal.append(&closed("patient"));
+            (answer, asked.elapsed())
+        });
+        std::thread::sleep(APPEND_LOCK_WAIT * 3 / 2);
+        let answered = waiter.join().expect("the waiter");
+        holder.release().expect("released");
+        answered
+    });
+    assert_eq!(
+        judged(answer, waited),
+        Ok(false),
+        "refused by the bound, named"
+    );
+    assert_eq!(journal.look().records(), 1, "the seed only");
+    // The lock is free again: the next record lands at once.
+    let after = closed("after");
+    assert_eq!(
+        journal.appended_within(APPEND_LOCK_WAIT, &after, image_of(&after)),
+        Ok(1)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// THE HAND-OFF TEST'S COUNT, ON INVENTED REFUSALS (BASE-REDS-1023 repair 7,
+/// check r7: that test still asserted none at all). A landed append counts
+/// nothing, a refusal past the bound with its name counts one, and a refusal
+/// inside the bound or with no name is a loss, whatever landed before it.
+#[test]
+fn the_hand_off_counts_a_named_refusal_and_fails_a_lost_one() {
+    let named = "/j: cannot take the journal append lock for a closed record (y) within its 1000 ms bound (APPEND_LOCK_WAIT): held; so this record was refused rather than interleaved";
+    let landed = || (Ok(()), Duration::ZERO);
+    let refused = || (Err(named.to_owned()), APPEND_LOCK_WAIT);
+    assert_eq!(refused_of([]), Ok(0), "nothing asked, nothing refused");
+    assert_eq!(refused_of([landed(), landed()]), Ok(0));
+    assert_eq!(refused_of([landed(), refused(), refused()]), Ok(2));
+    let inside = (Err(named.to_owned()), Duration::from_millis(1));
+    let why = refused_of([landed(), inside]).expect_err("inside the bound");
+    assert!(why.contains("inside the"), "{why}");
+    let unnamed = (Err("/j: held".to_owned()), APPEND_LOCK_WAIT);
+    let why = refused_of([refused(), unnamed, refused()]).expect_err("no name");
+    assert!(why.contains("does not name its bound"), "{why}");
 }
 
 /// code-5 itself: a run whose opening met another writer's append, and whose

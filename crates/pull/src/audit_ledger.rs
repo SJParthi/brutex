@@ -34,6 +34,7 @@
 //! O(1) per append in the ledger's size: one lock open and take, one 1-byte
 //! read of the tail, at most one newline, one write and one `sync_data`
 //! (bench C-GR-15, `appends_cost_the_same_at_any_ledger_length`).
+//! The bench is `pull::audit_ledger::tests::appends_cost_the_same_at_any_ledger_length` (gate 12, D-7149).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

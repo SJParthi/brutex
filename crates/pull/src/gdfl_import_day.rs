@@ -11,9 +11,7 @@ use crate::ingest::Failure;
 use crate::session::{Day, Window};
 use crate::vendor::Granularity;
 
-use super::causes::{
-    Cause, HOLE_REASONS, ImportRefusal, Outcome, REPAIRABLE_HOLES, Stage, cm_cause, import_cause,
-};
+use super::causes::{Cause, HOLE_REASONS, ImportRefusal, Outcome, Stage, cm_cause, import_cause};
 use super::census::{Census, StoreCensus, stop_at_census};
 use super::filing::{DayFiler, make_durable, stop_at_durability};
 use super::journal::{BAR_DEFINITION, Journal, ScopeHeld, closing_line, journal_path, run_line};
@@ -96,18 +94,42 @@ impl Close {
 /// with X's cause: closed with Y's hole reason, `admit` would skip the day
 /// for ever and X's day D would never be read again, while X's later days
 /// (held back in this run) land on the next. A hole closes a day only when
-/// every open failure of the day is a hole. O(failures).
+/// every open failure of the day is a hole.
+///
+/// ONE PASS, in the order above (gate 11 rule 6, BASE-REDS-1023, D-7150):
+/// each failure fills the first empty rank it qualifies for, and the walk
+/// stops at the first census failure, which no later one outranks. The
+/// failures are the ones this day already named, so the pass is O(1)
+/// amortised per failure named, never a search of the store; the order is
+/// proved by `pull::gdfl_import::tests::ia16::the_decisive_failure_is_ranked_census_run_open_then_hole`.
 pub(super) fn decisive(failures: &[Staged]) -> Option<&Staged> {
-    failures
-        .iter()
-        .find(|one| one.cause.stage == Stage::Census)
-        .or_else(|| failures.iter().find(|one| one.cause.stage == Stage::Run))
-        .or_else(|| {
-            failures
-                .iter()
-                .find(|one| !one.cause.closes && !one.cause.is_hole())
-        })
-        .or_else(|| failures.iter().find(|one| !one.cause.closes))
+    // Slots 0..=2: run, open and not a hole, open. A census failure returns at
+    // once; with no slot filled the day's first failure decides.
+    let mut ranked: [Option<&Staged>; 3] = [None; 3];
+    for one in failures {
+        let cause = &one.cause;
+        if cause.stage == Stage::Census {
+            return Some(one);
+        }
+        let rank = if cause.stage == Stage::Run {
+            Some(0)
+        } else if !cause.closes && !cause.is_hole() {
+            Some(1)
+        } else if !cause.closes {
+            Some(2)
+        } else {
+            None
+        };
+        if let Some(slot) = rank.and_then(|at| ranked.get_mut(at))
+            && slot.is_none()
+        {
+            *slot = Some(one);
+        }
+    }
+    ranked
+        .into_iter()
+        .flatten()
+        .next()
         .or_else(|| failures.first())
 }
 
@@ -578,13 +600,14 @@ fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
             return false;
         }
         Admit::Skip(skip @ (Skip::Hole(reason) | Skip::Unrepairable(reason))) => {
-            if matches!(skip, Skip::Hole(_)) {
+            let repairable = matches!(skip, Skip::Hole(_));
+            if repairable {
                 report.holes_skipped += 1;
             } else {
                 report.holes_unrepairable += 1;
             }
             report.holes_in_range.push((day, reason.to_owned()));
-            note_hole_skipped(ctx, (key, day), skip);
+            note_hole_skipped(ctx, (key, day), (reason, repairable));
             return false;
         }
     }
@@ -651,6 +674,7 @@ pub(super) enum Skip {
 
 /// What [`admit_rule`] reads of one key: a probe of each journal set its
 /// rows need, so a key costs O(1) in the journal's size.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct KeyState {
     /// Closed `done` under a current definition.
@@ -764,6 +788,7 @@ impl Asks {
 /// key restated whose last close is not a `done` either, so the two rows
 /// cannot both match a key a journal describes; the order is kept for the
 /// state a caller builds by hand (`admit_is_one_ordered_table_and_a_hole_is_read_only_when_asked`).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
     if state.done {
         return if asks.retry_refused && state.with_refusals {
@@ -773,7 +798,7 @@ pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
         };
     }
     match state.hole {
-        Some(reason) if is_repairable_hole(reason) => {
+        Some(reason) if super::hole_is_repairable(reason) => {
             return if asks.repair_reason {
                 Admit::Read
             } else {
@@ -789,20 +814,13 @@ pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
     Admit::Read
 }
 
-/// Whether `reason` is one of [`REPAIRABLE_HOLES`] (row 4a).
-fn is_repairable_hole(reason: &str) -> bool {
-    REPAIRABLE_HOLES.contains(&reason)
-}
-
 /// Says a hole day was passed over unread (D-4851): at `warn`, with its
 /// reason and whether a repair reason could fill it, so a search for the
-/// day finds why no run reads it.
-fn note_hole_skipped(ctx: &Ctx<'_>, (key, day): (&str, Day), skip: Skip) {
-    let (reason, repairable) = match skip {
-        Skip::Hole(reason) => (reason, true),
-        Skip::Unrepairable(reason) => (reason, false),
-        Skip::Done | Skip::Restated => return,
-    };
+/// day finds why no run reads it. Handed the hole's reason and that answer,
+/// never a [`Skip`]: its one caller holds a hole, and a `Skip` parameter made
+/// an arm for a done or restated day that no call could reach
+/// (BASE-REDS-1023 repair 3, verify r3).
+fn note_hole_skipped(ctx: &Ctx<'_>, (key, day): (&str, Day), (reason, repairable): (&str, bool)) {
     let day_text = day.to_string();
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn(
@@ -1377,7 +1395,7 @@ where
         started,
         announced: std::cell::Cell::new(false),
         scoped,
-        held_back: std::cell::RefCell::new(HashMap::new()),
+        held_back: std::cell::RefCell::new(HashMap::with_capacity(super::HELD_BACK_CAP)),
         store_id: std::cell::Cell::new(super::filing::store_identity(run.store_root)),
     };
     let _key = RunKey::claim(ctx.id);
