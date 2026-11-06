@@ -242,9 +242,9 @@ pub fn from_utc_micros(micros: i64) -> Option<(Day, u32)> {
         return None;
     }
     let local = micros.div_euclid(1_000_000) + i64::from(IST_OFFSET);
-    let day = i32::try_from(local.div_euclid(i64::from(DAY_SECONDS))).ok()?;
-    let sec = u32::try_from(local.rem_euclid(i64::from(DAY_SECONDS))).ok()?;
-    Some((Day(day), sec))
+    let day = i32::try_from(local.div_euclid(i64::from(DAY_SECONDS))).ok();
+    let sec = u32::try_from(local.rem_euclid(i64::from(DAY_SECONDS))).ok();
+    day.zip(sec).map(|(day, sec)| (Day(day), sec))
 }
 
 #[cfg(test)]

@@ -87,9 +87,9 @@ impl WilliamsR {
         if !self.warm() {
             return None;
         }
-        let highest = self.ring.iter().map(|(h, _)| *h).max()?;
-        let lowest = self.ring.iter().map(|(_, l)| *l).min()?;
-        Some(Reading {
+        let highest = self.ring.iter().map(|(h, _)| *h).max();
+        let lowest = self.ring.iter().map(|(_, l)| *l).min();
+        highest.zip(lowest).map(|(highest, lowest)| Reading {
             highest,
             lowest,
             close: self.close,

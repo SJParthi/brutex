@@ -154,6 +154,12 @@ fn x_f04_trading_span_extremes() {
         ),
         Ok(None)
     );
+    // oob: feeds that start a century before the window start the span at its first
+    // session (2018-09-03), never before it
+    assert_eq!(
+        trading_span(&[m(1918, 9)], &[m(1900, 1)], &two, &cal),
+        Ok(Some((day(2018, 9, 3), day(2018, 10, 31))))
+    );
 }
 
 /// X-F05: the warm-up start at its edges.

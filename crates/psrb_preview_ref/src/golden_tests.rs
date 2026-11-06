@@ -68,8 +68,53 @@ fn a_file_that_cannot_be_created_is_an_error() {
     s.name = "missing-folder/inside".to_owned();
     assert!(write_all(&dir, &[s]).is_err());
     let file = fresh("file");
-    std::fs::write(&file, b"x").unwrap();
+    std::io::Write::write_all(
+        &mut OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)
+            .unwrap(),
+        b"x",
+    )
+    .unwrap();
     assert!(write_all(&file, &[]).is_err());
+    // oob: the golden path exists as a folder: it cannot be read back for comparing
+    let dir = fresh("folder");
+    let s = hand().into_iter().next().unwrap();
+    std::fs::create_dir_all(dir.join(format!("{}.txt.md", s.name))).unwrap();
+    assert!(write_all(&dir, &[s]).is_err());
+}
+
+#[test]
+fn every_word_of_the_grammar_renders() {
+    assert_eq!(kind_word(DayKind::Full), "full");
+    assert_eq!(kind_word(DayKind::Short), "short");
+    assert_eq!(kind_word(DayKind::Muhurat), "muhurat");
+    assert_eq!(kind_word(DayKind::Closed), "closed");
+    assert_eq!(clock_word(Clock::Dated), "dated");
+    assert_eq!(clock_word(Clock::Today), "today");
+    assert_eq!(per_text(Per::Permille(-250)), "-250");
+    assert_eq!(per_text(Per::Base(-7)), "base:-7");
+    // a run without rows has no comparison and no floor
+    let mut head = String::new();
+    head_lines(&mut head, &[]);
+    assert_eq!(head, "nearest-met-floor none\n");
+    // a candidate with no trade has no fee line
+    let unfilled = Record {
+        candidate: crate::book::Candidate {
+            day: crate::generator::day(2018, 9, 4),
+            t: crate::time::OPEN + 300,
+            symbol: "S01".to_owned(),
+            side: crate::cond::Side::Long,
+            outcome: Outcome::NotFilled,
+        },
+        trade: None,
+    };
+    assert_eq!(fees_line(0, &unfilled), None);
+    assert_eq!(
+        candidate_line(0, &unfilled),
+        "c 0 2018-09-04 09:20:00 S01 LONG not-filled"
+    );
 }
 
 #[test]
@@ -82,6 +127,11 @@ fn a_rendered_file_carries_the_format_the_token_and_both_sections() {
     assert_eq!(text.matches("```").count(), 4);
     assert!(text.contains("\nm 09:15 100000 100000 100000 100000 1000 x375\n"));
     assert!(text.contains("\nrank 1 "));
+    // the head: 6 timeframes x 3 accounts x 3 pairs, then the nearest met floor
+    assert_eq!(text.matches("\nhead ").count(), 54);
+    assert!(text.contains("\nhead 1 LONG AV2/VO trades="));
+    assert!(text.contains("\nhead 60 BOTH VS/AV2 trades="));
+    assert_eq!(text.matches("\nnearest-met-floor ").count(), 1);
 }
 
 #[test]

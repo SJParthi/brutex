@@ -85,13 +85,11 @@ impl Cci {
         if !self.warm() {
             return None;
         }
-        let n = i128::try_from(self.period).ok()?;
-        let last = self.ring.back().copied()?;
-        let total_deviation = self.ring.iter().map(|t| (n * t - self.sum).abs()).sum();
-        Some(Reading {
+        let n = i128::try_from(self.period).ok();
+        self.ring.back().zip(n).map(|(&last, n)| Reading {
             n,
             deviation: n * last - self.sum,
-            total_deviation,
+            total_deviation: self.ring.iter().map(|t| (n * t - self.sum).abs()).sum(),
         })
     }
 }

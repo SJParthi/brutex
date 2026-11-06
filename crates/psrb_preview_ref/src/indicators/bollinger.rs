@@ -100,9 +100,8 @@ impl Bollinger {
         if !self.warm() {
             return None;
         }
-        let n = i128::try_from(self.period).ok()?;
-        let last = self.ring.back().copied()?;
-        Some(Window {
+        let n = i128::try_from(self.period).ok();
+        self.ring.back().zip(n).map(|(&last, n)| Window {
             n,
             sum: self.sum,
             sum_sq: self.sum_sq,

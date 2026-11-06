@@ -712,11 +712,39 @@ fn x_f51_f52_headline_and_net_extremes() {
         one_trade(true, 400, 125_000, 125_000, false, day(2023, 1, 2)).from,
         Clock::Dated
     );
-    // the 2020-21 SEBI relief: the today clock's Rs 10 can win on a tiny trade
-    let relief = one_trade(true, 1, 100, 100, false, day(2020, 9, 1));
-    assert!(
-        relief.dated_worst.total() >= relief.today_worst.total() || relief.from == Clock::Today
+    // the 2020-21 SEBI relief (Rs 5 a crore dated, Rs 10 today): on a Rs 5,065 trade both
+    // exchange lines round to 16 paisa and today's SEBI line rounds to 1, so the today
+    // clock is dearer by that paisa and is the headline
+    let relief = one_trade(true, 1, 253_250, 253_250, false, day(2020, 9, 1));
+    assert_eq!(
+        (relief.dated_worst.exchange, relief.today_worst.exchange),
+        (16, 16)
     );
+    assert_eq!((relief.dated_worst.sebi, relief.today_worst.sebi), (0, 1));
+    assert_eq!(relief.today_worst.total(), relief.dated_worst.total() + 1);
+    assert_eq!(
+        (relief.from, relief.headline),
+        (Clock::Today, relief.today_worst.total())
+    );
+    // combo: 2024-10-01..2026-02-28, Rs 50 lakh of turnover: both clocks' rates sum to
+    // Rs 307 a crore, but today's split lines round up twice (15,349.5 and 0.5 paisa) to
+    // 15,351 against the dated clock's 15,350; GST ties at 3,574 and the today clock wins
+    let big = one_trade(true, 100_000, 2_500, 2_500, false, day(2025, 1, 15));
+    assert_eq!(
+        (big.dated_worst.exchange, big.today_worst.exchange),
+        (15_350, 15_351)
+    );
+    assert_eq!((big.dated_worst.gst, big.today_worst.gst), (3_574, 3_574));
+    assert_eq!(big.today_worst.total(), big.dated_worst.total() + 1);
+    assert_eq!(big.today_precise.total(), big.dated_precise.total());
+    assert_eq!(
+        (big.from, big.headline),
+        (Clock::Today, big.today_worst.total())
+    );
+    // the same trade from 2026-03-01: one table, a tie, the dated clock
+    let same = one_trade(true, 100_000, 2_500, 2_500, false, day(2026, 3, 2));
+    assert_eq!(same.dated_worst, same.today_worst);
+    assert_eq!(same.from, Clock::Dated);
     let cheap = price_trade(
         &trade_orders(true, 50_000_000, 1, 1, false),
         day(2020, 9, 1),

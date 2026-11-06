@@ -49,11 +49,10 @@ pub fn fnv1a32(bytes: &[u8]) -> u32 {
     h
 }
 
+/// The name's bytes; the caller refuses an empty line first ([`Refusal::EmptyLine`]).
 fn name_ok(line: &str) -> bool {
-    !line.is_empty()
-        && line
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'&' || b == b'-')
+    line.bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'&' || b == b'-')
 }
 
 /// Loads a universe list with the real id function.

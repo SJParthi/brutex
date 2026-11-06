@@ -66,6 +66,16 @@ fn x_f11_prev_session_extremes() {
         },
     ];
     assert_eq!(day_bar(d, &outside).unwrap().high(), 101);
+    // a pre-open minute (09:14) never enters it either: the day opens at 09:15
+    let pre_open = [
+        Minute {
+            start: OPEN - 60,
+            bar: Bar::new(100, 900, 1, 100, 5),
+        },
+        minute(0, Bar::new(100, 101, 99, 100, 5)),
+    ];
+    let bar = day_bar(d, &pre_open).unwrap();
+    assert_eq!((bar.high(), bar.low()), (101, 99));
     let auction = [
         minute(0, Bar::new(100, 101, 99, 100, 5)),
         minute(359, Bar::new(100, 104, 99, 103, 5)),

@@ -16,6 +16,7 @@ use crate::generator::Scenario;
 use crate::market::{Bar, DayKind, Market, Stock};
 use crate::membership::Answer;
 use crate::readings::KINDS;
+use crate::report::{HeadRow, Measures, PAIRS, Per, head_compare};
 use crate::ruleset::RULE_SETS;
 use crate::run::{Output, Record, Row, RunError, run};
 use crate::time::{Day, Month, hm, hms};
@@ -33,6 +34,14 @@ fn kind_word(kind: DayKind) -> &'static str {
         DayKind::Short => "short",
         DayKind::Muhurat => "muhurat",
         DayKind::Closed => "closed",
+    }
+}
+
+/// The clock the headline came from (Q8: equal clocks read `dated`).
+fn clock_word(clock: Clock) -> &'static str {
+    match clock {
+        Clock::Dated => "dated",
+        Clock::Today => "today",
     }
 }
 
@@ -230,11 +239,7 @@ fn candidate_line(id: usize, r: &Record) -> String {
         return format!("{head} {word}");
     };
     let s = t.sim;
-    let from = if t.priced.from == Clock::Dated {
-        "dated"
-    } else {
-        "today"
-    };
+    let from = clock_word(t.priced.from);
     format!(
         "{head} filled {} {} {} {} {} {} {} {} {} {} {} {} {} {from} {}",
         hms(s.entry.second),
@@ -444,7 +449,58 @@ pub fn render_outputs(out_run: &Output) -> String {
             r.key.view.label()
         );
     }
+    head_lines(&mut out, &out_run.rows);
     out
+}
+
+fn per_text(p: Per) -> String {
+    match p {
+        Per::Permille(v) => v.to_string(),
+        Per::Base(b) => format!("base:{b}"),
+    }
+}
+
+/// F60's head: every comparison, then the nearest met floor.
+fn head_lines(out: &mut String, rows: &[Row]) {
+    let heads: Vec<HeadRow> = rows
+        .iter()
+        .map(|r| HeadRow {
+            set: r.key.set,
+            k: r.key.k,
+            view: r.key.view,
+            measures: Measures {
+                trades: i128::from(r.stats.trades),
+                net: r.stats.total_net,
+                dd_bp: r.drawdown.bp,
+                dd: r.drawdown.paisa,
+            },
+            floor: r.bar.floor,
+        })
+        .collect();
+    let head = head_compare(&heads, &PAIRS);
+    let short = |set: usize| RULE_SETS.get(set).map_or("?", |s| s.short);
+    for l in &head.lines {
+        let _ = writeln!(
+            out,
+            "head {} {} {}/{} trades={} net={} dd-bp={} dd={}",
+            l.k,
+            l.view.label(),
+            short(l.over),
+            short(l.base),
+            per_text(l.trades),
+            per_text(l.net),
+            per_text(l.dd_bp),
+            per_text(l.dd),
+        );
+    }
+    let nearest = head
+        .nearest
+        .and_then(|(i, bp)| heads.get(i).map(|h| (h, bp)))
+        .map_or_else(
+            || "none".to_owned(),
+            |(h, bp)| format!("{bp} {} {} {}", short(h.set), h.k, h.view.label()),
+        );
+    let _ = writeln!(out, "nearest-met-floor {nearest}");
 }
 
 /// One scenario's whole golden file.

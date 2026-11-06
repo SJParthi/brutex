@@ -36,7 +36,7 @@ pub fn window_days(calendar: &Calendar, window: &Window) -> Option<(Day, Day)> {
     let first = window.first.first_day()?;
     let last = window.last.next().first_day()?.index() - 1;
     let days = calendar.full_days(first, Day::from_index(last));
-    Some((*days.first()?, *days.last()?))
+    days.first().zip(days.last()).map(|(a, b)| (*a, *b))
 }
 
 /// F04: the stock's trading span, first to last day inclusive: from the first full session
@@ -60,11 +60,9 @@ pub fn trading_span(
     let Some((window_first, window_last)) = window_days(calendar, window) else {
         return Ok(None);
     };
-    let start_month = (*z).max(*g);
-    let Some(month_first) = start_month.first_day() else {
-        return Ok(None);
-    };
-    let from = month_first.max(window_first);
+    // `start` reads any year, so a start month far before the window still starts the
+    // span at the window's first session.
+    let from = (*z).max(*g).start().max(window_first);
     Ok(calendar
         .full_days(from, window_last)
         .first()

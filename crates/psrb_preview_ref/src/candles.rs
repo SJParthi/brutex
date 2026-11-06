@@ -22,8 +22,7 @@ pub fn auction_switch() -> Option<Day> {
 /// stock-day's last stored minute (padded or not) starts at or before 15:14.
 #[must_use]
 pub fn auction_eligible(day: Day, minutes: &[Minute]) -> Option<bool> {
-    let switch = auction_switch()?;
-    if day < switch {
+    if auction_switch().is_none_or(|switch| day < switch) {
         return None;
     }
     minutes
