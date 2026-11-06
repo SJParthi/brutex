@@ -423,14 +423,55 @@ canonical-root test once more as its child), each at its own assertion:
 Restored (`git checkout -- .`) and the main tree's tracked files touched before its next build
 (OPS-10).
 
-### Final measurement: Route B whole:api on `b3d5321c`, the code tip
+### Final measurement: Route B whole:api on `b3d5321c`, the code tip (6 Nov, 11:04-11:33 IST)
 
-Running at this commit (started 11:04 IST on 6 Nov in the scratch worktree, clean, after red
-round 3 was restored; tests ended 11:12:26 IST: passed 3119, failed 14, ignored 16, the
-baseline's 14 reds). Its figures, the lists rewritten from it and the FIX json follow in the next
-reports-only commits; until then the lists are the interim's (`c7da9149`).
+`d3-route-b-cloud.sh /home/user/rb /home/user/tgt <new profile folder> <new log folder>
+deep-BASE-COV-API-6ea46e59c074-set.txt api -- --skip
+a_full_calendar_pool_refuses_the_census_and_the_audit` (the scratch worktree at `b3d5321c`,
+clean, red round 3 restored; the kit's set file whole, 205 coverage files): build rc 0 in 2 min
+(170 artifacts, 148 reused); `== test api rc=101 END 2026-11-06 11:12:26 IST (5 min); tests
+passed 3119 failed 14 ignored 16`; lib `test result: FAILED. 3035 passed; 13 failed; 16
+ignored; 0 measured; 1 filtered out; finished in 194.53s`. The 14 reds are the baseline's 14:
+eight lib tests of other shards' files (`audit::cloud_mutant_tests`, `detail::tests` (a 4-slot
+pool), `pullrun::cloud_mutant_tests`, `pullrun::restart_tests`, `server::basis_route::tests`,
+`server::cloud_mutant_tests_c` twice, `server::feeds_route::tests`), `tests/pool_load.rs`'s
+`the_feed_list_stays_fast_while_32_clients_loop_each_route` (L-BCA-4), and G2's five
+head-deadline host reds (proved on START). Every test this shard added or changed passed.
+`ROUTE-B DONE 2026-11-06 11:33:01 IST WITH NOT PROVED lines above`, the 23 NOT PROVED files
+being the 22 `crates/api/benches/**` files and `crates/api/src/lib.rs` (L-BCA-2).
 
-### Two slips, recorded so the record is whole
+- Whole api, this host: lines 174,184/178,766 (4,582 uncovered), branches 12,706/15,370
+  (2,664 uncovered sides).
+- G2: lines 64,277/65,655 (1,378 uncovered), branches 4,518/5,382 (864 uncovered sides): (F)
+  144 lines 474 sides; (U) 56 lines 35 sides; GAP 1,178 lines 355 sides (production 950 lines
+  269 sides; test code 118 lines 74 sides; inside `#[ignore]`d tests 110 lines 12 sides).
+- Against the interim on the same host and classifier (`c7da9149`): GAP production 1,002/300
+  to 950/269, test code 130/88 to 118/74, inside `#[ignore]`d tests 110/12 unchanged; (U)
+  33/18 to 56/35. Against this continuation's baseline (`725e11d5`): production 1,071/348,
+  test code 172/120. **The bar is not met** for G2.
+- Of the 950/269 production rows, 389 lines and 28 sides are owed by name (L-BCA-5's saved
+  research projections, `indexstoprankingjson.rs` 194/21 and
+  `booleanqualification_projection.rs` 99/6, and L-BCA-6's credential and index-host paths in
+  `server.rs`), leaving 561 lines and 241 sides outside those tags, some of which D-8663
+  also names as L-BCA-5's (below):
+  `server.rs` (152 lines left past L-BCA-6), `census_cache.rs` 61/23, `provenance.rs` 58/25,
+  `bars_sort.rs` 46/41, `sources.rs` 42/37, `calendar_route.rs` 41/7, `expressionsearchjson.rs`
+  33/18 (past `Reader::open`, L-BCA-5's), `speed.rs` 21/6, `booleanjson.rs` 21/3,
+  `calendar_of.rs` 18/15, `booleanlaunch.rs` 17/2 (the launched search's observer, L-BCA-5's),
+  and smaller ones; `disk_route.rs` and `quarantine_route.rs` have none left.
+- Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, both rewritten from this readout. A row on a
+  line unchanged since START keeps repair r2's hand-read class; every other row was classed by
+  recipe v4 step 4 as r2 read it. The 25 rows whose class, file and text were not already among
+  the interim's hand-read rows were read by hand here: 24 are (F) as the recipe names them
+  (the panic lines and untaken elses of batch 4's one-line let-elses, `&&` operands and message
+  lines of asserts that ran in `disk_route.rs`, `head_deadline_body_tests.rs`,
+  `instruments_route.rs`, `operation_audit_tests.rs` and `trades.rs`), and one is a GAP side on
+  a line unchanged since START that r2's run and the interim's both met:
+  `census_cache.rs` 930:8 F, `telemetry::admits(Level::Info, "api.census")` false, which
+  depends on the process-wide level other tests change while this call runs, so a run meets it
+  or not by what runs beside it.
+
+### Three slips, recorded so the record is whole
 
 One shell command of this session began with a no-op call (`-c 1`) to the interpreter the
 operator's rule forbids by name. It read and wrote nothing and changed no file; nothing of it
@@ -438,7 +479,10 @@ is tracked. The report said it would not be repeated, and it was: later on 6 Nov
 5, one more command ended with that interpreter's version query, its output discarded
 (`| head -0`), while reading a scratch file of this session. It too read and wrote nothing of
 the repository and changed no file, and nothing of it is tracked. Both were habit, not need;
-neither did any work this shard relies on.
+neither did any work this shard relies on. A third, after the final measurement: a search of
+this folder's report files for that language's name, run to confirm no report holds it (none
+does), wrote the name in its pattern. It only searched; the rule forbids writing the name at
+all, so it is recorded here too.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 

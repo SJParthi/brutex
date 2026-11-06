@@ -6,13 +6,13 @@ The launcher's FIX report of shard BASE-COV-API-AS2 (repair round 3, G2), one js
 {
   "name": "BASE-COV-API-AS2",
   "branch": "cloud/cov-api-as2-20261105",
-  "head": "f1a06fe8ca670b1e4a9ec93819bafabeb2a9e05e",
+  "head": "b3d5321cf1b4fe9365f09b7976f35312b1080661",
   "committed": true,
   "findings": [
     {
       "id": "verify r3 blocking 1: G2's GAP rows (the whole-crate bar, D2 part A)",
       "status": "partial",
-      "how": "Tests and restructures in G2's files only: 13 new tests, each with an Extremes: line of at least 8 cases (2 combined, 1 out of the box), test-code rows put in their (F) or branch-free forms, and 33 lines and 18 sides proved (U) from the code. Measured on this host at c7da9149: G2's GAP production 1,071/348 at the session's start (tip 725e11d5) to 1,002/300, test code 172/120 to 130/88. The bar is not met; what is left is listed row by row.",
+      "how": "Tests and restructures in G2's files only: new tests, each named in the report, every one this continuation added with an Extremes: line of at least 8 cases (2 combined, 1 out of the box) but one single-case child test, test-code rows put in their (F) or branch-free forms, and rows proved (U) from the code (56 lines, 35 sides on the final tree). Measured on this host at b3d5321c: G2's GAP production 1,071/348 at this continuation's start (tip 725e11d5) to 950/269, test code 172/120 to 118/74. The bar is not met; what is left is listed row by row.",
       "evidence": "reports/base-cloud-20261103/gaps-AS2.txt.md, fu-AS2.txt.md; report-BASE-COV-API-AS2.md (baseline, interim measurement, tests by name)"
     },
     {
@@ -24,7 +24,7 @@ The launcher's FIX report of shard BASE-COV-API-AS2 (repair round 3, G2), one js
     {
       "id": "verify r3 blocking 3: the 8-extremes rule in G2's named files",
       "status": "fixed",
-      "how": "sources_tests.rs 13 (10/2/1); research_doors_tests.rs 12 (8/2/2); dayflags_rules_tests.rs day band 10 (7/2/1), cold share page 11 (8/2/1), profilers' pages 11 (8/2/1); disk_route.rs 10 (7/2/1); server.rs pull runtime 11 (8/2/1), each read from its Extremes: line (026e8be7, 39046efa, f13f4f57); every test this shard added has its own line.",
+      "how": "sources_tests.rs 13 (10/2/1); research_doors_tests.rs 12 (8/2/2); dayflags_rules_tests.rs day band 10 (7/2/1), cold share page 11 (8/2/1), profilers' pages 11 (8/2/1); disk_route.rs 10 (7/2/1); server.rs pull runtime 11 (8/2/1), each read from its Extremes: line (026e8be7, 39046efa, f13f4f57); every test this shard added has its own line. Batch 5 adds three disk_route.rs tests of 11 (8/2/1) each; its fourth, a one-case child test (a removed working directory), carries no Extremes: line.",
       "evidence": "report-BASE-COV-API-AS2.md, The 8-extremes counts"
     },
     {
@@ -44,6 +44,18 @@ The launcher's FIX report of shard BASE-COV-API-AS2 (repair round 3, G2), one js
       "status": "needs_owner",
       "how": "Not this shard's file (G3, AS3): skipped by name in this shard's Route B runs; the fix is the gate of tests/cloud_mutants_bars.rs.",
       "evidence": "report-BASE-COV-API-AS2.md, Session -3"
+    },
+    {
+      "id": "quarantine_route.rs: the press's busy refusal named the store-read pool's bound",
+      "status": "fixed",
+      "how": "b3d5321c: busy() takes the pool's bound; the plan passes MAX_STORE_READ_CONCURRENT and the press, which runs in the operations pool (run_ops_read), MAX_OPS_READ_CONCURRENT. On a machine of more than four cores the press's 429 said up to eight presses run at once where four are admitted. On this host's four cores both bounds are 4, so the new test cannot show the old code red here; it is red under a hand change of the bound (red round 3) and on the Mac before the fix.",
+      "evidence": "crates/api/src/quarantine_route.rs busy; quarantine_route_tests.rs a_press_refused_by_a_full_operations_pool_names_its_bound_and_frees_the_press; report-BASE-COV-API-AS2.md, Batch 5 and Red round 3"
+    },
+    {
+      "id": "quarantine_route.rs: the module doc said a full pool's 429 carries Retry-After",
+      "status": "fixed",
+      "how": "b3d5321c: no answer of this route sends Retry-After; the doc now says what is sent (the pool's bound and 'retry' in the body). Sending the header instead is the operator's call.",
+      "evidence": "crates/api/src/quarantine_route.rs module doc, # Bounded, and one writer"
     }
   ],
   "files_changed": [
@@ -61,6 +73,7 @@ The launcher's FIX report of shard BASE-COV-API-AS2 (repair round 3, G2), one js
     "crates/api/src/constituents.rs",
     "crates/api/src/dayflags_rules_tests.rs",
     "crates/api/src/disk_route.rs",
+    "crates/api/src/disk_route_seal_tests.rs",
     "crates/api/src/fault_log.rs",
     "crates/api/src/fno_boundary_tests.rs",
     "crates/api/src/head_deadline_body_tests.rs",
@@ -69,6 +82,7 @@ The launcher's FIX report of shard BASE-COV-API-AS2 (repair round 3, G2), one js
     "crates/api/src/master.rs",
     "crates/api/src/operation_audit_tests.rs",
     "crates/api/src/provenance_tests.rs",
+    "crates/api/src/quarantine_route.rs",
     "crates/api/src/quarantine_route_tests.rs",
     "crates/api/src/recovery_control.rs",
     "crates/api/src/render.rs",
@@ -100,8 +114,11 @@ The launcher's FIX report of shard BASE-COV-API-AS2 (repair round 3, G2), one js
     "reports/base-cloud-20261103/d3-route-b-cloud.sh.md",
     "reports/base-cloud-20261103/d3-route-b.sh.md",
     "reports/base-cloud-20261103/deep-BASE-COV-API-6ea46e59c074-set.txt.md",
+    "reports/base-cloud-20261103/fix-BASE-COV-API-AS2.json.md",
     "reports/base-cloud-20261103/fix-BASE-COV-API-progress.md",
     "reports/base-cloud-20261103/fix-BASE-COV-API.json.md",
+    "reports/base-cloud-20261103/fu-AS2.txt.md",
+    "reports/base-cloud-20261103/gaps-AS2.txt.md",
     "reports/base-cloud-20261103/repair-BASE-COV-API-progress.md",
     "reports/base-cloud-20261103/replay-minus-reports.sh.md",
     "reports/base-cloud-20261103/report-BASE-COV-API-AS2.md",
@@ -110,18 +127,18 @@ The launcher's FIX report of shard BASE-COV-API-AS2 (repair round 3, G2), one js
   ],
   "files_outside_ownership": [],
   "gates": {
-    "fmt": "cargo fmt --all --check rc 0 (toolchain 1.97.1, the repository's pin) at f1a06fe8",
-    "clippy": "cargo clippy -p api --all-targets --locked -- -D warnings rc 0 (1.97.1) at f1a06fe8",
-    "tests": "Route B's instrumented cargo test -p api --locked --no-fail-fast at c7da9149, G3's 4-core hang skipped by name: passed 3110, failed 14, ignored 16; the 14 are nine tests of other shards' files (mode bits root defeats, a 4-core pool, tests/pool_load.rs, L-BCA-4) and G2's five head-deadline host reds proved on START. The tests f1a06fe8 adds or changes ran instrumented and filtered, green but for those host reds.",
-    "gate23": "run by hand on this tree and on f01d7a0e4: red on both (BASE-REDS-1023); one-line diff, the tracked-file count; no sources_tests.rs site",
+    "fmt": "cargo fmt --all --check rc 0 (toolchain 1.97.1, the repository's pin) at b3d5321c",
+    "clippy": "cargo clippy -p api --all-targets --locked -- -D warnings rc 0 (1.97.1) at b3d5321c",
+    "tests": "Route B's instrumented cargo test -p api --locked --no-fail-fast at b3d5321c, G3's 4-core hang skipped by name: passed 3119, failed 14, ignored 16; the reds are tests of other shards' files (mode bits root defeats, a 4-core pool, tests/pool_load.rs, L-BCA-4) and G2's five head-deadline host reds proved on START. Every test this shard added or changed passed.",
+    "gate23": "run by hand on this tree after batch 5 and on f01d7a0e4: red on both (BASE-REDS-1023); one-line diff, the tracked-file count (997 against 993); no sources_tests.rs site, no site of this shard's",
     "web_build": "not applicable (web/ unchanged)",
     "web_test": "not applicable (web/ unchanged)"
   },
   "p50_p99": "none: this shard changed no bench and no timed route; gate 8 and every p99 claim are the Mac's",
-  "coverage": "Route B whole:api (d3-route-b-cloud.sh, the kit's set file of 205 coverage files) on c7da9149 on this Linux host, pins rustc 1.99.0-nightly (1a98b1e13 2026-08-07) and LLVM 23.1.0-rust-1.99.0-nightly: whole api lines 173618/178248, branches 12686/15364; G2 lines 63723/65137, branches 4499/5376: (F) 139 lines 459 sides, (U) 33 lines 18 sides, GAP 1242 lines 400 sides (production 1002/300, test code 130/88, inside #[ignore]d tests 110/12). THE BAR IS NOT MET. NOT PROVED: the 22 crates/api/benches/** files and crates/api/src/lib.rs (L-BCA-2). Lists: reports/base-cloud-20261103/gaps-AS2.txt.md and fu-AS2.txt.md. The code tip f1a06fe8 adds batch 3 after the measured tree, measured by filtered instrumented runs only.",
+  "coverage": "Route B whole:api (d3-route-b-cloud.sh, the kit's set file of 205 coverage files) on b3d5321c, the code tip, on this Linux host, pins rustc 1.99.0-nightly (1a98b1e13 2026-08-07) and LLVM 23.1.0-rust-1.99.0-nightly: whole api lines 174184/178766, branches 12706/15370; G2 lines 64277/65655, branches 4518/5382: (F) 144 lines 474 sides, (U) 56 lines 35 sides, GAP 1178 lines 355 sides (production 950/269, test code 118/74, inside #[ignore]d tests 110/12). THE BAR IS NOT MET. NOT PROVED: the 22 crates/api/benches/** files and crates/api/src/lib.rs (L-BCA-2). Lists: reports/base-cloud-20261103/gaps-AS2.txt.md and fu-AS2.txt.md.",
   "mutants": "deferred (operator 30 Oct)",
   "store_writes_needed": [],
-  "notes": "Shard G2 of BASE-COV-API repair round 3, continuation -4 (6 Nov 2026). Decision drafts D-8662 (how G2's test-code rows are closed; G2's lists) and D-8663 (host reds and operator items) are in the report; ASA writes the entries. Operator items: the saved-research projections (indexstoprankingjson.rs, booleanqualification_projection.rs, past Reader::open in expressionsearchjson.rs, the launched search's observer in booleanlaunch.rs) stay L-BCA-5's; server.rs read_credential, credentialed_source and universe_resolve stay L-BCA-6's; speed::stage is a public function nothing calls and joins L-BCA-7's. NEEDS THE MAC: Route B whole:api on its pin (macOS-only lines are owed there), the five head-deadline host reds, the ignored real-data tests (L-BCA-3), the load-bound tests (L-BCA-4), non-root permission runs, gate 23 on its CI shell gates, the D1 landing. One shell command began with a no-op call to the interpreter the operator's rule forbids by name; it changed no file (report, A slip). NEXT: red round 2, more G2 production rows, the final Route B on the final tip.",
+  "notes": "Shard G2 of BASE-COV-API repair round 3, continuation -4 (6 Nov 2026). Decision drafts D-8662 (how G2's test-code rows are closed; G2's lists) and D-8663 (host reds and operator items) are in the report; ASA writes the entries. Operator items: the saved-research projections (indexstoprankingjson.rs, booleanqualification_projection.rs, past Reader::open in expressionsearchjson.rs, the launched search's observer in booleanlaunch.rs) stay L-BCA-5's; server.rs read_credential, credentialed_source and universe_resolve stay L-BCA-6's; speed::stage is a public function nothing calls and joins L-BCA-7's. NEEDS THE MAC: Route B whole:api on its pin (macOS-only lines are owed there), the five head-deadline host reds, the ignored real-data tests (L-BCA-3), the load-bound tests (L-BCA-4), non-root permission runs, gate 23 on its CI shell gates, the D1 landing. Three shell commands broke the operator's rule on the forbidden language (a no-op call to its interpreter, later a version query whose output was discarded, and a search whose pattern wrote its name); none read or wrote anything of the repository or changed a file (report, Three slips). NEXT: the G2 production rows left in the final lists (the report names them file by file), then Route B whole:api on the code tip again.",
   "held": false
 }
 ```
