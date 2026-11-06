@@ -173,6 +173,20 @@ impl Month {
         Day::from_ymd(y, m, 1)
     }
 
+    /// The first day of the month, for any year (the proleptic Gregorian calendar).
+    #[must_use]
+    pub fn start(self) -> Day {
+        let (y, m) = self.ym();
+        let n = days_from_civil(i64::from(y), i64::from(m), 1);
+        Day(i32::try_from(n).unwrap_or(i32::MAX))
+    }
+
+    /// The last day of the month, for any year.
+    #[must_use]
+    pub fn end(self) -> Day {
+        Day(self.next().start().0 - 1)
+    }
+
     /// Every day of the month, in order (empty outside the supported years).
     #[must_use]
     pub fn days(self) -> Vec<Day> {

@@ -78,7 +78,7 @@ pub enum FoldError {
 pub fn check_minutes(day: Day, minutes: &[Minute]) -> Result<(), FoldError> {
     let mut previous: Option<u32> = None;
     for m in minutes {
-        if m.start % 60 != 0 {
+        if !m.start.is_multiple_of(60) {
             return Err(FoldError::OffGrid(day, m.start));
         }
         if previous.is_some_and(|p| m.start <= p) {

@@ -39,20 +39,27 @@
 
 #![deny(clippy::as_conversions)]
 
+pub mod account;
+pub mod benchkit;
+pub mod book;
 pub mod candles;
 pub mod cond;
 pub mod costs;
 pub mod daymask;
 pub mod dayref;
 pub mod fills;
+pub mod generator;
+pub mod golden;
 pub mod indicators;
 pub mod market;
 pub mod membership;
 pub mod money;
 pub mod pricemap;
 pub mod readings;
+pub mod report;
 pub mod rng;
 pub mod ruleset;
+pub mod run;
 pub mod signal;
 pub mod sizing;
 pub mod span;
@@ -60,3 +67,4 @@ pub mod time;
 pub mod trade;
 pub mod trail;
 pub mod universe;
+pub mod verdict;
