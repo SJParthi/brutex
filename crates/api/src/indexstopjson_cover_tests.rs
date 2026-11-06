@@ -6,6 +6,10 @@ use super::*;
 /// first root is then removed: a pinned ask under the second root must compare the roots, reopen there and answer,
 /// where a reader kept from the first root would refuse. A parsed ask then given a page kind no query can name is
 /// refused by the projection by name, after its pin and its setting pass.
+/// Extremes: singles — a kind word of another page (`grid`), an empty kind, a named kind in another case
+/// (`Trades`), one letter short of a named kind (`trade`), a named kind with a trailing space (`days `), a NUL;
+/// combinations — a pinned ask under a second root while the first root's reader is cached and its root removed,
+/// and an unnamed kind asked on that moved root at once; out of the box — a kind word of 4 KiB.
 #[test]
 fn a_second_root_reopens_and_a_page_kind_no_query_names_is_refused_by_name() -> Result<(), String> {
     projection_tests::with_saved_stop_catalog(|first, id| {
@@ -25,11 +29,23 @@ fn a_second_root_reopens_and_a_page_kind_no_query_names_is_refused_by_name() -> 
                 "the second root answers its own saved catalog"
             );
             let mut unnamed = Asked::parse(&format!("{pinned}&kind=trades&setting=1"))?;
-            unnamed.kind = "grid".into();
-            assert_eq!(
-                render(second, &unnamed),
-                Err("single-stop unsupported page".into())
-            );
+            for kind in [
+                "grid".to_owned(),
+                String::new(),
+                "Trades".to_owned(),
+                "trade".to_owned(),
+                "days ".to_owned(),
+                "\0".to_owned(),
+                "k".repeat(4096),
+            ] {
+                unnamed.kind = kind;
+                assert_eq!(
+                    render(second, &unnamed),
+                    Err("single-stop unsupported page".into()),
+                    "{:?}",
+                    unnamed.kind
+                );
+            }
             Ok(())
         })
     })

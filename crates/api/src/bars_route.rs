@@ -2430,11 +2430,17 @@ mod tests {
         W: FnOnce(&bars::Cancel) -> T + Send + 'static,
     {
         for _ in 0..400 {
-            match cancellable(heavy, make()).await {
+            let refused = match cancellable(heavy, make()).await {
                 Ok(done) => return done,
-                Err(crate::detail::RunError::Saturated) => free(),
-                Err(why) => panic!("the work did not join: {why:?}"),
-            }
+                Err(refused) => refused,
+            };
+            // A REFUSAL HERE IS THE FULL POOL OR THE TEST FAILS: an assert
+            // whose failing side is its own, never a match arm no run enters.
+            assert!(
+                matches!(refused, crate::detail::RunError::Saturated),
+                "the work did not join: {refused:?}"
+            );
+            free();
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("the pool stayed full");

@@ -488,11 +488,25 @@ mod tests {
     }
     /// `display` is every refusal's text where a conversion or a reservation fails, and no saved artifact makes one
     /// fail, so it is asked directly: a value's own text, unchanged, at both ends of a signed width and for text.
+    /// Extremes: singles — `i64::MIN`, `i64::MAX`, `u64::MAX`, zero, an empty text, a text of multi-byte characters;
+    /// combinations — a text holding quotes, a backslash and a newline at once, and a value of every width in one
+    /// sentence; out of the box — a text of 64 KiB, kept whole.
     #[test]
     fn a_refusal_names_a_value_by_its_own_text() {
         assert_eq!(display(i64::MIN), "-9223372036854775808");
+        assert_eq!(display(i64::MAX), "9223372036854775807");
         assert_eq!(display(u64::MAX), "18446744073709551615");
+        assert_eq!(display(0_u8), "0");
+        assert_eq!(display(""), "");
+        assert_eq!(display("नियम"), "नियम");
         assert_eq!(display("native rank extent"), "native rank extent");
+        assert_eq!(display("a \"q\" \\ and\na line"), "a \"q\" \\ and\na line");
+        assert_eq!(
+            display(format!("{} {} {}", i8::MIN, u32::MAX, i128::MAX)),
+            "-128 4294967295 170141183460469231731687303715884105727"
+        );
+        let long = "x".repeat(64 * 1024);
+        assert_eq!(display(&long), long);
     }
     #[test]
     fn fold_projection_preserves_all_integer_widths_and_zero_trade_decisions() {
