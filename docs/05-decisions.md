@@ -87317,6 +87317,146 @@ concurrent first requests over a master no request has loaded), and
 
 **Store step.** None: nothing is written, and every answer is read-time.
 
+### D-8600 — PSRB-STV: `indicators::dual_band_supertrend`, the standard two-band Supertrend, a second labelled reading beside the latch, which stays as it is — 2026-11-03
+
+**Decision.** The PSRB strategy family (Pivot R1, Supertrend, RSI and Bollinger
+Bands; NSE F&O stocks, cash, intraday) reads the Supertrend as `TradingView`
+publishes it and as TA-Lib's page describes it: two bands, both ratcheting on
+every candle whether the trend uses them or not, the trend turning when the
+close crosses the CURRENT candle's band (UNVERIFIED against `TradingView`'s own
+output; its charter rows are the PSRB law part's). It is its own module,
+`indicators::dual_band_supertrend` (`DualBandSuperTrend`, `Reading`, `Refusal`,
+`MAX_FACTOR_MILLI`), carrying both bands, beside `indicators::trend::SuperTrend`,
+the active-band latch, which the PSRB design keeps as the labelled engine
+reading (`state/strategy-psrb-20261103/PARTS.md` section 5).
+
+**The latch is not touched.** Vocabulary positions read it,
+`close_above_supertrend` (64) and `close_below_supertrend` (65) among them, so a
+change there would change bits every stored run already identifies. Not a line
+of `crates/indicators/src/trend.rs`, `evaluator.rs` or `crates/vocab` changes:
+`git diff --exit-code <seam> <tip>` of those paths is empty. The new module emits
+no condition bit and takes no vocabulary position; its readings are for the F&O
+strategy path.
+
+**Why a module and not a mode on the latch.** A mode would put a branch the
+vocabulary path never takes into the latch's fold and two meanings behind one
+name. Two types keep each reading's rules in one place, and the type a caller
+holds says which reading it has.
+
+**Proved by** `crates/indicators/src/dual_band_supertrend_tests.rs`
+(`docs/04-invariants.md`, PSRB-STV-I01 to I06). Built on
+`cloud/psrb-stv-20261103` on 2026-11-05; not merged (D1).
+
+### D-8601 — PSRB-STV: the ATR is `trend::Atr`, reused unchanged, and the band arithmetic is the latch's, so the two readings differ in band logic alone; every band is an `i128` — 2026-11-03
+
+**Decision.** The two-band form folds a `crate::trend::Atr`: the true range
+with the first candle's own high-low span, Wilder's seed the floored mean of the
+first `period` true ranges, then `1/period` smoothing floored, held scaled by
+`trend::SCALE` and read in whole paisa. That is `TradingView`'s `ta.atr`, an
+`rma` seeded by an `sma` (UNVERIFIED against `TradingView`'s output). The bands
+use the latch's arithmetic: `mid = high.midpoint(low)` in `i128`,
+`band = (atr * factor_milli).div_euclid(1000)`, basic upper `mid + band` and
+basic lower `mid - band`. The bands and the line are `i128`: the ATR is below
+2^63 and the factor at most 2^17, so the product is at most 2^80 and every band
+lies within 2^63 + 2^80 of zero, asserted by `const` items beside the
+arithmetic, so no band is ever absent the way the latch's `i64` stop can be.
+`atr()` reads the ATR only once it has folded its period; `Atr::value` reads a
+running mean from the first candle.
+
+**Why.** With the ATR and the band arithmetic shared, every difference between
+the two readings is a difference of band logic, which is what the fixtures show.
+The floors are the latch's, not real arithmetic: `docs/06-limits.md`
+L-PSRB-STV-01 bounds the gap.
+
+**Proved by** `the_atr_is_the_engine_atr` and the transcription test
+(PSRB-STV-I04), `the_extremes_never_overflow` (PSRB-STV-I05).
+
+### D-8602 — PSRB-STV: the previous TREND picks the band judged, never a comparison of values; the script's zero prior bands and its first-candle direction are kept — 2026-11-03
+
+**Decision.** Once the ATR is warm, with `pu` and `pl` the previous bands and
+`pc` the previous close: the upper band is the basic upper band if that is below
+`pu` or `pc > pu`, else `pu`; the lower band is the basic lower band if that is
+above `pl` or `pc < pl`, else `pl`. After the first ATR candle a `Down` trend
+turns `Up` only when the close is above the upper band and an `Up` trend turns
+`Down` only when the close is below the lower band, both bands the CURRENT
+candle's; the line is the lower band when `Up` and the upper when `Down`. The
+previous bands are 0 before the first ATR candle, which is what the script's
+`nz()` gives a missing value; the previous close is `None` at the very first
+candle and compares false; the first ATR candle reads `Down`, the script's
+direction when the previous ATR is missing. So at period 1 the first upper band
+is 0 (ST-6), and a basic lower band below 0 leaves the lower band at 0 until the
+basic band rises above it.
+
+**Why the previous trend.** The script asks whether the previous Supertrend
+equalled the previous upper band. In floating point that is the previous trend
+except where the two bands are exactly equal, which floats rarely make and whole
+paisa make often. On ST-9 (period 2, factor 500) the bands are both 128 at
+candle 3, and at candle 4 the close 151 is below the upper band 152: the literal
+comparison would read `Down` where the trend was up and stays up. The published
+meaning is kept. **Named, not built:** LITERAL-PINE, the literal comparison on
+these integer bands, which on ST-9 reads `Down 152 (152, 134)`,
+`Down 151 (151, 137)` and `Down 144 (144, 137)` at candles 4 to 6 and agrees
+elsewhere (the design's node model, re-run for this entry). A parity run against
+`TradingView`'s own output reads such equal-band candles with this decision in
+hand.
+
+**Proved by** PSRB-STV-I01, I02 and I03, ST-9 by
+`fixture_st_9_equal_bands_do_not_turn_an_up_candle`.
+
+### D-8603 — PSRB-STV: an ATR period of 1 to 65,535 candles and a factor of 1 to 100,000 thousandths; refusals before anything moves; timestamps not read; no look-ahead — 2026-11-03
+
+**Decision.** `DualBandSuperTrend::new(atr_period: u16, factor_milli: u32)`
+refuses a period of 0 (`Refusal::PeriodZero`), then a factor of 0 or above
+`MAX_FACTOR_MILLI` = 100,000, 100x the ATR (`Refusal::FactorOutOfRange`, naming
+the value). `fold` refuses a candle `Candle::check_evaluable` refuses, with its
+reason (`Refusal::Corrupt`), before anything moves, so a refusal leaves the
+whole state unchanged. Timestamps are not read: ordering and holes are the
+caller's, and the PSRB design has its strategy part taint a candle with a
+missing minute.
+`fold` takes one candle, and a reading after candle t depends on candles 0 to t
+only, the current candle included, which is the script's convention; a caller
+that wants the engine's convention, an anchor that excludes the candle it is
+measured against, keeps the previous reading (`Reading` is `Copy`).
+
+**Proved by** PSRB-STV-I05 and I06.
+
+### D-8604 — PSRB-STV: `Reading::settled` marks the first ATR candle, whose direction and prior bands are the script's defaults; the PSRB strategy reads settled readings only — 2026-11-03
+
+**Decision.** `settled` is false at the first ATR candle and true after it. That
+candle's reading is the script's, degenerate cases included (`Down` by default,
+and at period 1 an upper band of 0, ST-6), and it is kept so a parity run sees
+what the script plots. PSRB-STRAT, the strategy part that is to call this
+module and is not built, decides only on settled readings, as it decides only on
+warm ones: that is its design's rule, binding on it when it is built.
+
+**Proved by** PSRB-STV-I01.
+
+### D-8605 — PSRB-STV: `C-PSRB-STV-01` and `C-PSRB-STV-02`, measured by functions in the module and judged by a thin wrapper; the helpers copied per part — 2026-11-03
+
+**Decision.** `C-PSRB-STV-01` times one `fold` plus `reading()` after 2,000,
+20,000 and 200,000 candles at ATR period 10 and factor 3,000; `C-PSRB-STV-02`
+the same step at ATR periods 10, 100 and 1,000 after 20,000 candles. Each size
+runs 7 rounds of 10,000 single-step timings over a deterministic synthetic
+stream that turns both ways (a 400-candle triangle drift under splitmix64
+noise; noise alone never reaches a 3x band). The wrapper sorts each round,
+prints the best round's p50, p99 and max with n and the median and worst rounds'
+p99, and judges the best round, the crate's minimum-over-trials rule: every
+size's best p99 within `CEILING_PERMILLE` (3.0x) of the first size's and inside
+2 µs (the design's target 400 ns, ESTIMATE). `measure_step`, `measure_period`,
+`summarize`, `flat_within` and `StepCost` live in the module, where a unit test
+runs them at tiny sizes; `crates/indicators/benches/ratio/psrb_stv.rs` sorts
+(gate 11 keeps a sort out of production code), prints and judges, and its row
+folds into `benches/ratio.rs`'s check from under the PSRB-STV slot without
+entering `ROWS`. The three helpers are this part's own copy, in the form
+FNO-LADDER's rows take: a shared helper would make one part wait on another,
+and the duplication is accepted. The cloud figures are advisory; the Mac's
+gate 8 run decides, and gate 14's cover-table row for these two ids is the main
+session's at the family assembly.
+
+**Proved by** `the_bench_measures_both_rows_at_tiny_sizes` and
+`a_cost_is_read_by_rank_and_judged_flat_or_not`; the figures are in
+`docs/06-limits.md`, L-PSRB-STV-04.
+
 ### D-7111 — /db reads only what its view shows: the scope names its view's segments, a contract view offers its expiries from the facets answer, and no /db view reads the whole census (R3-12; FM-621, DB-G59, DB-G70, RA-005, RA-027, RA-258, RA-259) — 2026-10-24
 
 **Findings.** On :8080, 18 Oct 2026, `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s`

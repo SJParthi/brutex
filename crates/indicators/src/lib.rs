@@ -64,6 +64,7 @@ pub mod anchored;
 pub mod bollinger;
 pub mod column;
 pub mod daily;
+pub mod dual_band_supertrend;
 pub mod evaluator;
 pub mod fib;
 pub mod gap;
