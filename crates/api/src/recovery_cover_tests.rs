@@ -1149,3 +1149,199 @@ async fn the_page_names_every_state_and_a_pointer_to_another_plan_is_refused() {
     assert_eq!(why, "active recovery identity mismatch");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A sealed plan's journal state: its scans and its control row.
+fn sealed(scans: &[Record], body: &str) -> std::collections::HashMap<[u8; 32], Record> {
+    let mut latest: std::collections::HashMap<[u8; 32], Record> =
+        scans.iter().map(|row| (row.key, row.clone())).collect();
+    let mut control = record(body.to_owned());
+    control.key = CONTROL;
+    latest.insert(CONTROL, control);
+    latest
+}
+
+/// **A SEAL, A DESCRIPTOR, AN ENVELOPE AND A POINTER ARE EACH REFUSED BY
+/// THEIR OWN RULE** (BASE-COV-API repair 3, D-8661). `validate_seal`,
+/// `successor_identity`, `checked`, `plan`, `active_history` and
+/// `preflight_plan`, driven directly. Extremes: a sound original seal
+/// (accepted); a seal row carrying an attempt (refused: quantities); a seal
+/// whose state is `Unverified` (refused: state); a scan whose key is not its
+/// body's (refused: identity); a scan set that is not the plan's identity
+/// (refused: inventory); a successor seal naming another predecessor and one
+/// naming another generation (refused: binding); a descriptor of two parts
+/// and one of another policy (refused by name); a body on another feed, for
+/// another target, under another identity rule and at the 5min rung (each
+/// refused); a leg on another route and one from another vendor (refused);
+/// a pointer row never activated (refused) and one whose key is not its
+/// body's (refused); a plan on disk with no seal that the pointer names
+/// (refused: not reseeded) and one it does not name (its seal not asked for;
+/// refused only for the attempt history the site never wrote); and, at once,
+/// a seal with an attempt in the `Unverified` state (refused once), and a
+/// successor seal naming both another predecessor and another generation;
+/// out of the box, a descriptor whose predecessor is not hexadecimal.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every refusal of the durable plan's checks, each beside the sound case"
+)]
+fn a_seal_a_descriptor_an_envelope_and_a_pointer_are_each_refused_by_their_own_rule() {
+    let today = today_or_now();
+    let day = on(2026, 7, 1);
+    let window = Window::new(day, day).expect("a day");
+    let scans = vec![record(canonical("NIFTY", "1min", window, "scan"))];
+    let id = scope_identity(&scans);
+    // THE ORIGINAL SEAL.
+    assert_eq!(validate_seal(&sealed(&scans, CONTROL_BODY), id), Ok(()));
+    let tampered = |change: &dyn Fn(&mut Record)| {
+        let mut latest = sealed(&scans, CONTROL_BODY);
+        change(latest.get_mut(&CONTROL).expect("a seal"));
+        validate_seal(&latest, id).expect_err("refused")
+    };
+    for why in [
+        tampered(&|seal| seal.attempts = 1),
+        tampered(&|seal| seal.status = Status::Unverified),
+        tampered(&|seal| {
+            seal.attempts = 1;
+            seal.status = Status::Unverified;
+        }),
+    ] {
+        assert!(why.contains("invalid control state or quantities"), "{why}");
+    }
+    let mut forged = scans.clone();
+    forged[0].key = [3; 32];
+    let why = validate_seal(&sealed(&forged, CONTROL_BODY), id).expect_err("refused");
+    assert!(why.contains("invalid work identity"), "{why}");
+    let why = validate_seal(&sealed(&scans, CONTROL_BODY), [4; 32]).expect_err("refused");
+    assert!(
+        why.contains("does not match its original plan identity"),
+        "{why}"
+    );
+    // A SUCCESSOR SEAL binds its predecessor (the scope) and its generation.
+    let descriptor =
+        |predecessor: [u8; 32]| format!("{SUCCESSOR_POLICY}:{}:{}", hex(predecessor), hex([9; 32]));
+    let bound = descriptor(id);
+    let (generation, predecessor) = successor_identity(&bound).expect("a descriptor");
+    assert_eq!(predecessor, id);
+    assert_eq!(validate_seal(&sealed(&scans, &bound), generation), Ok(()));
+    for (body, at) in [
+        (
+            descriptor([5; 32]),
+            successor_identity(&descriptor([5; 32])).expect("read").0,
+        ),
+        (bound.clone(), [6; 32]),
+        (descriptor([5; 32]), [6; 32]),
+    ] {
+        let why = validate_seal(&sealed(&scans, &body), at).expect_err("refused");
+        assert!(why.contains("does not bind its exact scope"), "{why}");
+    }
+    for (body, why) in [
+        (
+            format!("{SUCCESSOR_POLICY}:{}", hex(id)),
+            "unknown generation descriptor",
+        ),
+        (
+            format!("another-policy:{}:{}", hex(id), hex(id)),
+            "unknown generation policy",
+        ),
+    ] {
+        let refused = successor_identity(&body).expect_err("refused");
+        assert!(refused.contains(why), "{refused}");
+    }
+    assert!(successor_identity(&format!("{SUCCESSOR_POLICY}:not-hex:{}", hex(id))).is_err());
+
+    // ENVELOPES `checked` REFUSES, each parsed as a spot request first.
+    let good = canonical("NIFTY", "1min", window, "scan");
+    assert!(checked(&good, today).is_ok());
+    for (from, to) in [
+        (
+            "vendor=zerodha&cash_identity=zerodha_cross_checked",
+            "vendor=dhan",
+        ),
+        ("target=fno", "target=swept"),
+        (
+            "cash_identity=zerodha_cross_checked",
+            "cash_identity=zerodha_nse_checked",
+        ),
+        ("granularity=1min", "granularity=5min"),
+    ] {
+        let body = good.replace(from, to);
+        let parsed = ingest::parse_spot(&body, today);
+        assert!(parsed.is_ok(), "{to}: a spot request: {:?}", parsed.err());
+        let why = checked(&body, today).expect_err(to);
+        assert!(
+            why.contains("recovery requires explicit F&O spot members"),
+            "{to}: {why}"
+        );
+    }
+    let leg = |route: Route, vendor: &str| Leg {
+        route,
+        vendor: vendor.to_owned(),
+        dir: "1min".to_owned(),
+        label: "fixture".to_owned(),
+        body: good.clone(),
+    };
+    assert!(plan(vec![leg(Route::Spot, "zerodha")], today).is_ok());
+    for refused in [leg(Route::Fno, "zerodha"), leg(Route::Spot, "dhan")] {
+        assert!(plan(vec![refused], today).is_err());
+    }
+
+    // POINTERS AND PLANS ON DISK.
+    let (root, site) = refused_site("recovery-cover-seal");
+    for pointer in [
+        Record {
+            attempts: 0,
+            ..record(hex(id))
+        },
+        Record {
+            attempts: 1,
+            key: [8; 32],
+            ..record(hex(id))
+        },
+    ] {
+        let path = active_path(&site);
+        let _ = std::fs::remove_file(&path);
+        Journal::open(&path)
+            .expect("the pointer journal")
+            .append(pointer)
+            .expect("a pointer");
+        let why = active_history(&site).expect_err("refused");
+        assert!(
+            why.contains("invalid identity or activation state"),
+            "{why}"
+        );
+    }
+    let path = active_path(&site);
+    std::fs::remove_file(&path).expect("removed");
+    Journal::open(&path)
+        .expect("the pointer journal")
+        .append(Record {
+            attempts: 1,
+            key: id,
+            ..record(hex(id))
+        })
+        .expect("a sound pointer");
+    assert!(active_history(&site).is_ok(), "the sound pointer reads");
+    // THE PLAN THE POINTER NAMES, ON DISK WITH NO SEAL: refused.
+    Journal::open(&plan_path(&site, id))
+        .expect("a plan journal")
+        .append(scans[0].clone())
+        .expect("a scan");
+    let why = preflight_plan(&site, id).expect_err("refused");
+    assert!(
+        why.contains("has no durable seal; history was not reseeded"),
+        "{why}"
+    );
+    // ONE IT DOES NOT NAME: no seal to check, so the only refusal is the
+    // shared attempt history this site has never written.
+    let other = [11; 32];
+    Journal::open(&plan_path(&site, other))
+        .expect("a plan journal")
+        .append(scans[0].clone())
+        .expect("a scan");
+    let why = preflight_plan(&site, other).expect_err("refused for the ledger alone");
+    assert!(
+        why.contains("shared recovery attempt history is unavailable"),
+        "{why}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
