@@ -57,8 +57,9 @@ const WINDOW: &str =
 
 /// The months the `/bars.json` refusal is timed on, in rows: one row past
 /// the cap, the bench's own 100x month, and every second of June (30 x
-/// 86,400, the fullest one-second month the store files). Every one is
-/// past [`MONTH_ANSWER_CAP_ROWS`], so every one is refused; 1x to 43.2x.
+/// 86,400, the most a one-second June can hold; a 31-day month holds
+/// 2,678,400, 44.6x the first). Every one is past
+/// [`MONTH_ANSWER_CAP_ROWS`], so every one is refused; 1x to 43.2x.
 const REFUSED_SIZES: [usize; 3] = [MONTH_ANSWER_CAP_ROWS + 1, 102_400, 30 * 86_400];
 
 /// The revalidation of `path`: its `ETag`, asked back. A route that sends no
@@ -137,6 +138,12 @@ const REFUSALS_TIMED: usize = 200;
 /// whole-month `/bars.json` ask of a month past the 60,000 rows one answer
 /// serves is refused `400 too_many_rows`, naming that cap, and the refusal
 /// costs the same however large the month is.
+///
+/// ITS PROOF IS THIS BENCH, `crates/api/benches/ratio.rs` (gate 8), whose
+/// `main` runs this function and exits 1 when it returns `false`: invariant
+/// row BBENCH-03, read in the bench's `reads /bars.json refusal p50` lines.
+/// The answer itself, whole at exactly 60,000 rows and refused at 60,001, is
+/// tested in `crates/api/tests/bench_paged_month.rs` (BBENCH-02).
 ///
 /// The refusal cannot be timed on the 1x and 10x stores the other rows use
 /// (1,024 and 10,240 bars answer whole, as they should), so it has stores of

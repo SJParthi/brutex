@@ -88860,3 +88860,72 @@ belongs to the part that takes that file.
 **Cost.** No served route and no store file changes. The bench's timed path
 makes the same requests and does the same work per page; only where the code
 lives moved. D-7402 to D-7409 are unused.
+
+### D-7402 — The whole-month refusal's O(1) claim names its proof, the bench file and BBENCH-03, so gate 12 reads it proven (BASE-BENCH-1028, repair 2) — 2026-11-06
+
+**Context.** The landing gate of 6 Nov 2026 merged this part into
+`feat/db-fix` 146031905, and gate 12 refused one block:
+`crates/api/benches/ratio/reads.rs:136 (refusals_are_flat) — a cost claim that
+names no proof`. The block opens "THE CAP IS KEPT, AND ITS REFUSAL IS O(1)
+(BASE-BENCH-1028, D-7400)", and a part's name or a decision's number is no
+proof gate 12 reads. It takes a `crate::module::name` token that resolves to a
+test or a bench, a tracked `crates/**/tests/*.rs` or `crates/**/benches/*.rs`
+path, or an invariant row id whose row names such a token in backticks. The
+merge did not cause it. Gate 12 as this part's own tip 37d7f9866 carried it
+refused the same block there, the first of 86 refusals; the 85 others are in
+files this part never touched, the base's own reds, which BASE-REDS-1023
+cleared before this landing. A gate already red on its base hid the one new
+refusal.
+
+**Decision.** The block names its proof, as its module's header already did:
+the bench file `crates/api/benches/ratio.rs`, whose `main` runs
+`refusals_are_flat` and exits 1 when it returns `false`; invariant row
+BBENCH-03, read in the bench's `reads /bars.json refusal p50` lines; and, for
+the answer itself, `crates/api/tests/bench_paged_month.rs` (BBENCH-02). The
+claim, the 60,000-row cap, the three refused sizes, the 3.0x ceiling, gate
+12's tool and its allowlist are unchanged.
+
+**Rejected.** Writing UNVERIFIED: the claim is measured and gated at every
+run of the bench, so the word would understate it. An allowlist entry: that
+list excuses a claim with no proof beside it, and this one has one; it is CI's
+file besides, which this part does not edit.
+
+**Also corrected here**, each a follow-up the second check of 2 and 3 Nov 2026
+left in this part's own files:
+
+- D-7400 and the comment on `REFUSED_SIZES` call June "the fullest one-second
+  month". A 31-day month holds 2,678,400 rows, 44.6x the smallest refused
+  month, so the comment now says what June holds, and L-BBENCH-2 names the
+  31-day month. Its conclusion stands: no refused month can be 100x the
+  smallest.
+- The test file's header called its 12,345.00 a level "no real index printed
+  in June 2024". The second check read only NIFTY's and BANKNIFTY's June 2024
+  in the store, so the header now says NIFTY, the one index its fixtures
+  name, and calls the rest UNVERIFIED.
+- D-7400's red run, "0 passed, 9 failed", kept no log:
+  `state/fix/round2/logs-BENCH1028/red-v0.log` holds only a queue line and
+  `EXIT 143`, a later start cut while it waited for a build slot. The red that
+  survives for the same point is the second check's,
+  `logs-BENCH1028-v1/red-v0.log` of 30 Oct 2026: 1 passed, 8 failed, with
+  `the_benchs_whole_month_read_answers_every_size_it_times` failing on
+  `too_many_rows`.
+- L-BBENCH-5 named `feat/db-fix`'s commit of 2 Nov 2026 by its hash. That
+  commit is no ancestor of `main`, and `NOT_ON_MAIN` in
+  `crates/store/tests/cited_commits.rs` does not list it, so that test read
+  the row red. The row now names it as this part's merge base of that day,
+  and it gains the one quiet whole run: the second check's of 30 Oct 2026 on
+  this part's first build, started at load 8.9, exit 0, `C-T-04` 334.653
+  floors. L-BBENCH-1, -2 and -5 say "this part's tree of 2 Nov 2026" where
+  they said "the final tree", which stopped being true at this merge.
+
+**Proof.** Gate 12, run by `state/fix/ci-shell-gates.sh` with `--jobs
+language-purity --fast --only 12` (logs `state/fix/round2/logs-BENCH1028/r2/`):
+on this part's tip merged with `feat/db-fix` 146031905, the landing gate's
+tree byte for byte, `GATE 12 rc=1`, 779 claims, 3 naming nothing, `REFUSED
+crates/api/benches/ratio/reads.rs:136`; with this change `GATE 12 rc=0`, 779
+claims, 75 naming a tracked test or bench file where 74 did, 2 naming nothing,
+both allowed, and "OK — every cost claim names its proof or says UNVERIFIED."
+The documents' citations are `cited_commits`' to read.
+
+**Cost.** Comments and documents only: no compiled line changes, no served
+route, no store file, no bench row. D-7403 to D-7409 are unused.

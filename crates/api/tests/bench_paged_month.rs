@@ -15,8 +15,11 @@
 //! anything wrong is refused by name rather than timed.
 //!
 //! No row here is market data: every bar is generated, at an invented level
-//! (12,345.00) no real index printed in June 2024, in a scratch store under
-//! the system temporary directory that each test removes.
+//! (12,345.00) far below every NIFTY print of June 2024 (NIFTY is the one
+//! index these fixtures name; the second check of 2 Nov 2026 read that month
+//! in the store), in a scratch store under the system temporary directory
+//! that each test removes. Whether some other index printed that level then
+//! is UNVERIFIED, and nothing here depends on it.
 
 #![allow(
     clippy::expect_used,
