@@ -836,3 +836,87 @@ fn an_audited_refusal_of_a_day_is_the_importers_error_and_nothing_else() {
     assert!(got.unread.is_empty(), "{:?}", got.unread);
     let _ignored = std::fs::remove_dir_all(&root);
 }
+
+/// The child of [`a_window_after_kept_out_server_errors_opens_with_their_count`].
+const KEPT_OUT_CHILD: &str = "BRUTEX_TEST_LOGS_KEPT_OUT_CHILD";
+
+/// **A WINDOW AFTER KEPT-OUT SERVER ERRORS OPENS WITH THEIR COUNT**
+/// (BASE-COV-API-AS3, WP-33c). Past [`super::AUDITED_ERRORS_PER_WINDOW`] a
+/// window, a server error's line is kept out of the audit stream, and the
+/// next window's first such line says how many were. In a child of this
+/// binary, since the ration is process-wide: the ration is filled past its
+/// bound in a window opened at the far end of the clock, then one real `500`
+/// is served through `note_request`; its earlier clock opens a new window,
+/// and its line carries `kept_out_of_audit_before` = the one kept out.
+/// Extremes: a window filled to its bound and one past it; a request whose
+/// clock runs backwards against the window (the reopen arm); out of the box —
+/// a window opened at `u64::MAX` milliseconds.
+#[test]
+fn a_window_after_kept_out_server_errors_opens_with_their_count() {
+    const NAME: &str =
+        "logs::cover_tests::a_window_after_kept_out_server_errors_opens_with_their_count";
+    if let Some(root) = std::env::var_os(KEPT_OUT_CHILD) {
+        let root = std::path::PathBuf::from(root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let from = crate::emitted::mark();
+            {
+                let mut ration = super::AUDITED_ERRORS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for _ in 0..=super::AUDITED_ERRORS_PER_WINDOW {
+                    let _ = ration.admit(u64::MAX);
+                }
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a loopback port");
+            let addr = listener.local_addr().expect("its address");
+            let router = axum::Router::new()
+                .route(
+                    "/as3-kept-out",
+                    axum::routing::get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+                )
+                .layer(axum::middleware::from_fn(super::note_request));
+            let served = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+                listener, router,
+            )));
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("a socket");
+            stream
+                .write_all(b"GET /as3-kept-out HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("the request");
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).await.expect("the answer");
+            served.abort();
+            let _stopped = served.await;
+            assert!(
+                reply.starts_with(b"HTTP/1.1 500"),
+                "{}",
+                String::from_utf8_lossy(&reply)
+            );
+            let lines = crate::emitted::landed(from, "api.request", "served");
+            let counted: Vec<_> = lines
+                .iter()
+                .filter(|line| crate::emitted::says(line, "path", "/as3-kept-out"))
+                .filter(|line| crate::emitted::counts(line, "kept_out_of_audit_before", 1))
+                .collect();
+            assert_eq!(counted.len(), 1, "{lines:?}");
+        });
+        std::fs::write(root.join("child-ran"), b"kept out").expect("the child's proof");
+        return;
+    }
+    let root = scratch("kept-out-window");
+    let _ = crate::isolated::rerun(NAME, &[(KEPT_OUT_CHILD, root.as_os_str())]);
+    assert_eq!(
+        std::fs::read(root.join("child-ran")).ok().as_deref(),
+        Some(&b"kept out"[..])
+    );
+    let _ignored = std::fs::remove_dir_all(&root);
+}

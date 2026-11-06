@@ -8947,6 +8947,96 @@ mod cloud_mutant_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A LIVE LOOP OVER A VENDOR THAT ANSWERS NO BARS REFUSES THE EMPTY
+    /// ANSWER BY NAME, BACKS THAT MONTH OFF, AND KEEPS PASSING**
+    /// (BASE-COV-API-AS3; `fly`'s `waited > 0`, both sides). A loopback vendor
+    /// answers every request with no bars at all: Dhan's first tick reaches
+    /// both tracked indices, the empty answer is a named refusal ("NO ROWS AT
+    /// ALL"), never a quiet success, and the month is retried after its
+    /// backoff, the one nap a pass earns (`waited > 0`). The passes between
+    /// owe nothing and nap nothing (`waited > 0` false: `nap(.., 0)` would
+    /// credit nothing either, so what is asserted is the loop's whole
+    /// behaviour): by the second attempt, less than one idle poll of nap is
+    /// credited, the backoff's own seconds and no more. Every request goes to
+    /// `127.0.0.1`; the credential is the script's.
+    /// Extremes: an answer of no bars, for each of the two tracked indices; a
+    /// second attempt at the same month; and, at once, a feed backing off while
+    /// the loop keeps passing the others; out of the box — the grace window
+    /// before the first pass, which credits no wait.
+    #[tokio::test]
+    async fn a_live_loop_over_an_empty_vendor_refuses_it_by_name_and_keeps_passing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let base: &'static str = Box::leak(
+            format!("http://{}", listener.local_addr().expect("its address")).into_boxed_str(),
+        );
+        let asked = std::sync::Arc::new(AtomicU64::new(0));
+        let count = std::sync::Arc::clone(&asked);
+        let app = axum::Router::new().fallback(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+            async {
+                "{\"open\":[],\"high\":[],\"low\":[],\"close\":[],\"volume\":[],\"timestamp\":[]}"
+            }
+        });
+        let vendor = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
+        let root = crate::scratch::path("autopilot-cloud-no-nap");
+        let _ = std::fs::remove_dir_all(&root);
+        let (masters, store) = (root.join("masters"), root.join("store"));
+        std::fs::create_dir_all(&masters).expect("mkdir masters");
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir store");
+        std::fs::write(
+            masters.join("dhan_scrip.csv"),
+            "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,INSTRUMENT_TYPE,\
+             SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n\
+             NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,13\n\
+             NSE,I,NA,INDEX,BANKNIFTY,BANKNIFTY,INDEX,NA,0001-01-01,,,25\n",
+        )
+        .expect("write the master");
+        let mut site = Site::serving(&masters, &store);
+        site.credentials = crate::credential_law::Credentials::Scripted(std::sync::Arc::new(
+            crate::credential_law::Script::new(
+                base,
+                (0..64).map(|_| Ok("live".to_owned())).collect(),
+            ),
+        ));
+        let site = Loaded::new(site);
+        site.autopilot.resume();
+        let flying = tokio::spawn(fly(Loaded::clone(&site)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(GRACE_SECS + 90);
+        // Two passes, each asking both indices: the second began only after
+        // the first returned and the loop chose whether to nap.
+        while asked.load(Ordering::Relaxed) < 4 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no second pass: {}",
+                site.autopilot.json()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        let (waited, why) = site
+            .autopilot
+            .inspect(|status| (status.waiting_ms, status.detail.clone()))
+            .expect("a readable status");
+        let status = site.autopilot.json();
+        site.autopilot.pause();
+        flying.abort();
+        let _aborted = flying.await;
+        vendor.abort();
+        let _stopped = vendor.await;
+        assert!(
+            why.contains("did not complete. Attempt ") && why.contains("NO ROWS AT ALL"),
+            "the empty answer is refused by name and its month retried: {status}"
+        );
+        assert!(
+            waited < IDLE_POLL_SECS * 1_000,
+            "less than one idle poll of nap is credited: {status}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A TICK THAT REACHES ITS INSTRUMENTS CLOSES ITS RUN WITH THE RUN'S OWN
     /// RECORD (`tick`'s `Record::of_run` arm). A loopback vendor answers every
     /// request with one generated daily bar, so both tracked indices are

@@ -1574,4 +1574,58 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// **A FRONTIER WHOSE ABSENCE CANNOT BE CHECKED IS REFUSED BY NAME, NEVER
+    /// READ AS A ZERO-ROW CHILD** (BASE-COV-API-AS3). `missing_file_response`
+    /// tells an absent frontier (a zero-row run) from one whose path cannot be
+    /// asked about at all: any refusal of the `metadata` call but "not found"
+    /// is answered with the host's own words beside the caller's reason. Asked
+    /// directly: through `/frontier.json` the preflight refuses these roots
+    /// first. Extremes: a store root that is a regular file; a `results` that
+    /// is a regular file; a root holding a NUL byte (refused before any call
+    /// reaches the host); out of the box — the same refusal under an empty
+    /// reason sentence.
+    #[test]
+    fn a_frontier_whose_absence_cannot_be_checked_is_refused_by_name() {
+        let dir = crate::scratch::path("frontier-absence-unchecked");
+        let _ = std::fs::remove_dir_all(&dir);
+        let results = dir.join("results-is-a-file");
+        std::fs::create_dir_all(&results).expect("a scratch root");
+        std::fs::write(results.join("results"), b"a file where results goes").expect("a file");
+        let file_root = dir.join("root-is-a-file");
+        std::fs::write(&file_root, b"a file where the root goes").expect("a file");
+        let nul_root = dir.join("a\0root");
+        for (root, why) in [
+            (&file_root, "the frontier would not open"),
+            (&results, "the frontier would not open"),
+            (&nul_root, "the frontier would not open"),
+            (&file_root, ""),
+        ] {
+            let (status, _, body) = super::missing_file_response(
+                root,
+                &[0xa7; 32],
+                None,
+                "",
+                crate::detail::Page {
+                    number: 0,
+                    limit: 16,
+                },
+                super::json_headers(),
+                why,
+            );
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{}: {body}",
+                root.display()
+            );
+            assert!(
+                body.contains(&format!("{why}. "))
+                    && body.contains("could not be checked for absence: "),
+                "{}: {body}",
+                root.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
