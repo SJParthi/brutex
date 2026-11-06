@@ -1867,3 +1867,660 @@ fn an_underlying_held_on_two_exchanges_is_refused_until_one_is_named() {
         "{got:?} {keys:?}"
     );
 }
+
+/// One FNO key of NIFTY whose contract is text the store holds but no
+/// spelling this index reads: `contract_of` answers `None` for it.
+fn unread(text: &str, tf: Timeframe, at: YearMonth) -> EntryKey {
+    EntryKey {
+        contract: Some(Contract::parse(text).expect("text the store holds")),
+        ..fno("2019-03-28-FUT", tf, at)
+    }
+}
+
+/// A slot over a census with no file at its path: no part for any segment.
+fn absent_slot() -> Arc<Slot> {
+    Slot::detached(census::VendorCensus {
+        vendor: Vendor::Gdfl,
+        path: std::path::PathBuf::from("/nonexistent/facets/absent.man"),
+        state: census::Census::Absent,
+    })
+}
+
+/// **A DELTA NAMES ONLY WHAT MOVED, A KEY THE INDEX CANNOT READ IS COUNTED
+/// ONCE, AND A `since` OVER NO CENSUS IS REFUSED BY NAME** (BASE-COV-API
+/// repair 3, D-8661). One census on disk, an index built over it, a tail
+/// appended and the index moved by it, then every delta read off the moved
+/// index. Extremes: a contract text the index cannot read, counted when first
+/// seen; the same key grown in a tail, never counted again; a key of another
+/// segment appended, left out of the FNO delta's keys; one key appended
+/// twice, read once; a delta naming an expiry, which lists only the contract
+/// that moved, its other side `null`; that expiry's future, unchanged, left
+/// out of the delta's futures; an expiry the underlying does not hold, asked
+/// cold and in a delta (no months, no strikes, no futures); a delta with no
+/// expiry, which lists only the expiry that moved and not the weekly beside
+/// it; a `since` asked of an index over no read at all, refused
+/// `410 since_too_old`; and, at once, the unread key grown in the same tail
+/// as another segment's key and a key appended twice (the moved index still
+/// answers what a fresh build answers), and an expiry not held asked in a
+/// delta; out of the box, a `since` asked of the empty index of a census that
+/// holds no part for the segment.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one census, one tail, and every delta read against the same moved index"
+)]
+fn a_delta_names_only_what_moved_and_an_unread_contract_is_counted_once() {
+    let march = month(2019, 3);
+    let ce = |rows: u64, last: i64| {
+        held(
+            fno("2019-03-28-1150000-CE", Timeframe::SECOND_1, march),
+            rows,
+            0,
+            last,
+            7_001,
+        )
+    };
+    let odd = |rows: u64, last: i64| {
+        held(
+            unread("NIFTYX", Timeframe::SECOND_1, march),
+            rows,
+            0,
+            last,
+            9_001,
+        )
+    };
+    let base = vec![
+        ce(10, 100),
+        held(
+            fno("2019-03-28-1150000-PE", Timeframe::SECOND_1, march),
+            20,
+            5,
+            200,
+            3_002,
+        ),
+        held(
+            fno("2019-03-28-1160000-CE", Timeframe::SECOND_1, march),
+            30,
+            7,
+            300,
+            2_003,
+        ),
+        held(
+            fno("2019-03-28-FUT", Timeframe::SECOND_1, march),
+            40,
+            1,
+            400,
+            1_150_004,
+        ),
+        held(
+            fno("2019-03-07-1100000-PE", Timeframe::SECOND_1, march),
+            50,
+            2,
+            150,
+            1_005,
+        ),
+        odd(5, 50),
+    ];
+    let mut disk = OnDisk::new("delta-expiry", &base);
+    let before = disk.read(None);
+    let mut index = built(Segment::Fno, &before);
+    let generation = index.generation;
+    let nifty = (Exchange::Nse, Symbol::new("NIFTY").expect("a symbol"));
+    assert_eq!(
+        index.underlyings[&nifty].unread_contracts, 1,
+        "counted when first seen"
+    );
+
+    // THE TAIL: the CE grows twice, the unread key grows once, and a key of
+    // another segment lands between them.
+    disk.append(&[
+        ce(15, 120),
+        odd(6, 60),
+        held(
+            spot(Segment::Index, "NIFTY", Timeframe::MINUTE_1, month(2019, 4)),
+            60,
+            0,
+            500,
+            1_150_006,
+        ),
+        ce(16, 130),
+    ]);
+    let after = disk.read(Some(before.census()));
+    advance(&mut index, Segment::Fno, &after);
+    assert!(
+        index
+            .reflects
+            .as_ref()
+            .is_some_and(|reflects| Arc::ptr_eq(reflects, &after)),
+        "moved to the new read"
+    );
+    assert_eq!(
+        index.underlyings[&nifty].unread_contracts, 1,
+        "grown, never counted again"
+    );
+    let fresh = built(Segment::Fno, &after);
+    for query in [
+        "feed=gdfl&segment=FNO",
+        "feed=gdfl&segment=FNO&underlying=NIFTY",
+        "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-03-28",
+    ] {
+        assert_eq!(
+            render_answer(&index, &asked_for(query), "held", None),
+            render_answer(&fresh, &asked_for(query), "held", None),
+            "{query}: the moved index answers what a fresh build answers"
+        );
+    }
+
+    // THE DELTA'S KEYS: the CE once and the unread key, no INDEX key.
+    let changes = part_of(&after, Segment::Fno)
+        .expect("a part")
+        .changed_since(generation)
+        .expect("the appends since");
+    let changed = Changed::of(&changes, Segment::Fno);
+    assert_eq!(changed.keys.len(), 2, "{:?}", changed.keys);
+    assert!(
+        changed.keys.iter().all(|key| key.segment == Segment::Fno),
+        "{:?}",
+        changed.keys
+    );
+
+    let delta = |query: &str| {
+        json(
+            &render_answer(&index, &asked_for(query), "held", None)
+                .unwrap_or_else(|(code, body)| panic!("{query}: {code} {body}")),
+        )
+    };
+    // A DELTA NAMING AN EXPIRY: the CE that moved, its PE `null`, no future.
+    let one = delta(&format!(
+        "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-03-28&since={generation}"
+    ));
+    let strikes = one["strikes"].as_array().expect("a list");
+    assert_eq!(strikes.len(), 1, "{one}");
+    assert_eq!(strikes[0]["strike"], 1_150_000);
+    assert_eq!(strikes[0]["ce"]["rows"]["1s"], 16);
+    assert!(strikes[0]["pe"].is_null(), "{one}");
+    assert_eq!(one["futures"], serde_json::json!([]), "{one}");
+    let months = one["months"].as_array().expect("a list");
+    assert_eq!(months.len(), 1, "{one}");
+    assert_eq!(months[0]["month"], "2019-03");
+    assert_eq!(months[0]["rows"]["1s"], 16 + 20 + 30 + 40, "{one}");
+
+    // AN EXPIRY THE UNDERLYING DOES NOT HOLD, cold and in a delta.
+    for query in [
+        "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-04-25".to_owned(),
+        format!("feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-04-25&since={generation}"),
+    ] {
+        let none = delta(&query);
+        assert_eq!(none["underlyings"][0]["symbol"], "NIFTY", "{query}: {none}");
+        for list in ["months", "expiries", "strikes", "futures"] {
+            assert_eq!(none[list], serde_json::json!([]), "{query}: {list}: {none}");
+        }
+    }
+
+    // A DELTA WITH NO EXPIRY: only the expiry that moved, never the weekly.
+    let all = delta(&format!(
+        "feed=gdfl&segment=FNO&underlying=NIFTY&since={generation}"
+    ));
+    let expiries = all["expiries"].as_array().expect("a list");
+    assert_eq!(expiries.len(), 1, "{all}");
+    assert_eq!(expiries[0]["expiry"], "2019-03-28");
+    assert_eq!(all["underlyings"][0]["unread_contracts"], 1, "{all}");
+    let cold = delta("feed=gdfl&segment=FNO&underlying=NIFTY");
+    assert_eq!(
+        cold["expiries"].as_array().expect("a list").len(),
+        2,
+        "{cold}"
+    );
+
+    // A `since` OVER NO CENSUS: an index over nothing, and the empty index
+    // of a census that holds no part for the segment.
+    let absent = absent_slot();
+    for (over, why) in [
+        (Index::default(), "an index over no read"),
+        (
+            whole(Segment::Fno, &absent),
+            "the empty index of an absent census",
+        ),
+    ] {
+        let (code, body) = render_answer(
+            &over,
+            &asked_for("feed=gdfl&segment=FNO&since=1"),
+            "absent",
+            None,
+        )
+        .expect_err(why);
+        assert_eq!(code, axum::http::StatusCode::GONE, "{why}: {body}");
+        assert_eq!(json(&body)["error"], "since_too_old", "{why}");
+        assert!(body.contains("no census for the segment"), "{why}: {body}");
+    }
+    let _ = std::fs::remove_dir_all(&disk.root);
+}
+
+/// **AN INDEX MOVES BY ITS OWN EVIDENCE, AND A NODE NO STORE TEXT GIVES IS
+/// REFUSED BY NAME** (BASE-COV-API repair 3, D-8661). The helpers the cache is
+/// made of, driven directly. Extremes: a census with no part, built whole (an
+/// empty index that reflects it); the same read advanced again (nothing
+/// moves); an index advanced to another in-memory census, which continues no
+/// file (built again, equal to a fresh build); a held index advanced to a
+/// census with no part (emptied, and reflecting it); an index over a census
+/// with no part offered as the previous index of one that holds the segment
+/// (refused) and of one that holds none (served); an index over no read at
+/// all (never served); a pending taken when idle, then asked for again
+/// (refused with the instant the holder took it); a hand-built option at
+/// strike `i64::MIN`, whose text runs past a contract's 24 bytes (refused
+/// `rows_unreadable`, naming it); a contract node with no month span
+/// (skipped, never a candidate); and, at once, a pending held by two holders
+/// (still refused after one lets go, idle after both), and the spanless node
+/// beside a strike that names its month (the keys are the latter's alone);
+/// out of the box, the strike `i64::MIN`.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every helper of the cache, each beside the evidence it moves by"
+)]
+fn an_index_moves_by_its_own_evidence_and_a_node_no_store_text_gives_is_refused() {
+    let absent = absent_slot();
+    let empty = whole(Segment::Fno, &absent);
+    assert!(
+        empty
+            .reflects
+            .as_ref()
+            .is_some_and(|reflects| Arc::ptr_eq(reflects, &absent)),
+        "built over the absent read"
+    );
+    assert!(empty.underlyings.is_empty() && empty.generation == 0);
+
+    let cold = asked_for("feed=gdfl&segment=FNO");
+    let held_slot = slot_of(&chain());
+    let mut index = built(Segment::Fno, &held_slot);
+    let first = render_answer(&index, &cold, "held", None).expect("answers");
+    advance(&mut index, Segment::Fno, &held_slot);
+    assert_eq!(
+        render_answer(&index, &cold, "held", None).expect("answers"),
+        first,
+        "the same read moves nothing"
+    );
+
+    let other = slot_of(&chain()[..3]);
+    advance(&mut index, Segment::Fno, &other);
+    assert!(
+        index
+            .reflects
+            .as_ref()
+            .is_some_and(|reflects| Arc::ptr_eq(reflects, &other)),
+        "built again over the other census"
+    );
+    assert_eq!(
+        render_answer(&index, &cold, "held", None),
+        render_answer(&built(Segment::Fno, &other), &cold, "held", None),
+        "equal to a fresh build"
+    );
+    assert_ne!(
+        render_answer(&index, &cold, "held", None).expect("answers"),
+        first,
+        "and not the index it was"
+    );
+
+    advance(&mut index, Segment::Fno, &absent);
+    assert!(
+        index
+            .reflects
+            .as_ref()
+            .is_some_and(|reflects| Arc::ptr_eq(reflects, &absent))
+            && index.underlyings.is_empty(),
+        "emptied over the census with no part"
+    );
+
+    // THE PREVIOUS INDEX.
+    assert!(
+        !serves_as_previous(&empty, Segment::Fno, &held_slot),
+        "an index over no part never stands for a census that holds the segment"
+    );
+    assert!(
+        serves_as_previous(&empty, Segment::Fno, &absent),
+        "but stands for one that holds none"
+    );
+    assert!(
+        !serves_as_previous(&Index::default(), Segment::Fno, &absent),
+        "an index over no read never stands"
+    );
+
+    // PENDING: refused while held, by one holder or two, idle after both.
+    let cell: IndexCell = Arc::default();
+    let one = PendingHold::if_idle(&cell).expect("idle");
+    let taken = one.since();
+    assert_eq!(
+        PendingHold::if_idle(&cell).expect_err("held"),
+        taken,
+        "refused with the instant the holder took it"
+    );
+    let two = PendingHold::of(&cell);
+    drop(one);
+    assert_eq!(
+        PendingHold::if_idle(&cell).expect_err("one holder still holds it"),
+        taken
+    );
+    drop(two);
+    drop(PendingHold::if_idle(&cell).expect("idle once both let go"));
+
+    // HAND-BUILT NODES: a strike no store text gives, and a spanless node.
+    let march = month(2019, 3);
+    let expiry = Day::new(2019, 3, 28).expect("a day");
+    let mut applied = Agg::default();
+    applied.apply(
+        None,
+        &held(
+            fno("2019-03-28-1150000-CE", Timeframe::SECOND_1, march),
+            10,
+            0,
+            100,
+            7_001,
+        ),
+    );
+    let symbol = Symbol::new("NIFTY").expect("a symbol");
+    let key = |contract, at, timeframe| EntryKey {
+        contract,
+        exchange: Exchange::Nse,
+        segment: Segment::Fno,
+        symbol,
+        timeframe,
+        month: at,
+    };
+    let under_of = |contracts: BTreeMap<ContractId, Agg>| Underlying {
+        agg: applied.clone(),
+        expiries: BTreeMap::from([(
+            expiry,
+            Expiry {
+                agg: applied.clone(),
+                months: BTreeMap::from([(march, applied.clone())]),
+                contracts,
+                strikes: 1,
+            },
+        )]),
+        ..Underlying::default()
+    };
+    let rows = asked_for("feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1");
+    let past = under_of(BTreeMap::from([(
+        ContractId::Option {
+            strike: i64::MIN,
+            call: true,
+        },
+        applied.clone(),
+    )]));
+    let (code, body) = chain_keys(&past, &rows, symbol, &key).expect_err("refused");
+    assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(json(&body)["error"], "rows_unreadable", "{body}");
+    assert!(
+        body.contains("-9223372036854775808-CE") && body.contains("does not parse back"),
+        "{body}"
+    );
+    let spanless = under_of(BTreeMap::from([
+        (
+            ContractId::Option {
+                strike: 1_150_000,
+                call: true,
+            },
+            applied.clone(),
+        ),
+        (
+            ContractId::Option {
+                strike: 1_160_000,
+                call: true,
+            },
+            Agg::default(),
+        ),
+    ]));
+    let (keys, sums) = chain_keys(&spanless, &rows, symbol, &key).expect("named");
+    assert_eq!(
+        keys.len(),
+        1,
+        "the spanless node names no candidate: {keys:?}"
+    );
+    assert_eq!(
+        keys[0]
+            .contract
+            .map(|contract| contract.as_str().to_owned()),
+        Some("2019-03-28-1150000-CE".to_owned())
+    );
+    assert_eq!(sums.get(&Timeframe::SECOND_1), Some(&10));
+}
+
+/// **THE ROUTE SAYS A REFUSED DELTA AND REFUSED ROWS WITH ITS HEADERS, AND A
+/// CONTRACT STORED UNDER TWO SPELLINGS IS NEVER A SHORT LIST** (BASE-COV-API
+/// repair 3, D-8661). `answer` itself, over a site's census on disk.
+/// Extremes: a `since` past the part's newest generation, refused
+/// `409 since_in_future` with the census headers kept; a rows answer of an
+/// underlying holding a contract text the index cannot read, refused
+/// `409 rows_unreadable` through the route; a strike stored with a leading
+/// zero beside its plain spelling (`409 rows_incomplete`); a future stored
+/// with an unpadded date beside its padded spelling (the same); the lists of
+/// that selection, which answer and count the two spellings as one contract;
+/// the rows of the other expiry, which holds no second spelling (answered);
+/// the rows of a spot underlying of the same census (answered); and, at
+/// once, both second spellings in one chain (refused once, as incomplete),
+/// and an unread contract beside a second spelling (refused as unreadable,
+/// the check made first); out of the box, the strike spelled `01150000`.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "three censuses, each read through the route beside the others"
+)]
+fn the_route_says_a_refused_delta_and_refused_rows_and_two_spellings_are_never_short() {
+    let march = month(2019, 3);
+    let rows_of = "feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1";
+    let refused =
+        |site: &crate::server::Site, query: &str, code: axum::http::StatusCode, error: &str| {
+            let (got, headers, body) = answer(site, query);
+            assert_eq!(got, code, "{query}: {body}");
+            assert_eq!(json(&body)["error"], error, "{query}: {body}");
+            assert_eq!(headers["x-brutex-census-state"], "held", "{query}");
+            assert!(
+                headers.contains_key(super::super::store_route::CENSUS_PART_GENERATION_HEADER),
+                "{query}: the part generation is said on a refusal too"
+            );
+            body
+        };
+
+    // A `since` PAST THE NEWEST, and an unread contract's rows.
+    let mut rows = chain();
+    rows.push(held(
+        unread("NIFTYX", Timeframe::SECOND_1, march),
+        5,
+        0,
+        50,
+        9_001,
+    ));
+    let site = site_holding("facets-route-refusals", &rows);
+    let body = refused(
+        &site,
+        "feed=gdfl&segment=FNO&since=99999999999",
+        axum::http::StatusCode::CONFLICT,
+        "since_in_future",
+    );
+    assert_eq!(json(&body)["generation"], 8, "{body}");
+    let body = refused(
+        &site,
+        rows_of,
+        axum::http::StatusCode::CONFLICT,
+        "rows_unreadable",
+    );
+    assert!(body.contains("1 key(s) of NIFTY"), "{body}");
+
+    // TWO SPELLINGS OF ONE CONTRACT: a key outside the index's reading.
+    let second = |text: &str, rows: u64| {
+        held(
+            EntryKey {
+                contract: Some(Contract::parse(text).expect("a contract")),
+                ..fno("2019-03-28-FUT", Timeframe::SECOND_1, march)
+            },
+            rows,
+            3,
+            90,
+            1_111,
+        )
+    };
+    for (name, extra) in [
+        (
+            "facets-two-strikes",
+            vec![second("2019-03-28-01150000-CE", 4)],
+        ),
+        ("facets-two-futures", vec![second("2019-3-028-FUT", 6)]),
+        (
+            "facets-two-both",
+            vec![
+                second("2019-03-28-01150000-CE", 4),
+                second("2019-3-028-FUT", 6),
+            ],
+        ),
+    ] {
+        let mut rows = chain();
+        rows.extend(extra.iter().copied());
+        let site = site_holding(name, &rows);
+        let body = refused(
+            &site,
+            &format!("{rows_of}&expiry=2019-03-28"),
+            axum::http::StatusCode::CONFLICT,
+            "rows_incomplete",
+        );
+        assert!(
+            body.contains("do not sum to what the census holds"),
+            "{name}: {body}"
+        );
+        // THE LISTS ANSWER, one contract for the two spellings.
+        let (code, _, lists) = answer(&site, "feed=gdfl&segment=FNO&underlying=NIFTY");
+        assert_eq!(code, axum::http::StatusCode::OK, "{name}: {lists}");
+        assert_eq!(
+            json(&lists)["underlyings"][0]["contracts"],
+            5,
+            "{name}: {lists}"
+        );
+        // THE OTHER EXPIRY AND THE SPOT UNDERLYING ANSWER THEIR ROWS.
+        for query in [
+            format!("{rows_of}&expiry=2019-03-07"),
+            "feed=gdfl&segment=INDEX&underlying=NIFTY&rows=census-tuples-v1".to_owned(),
+        ] {
+            let (code, _, body) = answer(&site, &query);
+            assert_eq!(code, axum::http::StatusCode::OK, "{name}: {query}: {body}");
+        }
+    }
+
+    // AN UNREAD CONTRACT BESIDE A SECOND SPELLING: unreadable, checked first.
+    let mut rows = chain();
+    rows.push(second("2019-03-28-01150000-CE", 4));
+    rows.push(held(
+        unread("NIFTYX", Timeframe::SECOND_1, march),
+        5,
+        0,
+        50,
+        9_001,
+    ));
+    let site = site_holding("facets-unread-and-two", &rows);
+    let _ = refused(
+        &site,
+        rows_of,
+        axum::http::StatusCode::CONFLICT,
+        "rows_unreadable",
+    );
+}
+
+/// **A SECOND BUILDER WAITS FOR THE FIRST AND BUILDS NOTHING, AND A REQUEST
+/// NEVER STARTS A BUILD OVER A REFUSED READ** (BASE-COV-API repair 3,
+/// D-8661). One whole build held open by the test pause (`SLOW_BUILD_KEY`,
+/// 1.5 s); a second caller arrives while it runs, waits on the one build
+/// lock, finds the index current and returns without building (a second
+/// build would hold it another 1.5 s). Then the census runs in the
+/// background, and `kick` is asked to build over refused reads of two feeds
+/// whose census files are not manifests. Extremes: a build held open; a
+/// second caller arriving inside it, answered the first's generation; the
+/// second back in less time than a build of its own takes; the pending
+/// released once both return; a refused read asked before the feed's read is
+/// kept (no build started); a refused read beside a kept read that is itself
+/// refused (none); nothing left pending by a refused kick; the same in the
+/// INDEX and the FNO segment of each feed; and, at once, the second caller
+/// and the pending observed together (pending while the first holds it), and
+/// two refused reads, the kept and the asked; out of the box, a feed whose
+/// census file is fourteen bytes of plain text.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one site: the two builders, then the refused reads kick is asked to build over"
+)]
+fn a_second_builder_waits_for_the_first_and_a_refused_read_starts_no_build() {
+    use super::super::census_cache::{self, slow_read};
+    let site: crate::server::Loaded = Arc::new(site_holding("facets-two-builders", &chain()));
+    let (_stamps, now) = census_cache::vendor_census(&site, Vendor::Gdfl);
+    let slot = Arc::clone(now.slot());
+    let pause = site.store_root.join(SLOW_BUILD_KEY);
+    slow_read::set(&pause, 1_500);
+    let cell = cell_of(&site, Vendor::Gdfl, Segment::Fno);
+    let first = {
+        let (site, slot) = (Arc::clone(&site), Arc::clone(&slot));
+        std::thread::spawn(move || {
+            index(&site, Vendor::Gdfl, Segment::Fno, &slot, |index| {
+                index.generation
+            })
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    while pending(&site, Vendor::Gdfl, &cell).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first build never began"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let began = std::time::Instant::now();
+    let second = index(&site, Vendor::Gdfl, Segment::Fno, &slot, |index| {
+        index.generation
+    });
+    let waited = began.elapsed();
+    slow_read::set(&pause, 0);
+    let first = first.join().expect("the first builder");
+    assert_eq!(second, first, "the second answers the first's build");
+    assert_eq!(second, 7, "the census's generation");
+    assert!(
+        waited < std::time::Duration::from_millis(2_700),
+        "the second built again ({waited:?}): a build of its own holds 1.5 s more"
+    );
+    assert!(
+        pending(&site, Vendor::Gdfl, &cell).is_none(),
+        "released once both return"
+    );
+
+    // KICK, with the census in the background.
+    for vendor in [Vendor::Zerodha, Vendor::Dhan] {
+        std::fs::write(manifest_path(&site.store_root, vendor), b"not a manifest")
+            .expect("written");
+    }
+    census_cache::start(&site, &[]).expect("the warm starts");
+    let refused = |vendor: Vendor| {
+        Slot::detached(census::VendorCensus {
+            vendor,
+            path: manifest_path(&site.store_root, vendor),
+            state: census::Census::Unreadable {
+                reason: "a test's refusal".to_owned(),
+                fault: census::Fault::Refused,
+            },
+        })
+    };
+    // NO KEPT READ YET, OR A KEPT READ THAT IS ITSELF REFUSED (neither file
+    // is a manifest): the asked read is refused too, so never a build.
+    for vendor in [Vendor::Zerodha, Vendor::Dhan] {
+        for segment in [Segment::Index, Segment::Fno] {
+            let cell = cell_of(&site, vendor, segment);
+            assert_eq!(
+                kick(&site, vendor, segment, &cell, &refused(vendor)),
+                None,
+                "{vendor:?} {segment:?}: no build over a refused read"
+            );
+            assert!(
+                cell.pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .since
+                    .is_none(),
+                "{vendor:?} {segment:?}: nothing pending"
+            );
+        }
+    }
+}
