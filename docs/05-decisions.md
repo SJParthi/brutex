@@ -89046,3 +89046,55 @@ ledger rows: no production byte, fixture or report changes. The results are in t
 repair's report, `state/fix/round2/fix-BASE-STACK-1028.json`, and
 `state/fix/round2/logs-STACK1028/repair4/`, not here: an entry cannot state a
 result taken on the commit that holds it. D-7415 to D-7419 stay unused.
+
+### D-7415 — BASE-STACK-1028 repair 6: the speed tests give a real stop a patient list, so its words are its processes' however late `ps` answers; the sheet keeps its bounded list and its words for a late answer — 2026-11-06
+
+**Context.** This part's D1 landing gate of 6 Nov 2026 (M `ba39c7d21`, the merge
+of `2f136e0c2` into `feat/db-fix` `146031905`, load 207 to 253; check r6,
+`state/fix/ci-gates-logs/land-BASE-STACK-1028-20261106T1001Z-g2/web.log`) was red
+in `web/tests/speed.test.js` at line 3921 and green on `feat/db-fix` alone; the
+merge changes no file under `web/`. The --restart test's stubborn stop said
+`KILLED` and then "(its processes could not be listed again (ps did not answer
+within 2000 ms), so a process that joined it after the last list was not sent
+SIGTERM)". The stop lists its command's group with `ps -A -o pid= -o pgid=`
+every 100 ms while it waits, about fifty lists in a 5 s stop, each bounded by
+`LIST_WAIT_MS`. One answered past 2,000 ms, and the stop said so, as D-7152's
+addenda 25 and 28 require. The test stated the words of a machine on which no
+`ps` ever stalls. `ps` took 21.2 ms at p50 and 58.5 ms at most over 200 runs on
+this Mac at load 146 the same day, so that answer was a stall, and a stall can
+outlast any fixed bound. Every test of the file that states a real stop's words
+made the same assumption. With a `ps` that answers 2.1 s late at every call, M's
+own test file is red at line 3901 with no load, and the stubborn stop says the
+gate's words exactly.
+
+**Decision.** The fix is in the tests, where the assumption was. A test that
+states the words of a stop of a real command gives the stop a patient list: the
+sheet's own command, read by `sheet.membersIn`, with no time bound, so a stall
+delays the words and never changes them. A `ps` that fails or is missing is
+still said, because the list waits out lateness only. The stop takes the list
+through `run`'s `deps`, and now through `restartWithin`'s fourth argument and
+`runSheet`'s `deps.group`, so both of the sheet's commands can be given it; with
+nothing given, each still uses the sheet's bounded list. A test that bounds such
+a stop's time adds what the stop waited on its lists, its first and the one in
+flight when its wait ends, and nothing else. The look at the real table asks
+again only after an answer past `LIST_WAIT_MS`. A child sheet, which no test can
+hand a list, may say exactly the sheet's words for a late answer after its own,
+and nothing else. The sheet keeps `LIST_WAIT_MS`, its words, and its rule that
+no list is tried after one failed. The new test makes those words through the
+sheet's own list at will, and pins what a patient list says for a `ps` late at
+its first list or at every list, one that fails, one with no table, and none at
+all. STACK1028-17 is the row, and L-STACK1028-13 names the bound.
+
+**Why not the others.** A larger `LIST_WAIT_MS` is a raised timeout, and still
+races a longer stall. Retrying a late list in the sheet changes D-7152's rule
+and still races at the last list of a wait. Accepting either set of words in a
+test that runs in this process asserts less than it can, because there the
+outcome can be made exact.
+
+**Not this part's.** `speed.test.js` line 2032, red on M and on `feat/db-fix`
+alone, is the base's (the D1 red alert of 6 Nov, 10:27Z). This repair does not
+touch it.
+
+**Cost.** Four lines of `web/ci/speed-sheet.mjs`, which pass a list through, and
+their comments; the tests; and these rows. No Rust byte changes. D-7416 to
+D-7419 stay unused.
