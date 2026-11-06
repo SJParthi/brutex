@@ -675,3 +675,360 @@ fn a_source_read_takes_the_minutes_only_when_the_days_do_not_answer() {
         let _ = std::fs::remove_dir_all(crate::scratch::path(name));
     }
 }
+
+/// A site whose Zerodha master maps NIFTY by an invented index row (the
+/// shape a Zerodha `INDICES` row takes: type `EQ`, segment `INDICES`; the
+/// tokens are invented), over a store of its own, the recovery's folder
+/// made.
+fn mapped_site(name: &str) -> (PathBuf, Loaded) {
+    let root = store_root(name);
+    let masters = root.join("masters");
+    std::fs::create_dir_all(&masters).expect("a masters folder");
+    std::fs::write(
+        masters.join(Vendor::Zerodha.master_file()),
+        "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,\
+         tick_size,lot_size,instrument_type,segment,exchange\n\
+         900001,9001,NIFTY 50,NIFTY 50,0,,0,0.05,0,EQ,INDICES,NSE\n",
+    )
+    .expect("an invented master");
+    let site = Loaded::new(Site::load(&masters, &root));
+    std::fs::create_dir_all(super::root(&site)).expect("the recovery folder");
+    (root, site)
+}
+
+/// Every minute an open day's exchange session holds, as stamps.
+fn session_of(day: Day) -> Vec<i64> {
+    let pull::calendar::DayKind::Open(session) =
+        pull::calendar::kind_of(i64::from(day.days_from_epoch()))
+    else {
+        panic!("{day} is an open day of the calendar of record");
+    };
+    session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .flat_map(|window| {
+            (window.from..=window.to).map(move |minute| at(day, i64::from(minute), 0))
+        })
+        .collect()
+}
+
+/// **AN ASSESSMENT COUNTS EACH DAY BY ITS OWN EVIDENCE, AND REFUSES WHAT IT
+/// CANNOT COUNT** (BASE-COV-API repair 3, D-8661). `assess` reached past the
+/// identity check for the first time: a site whose Zerodha master maps NIFTY,
+/// over NIFTY months written here. Extremes: a day whose every session minute
+/// and its daily bar are held (nothing owed); a day missing ten minutes with
+/// its daily bar held (ten missing, the day retried); an open day with no
+/// bar at all (its session unverified, never retried); a weekend (nothing);
+/// a day with a bar at 08:00, before the session (one evidence issue); a day
+/// with its daily bar and no minute (its whole session missing, retried); a
+/// daily scan over the same days (held, missing and unverified by day); a
+/// Muhurat day the calendar holds no length for (unverified); a daily bar on
+/// a Sunday (refused by name); a scan spanning two months (refused by name);
+/// and, at once, the ten-minute hole and the daily-only day in one window
+/// (both retried, in day order, their minutes summed), and the bar before the
+/// session on a day whose session is whole (held, and an issue, no gap); out
+/// of the box, a scan of one day that is a Sunday with nothing held.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one store, every day shape an assessment reads, each beside the others"
+)]
+async fn an_assessment_counts_each_day_by_its_own_evidence() {
+    let (root, site) = mapped_site("recovery-cover-assess");
+    let (d1, d2, d3, d6, d7) = (
+        on(2026, 7, 1),
+        on(2026, 7, 2),
+        on(2026, 7, 3),
+        on(2026, 7, 6),
+        on(2026, 7, 7),
+    );
+    let july = d1.year_month().expect("a month");
+    let hole = |stamp: &i64| {
+        let ten = at(d2, 10 * 60, 0)..at(d2, 10 * 60 + 10, 0);
+        !ten.contains(stamp)
+    };
+    let mut minutes: Vec<i64> = session_of(d1);
+    minutes.extend(session_of(d2).into_iter().filter(hole));
+    minutes.push(at(d6, 8 * 60, 0));
+    minutes.extend(session_of(d6));
+    source_month(&root, "NIFTY", "1min", july, &minutes);
+    let daily: Vec<i64> = [d1, d2, d7].into_iter().map(|day| at(day, 0, 0)).collect();
+    source_month(&root, "NIFTY", "1day", july, &daily);
+    let window = Window::new(d1, d7).expect("a window");
+
+    // THE MINUTE SCAN.
+    let found = assess(&site, &canonical("NIFTY", "1min", window, "scan"), &None)
+        .await
+        .expect("assessed");
+    let bars = |day: Day| u64::try_from(session_of(day).len()).expect("small");
+    assert_eq!(found.held, u64::try_from(minutes.len()).expect("small"));
+    assert_eq!(found.missing, 10 + bars(d7), "{found:?}");
+    assert_eq!(found.unverified, bars(d3), "{found:?}");
+    assert_eq!(found.evidence_issues, 1, "the bar at 08:00: {found:?}");
+    assert_eq!(found.retry_days, vec![d2, d7]);
+    assert_eq!(found.status(), Status::Unverified, "an issue speaks first");
+
+    // THE DAILY SCAN OF THE SAME DAYS: d3 and d6 hold no daily bar, d6 holds
+    // minutes (missing, retried), d3 nothing (unverified).
+    let found = assess(&site, &canonical("NIFTY", "1day", window, "scan"), &None)
+        .await
+        .expect("assessed");
+    assert_eq!(found.held, 3, "{found:?}");
+    assert_eq!(found.missing, 1, "{found:?}");
+    assert_eq!(found.unverified, 1, "{found:?}");
+    assert_eq!(found.retry_days, vec![d6]);
+    assert_eq!(
+        found.status(),
+        Status::Exhausted,
+        "a day missing, none unread"
+    );
+
+    // A MUHURAT DAY OF NO MEASURED LENGTH, and a Sunday with nothing held.
+    for (day, unverified) in [(on(2024, 11, 1), 1), (on(2026, 7, 5), 0)] {
+        let found = assess(
+            &site,
+            &canonical(
+                "NIFTY",
+                "1day",
+                Window::new(day, day).expect("a day"),
+                "scan",
+            ),
+            &None,
+        )
+        .await
+        .expect("assessed");
+        assert_eq!(found.unverified, unverified, "{day}: {found:?}");
+        assert_eq!(found.held, 0, "{day}");
+    }
+
+    // REFUSED BY NAME: a daily bar on a Sunday, and two months in one scan.
+    let sunday = on(2026, 8, 2);
+    source_month(
+        &root,
+        "NIFTY",
+        "1day",
+        sunday.year_month().expect("a month"),
+        &[at(sunday, 0, 0)],
+    );
+    let why = assess(
+        &site,
+        &canonical(
+            "NIFTY",
+            "1day",
+            Window::new(sunday, sunday).expect("a day"),
+            "scan",
+        ),
+        &None,
+    )
+    .await
+    .expect_err("a daily bar on a closed date");
+    assert!(why.contains("calendar-closed date 2026-08-02"), "{why}");
+    let why = assess(
+        &site,
+        &canonical(
+            "NIFTY",
+            "1min",
+            Window::new(on(2026, 6, 29), on(2026, 7, 2)).expect("a window"),
+            "scan",
+        ),
+        &None,
+    )
+    .await
+    .expect_err("two months");
+    assert!(why.contains("contained in one month"), "{why}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A start body naming each `(symbol, dir, from, to)` scan as one leg.
+fn legs_of(scans: &[(&str, &str, Day, Day)]) -> String {
+    scans
+        .iter()
+        .map(|&(symbol, dir, from, to)| {
+            let inner = canonical(
+                symbol,
+                dir,
+                Window::new(from, to).expect("a window"),
+                "scan",
+            );
+            format!(
+                "leg={}",
+                encode(&format!(
+                    "/pull/spot|zerodha|{dir}|fixture|{}",
+                    encode(&inner)
+                ))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Starts `body` on `site` and waits for its run to end: its plan id and the
+/// sentence it finished with.
+async fn started(site: &Loaded, body: String) -> ([u8; 32], String) {
+    let (status, _, answer) = start(State(Loaded::clone(site)), body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
+    let reply: serde_json::Value = serde_json::from_str(&answer).expect("JSON");
+    let id = unhex(reply["plan"].as_str().expect("a plan")).expect("an id");
+    tokio::time::timeout(std::time::Duration::from_mins(1), async {
+        while site
+            .run
+            .lock()
+            .expect("the run")
+            .as_ref()
+            .is_some_and(crate::pullrun::Progress::running)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the run ends");
+    let finished = site
+        .run
+        .lock()
+        .expect("the run")
+        .as_ref()
+        .and_then(|run| run.finished.clone())
+        .expect("a finished run");
+    (id, finished)
+}
+
+/// **A START OVER A MAPPED SITE COUNTS EVERY WINDOW BY ITS OWN EVIDENCE AND
+/// RECONCILES ONLY THE PENDING DAYS ITS OWN WINDOWS HOLD** (BASE-COV-API
+/// repair 3, D-8661). `start` through `execute` and `reconcile_pending`, with
+/// the shared attempt ledger written before the start. Extremes: a minute
+/// window whose one day is whole (verified); a daily window over a weekend
+/// (not applicable); a daily window over an open day with no bar (unverified);
+/// a minute window over a whole day and two days with no bar (unverified); a
+/// window of a member the master does not map (blocked, the run goes on); a
+/// pending day inside a window, whose reassessment records (queued to
+/// unverified); a pending unverified day the store still says the same of
+/// (nothing recorded); a pending day of the plan's scope outside every window
+/// (passed over); a pending day of a scope the plan does not hold (passed
+/// over); a blocked day inside a window, reconciled because the start is
+/// explicit; a pending day of the unmapped member (blocked, its diagnostics
+/// counted); a day the ledger holds verified (not pending); and, at once, the
+/// five windows' four verdicts in one summary sentence, and the unmapped
+/// member's window and pending day blocked in one pass; out of the box, a
+/// ledger row whose key is not its body's, which blocks the whole run by
+/// name.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one plan over one ledger: every window's verdict and every pending row's fate"
+)]
+async fn a_start_counts_every_window_and_reconciles_only_its_own_pending_days() {
+    let (root, site) = mapped_site("recovery-cover-start");
+    let (june, d1, d2, d3) = (
+        on(2026, 6, 1),
+        on(2026, 7, 1),
+        on(2026, 7, 2),
+        on(2026, 7, 3),
+    );
+    let (saturday, sunday, d6) = (on(2026, 7, 4), on(2026, 7, 5), on(2026, 7, 6));
+    source_month(
+        &root,
+        "NIFTY",
+        "1min",
+        june.year_month().expect("a month"),
+        &session_of(june),
+    );
+    source_month(
+        &root,
+        "NIFTY",
+        "1min",
+        d1.year_month().expect("a month"),
+        &session_of(d1),
+    );
+    let gap = |symbol: &str, day: Day| {
+        record(canonical(
+            symbol,
+            "1min",
+            Window::new(day, day).expect("a day"),
+            "gap",
+        ))
+    };
+    let bars = |day: Day| u64::try_from(session_of(day).len()).expect("small");
+    let queued_in = gap("NIFTY", d1);
+    let mut same = gap("NIFTY", d2);
+    same.status = Status::Unverified;
+    same.unverified = bars(d2);
+    let outside = gap("NIFTY", d6);
+    let foreign = gap("SBIN", d1);
+    let mut blocked = gap("NIFTY", d3);
+    blocked.status = Status::Blocked;
+    let unmapped = gap("BANKNIFTY", d1);
+    let mut verified = gap("NIFTY", june);
+    verified.status = Status::Verified;
+    {
+        let mut ledger = Journal::open(&super::root(&site).join("attempts.bin")).expect("a ledger");
+        for row in [
+            &queued_in, &same, &outside, &foreign, &blocked, &unmapped, &verified,
+        ] {
+            ledger.append(row.clone()).expect("a pending row");
+        }
+    }
+    let (_id, finished) = started(
+        &site,
+        legs_of(&[
+            ("NIFTY", "1min", june, june),
+            ("NIFTY", "1day", saturday, sunday),
+            ("NIFTY", "1day", d3, d3),
+            ("NIFTY", "1min", d1, d3),
+            ("BANKNIFTY", "1min", d1, d1),
+        ]),
+    )
+    .await;
+    assert!(
+        finished.contains(
+            "1 stored windows verified against measured schedule; 1 not applicable; \
+             2 unverified; 1 missing/blocked"
+        ),
+        "{finished}"
+    );
+    let ledger = Journal::open(&super::root(&site).join("attempts.bin")).expect("the ledger");
+    let now = |row: &Record| ledger.latest.get(&row.key).cloned().expect("a row");
+    assert_eq!(
+        now(&queued_in).status,
+        Status::Unverified,
+        "reassessed and recorded"
+    );
+    assert_eq!(
+        now(&queued_in).diagnostics,
+        1,
+        "the lost receipt counted once"
+    );
+    assert_eq!(now(&same), same, "nothing new, nothing recorded");
+    assert_eq!(now(&outside), outside, "outside every window: passed over");
+    assert_eq!(now(&foreign), foreign, "a scope the plan does not hold");
+    assert_eq!(
+        now(&blocked).status,
+        Status::Unverified,
+        "reconciled on an explicit start"
+    );
+    assert_eq!(
+        now(&unmapped).status,
+        Status::Blocked,
+        "its reassessment refused"
+    );
+    assert_eq!(now(&unmapped).diagnostics, 1);
+    assert_eq!(now(&verified), verified, "a verified day is not pending");
+    drop(ledger);
+
+    // A LEDGER ROW WHOSE KEY IS NOT ITS BODY'S blocks the run by name.
+    let (forged_root, forged_site) = mapped_site("recovery-cover-start-forged");
+    let mut forged = gap("NIFTY", d1);
+    forged.key = [7; 32];
+    {
+        let mut ledger =
+            Journal::open(&super::root(&forged_site).join("attempts.bin")).expect("a ledger");
+        ledger.append(forged).expect("a forged row");
+    }
+    let (_id, finished) = started(&forged_site, legs_of(&[("NIFTY", "1min", d1, d1)])).await;
+    assert!(
+        finished.contains("Recovery BLOCKED: shared attempt has invalid identity or non-day scope"),
+        "{finished}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&forged_root);
+}
