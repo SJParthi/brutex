@@ -75,6 +75,12 @@ pub mod session;
 pub mod trend;
 pub mod vwap;
 
+// ---- PSRB second wave (state/strategy-psrb-20261103/PARTS-WILLR-CCI.md 3). One slot
+// ---- per part; each part inserts its single `pub mod` line directly under its slot.
+// slot PSRB-WILLR (williams_r)
+
+// slot PSRB-CCI (cci)
+
 // ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
 // ---- part; each part inserts its single `pub mod` line directly under its slot.
 // slot FNO-LADDER (fno_ladder)
