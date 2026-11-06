@@ -731,3 +731,222 @@ fn a_name_at_the_v4_directory_that_is_not_one_is_named() {
         "{body}"
     );
 }
+
+/// A FIFO at `at`: a name that is no regular file, no directory and no link.
+/// `mkfifo` is the external program, run from a test only.
+fn fifo(at: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(at)
+        .status()
+        .expect("mkfifo ran");
+    assert!(made.success(), "mkfifo {}", at.display());
+}
+
+/// Each listed feed's `feed`, in the order the answer lists them.
+fn feeds_of(body: &serde_json::Value) -> Vec<String> {
+    body["feeds"]
+        .as_array()
+        .expect("feeds")
+        .iter()
+        .map(|feed| feed["feed"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// **WHAT STANDS AT A CENSUS NAME IS SAID AS WHAT IT IS, AND EVERY FEED IS
+/// LISTED** (BASE-COV-API-AS2): a FIFO at `manifest/REQUIRES`, at
+/// `manifest/v4/<vendor>` and at a migration receipt's name is `lstat`ed,
+/// never opened, and said as what it is — neither a regular file nor a
+/// directory; a `manifest/v4/<vendor>` directory with nothing in it is a
+/// migrated feed answered with no file to list; and two feeds with a fault
+/// each are both answered, in `Vendor::ALL` order, in one JSON document.
+///
+/// Extremes: (1) a FIFO at REQUIRES is "not a regular file"; (2) a FIFO at
+/// the v4 name is "neither a directory nor a regular file"; (3) an empty v4
+/// directory is migrated; (4) with no migration receipt in it, no file is
+/// listed as one; (5) with no single file, a pre-version-4 reader finds no
+/// census at all; (6) two feeds are two objects in `feeds`; (7) two faults
+/// are two in `faults`, each under its own feed; (8) no FIFO is waited on.
+/// Combined: (9) the empty v4 directory and the FIFO at REQUIRES are said in
+/// one sentence; (10) one feed migrated and one whose v4 name is a FIFO are
+/// answered together, each with its own kind of fault. Out of the box: (11) a
+/// FIFO at the migration receipt's own name is listed as the receipt, at 0
+/// bytes, kept by nobody, and never read.
+#[test]
+fn what_stands_at_a_census_name_is_said_as_what_it_is_and_every_feed_is_listed() {
+    let scratch = Scratch::new("fifo-names");
+    let root = &scratch.0;
+    let gdfl = vendor_dir(root, Vendor::Gdfl);
+    std::fs::create_dir_all(&gdfl).expect("an empty v4 directory");
+    let requires = census_store::requires_path(root);
+    fifo(&requires);
+    assert!(census_files(root, Vendor::Gdfl).is_empty(), "(3)(4)(5)");
+
+    let asked = std::time::Instant::now();
+    let body = answer(root);
+    let waited = asked.elapsed();
+    assert!(waited < std::time::Duration::from_secs(5), "(8) {waited:?}");
+    assert_eq!(feeds_of(&body), ["gdfl"], "(3) {body}");
+    assert_eq!(body["feeds"][0]["seal"]["migrated"], true, "(3) {body}");
+    assert_eq!(
+        body["feeds"][0]["census_files"],
+        serde_json::json!([]),
+        "(4) {body}"
+    );
+    assert_eq!(body["feeds"][0]["seal"]["requires"], false, "(1) {body}");
+    let why = fault_said(root, "census_unsealed");
+    let absent = format!(
+        "{} is absent, so a pre-version-4 reader finds no census at all",
+        manifest_path(root, Vendor::Gdfl).display()
+    );
+    assert!(why.contains(&absent), "(5)(9) {why}");
+    let not_a_file = format!(
+        "{} is not a regular file, so no build reads it",
+        requires.display()
+    );
+    assert!(why.contains(&not_a_file), "(1)(9) {why}");
+
+    // A SECOND FEED, ITS v4 NAME A FIFO: both answered, in `Vendor::ALL` order.
+    let dhan = vendor_dir(root, Vendor::Dhan);
+    fifo(&dhan);
+    let body = answer(root);
+    assert_eq!(feeds_of(&body), ["dhan", "gdfl"], "(6)(10) {body}");
+    assert_eq!(body["feeds"][0]["seal"]["migrated"], false, "(2) {body}");
+    let faults: Vec<(String, String)> = body["faults"]
+        .as_array()
+        .expect("faults")
+        .iter()
+        .map(|fault| {
+            (
+                fault["feed"].as_str().unwrap_or_default().to_owned(),
+                fault["fault"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        faults,
+        [
+            ("dhan".to_owned(), "census_v4_not_a_directory".to_owned()),
+            ("gdfl".to_owned(), "census_unsealed".to_owned()),
+        ],
+        "(7)(10) {body}"
+    );
+    let why = body["faults"][0]["why"].as_str().expect("why");
+    let neither = format!(
+        "{} is neither a directory nor a regular file",
+        dhan.display()
+    );
+    assert!(why.contains(&neither), "(2) {why}");
+
+    // A FIFO AT THE MIGRATION RECEIPT'S OWN NAME: listed, never read.
+    fifo(&gdfl.join(census_store::MIGRATION_RECEIPT));
+    let asked = std::time::Instant::now();
+    assert_eq!(
+        role(root, census_store::MIGRATION_RECEIPT),
+        Some(("receipt", 0)),
+        "(11)"
+    );
+    let body = answer(root);
+    let waited = asked.elapsed();
+    assert!(
+        waited < std::time::Duration::from_secs(5),
+        "(11) {waited:?}"
+    );
+    assert_eq!(
+        body["feeds"][1]["census_files"][0]["role"], "receipt",
+        "(11) {body}"
+    );
+    assert_eq!(body["census_kept_bytes"], 0, "(11) kept by nobody: {body}");
+}
+
+/// **A FEED ANSWERED FOR ITS SITE NAMES ITS MONTHS, ROWS AND THE BYTES THEY
+/// HOLD** (BASE-COV-API-AS2): the census the site holds gives the counters,
+/// one field read each, and the bar bytes are a header region per
+/// instrument-month and a stride per row; with no site the three are
+/// `null`, never 0, and nothing else in the answer changes.
+///
+/// Extremes: (1) months are the census's instrument-months; (2) rows are its
+/// rows summed; (3) the bar bytes are months × `HEADER_LEN` + rows ×
+/// `RECORD_STRIDE`; (4) with no site, months are null; (5) rows are null; (6)
+/// the bar bytes are null; (7) a feed whose census never loads — a file at its v4
+/// name, no single file — is null for the site too; (8) a census of
+/// one entry of one row is one header and one stride. Combined: (9) three
+/// feeds at once, each with its own counters or none; (10) the site's answer
+/// and the answer without one agree on every member but the counters. Out of
+/// the box: (11) a census grown after the site loaded is answered as it is
+/// now, not as the site first read it.
+#[test]
+fn a_feed_answered_for_its_site_names_its_months_rows_and_bar_bytes() {
+    let scratch = Scratch::new("site-counters");
+    let root = &scratch.0;
+    census_store::record(root, Vendor::Gdfl, &[held(0), held(1)]).expect("gdfl");
+    census_store::record(root, Vendor::TrueData, &[held(0)]).expect("truedata");
+    let dhan = vendor_dir(root, Vendor::Dhan);
+    std::fs::create_dir_all(dhan.parent().expect("manifest/v4")).expect("manifest/v4");
+    std::fs::write(&dhan, b"not a directory").expect("a file at the v4 name");
+    std::fs::create_dir_all(root.join("masters")).expect("a masters folder");
+    let site = super::Site::load(&root.join("masters"), root);
+    let with: serde_json::Value =
+        serde_json::from_str(&super::measured(root, Some(&site))).expect("JSON");
+    let bar_bytes = |months: u64, rows: u64| {
+        months * store::format::HEADER_LEN + rows * store::format::RECORD_STRIDE
+    };
+    let counters = |body: &serde_json::Value, at: usize| {
+        let feed = &body["feeds"][at];
+        (
+            feed["feed"].as_str().unwrap_or_default().to_owned(),
+            feed["months"].as_u64(),
+            feed["rows"].as_u64(),
+            feed["bar_bytes_lower_bound"].as_u64(),
+        )
+    };
+    assert_eq!(feeds_of(&with), ["dhan", "truedata", "gdfl"], "(9) {with}");
+    assert_eq!(
+        counters(&with, 0),
+        ("dhan".to_owned(), None, None, None),
+        "(7)"
+    );
+    assert_eq!(
+        counters(&with, 1),
+        (
+            "truedata".to_owned(),
+            Some(1),
+            Some(1),
+            Some(bar_bytes(1, 1))
+        ),
+        "(8)"
+    );
+    assert_eq!(
+        counters(&with, 2),
+        ("gdfl".to_owned(), Some(2), Some(3), Some(bar_bytes(2, 3))),
+        "(1)(2)(3)"
+    );
+
+    let without = answer(root);
+    for at in 0..3 {
+        let (feed, months, rows, bytes) = counters(&without, at);
+        assert_eq!(
+            (months, rows, bytes),
+            (None, None, None),
+            "(4)(5)(6) {feed}"
+        );
+        let mut same = with["feeds"][at].clone();
+        for member in ["months", "rows", "bar_bytes_lower_bound"] {
+            same[member] = serde_json::Value::Null;
+        }
+        assert_eq!(same, without["feeds"][at], "(10) {feed}");
+    }
+    assert_eq!(with["faults"], without["faults"], "(10)");
+    assert_eq!(
+        with["census_kept_bytes"], without["census_kept_bytes"],
+        "(10)"
+    );
+
+    census_store::record(root, Vendor::Gdfl, &[held(2)]).expect("one entry more");
+    let now: serde_json::Value =
+        serde_json::from_str(&super::measured(root, Some(&site))).expect("JSON");
+    assert_eq!(
+        counters(&now, 2),
+        ("gdfl".to_owned(), Some(3), Some(6), Some(bar_bytes(3, 6))),
+        "(11) {now}"
+    );
+}

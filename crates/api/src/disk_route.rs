@@ -1357,11 +1357,9 @@ mod tests {
                 .contains("no copy of this store is recorded")
         );
         assert!(parsed["projection"].is_null());
-        assert!(
-            parsed["filesystem"]["free_bytes"].as_u64().is_some()
-                || parsed["filesystem"]["error"].is_string(),
-            "{body}"
-        );
+        // A SCRATCH ROOT IS MEASURED on every host this runs on, as
+        // `the_filesystem_numbers_are_what_the_call_returns` measures one.
+        assert!(parsed["filesystem"]["free_bytes"].is_u64(), "{body}");
 
         std::fs::create_dir_all(root.join("ops")).unwrap();
         std::fs::write(
@@ -1583,6 +1581,345 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A RECEIPT'S INSTANT IS REFUSED AT EACH SEPARATOR AND FIELD, AND A LOG
+    /// CUT TO ITS TAIL DROPS THE FRAGMENT ITS TAIL BEGINS INSIDE**
+    /// (BASE-COV-API-AS2): every byte the shape names is checked, not only the
+    /// digits, and the line a longer log's tail begins inside is never read as
+    /// the newest receipt.
+    ///
+    /// Extremes: (1) seconds set off by no colon; (2) no dash after the year;
+    /// (3) no dash after the month; (4) no colon after the hour; (5) a last
+    /// byte that is not `Z`; (6) minute 60; (7) second 60; (8) the last instant
+    /// of a year, 23:59:59 on 31 December, passes. Combined: (9) a log longer
+    /// than its read tail whose only whole line is the fragment the tail
+    /// begins inside holds no whole receipt line, never an unreadable receipt;
+    /// (10) the same log with a whole receipt after the fragment answers that
+    /// receipt. Out of the box: (11) a fragment that is itself a well-formed
+    /// receipt, cut from a longer line, is still never read.
+    #[test]
+    fn a_receipt_instant_is_refused_at_each_separator_and_a_cut_log_drops_its_fragment() {
+        for (word, case) in [
+            ("2026-10-13T01:00x00Z", "(1)"),
+            ("2026x10-13T01:00Z", "(2)"),
+            ("2026-10x13T01:00Z", "(3)"),
+            ("2026-10-13T01x00Z", "(4)"),
+            ("2026-10-13T01:00X", "(5)"),
+            ("2026-10-13T01:60Z", "(6)"),
+            ("2026-10-13T01:00:60Z", "(7)"),
+        ] {
+            assert!(!is_utc_instant(word), "{case} {word}");
+        }
+        assert!(is_utc_instant("2026-12-31T23:59:59Z"), "(8)");
+
+        let root = crate::scratch::path("disk-route-cut-log");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ops")).unwrap();
+        let log = root.join(BACKUP_RECEIPTS);
+        let tail = usize::try_from(RECEIPT_TAIL_BYTES).unwrap();
+        let good = "copied=2026-10-11T01:00:00Z dest=/Volumes/B bytes=2";
+        std::fs::write(&log, format!("{}\n", "x".repeat(tail + 904))).unwrap();
+        let why = last_backup(&root).expect_err("(9) no whole line");
+        assert!(why.contains("holds no whole receipt line"), "(9) {why}");
+        assert!(!why.contains("unreadable receipt"), "(9) {why}");
+        std::fs::write(&log, format!("{}\n{good}\n", "x".repeat(tail + 904))).unwrap();
+        assert_eq!(last_backup(&root).as_deref(), Ok(good), "(10)");
+        // THE TAIL BEGINS EXACTLY AT A RECEIPT THAT ENDS A LONGER LINE: the
+        // newlines after it fill the rest of the tail.
+        let receipt = "copied=2026-10-12T01:00:00Z dest=/Volumes/A";
+        let blanks = tail - receipt.len() - 1;
+        let cut = format!(
+            "{} {receipt}\n{}",
+            "y".repeat(MAX_RECEIPT_LINE),
+            "\n".repeat(blanks)
+        );
+        std::fs::write(&log, &cut).unwrap();
+        let from = cut.len() - tail;
+        assert_eq!(cut.get(from..from + receipt.len()), Some(receipt), "(11)");
+        let why = last_backup(&root).expect_err("(11) never read");
+        assert!(why.contains("holds no whole receipt line"), "(11) {why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A SCRUB LEDGER THAT IS NO REGULAR FILE IS SAID BY NAME, NEVER READ AND
+    /// NEVER COUNTED** (BASE-COV-API-AS2): where the scrub stands is read from
+    /// its cursor and what it found from its ledger, and a ledger name that
+    /// holds a directory, a FIFO or a link answers `recorded: false` with the
+    /// sentence that names the ledger, not totals nobody read.
+    ///
+    /// Extremes: (1) a directory at the ledger's name; (2) a FIFO there, never
+    /// waited on; (3) a symbolic link there; (4) each refusal names the
+    /// ledger's path; (5) and says what the scrub found cannot be told; (6) no
+    /// ledger at all beside a cursor whose scrub is done is complete and
+    /// recorded, none standing; (7) the refusal reaches the whole answer under
+    /// its feed; (8) a whole ledger of two findings put back is read again,
+    /// both named in its order. Combined: (9) a directory at the ledger's name
+    /// and no cursor is the cursor's absence, said first; (10) a FIFO at the
+    /// ledger's name and a cursor with no whole line is the cursor's sentence,
+    /// and the FIFO is never opened. Out of the box: (11) a link at the
+    /// ledger's name to a whole ledger is refused, though what it names is
+    /// whole.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one test walks every ledger shape its Extremes: line names, in order"
+    )]
+    fn a_scrub_ledger_that_is_no_regular_file_is_said_and_never_read() {
+        let root = crate::scratch::path("disk-route-scrub-ledger");
+        let _ = std::fs::remove_dir_all(&root);
+        let vendor = Vendor::Gdfl;
+        let ledger = root.join(cli::scrub_ledger_name(vendor));
+        let cursor = root.join(cli::scrub_cursor_name(vendor));
+        std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+        let whole = "run 1 vendor=gdfl commit=unstamped pass=1 resume=-\n\
+             bad bars/gdfl/NSE/INDEX/X/1s/2020-07.bin block=4 records=292-364 run=1 why=checksum\n";
+        let progress = "progress run=1 pass=1 months=9 blocks=90 bad=1 unverifiable=0 \
+             misfiled=0 unbound=9 busy=0 missing=0 cursor=bars/x.bin\n";
+        let scrub = || -> serde_json::Value {
+            serde_json::from_str(&scrub_json(&root, vendor)).expect("JSON")
+        };
+
+        // (9) NO CURSOR: its absence is said before the ledger is looked at.
+        std::fs::create_dir(&ledger).unwrap();
+        let said = scrub();
+        assert_eq!(said["recorded"], false, "(9) {said}");
+        let why = said["why"].as_str().unwrap();
+        assert!(
+            why.contains("no full-block scrub of gdfl has run"),
+            "(9) {why}"
+        );
+
+        std::fs::write(&cursor, progress).unwrap();
+        let elsewhere = root.join("elsewhere.log");
+        std::fs::write(&elsewhere, whole).unwrap();
+        for (kind, case) in [("directory", "(1)"), ("fifo", "(2)"), ("link", "(3)(11)")] {
+            let _ = std::fs::remove_dir(&ledger);
+            let _ = std::fs::remove_file(&ledger);
+            match kind {
+                "directory" => std::fs::create_dir(&ledger).unwrap(),
+                "fifo" => {
+                    // `mkfifo` is the external program, run from a test only.
+                    let made = std::process::Command::new("mkfifo")
+                        .arg(&ledger)
+                        .status()
+                        .expect("mkfifo ran");
+                    assert!(made.success(), "{case}");
+                }
+                _ => std::os::unix::fs::symlink(&elsewhere, &ledger).unwrap(),
+            }
+            let asked = Instant::now();
+            let said = scrub();
+            assert!(asked.elapsed() < Duration::from_secs(5), "{case} no wait");
+            assert_eq!(said["recorded"], false, "{case} {said}");
+            let why = said["why"].as_str().unwrap();
+            assert!(
+                why.starts_with(&format!("{} cannot be read (", ledger.display())),
+                "{case}(4) {why}"
+            );
+            assert!(
+                why.ends_with("what the full-block scrub of gdfl found cannot be told"),
+                "{case}(5) {why}"
+            );
+            assert!(
+                said.get("totals").is_none(),
+                "{case} nothing counted: {said}"
+            );
+            assert_eq!(said["ledger"], ledger.display().to_string(), "{case}");
+        }
+
+        // (10) A FIFO AT THE LEDGER AND A CURSOR WITH NO WHOLE LINE.
+        std::fs::remove_file(&ledger).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&ledger)
+            .status()
+            .expect("mkfifo ran");
+        assert!(made.success(), "(10)");
+        std::fs::write(&cursor, progress.trim_end()).unwrap();
+        let asked = Instant::now();
+        let said = scrub();
+        assert!(asked.elapsed() < Duration::from_secs(5), "(10) no wait");
+        let why = said["why"].as_str().unwrap();
+        assert!(why.contains("holds no whole line"), "(10) {why}");
+
+        // (6) NO LEDGER AT ALL, A CURSOR WHOSE SCRUB IS DONE: recorded and
+        // complete, nothing standing.
+        std::fs::remove_file(&ledger).unwrap();
+        std::fs::write(
+            &cursor,
+            "done run=1 pass=1 months=9 blocks=90 bad=1 unverifiable=0 misfiled=0 \
+             unbound=9 busy=0 missing=0\n",
+        )
+        .unwrap();
+        let said = scrub();
+        assert_eq!(said["recorded"], true, "(6) {said}");
+        assert_eq!(said["state"], "complete", "(6) {said}");
+        assert_eq!(said["standing_findings"], 0, "(6) {said}");
+        assert_eq!(said["named"], serde_json::json!([]), "(6) {said}");
+
+        // (8) A WHOLE LEDGER OF TWO FINDINGS PUT BACK IS READ AGAIN, BOTH
+        // NAMED IN ITS ORDER.
+        std::fs::write(&cursor, progress).unwrap();
+        std::fs::write(
+            &ledger,
+            format!(
+                "{whole}bad bars/gdfl/NSE/INDEX/Y/1s/2020-08.bin block=2 records=10-20 run=1 \
+                 why=checksum\n"
+            ),
+        )
+        .unwrap();
+        let said = scrub();
+        assert_eq!(said["standing_findings"], 2, "(8) {said}");
+        let named: Vec<&str> = said["named"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|named| named["series"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            named,
+            ["bars/gdfl/NSE/INDEX/X/1s", "bars/gdfl/NSE/INDEX/Y/1s"],
+            "(8) {said}"
+        );
+
+        // (7) THE REFUSAL UNDER ITS FEED, IN THE WHOLE ANSWER.
+        std::fs::remove_file(&ledger).unwrap();
+        std::fs::create_dir(&ledger).unwrap();
+        let single = manifest_path(&root, vendor);
+        std::fs::create_dir_all(single.parent().unwrap()).unwrap();
+        std::fs::write(&single, vec![0_u8; 50]).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&measured(&root, None)).expect("JSON");
+        assert_eq!(body["feeds"][0]["feed"], "gdfl", "(7) {body}");
+        assert_eq!(body["feeds"][0]["scrub"]["recorded"], false, "(7) {body}");
+        let why = body["feeds"][0]["scrub"]["why"].as_str().unwrap();
+        assert!(why.contains("found cannot be told"), "(7) {why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The child's proof of [`a_root_that_cannot_be_made_canonical_names_no_mount_point`].
+    #[cfg(not(target_vendor = "apple"))]
+    const REMOVED_CWD_PROOF: &str = "BRUTEX_DISK_ROUTE_REMOVED_CWD_PROOF";
+
+    /// **A ROOT THAT CANNOT BE MADE CANONICAL HAS NO MOUNT POINT TO NAME, AND
+    /// SAYS SO** (BASE-COV-API-AS2): `statvfs(2)` and `stat(2)` both answer for
+    /// a working directory that has been removed, and `realpath(3)` does not,
+    /// so `.` there is counted and then refused at its mount point, by name. A
+    /// process may move only its own working directory, so the case runs in a
+    /// child of its own (`crate::isolated`), which proves it ran by a file.
+    #[cfg(not(target_vendor = "apple"))]
+    #[test]
+    fn a_root_that_cannot_be_made_canonical_names_no_mount_point() {
+        if let Some(proof) = std::env::var_os(REMOVED_CWD_PROOF) {
+            let proof = PathBuf::from(proof);
+            let gone = proof.with_extension("gone");
+            std::fs::create_dir(&gone).unwrap();
+            std::env::set_current_dir(&gone).unwrap();
+            std::fs::remove_dir(&gone).unwrap();
+            let why = measure(Path::new(".")).expect_err("no mount point to name");
+            assert!(
+                why.starts_with(". has no mount point to name: it cannot be made canonical ("),
+                "{why}"
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(&measured(Path::new("."), None)).expect("JSON");
+            assert_eq!(body["filesystem"]["error"], why.as_str(), "{body}");
+            std::fs::write(&proof, b"ran").unwrap();
+            return;
+        }
+        let folder = crate::scratch::path("disk-route-removed-cwd");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let proof = folder.join("proof");
+        let _out = crate::isolated::rerun(
+            "server::disk_route::tests::a_root_that_cannot_be_made_canonical_names_no_mount_point",
+            &[(REMOVED_CWD_PROOF, proof.as_os_str())],
+        );
+        assert_eq!(
+            std::fs::read(&proof).ok().as_deref(),
+            Some(&b"ran"[..]),
+            "the child ran its case"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// **A FULL OPERATIONS POOL IS A 429 THAT NAMES THE DISK MEASUREMENT AND
+    /// ITS BOUND, ASKED BEFORE THE STORE OR THE CACHE** (BASE-COV-API-AS2):
+    /// `/disk.json` reads through the operations pool, and a crowd there is
+    /// refused at admission in the pool's own words; the same request is
+    /// answered once the pool frees.
+    ///
+    /// Extremes: (1) every operations slot counted taken is a 429; (2) the
+    /// body names the disk measurement; (3) and the pool's bound; (4) and says
+    /// to retry; (5) the refusal is still JSON; (6) and still `no-store`; (7)
+    /// the pool freed, the same request is a 200; (8) whose body is the disk
+    /// document. Combined: (9) crowded and a store root that does not exist is
+    /// the same 429 — admission is asked before the store is looked at; (10)
+    /// freed and that root still missing is a 200 that names the root as
+    /// absent. Out of the box: (11) an answer cached for the root before the
+    /// crowd is still refused while it lasts: the cache is behind admission,
+    /// never in front of it.
+    #[tokio::test]
+    async fn a_full_operations_pool_refuses_the_disk_measurement_by_name() {
+        let _apart = crate::detail::apart_from_slot_owners().await;
+        let tmp = crate::scratch::path("disk-route-crowded");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("masters")).unwrap();
+        let site = Loaded::new(Site::load(&tmp.join("masters"), &tmp));
+        let missing = tmp.join("no-such-store");
+        let absent = Loaded::new(Site::load(&tmp.join("masters"), &missing));
+        let ask = |site: &Loaded| disk_json(axum::extract::State(Loaded::clone(site)));
+
+        let (status, _, cached) = ask(&site).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "(11) {cached}");
+        let crowd = crate::detail::crowd(crate::detail::Named::OpsRead);
+        let (status, headers, body) = ask(&site).await;
+        let (absent_status, _, absent_body) = ask(&absent).await;
+        drop(crowd);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "(1)(11) {body}"
+        );
+        assert!(body.contains("a disk measurement"), "(2) {body}");
+        let bound = crate::detail::MAX_OPS_READ_CONCURRENT.to_string();
+        assert!(body.contains(&bound), "(3) {body}");
+        assert!(body.contains("retry"), "(4) {body}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&body).is_ok(),
+            "(5) {body}"
+        );
+        assert_eq!(
+            headers,
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json; charset=utf-8"
+                ),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            "(5)(6)"
+        );
+        assert_eq!(
+            (absent_status, absent_body.as_str()),
+            (axum::http::StatusCode::TOO_MANY_REQUESTS, body.as_str()),
+            "(9)"
+        );
+
+        let (status, _, body) = ask(&site).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "(7) {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("(8) JSON");
+        assert_eq!(parsed["schema"], 1, "(8) {body}");
+        assert_eq!(parsed["store"], tmp.display().to_string(), "(8) {body}");
+        let (status, _, body) = ask(&absent).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "(10) {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("(10) JSON");
+        let said = format!(
+            "{} does not exist, so no filesystem is measured for it",
+            missing.display()
+        );
+        assert_eq!(parsed["filesystem"]["error"], said.as_str(), "(10) {body}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// The counts the filesystem answers for `dir`, read apart from
     /// [`measure`] through the same call it makes: fragment size, fragments,
     /// free fragments, and fragments an unprivileged writer may take. On
@@ -1618,40 +1955,36 @@ mod tests {
         let dir = crate::scratch::path("disk-route-statvfs");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // ONLY A QUIET READ IS COMPARED, AND A RACE IS RETRIED: another process
-        // may write between two reads, so a round counts when the counts read
-        // on each side of it agree AND the measurement equals them. A round
-        // can be quiet on both sides and still race — on the operator's APFS
-        // boot volume on 17 Oct 2026 one round's `used` was one fragment off,
-        // the free count having moved and moved back while `measure` read —
-        // so a quiet round that disagrees is retried rather than failed. A
+        // ONLY A QUIET READ IS COMPARED, AND A RACE IS NOT A FAILURE: another
+        // process may write between two reads, so a round counts when the
+        // counts read on each side of it agree AND the measurement equals
+        // them. A round can be quiet on both sides and still race — on the
+        // operator's APFS boot volume on 17 Oct 2026 one round's `used` was one
+        // fragment off, the free count having moved and moved back while
+        // `measure` read — so a quiet round that disagrees is not counted
+        // rather than failed. Every one of the 200 rounds is taken and counted
+        // by arithmetic, so no line here runs only when the host races. A
         // wrong formula disagrees on every round, so it cannot reach three;
         // the formula on counts where free and available differ is pinned by
         // `counts_no_filesystem_can_have_are_refused_by_name`.
-        let mut agreed = 0;
-        for _ in 0..200 {
-            let before = counts_of(&dir);
-            let fs = measure(&dir).expect("measured");
-            if counts_of(&dir) != before {
-                continue;
-            }
-            let (fragment, blocks, free, available) = before;
-            if (fs.total, fs.used, fs.free)
-                == (
-                    blocks * fragment,
-                    (blocks - free) * fragment,
-                    available * fragment,
-                )
-            {
-                agreed += 1;
-                if agreed == 3 {
-                    break;
-                }
-            }
-        }
-        assert_eq!(
-            agreed, 3,
-            "no three quiet reads agreed with the measurement"
+        let agreed: u32 = (0..200)
+            .map(|_| {
+                let before = counts_of(&dir);
+                let fs = measure(&dir).expect("measured");
+                let quiet = counts_of(&dir) == before;
+                let (fragment, blocks, free, available) = before;
+                let equal = (fs.total, fs.used, fs.free)
+                    == (
+                        blocks * fragment,
+                        (blocks - free) * fragment,
+                        available * fragment,
+                    );
+                u32::from(quiet) * u32::from(equal)
+            })
+            .sum();
+        assert!(
+            agreed >= 3,
+            "no three quiet reads agreed with the measurement: {agreed} of 200"
         );
 
         let fs = measure(&dir).expect("measured");
@@ -1675,14 +2008,17 @@ mod tests {
                 dir.display()
             );
             assert_eq!(std::fs::metadata(mount).unwrap().dev(), device);
-            if let Some(parent) = mount.parent() {
-                assert_ne!(
-                    std::fs::metadata(parent).unwrap().dev(),
-                    device,
-                    "{} is not the highest directory on its device",
-                    fs.mount
-                );
-            }
+            // THE HIGHEST DIRECTORY ON ITS DEVICE: its parent, when it has
+            // one, is on another (`/` has none).
+            let above = mount
+                .parent()
+                .map(|parent| std::fs::metadata(parent).unwrap().dev());
+            assert_ne!(
+                above,
+                Some(device),
+                "{} is not the highest directory on its device",
+                fs.mount
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

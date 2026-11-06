@@ -19,9 +19,10 @@
 //! The plan runs on the store-read pool (`detail::run_store_read`); the
 //! press on the operations pool (`detail::run_ops_read`) and only ONE at a
 //! time in this process: a second press while one runs is 409
-//! `quarantine_running`, never queued behind it. A full pool is 429 with
-//! `Retry-After`. An unstamped build never reaches the press (the server's
-//! write gate answers every POST 403 first).
+//! `quarantine_running`, never queued behind it. A full pool is 429, its body
+//! naming that pool's bound and saying to retry; no `Retry-After` header is
+//! sent (this said one was; BASE-COV-API-AS2). An unstamped build never
+//! reaches the press (the server's write gate answers every POST 403 first).
 //!
 //! # Cost
 //!
@@ -166,16 +167,17 @@ pub(super) async fn quarantine_plan_json(
     .await;
     match run {
         Ok((code, report)) => answer(code, &report, false),
-        Err(why) => busy(&why),
+        Err(why) => busy(&why, crate::detail::MAX_STORE_READ_CONCURRENT),
     }
 }
 
-fn busy(why: &crate::detail::RunError) -> Answer {
-    let (status, body) = crate::detail::admission_refused(
-        "the quarantine",
-        crate::detail::MAX_STORE_READ_CONCURRENT,
-        why,
-    );
+/// The refusal of the pool `why` came from, naming THAT pool's bound: the
+/// plan's store-read pool or the press's operations pool. The press named
+/// the store-read pool's bound, so on a machine of more than four cores its
+/// refusal said more presses run at once than the operations pool admits
+/// (BASE-COV-API-AS2).
+fn busy(why: &crate::detail::RunError, bound: usize) -> Answer {
+    let (status, body) = crate::detail::admission_refused("the quarantine", bound, why);
     json(status, body)
 }
 
@@ -216,7 +218,7 @@ pub(super) async fn quarantine_apply(
     .await;
     match run {
         Ok((code, report)) => answer(code, &report, true),
-        Err(why) => busy(&why),
+        Err(why) => busy(&why, crate::detail::MAX_OPS_READ_CONCURRENT),
     }
 }
 

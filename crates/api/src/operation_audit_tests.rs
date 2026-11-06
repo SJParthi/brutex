@@ -1005,3 +1005,92 @@ async fn an_unreadable_question_is_a_400_and_a_panicking_handler_is_said_as_run(
 async fn panics() -> axum::response::Response {
     panic!("a handler that never returns its answer")
 }
+
+/// **A FULL DETAIL POOL REFUSES THE AUDIT'S START 429, BEFORE ANY HANDLER IS
+/// POLLED OR ANY RECORD WRITTEN** (BASE-COV-API-AS2): the start is journaled
+/// through a detail slot, and a pool that stays full is answered in the
+/// pool's own words — retryable, no handler dispatched, nothing queued.
+///
+/// Extremes: (1) every free slot taken is a 429; (2) the body says the audit
+/// capacity is full; (3) that no handler was dispatched; (4) and that no work
+/// was queued; (5) the handler is never polled; (6) no record is journaled;
+/// (7) the refusal says the handler did not complete; (8) the slots freed,
+/// the same request is answered by its handler, stamped with the journal's
+/// id. Combined: (9) a full pool and a handler that would answer 500 is the
+/// pool's 429, never the handler's; (10) a full pool and a store root that
+/// does not exist is the pool's 429, not the store's 503: admission is asked
+/// first. Out of the box: (11) the refusal carries no audit header, since
+/// there is no record for it to point at.
+#[tokio::test]
+async fn a_full_detail_pool_refuses_the_audits_start_before_its_handler() {
+    let apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    let called = AtomicUsize::new(0);
+    let taken = crate::detail::take_every_free_slot(&apart);
+    let refused = request_audited(
+        root.0.clone(),
+        "POST /backtest/run".to_owned(),
+        Counted {
+            called: &called,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        },
+    )
+    .await;
+    let missing = request_audited(
+        root.0.join("missing"),
+        "POST /backtest/run".to_owned(),
+        Counted {
+            called: &called,
+            status: StatusCode::ACCEPTED,
+        },
+    )
+    .await;
+    drop(taken);
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS, "(1)(9)");
+    assert_eq!(missing.status(), StatusCode::TOO_MANY_REQUESTS, "(10)");
+    assert_eq!(called.load(Ordering::Relaxed), 0, "(5)");
+    assert!(
+        refused.headers().get("x-brutex-request-audit").is_none(),
+        "(11)"
+    );
+    let body = axum::body::to_bytes(refused.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let said = body.to_string();
+    for (words, case) in [
+        ("bounded request audit capacity is full", "(2)"),
+        ("no handler was dispatched", "(3)"),
+        ("no work was queued", "(4)"),
+    ] {
+        assert!(said.contains(words), "{case} {said}");
+    }
+    assert_eq!(body["handler_completed"], false, "(7) {said}");
+    assert_eq!(
+        journal::page(&root.0, None, 32).unwrap().len(),
+        0,
+        "(6) nothing journaled"
+    );
+
+    let admitted = request_audited(
+        root.0.clone(),
+        "POST /backtest/run".to_owned(),
+        Counted {
+            called: &called,
+            status: StatusCode::ACCEPTED,
+        },
+    )
+    .await;
+    assert_eq!(admitted.status(), StatusCode::ACCEPTED, "(8)");
+    assert_eq!(called.load(Ordering::Relaxed), 1, "(8)");
+    let id: u64 = admitted
+        .headers()
+        .get("x-brutex-request-audit")
+        .expect("(8) stamped")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let record = journal::read(&root.0, id).unwrap().unwrap();
+    assert_eq!(record.phase, Phase::Completed, "(8)");
+}

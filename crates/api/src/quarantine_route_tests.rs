@@ -713,3 +713,88 @@ async fn the_verbs_misuse_and_refusal_and_an_unread_question_are_said_apart() {
     assert!(files_under(&fixture.root.join("not-there")).is_empty());
     let _ = fs::remove_dir_all(&fixture.root);
 }
+
+/// **A PRESS REFUSED AT A FULL OPERATIONS POOL IS A 429 THAT NAMES THAT
+/// POOL'S BOUND, AND THE REFUSED PRESS LEAVES THE PRESS FREE**
+/// (BASE-COV-API-AS2): the press runs in the operations pool, so its refusal
+/// names the slots that pool has. It named the store-read pool's, eight on a
+/// machine of eight cores or more where the operations pool has four (on this
+/// host's four cores the two agree). The press guard moved into the refused
+/// work is dropped with it, so the next press runs.
+///
+/// Extremes: (1) every operations slot counted taken is a 429; (2) the body
+/// names the quarantine; (3) and the operations pool's slots on this
+/// machine; (4) and says to retry; (5) nothing in the store changes; (6) the
+/// press is free once the refusal is answered; (7) the pool freed, the same
+/// press applies; (8) and drops exactly the planned bar. Combined: (9) the
+/// operations pool full and the store-read pool free: the plan is answered
+/// while the press is refused; (10) the operations pool full and a press
+/// whose question is unreadable: the 400 comes first, before the pool. Out of
+/// the box: (11) the operations pool full and another press marked running:
+/// the one-writer 409 is asked before the pool, and the refused press does
+/// not clear the other's mark.
+#[tokio::test]
+async fn a_press_refused_by_a_full_operations_pool_names_its_bound_and_frees_the_press() {
+    let _serial = PRESS_TESTS.lock().await;
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let fixture = Fixture::new("r418-press-crowded");
+    let held = fixture.month(ym(2018, 3), 520, 5);
+    plan(&fixture.root, &[held[1].ts_micros]);
+    let form = format!(
+        "symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=invented"
+    );
+    let press =
+        |form: String| quarantine_apply(axum::extract::State(Loaded::clone(&fixture.site)), form);
+    let before = files_under(&fixture.root);
+
+    let crowd = crate::detail::crowd(crate::detail::Named::OpsRead);
+    let (status, _, refused) = press(form.clone()).await;
+    let pressing_after = super::PRESSING.load(std::sync::atomic::Ordering::Acquire);
+    let (plan_status, plan_body) = get(
+        &fixture.site,
+        &format!("/pull/quarantine.json?symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level"),
+    )
+    .await;
+    let (unread_status, _, unread) = press("symbol=".to_owned()).await;
+    super::PRESSING.store(true, std::sync::atomic::Ordering::Release);
+    let (running_status, _, running) = press(form.clone()).await;
+    let still_marked = super::PRESSING.load(std::sync::atomic::Ordering::Acquire);
+    super::PRESSING.store(false, std::sync::atomic::Ordering::Release);
+    drop(crowd);
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "(1) {refused}");
+    let said: Value = serde_json::from_str(&refused).expect("JSON");
+    let why = said["error"].as_str().unwrap_or_default();
+    assert!(why.starts_with("the quarantine not admitted"), "(2) {why}");
+    let slots = crate::detail::Named::OpsRead.pool().max();
+    assert!(
+        why.contains(&format!("at most {slots} run at once")),
+        "(3) {why}"
+    );
+    assert!(why.ends_with("retry"), "(4) {why}");
+    assert_eq!(
+        files_under(&fixture.root),
+        before,
+        "(5) the store is as it was"
+    );
+    assert!(!pressing_after, "(6) the refused press left the press free");
+    assert_eq!(plan_status, StatusCode::OK, "(9) {plan_body}");
+    assert_eq!(plan_body["applied"], false, "(9) {plan_body}");
+    assert_eq!(unread_status, StatusCode::BAD_REQUEST, "(10) {unread}");
+    assert!(unread.contains("quarantine_question"), "(10) {unread}");
+    assert_eq!(running_status, StatusCode::CONFLICT, "(11) {running}");
+    assert!(running.contains("quarantine_running"), "(11) {running}");
+    assert!(still_marked, "(11) the other press's mark stands");
+
+    let (status, _, text) = press(form).await;
+    assert_eq!(status, StatusCode::OK, "(7) {text}");
+    let body: Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(body["applied"], true, "(7) {body}");
+    assert!(
+        body["report"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("DROPPED 1 of 5"),
+        "(8) {body}"
+    );
+}
