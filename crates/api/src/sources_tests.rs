@@ -2332,7 +2332,8 @@ async fn a_root_no_folder_an_unlisted_rung_an_escaped_symbol_and_a_full_memo() {
     assert!(
         notes
             .iter()
-            .any(|note| note.starts_with("cannot read ") && note.contains("SYNTHA")),
+            .filter(|note| note.starts_with("cannot read "))
+            .any(|note| note.contains("SYNTHA")),
         "{notes:#?}"
     );
     assert!(

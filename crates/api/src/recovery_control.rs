@@ -517,11 +517,11 @@ mod tests {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let (root, site) = fixture("as2-recovery-kernel-folder");
-            let owned = if cfg!(target_os = "linux") {
-                "/sys"
-            } else {
-                "/System"
-            };
+            // One of the two is compiled, so no arm is left for the other host.
+            #[cfg(target_os = "linux")]
+            let owned = "/sys";
+            #[cfg(not(target_os = "linux"))]
+            let owned = "/System";
             std::os::unix::fs::symlink(owned, root.join("audit")).unwrap();
             activate(&site, id);
             let why = stop(&site).unwrap_err();

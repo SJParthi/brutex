@@ -219,6 +219,32 @@ covered with `llvm-cov show` of that run's profile, the rows left in the edited 
   holds 3.9-5.5 MB in flight when the stall deadline cuts the paced reader. Verify r3 ran the
   file green on the Mac. Owed to the Mac's Route B: these tests' lines past the cut.
 
+### Gate 23 by hand (blocking item 2)
+
+The `Gate 23` step of `.github/workflows/ci.yml` (job language-purity), its `run:` script taken
+from the file unchanged, run by hand on this tree and on f01d7a0e4 (a detached worktree), each
+with its own `.github/source_scan.rs` and `.github/gates_runtime.rs` built as the job builds
+them (`rustc --edition=2024 -D warnings`, `CARGO_BIN_EXE_source_scan` set) and `RUNNER_TEMP`
+pointing at them. Both exit 1 (red on the base, BASE-REDS-1023's). `diff` of the two outputs
+is one line: `993 tracked source file(s)` on f01d7a0e4 against `997` here. The print-surface
+section ("REFUSED  the print surface is not the declared one.") is the same 39 lines on both,
+and lists no `api/src/sources_tests.rs` site. One run on this tree first refused a new clause C
+site of mine (`booleanlaunch_tests.rs`, a bare `env::temp_dir()` as a store root, before the
+commit below); it now uses a `Scratch` folder named by the process, and the rerun is the
+one-line diff above.
+
+### The 8-extremes counts of verify r3's named G2 files (read from their `Extremes:` lines)
+
+| file | test | extremes (single / combined / out of the box) |
+|---|---|---|
+| `sources_tests.rs` | `a_sources_question_it_cannot_read_or_a_full_pool_is_said_by_name` | 13 (10 / 2 / 1) |
+| `research_doors_tests.rs` | `a_query_a_door_cannot_read_is_a_400_before_the_store` | 12 (8 / 2 / 2) |
+| `dayflags_rules_tests.rs` | `the_day_band_timing_holds_at_its_extremes` | 10 (7 / 2 / 1) |
+| `dayflags_rules_tests.rs` | `the_cold_share_page_timing_holds_at_its_extremes` | 11 (8 / 2 / 1) |
+| `dayflags_rules_tests.rs` | `the_profilers_pages_hold_at_their_extremes` | 11 (8 / 2 / 1) |
+| `disk_route.rs` | `the_disk_timing_holds_at_its_extremes` | 10 (7 / 2 / 1) |
+| `server.rs` | `the_pull_runtime_measurement_holds_at_its_extremes` | 11 (8 / 2 / 1) |
+
 ### Red round 1 (each new test shown red by a hand change, then restored)
 
 Scratch worktree at `c954f932`, four hand changes, instrumented build, `cargo test -p api

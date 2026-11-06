@@ -313,14 +313,11 @@ fn queries_reject_aliases_duplicates_overflow_and_mixed_exact_pages() {
         }
     ));
     let before = ID_BASE + 4;
-    let Asked::Page {
-        before: Some(asked),
-        limit: 2,
-    } = parse(&format!("before={before}&limit=2")).unwrap()
-    else {
-        panic!("a page of two before {before}");
-    };
-    assert_eq!(asked, before);
+    let parsed = parse(&format!("before={before}&limit=2")).unwrap();
+    assert!(
+        matches!(parsed, Asked::Page { before: Some(asked), limit: 2 } if asked == before),
+        "a page of two before {before}"
+    );
     // An id at or below `ID_BASE` names no durable record: a caller error
     // (400), never the journal's 503 (Z1-slice13-F3, D-1762).
     for query in [

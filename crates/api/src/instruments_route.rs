@@ -1367,4 +1367,78 @@ mod tests {
         assert_eq!(code, axum::http::StatusCode::OK, "{groww}");
         assert!(groww.contains("NIFTY"), "{groww}");
     }
+
+    /// **A FEED THAT PUBLISHES NO MASTER IS NEVER A 503 FOR ITS MASTER.** The
+    /// 503 is for a master that should be there and will not decode; GDFL and
+    /// `TrueData` publish none, so a read that records one of their masters
+    /// unread (which `Read::new` lets any caller do) still answers 200 and says
+    /// the state by name, while a mastered feed recorded unread is a 503.
+    ///
+    /// Extremes: (1) GDFL recorded unread answers 200 and `UNAVAILABLE`; (2)
+    /// `TrueData` recorded unread answers 200; (3) Dhan, (4) Groww and (5)
+    /// Zerodha recorded unread answer 503; (6) GDFL not recorded is
+    /// `not-mastered`; (7) the master note names the vendor and the reason;
+    /// (8) the list GDFL answers from its census is the same with its master
+    /// recorded unread. Combined: (9) GDFL and Dhan unread in one read answer
+    /// per feed, 200 and 503; (10) a damaged GDFL census beside its unread
+    /// master is a 503 by the census. Out of the box: (11) a vendor recorded
+    /// unread twice answers with its first reason.
+    #[test]
+    fn a_feed_that_publishes_no_master_is_never_a_503_for_its_master() {
+        let dir = agreeing("instruments-unread");
+        let built = site("instruments-unread", &dir);
+        census_on_disk(
+            &built.store_root,
+            Vendor::Gdfl,
+            &[(
+                Segment::Index,
+                "NIFTY",
+                None,
+                store::path::Timeframe::SECOND_1,
+                ROWS,
+            )],
+        );
+        let (_, plain_headers, plain) = instruments_answer(&built, Vendor::Gdfl);
+        assert_eq!(plain_headers[MASTER_STATE_HEADER], "not-mastered");
+        let record = |unread: Vec<(Vendor, String)>| {
+            let merged = crate::server::universe(&dir).merged;
+            built.parsed.write().expect("the universe lock").read =
+                crate::server::Read::new(merged, Vec::new(), unread, 0, 0, 0);
+        };
+        record(vec![
+            (Vendor::Gdfl, "first reason".to_owned()),
+            (Vendor::Gdfl, "second reason".to_owned()),
+            (Vendor::Dhan, "a damaged Dhan master".to_owned()),
+        ]);
+        let (code, headers, body) = instruments_answer(&built, Vendor::Gdfl);
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(headers[MASTER_STATE_HEADER], "UNAVAILABLE");
+        let note = headers[MASTER_NOTE_HEADER].to_str().expect("a note");
+        assert!(
+            note.starts_with("gdfl: UNAVAILABLE") && note.contains("first reason"),
+            "{note}"
+        );
+        assert!(!note.contains("second reason"), "{note}");
+        assert_eq!(body, plain, "the census list does not depend on the master");
+        let (dhan, _, _) = instruments_answer(&built, Vendor::Dhan);
+        assert_eq!(dhan, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        for vendor in [Vendor::TrueData, Vendor::Groww, Vendor::Zerodha] {
+            record(vec![(vendor, "unread".to_owned())]);
+            let (code, _, _) = instruments_answer(&built, vendor);
+            let want = if vendor.publishes_master() {
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                axum::http::StatusCode::OK
+            };
+            assert_eq!(code, want, "{}", vendor.as_str());
+        }
+        record(vec![(Vendor::Gdfl, "unread".to_owned())]);
+        std::fs::write(
+            pull::manifest::manifest_path(&built.store_root, Vendor::Gdfl),
+            b"not a census",
+        )
+        .expect("a damaged census");
+        let (code, _, body) = instruments_answer(&built, Vendor::Gdfl);
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
 }

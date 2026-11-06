@@ -215,10 +215,7 @@ async fn drain(stream: &mut TcpStream, limit: Duration) -> String {
     let until = Instant::now() + limit;
     loop {
         let Ok(read) = tokio::time::timeout_at(until, stream.read(&mut chunk)).await else {
-            panic!(
-                "the socket was held past {limit:?}; {} byte(s) came",
-                got.len()
-            );
+            panic!("held past {limit:?}; {} byte(s) came", got.len());
         };
         match read {
             Ok(0) | Err(_) => return String::from_utf8_lossy(&got).into_owned(),

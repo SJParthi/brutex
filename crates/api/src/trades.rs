@@ -1119,9 +1119,7 @@ mod tests {
         commit_trade_fixture(&dir, healthy, 1);
 
         let mut damaged = trade_row([0x6b; 32], 0).to_bytes();
-        if let Some(byte) = damaged.get_mut(40) {
-            *byte ^= 0x80;
-        }
+        *damaged.get_mut(40).expect("a row is longer than 40 bytes") ^= 0x80;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(cli::trades::Trades::path(&dir))
@@ -1184,9 +1182,7 @@ mod tests {
             .expect("the healthy row");
         commit_trade_fixture(dir, healthy, 1);
         let mut damaged = trade_row([0x6e; 32], 0).to_bytes();
-        if let Some(byte) = damaged.get_mut(40) {
-            *byte ^= 0x80;
-        }
+        *damaged.get_mut(40).expect("a row is longer than 40 bytes") ^= 0x80;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(cli::trades::Trades::path(dir))
@@ -1301,6 +1297,52 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(body.contains(r#""trades":null"#), "not absent: {body}");
         assert!(body.contains("still exists"), "cause: {body}");
+
+        // A LINK THAT LOOPS AT THE CHILD'S PATH is neither absent nor present:
+        // its status cannot be read (ELOOP, whoever asks), and the answer says
+        // so rather than taking either.
+        let looped = dir.join("looped");
+        cli::trades::Trades::open(&looped).expect("a trade header");
+        commit_trade_fixture(&looped, [0x7f; 32], 1);
+        let child = cli::trades::Trades::path(&looped);
+        std::fs::remove_file(&child).expect("the child goes");
+        std::os::unix::fs::symlink(&child, &child).expect("a link to itself");
+        let query = format!("identity={}", "7f".repeat(32));
+        let (status, _, body) = respond(Ok(looped.clone()), &query);
+        // THE BOUNDED OPEN REFUSES IT FIRST: a file it cannot measure is the
+        // store's fault (503), and the absence check is never asked.
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        assert!(body.contains(r#""trades":null"#), "not empty: {body}");
+        assert!(
+            body.contains("could not be measured before its bounded read"),
+            "cause: {body}"
+        );
+        // So the absence check meets an unreadable status only when the open
+        // saw nothing and the path changed before the check, a race no
+        // request can order; asked directly, it names what it could not read.
+        let (status, _, body) = super::missing_file_response(
+            &looped,
+            &[0x7f; 32],
+            None,
+            "",
+            crate::detail::Page {
+                number: 0,
+                limit: 16,
+            },
+            super::json_headers(),
+            "the child was absent at its open",
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains(r#""trades":null"#), "not empty: {body}");
+        assert!(
+            body.contains("the child was absent at its open.")
+                && body.contains("could not be checked for absence"),
+            "cause: {body}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

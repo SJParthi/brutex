@@ -795,7 +795,8 @@ fn each_launch_field_at_its_edge_is_refused_in_its_own_words() {
     };
     assert!(refusal(Path::new("relative/store"), None).contains(NO_STORE));
     assert!(refusal(Path::new("/brutex-no-such-store-directory"), None).contains(NO_STORE));
-    let queried = refusal(&std::env::temp_dir(), Some("limit=5"));
+    let store = Scratch::new();
+    let queried = refusal(&store.0, Some("limit=5"));
     assert!(
         queried.contains("metadata accepts only one exact max_points query")
             && !queried.contains(NO_STORE),
