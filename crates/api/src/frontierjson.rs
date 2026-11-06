@@ -1432,6 +1432,10 @@ mod tests {
     /// zero-row run asked for page 0 and page 1 at once (one answer, one
     /// refusal); out of the box — a ledger whose bytes are a JSON document.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every answer the page can give unasked, each over its own small store, in one table"
+    )]
     fn every_unasked_frontier_answer_is_given_or_refused_by_name() {
         let dir = crate::scratch::path("frontier-unasked");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1547,10 +1551,26 @@ mod tests {
             let (status, _, body) = respond(Ok(root), &format!("identity={}", "a7".repeat(32)));
             assert_eq!(status, axum::http::StatusCode::OK, "{name}: {body}");
             let value: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-            assert_eq!(value["count"], rows.len(), "{name}");
-            assert_eq!(value["admitted"], admitted, "{name}: {body}");
-            assert_eq!(value["total_admitted"], admitted, "{name}: {body}");
-            assert_eq!(value["rows"][0]["meets"]["all"], true, "{name}: {body}");
+            assert_eq!(
+                value.get("count"),
+                Some(&serde_json::json!(rows.len())),
+                "{name}"
+            );
+            assert_eq!(
+                value.get("admitted"),
+                Some(&serde_json::json!(admitted)),
+                "{name}: {body}"
+            );
+            assert_eq!(
+                value.get("total_admitted"),
+                Some(&serde_json::json!(admitted)),
+                "{name}: {body}"
+            );
+            assert_eq!(
+                value.pointer("/rows/0/meets/all"),
+                Some(&serde_json::json!(true)),
+                "{name}: {body}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

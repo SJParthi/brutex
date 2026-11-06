@@ -702,11 +702,11 @@ fn a_journaled_read_asked_while_every_slot_is_held_waits_for_one() {
         live(
             |addr| audited(store, store, addr),
             |addr| async move {
+                const SAME: &str = "Sec-Fetch-Site: same-origin\r\n";
                 let local = addr.to_string();
                 let held = crate::detail::hold_every_slot()
                     .await
                     .expect("this child owns every slot");
-                const SAME: &str = "Sec-Fetch-Site: same-origin\r\n";
                 for extra in ["", SAME] {
                     let refused = ask(addr, "GET", "/backtest.json", &local, extra).await;
                     assert!(status_line(&refused).contains("429"), "{refused}");

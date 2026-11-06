@@ -514,15 +514,13 @@ const CHILD_PATH: &str = concat!(
 );
 
 #[test]
-fn configured_launch_admits_only_exact_requests_and_records_missing_source_refusal()
--> Result<(), String> {
+fn configured_launch_admits_only_exact_requests_and_records_missing_source_refusal() {
     if let Some(root) = std::env::var_os(CHILD) {
         configuration_child(Path::new(&root));
-        return Ok(());
+        return;
     }
     let root = Scratch::new();
     run_child(CHILD_PATH, &launch_env(&root.0, CHILD, "268435456", "128"));
-    Ok(())
 }
 
 /// The environment of a configured launch child over `root`: the checksum,
@@ -715,6 +713,10 @@ fn configuration_child(root: &Path) {
 /// out of the box — the search itself delivered as an observation event,
 /// where stages are expected.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every incoherent observation and every coherent edge, each one refusal or answer in one table"
+)]
 fn every_incoherent_observation_is_refused_by_name_and_its_coherent_edges_pass() {
     use cli::index_stop_search::{CompletedBatch, Observation, Progress, RungStage};
     let asked = parse(&body().to_string()).unwrap();
@@ -1053,6 +1055,10 @@ fn a_launch_whose_slot_moved_and_a_preview_that_cannot_run_are_refused_by_name()
     );
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the moved slot and every preview that cannot run, each asked in turn over one child's store"
+)]
 fn moved_child(root: &Path) {
     let exact = cli::index_stop_search::configuration(5, 2).unwrap();
     configuration::observation_limits(&exact).unwrap();

@@ -158,6 +158,10 @@ async fn page(query: &str) -> (StatusCode, Value) {
 /// child, since every bound comes from the environment and the launch is
 /// process-wide.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one production launch, then every page that reads what it saved, in the order a reader opens them"
+)]
 fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
     let Some(root) = std::env::var_os(CHILD) else {
         let root = crate::scratch::path("saved-qualification");

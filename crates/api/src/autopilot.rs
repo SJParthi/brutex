@@ -7501,14 +7501,14 @@ mod tests {
         let root = crate::scratch::path("autopilot-probe-long-name");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a writable root");
-        let room = 255 - STORE_PROBE_PREFIX.len();
+        let spare = 255 - STORE_PROBE_PREFIX.len();
         let long = |n: usize| "v".repeat(n);
         // Past the limit in bytes AND in characters, so a filesystem that
         // counts either refuses each.
         for vendor in [
-            long(room + 1),
+            long(spare + 1),
             long(4 * 255),
-            "é".repeat(room + 1),
+            "é".repeat(spare + 1),
             "dh\0an".to_owned(),
             "missing-folder/dhan".to_owned(),
         ] {
@@ -7521,7 +7521,7 @@ mod tests {
         }
         std::fs::create_dir_all(root.join(format!("{STORE_PROBE_PREFIX}groww")))
             .expect("an occupied probe name");
-        for other in [long(room + 1), "gro\0ww".to_owned()] {
+        for other in [long(spare + 1), "gro\0ww".to_owned()] {
             let held = store_writable(&root, "groww").expect_err("an occupied name");
             let refused = store_writable(&root, &other).expect_err("a name the host refuses");
             assert!(
@@ -7533,7 +7533,7 @@ mod tests {
                 "{refused}"
             );
         }
-        store_writable(&root, &long(room)).expect("the longest name that fits");
+        store_writable(&root, &long(spare)).expect("the longest name that fits");
         let left: Vec<_> = std::fs::read_dir(&root)
             .expect("the root lists")
             .map(|entry| entry.expect("an entry").file_name())
@@ -8665,7 +8665,6 @@ mod cloud_mutant_tests {
     #[test]
     fn the_served_autopilot_reads_its_switch_from_the_environment() {
         const CASE: &str = "BRUTEX_CLOUD_AUTOPILOT_CASE";
-        let name = "autopilot::cloud_mutant_tests::the_served_autopilot_reads_its_switch_from_the_environment";
         // (case, flies on startup, the served control starts paused, why)
         const CASES: [(&str, bool, bool, &str); 4] = [
             ("run", true, false, "run flies"),
@@ -8673,17 +8672,16 @@ mod cloud_mutant_tests {
             ("unset", false, true, "no word stays paused"),
             ("run-read-only", true, true, "read-only grounds it"),
         ];
-        match std::env::var(CASE) {
-            Ok(case) => {
-                let Some(&(_, flies, paused, why)) =
-                    CASES.iter().find(|(named, ..)| *named == case)
-                else {
-                    panic!("unknown case {case}");
-                };
-                assert_eq!(flies_on_startup(), flies, "{case}: {why}");
-                assert_eq!(Control::serving().is_paused(), paused, "{case}: {why}");
-            }
-            Err(_) => {
+        let name = "autopilot::cloud_mutant_tests::the_served_autopilot_reads_its_switch_from_the_environment";
+        if let Ok(case) = std::env::var(CASE) {
+            let Some(&(_, flies, paused, why)) = CASES.iter().find(|(named, ..)| *named == case)
+            else {
+                panic!("unknown case {case}");
+            };
+            assert_eq!(flies_on_startup(), flies, "{case}: {why}");
+            assert_eq!(Control::serving().is_paused(), paused, "{case}: {why}");
+        } else {
+            {
                 let os = std::ffi::OsStr::new;
                 for (case, env) in [
                     (

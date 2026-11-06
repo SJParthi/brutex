@@ -940,8 +940,12 @@ fn concurrent_installs_and_readers_never_see_a_torn_census() {
                         .find(|census| census.vendor == Vendor::Dhan)
                         .map(|census| census.state.name());
                     // `|`, not `||`: both halves are read on every look.
-                    let tore = (entries.len() != 1) | (dhan != Some("held"));
-                    torn.fetch_add(usize::from(tore), std::sync::atomic::Ordering::Relaxed);
+                    #[expect(
+                        clippy::needless_bitwise_bool,
+                        reason = "both halves are read on every look, so neither is a side a run may skip"
+                    )]
+                    let split_view = (entries.len() != 1) | (dhan != Some("held"));
+                    torn.fetch_add(usize::from(split_view), std::sync::atomic::Ordering::Relaxed);
                     looked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             });

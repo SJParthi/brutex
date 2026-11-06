@@ -2329,6 +2329,10 @@ mod tests {
     /// of all three refusal kinds at once, with a body and a refused prime
     /// between them; out of the box, a re-prime step whose URL is empty.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one landing kind and one ledger of every step kind, each asserted where it is built"
+    )]
     fn a_refetch_that_changed_nothing_and_a_reprimed_step_are_each_named() {
         use masters::{Attempt, Fetched, Got, Verdict};
         let source = &masters::SOURCES[0];

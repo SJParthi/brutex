@@ -12,7 +12,6 @@
 use super::*;
 use brutex_core::vendor::Vendor;
 use pull::session::Day;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, StorePath};

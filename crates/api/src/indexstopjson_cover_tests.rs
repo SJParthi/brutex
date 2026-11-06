@@ -17,15 +17,16 @@ fn a_second_root_reopens_and_a_page_kind_no_query_names_is_refused_by_name() -> 
             assert_eq!(id, same, "both catalogs save one identity");
             let base = format!("identity={}", hex(id));
             let opened = render(first, &Asked::parse(&base)?)?;
-            let pin = opened["completion"]
-                .as_str()
+            let pin = opened
+                .get("completion")
+                .and_then(Value::as_str)
                 .ok_or("the first read names its completion")?;
             std::fs::remove_dir_all(first).map_err(|why| why.to_string())?;
             let pinned = format!("{base}&completion={pin}");
             let moved = render(second, &Asked::parse(&pinned)?)?;
             assert_eq!(
-                (&moved["completion"], &moved["total"]),
-                (&opened["completion"], &json!("2")),
+                (moved.get("completion"), moved.get("total")),
+                (opened.get("completion"), Some(&json!("2"))),
                 "the second root answers its own saved catalog"
             );
             let mut unnamed = Asked::parse(&format!("{pinned}&kind=trades&setting=1"))?;
