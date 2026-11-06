@@ -1345,3 +1345,93 @@ fn a_seal_a_descriptor_an_envelope_and_a_pointer_are_each_refused_by_their_own_r
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A site whose masters map FORCEMOT under the cross-checked identity: a
+/// Zerodha cash row and a Groww witness carrying the share's ISIN from the
+/// workspace's own universe table (`brutex_core::universe::nse_isin`); the
+/// tokens are invented. NIFTY's invented index row stands beside it.
+fn cross_checked_site(name: &str) -> (PathBuf, Loaded) {
+    let root = store_root(name);
+    let masters = root.join("masters");
+    std::fs::create_dir_all(&masters).expect("a masters folder");
+    let isin = brutex_core::universe::nse_isin("FORCEMOT").expect("an F&O share");
+    std::fs::write(
+        masters.join(Vendor::Zerodha.master_file()),
+        "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,\
+         tick_size,lot_size,instrument_type,segment,exchange\n\
+         900001,9001,NIFTY 50,NIFTY 50,0,,0,0.05,0,EQ,INDICES,NSE\n\
+         900002,9002,FORCEMOT,FORCE MOTORS,0,,0,0.05,1,EQ,NSE,NSE\n",
+    )
+    .expect("an invented master");
+    std::fs::write(
+        masters.join(Vendor::Groww.master_file()),
+        format!(
+            "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,\
+             expiry_date,strike_price,groww_symbol\n\
+             NSE,CASH,,FORCEMOT,EQ,EQ,{},,,NSE-FORCEMOT\n",
+            isin.as_str()
+        ),
+    )
+    .expect("an invented witness");
+    std::fs::write(
+        masters.join(Vendor::Dhan.master_file()),
+        "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,INSTRUMENT_TYPE,SERIES,\
+         SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n",
+    )
+    .expect("an empty master");
+    let site = Loaded::new(Site::load(&masters, &root));
+    std::fs::create_dir_all(super::root(&site)).expect("the recovery folder");
+    (root, site)
+}
+
+/// **A SHARE'S ASSESSMENT READS ITS CASH SESSION AND ITS WITHDRAWN DAYS BY
+/// THEIR OWN EVIDENCE** (BASE-COV-API repair 3, D-8661). `assess` over a
+/// cross-checked share, FORCEMOT, inside its sourced withdrawal (2023-10-26
+/// to 2024-02-13, `pull::cash_auction::independently_inactive`), before the
+/// closing auction's eligibility applies, so no schedule is fetched. Extremes:
+/// half a session held on a withdrawn day (every other minute of that day
+/// unverified, a withdrawn day having no session to measure against; never
+/// missing, never retried); a daily bar on a withdrawn day with no minute (its
+/// whole day unverified); withdrawn days with no bar (nothing counted);
+/// a weekend (nothing); each withdrawn day held, an issue; the share held
+/// with no lifecycle master, an issue; no day retried; the share mapped only
+/// by the cross-check (a Zerodha row and an independent witness); and, at
+/// once, the minutes and the daily bar on two withdrawn days of one window
+/// (both unverified, both issues), and the share's cash shape read beside its
+/// stored minutes with no conflict; out of the box, a share the exchange
+/// withdrew, asked as if it traded.
+#[tokio::test]
+async fn a_shares_assessment_reads_its_cash_session_and_its_withdrawn_days() {
+    let (root, site) = cross_checked_site("recovery-cover-share");
+    let (jan2, jan4) = (on(2024, 1, 2), on(2024, 1, 4));
+    let half: Vec<i64> = {
+        let whole = session_of(jan2);
+        whole[..whole.len() / 2].to_vec()
+    };
+    let january = jan2.year_month().expect("a month");
+    source_month(&root, "FORCEMOT", "1min", january, &half);
+    source_month(&root, "FORCEMOT", "1day", january, &[at(jan4, 0, 0)]);
+    let window = Window::new(on(2024, 1, 1), on(2024, 1, 7)).expect("a window");
+    let found = assess(&site, &canonical("FORCEMOT", "1min", window, "scan"), &None)
+        .await
+        .expect("assessed");
+    let held = u64::try_from(half.len()).expect("small");
+    assert_eq!(found.held, held, "{found:?}");
+    assert_eq!(
+        found.missing, 0,
+        "a withdrawn day is never missing: {found:?}"
+    );
+    // A WITHDRAWN DAY HAS NO SESSION TO MEASURE AGAINST: every minute of a
+    // withdrawn day that holds a bar, and is not itself held, is unverified.
+    assert_eq!(
+        found.unverified,
+        (1_440 - held) + 1_440,
+        "the two withdrawn days that hold a bar, whole: {found:?}"
+    );
+    assert_eq!(found.retry_days, Vec::<Day>::new(), "never retried");
+    assert_eq!(
+        found.evidence_issues, 3,
+        "two withdrawn days held, and no lifecycle master: {found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
