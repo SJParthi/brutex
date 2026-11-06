@@ -1321,10 +1321,12 @@ export function run(command, log, deps = {}) {
  * @param {string} command
  * @param {number} ms `--restart-wait-ms`
  * @param {number} log the commands' log ({@link run})
+ * @param {Parameters<typeof asker>[1]} [deps] how its group is listed and signalled, as {@link run} takes it:
+ *   the system's `ps` within {@link LIST_WAIT_MS} by default (BASE-STACK-1028 repair 6: a test's own list)
  * @returns {Promise<number | string>}
  */
-export async function restartWithin(command, ms, log) {
-  const cmd = run(command, log);
+export async function restartWithin(command, ms, log, deps = {}) {
+  const cmd = run(command, log, deps);
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let t;
   const late = Symbol('late');
@@ -1616,9 +1618,12 @@ export function readCapturedFile(path) {
  * @param {ReturnType<typeof parseArgs>} args
  * @param {{send?: typeof timed, log?: (line: string) => void, capture?: string | null,
  *   restart?: (command: string, waitMs: number, i: number) => Promise<number | string>,
- *   openLog?: (path: string) => number}} [deps] `restart` runs restart `i` (from 1) within `waitMs` and
- *   resolves with its exit code, or with what happened instead ({@link restartWithin}, the shell command
- *   printing to the commands' log, by default); `openLog` opens that log ({@link openCommandLog} by default)
+ *   openLog?: (path: string) => number, group?: Parameters<typeof asker>[1]}} [deps] `restart` runs restart
+ *   `i` (from 1) within `waitMs` and resolves with its exit code, or with what happened instead
+ *   ({@link restartWithin}, the shell command printing to the commands' log, by default); `openLog` opens that
+ *   log ({@link openCommandLog} by default); `group` is how the process group of each command the run starts,
+ *   the `--writer` and the `--restart`, is listed and signalled ({@link run}'s `deps`: the system's `ps`
+ *   within {@link LIST_WAIT_MS} by default; BASE-STACK-1028 repair 6, a test's own list)
  * @returns {Promise<SheetResult & {notes: string[]}>} every return carries its notes (the day taken, R315-38)
  */
 export async function runSheet(args, deps = {}) {
@@ -1664,7 +1669,7 @@ export async function runSheet(args, deps = {}) {
   };
   const restartOnce = deps.restart ?? (async (/** @type {string} */ command, /** @type {number} */ waitMs, /** @type {number} */ i) => {
     const into = loggedFor('--restart', `restart ${i} of ${args.restarts}, the --restart command: ${command}`);
-    return 'why' in into ? `was not run: ${into.why}` : restartWithin(command, waitMs, into.fd);
+    return 'why' in into ? `was not run: ${into.why}` : restartWithin(command, waitMs, into.fd, deps.group);
   });
   /** @type {string[]} */
   const failures = [];
@@ -1799,7 +1804,7 @@ export async function runSheet(args, deps = {}) {
     failures.push(`the --writer command was not run: ${into.why}`);
     notMeasured.push('warm+writer: the --writer command was not run (its FAILED line says why)');
   } else {
-    const writer = run(/** @type {string} */ (args.writer), into.fd);
+    const writer = run(/** @type {string} */ (args.writer), into.fd, deps.group);
     /** @type {number | string | null} how it ended, once it has */
     let gone = null;
     void writer.wait.then((how) => (gone = how));
