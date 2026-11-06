@@ -496,7 +496,7 @@ fn a_page_near_the_end_of_a_read_order_keeps_the_last_rows() {
         .into_iter()
         .filter(|b| {
             let at = u32::try_from((b.ts_micros / MICROS + 19_800).rem_euclid(86_400)).unwrap();
-            at >= tod.0 && at <= tod.1
+            (tod.0..=tod.1).contains(&at)
         })
         .map(|b| (0, b))
         .collect();
@@ -943,22 +943,16 @@ fn indexed_extremes_read_no_bar_and_match_the_fold() {
         assert_eq!(answer.scan_rows, 0, "{series:?}: no bar folded");
         let got = answer.extremes.expect("extremes");
         let rows = every(series);
+        // The best value, and among equal values the earliest (stamp,
+        // series): the order the route names an extreme by.
         let first = |pick: &dyn Fn(&Bar) -> i64, larger: bool| {
-            rows.iter()
-                .map(|(s, b)| (pick(b), b.ts_micros, *s))
-                .reduce(|held, now| {
-                    let better = if larger {
-                        now.0 > held.0
-                    } else {
-                        now.0 < held.0
-                    };
-                    if better || (now.0 == held.0 && (now.1, now.2) < (held.1, held.2)) {
-                        now
-                    } else {
-                        held
-                    }
-                })
-                .unwrap()
+            let keyed = rows.iter().map(|(s, b)| (pick(b), b.ts_micros, *s));
+            if larger {
+                keyed.max_by_key(|&(value, ts, s)| (value, std::cmp::Reverse((ts, s))))
+            } else {
+                keyed.min_by_key(|&key| key)
+            }
+            .unwrap()
         };
         let check = |held: Option<super::super::Extreme>, want: (i64, i64, u32)| {
             let held = held.expect("an extreme");
@@ -1078,10 +1072,9 @@ fn a_sparse_range_writes_one_line_counting_its_holes() {
     let mine = |message: &str| -> Vec<telemetry::Record> {
         crate::emitted::landed(from, "api.bars", message)
             .into_iter()
-            .filter(|line| {
-                crate::emitted::says(line, "key", "HOLETEST")
-                    || crate::emitted::says(line, "symbol", "HOLETEST")
-            })
+            // The holes line names its series by `key` (bars.rs), never by a
+            // symbol field.
+            .filter(|line| crate::emitted::says(line, "key", "HOLETEST"))
             .collect()
     };
     let holes = mine("window range holds months not stored");
@@ -1488,10 +1481,6 @@ fn an_index_built_from_another_contracts_bars_is_never_served_as_this_ones() {
         path(&ce, feb, FileKind::SortIndex).to_path_buf(&root.0),
     )
     .unwrap();
-    let own: std::collections::HashMap<i64, Bar> = (0..PER_MONTH)
-        .map(|i| bar(feb, 0, i))
-        .map(|bar| (bar.ts_micros, bar))
-        .collect();
     let mut asked = query(&[0], Column::Close, false, 0, Filter::default());
     (asked.from, asked.to, asked.limit) = (feb, feb, 360);
     let answer = window(&root.0, &asked).unwrap();
@@ -1504,21 +1493,18 @@ fn an_index_built_from_another_contracts_bars_is_never_served_as_this_ones() {
         report.indexed_rows, 360,
         "the foreign index binds: {report:?}"
     );
-    for row in &answer.bars {
-        assert_eq!(
-            own.get(&row.bar.ts_micros),
-            Some(&row.bar),
-            "a served row is this contract's own bar"
-        );
-    }
-    assert_eq!(
-        answer.bars.len() + answer.faults.len(),
-        360,
-        "every place of the page is a checked row or a named fault"
-    );
+    // The two contracts' closes differ at every instant, so not one entry of
+    // the foreign index names this contract's value: the page serves no row
+    // at all, and every one of its places is a named fault.
     assert!(
-        !answer.faults.is_empty(),
-        "the two contracts' closes differ"
+        answer.bars.is_empty(),
+        "a foreign value was served: {:?}",
+        answer.bars.first()
+    );
+    assert_eq!(
+        answer.faults.len(),
+        360,
+        "every place of the page is a named fault"
     );
     assert!(
         answer

@@ -1339,15 +1339,16 @@ pub(crate) mod tests {
 
     /// The windows an open day was given, as `(from, to)` pairs.
     fn windows_of(cal: &Calendar, day: i64) -> Vec<(u16, u16)> {
-        match cal.kind_of(day) {
-            DayKind::Open(session) => session
-                .windows
-                .iter()
-                .take(usize::from(session.count))
-                .map(|window| (window.from, window.to))
-                .collect(),
-            other => panic!("day {day} is {other:?}, not an open session"),
-        }
+        let kind = cal.kind_of(day);
+        let DayKind::Open(session) = kind else {
+            panic!("day {day} is {kind:?}, not an open session");
+        };
+        session
+            .windows
+            .iter()
+            .take(usize::from(session.count))
+            .map(|window| (window.from, window.to))
+            .collect()
     }
 
     /// Appends one legal bar per stamp to `NSE/INDEX/NIFTY`'s `rung` file for
@@ -1925,10 +1926,10 @@ pub(crate) mod tests {
     /// Holds a derivation open until `followers` requests wait on it, bounded
     /// so a broken single-flight fails its count rather than hanging.
     fn until_joined(cache: &Cache, followers: usize) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while cache.waiting() < followers && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        // At most 30,000 waits of a millisecond each, about 30 s.
+        (0..30_000)
+            .take_while(|_| cache.waiting() < followers)
+            .for_each(|_| std::thread::sleep(std::time::Duration::from_millis(1)));
     }
 
     /// **CONCURRENT MISSES ON ONE KEY DERIVE ONCE AND SHARE THE ANSWER.**
@@ -3222,14 +3223,13 @@ mod segments {
         // MIDDAY ON THE FIRST, so the bar is unambiguously inside the month the
         // path names — the store resolves a record's slot from its stamp, and a
         // bar stamped outside its own month is a different test, not a smaller
-        // one. Days-since-epoch by the civil-from-days algorithm the store uses.
-        let (y, m) = (i64::from(month.year()), i64::from(month.month()));
-        let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
-        let era = y2.div_euclid(400);
-        let yoe = y2 - era * 400;
-        let doy = (153 * m2 + 2) / 5;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        let days = era * 146_097 + doe - 719_468;
+        // one. Days-since-epoch by `pull::session::Day`, the calendar the
+        // store's stamps are read against, rather than a second copy of it.
+        let days = i64::from(
+            pull::session::Day::new(month.year(), month.month(), 1)
+                .expect("a stored month's first day")
+                .days_from_epoch(),
+        );
         let rows = [store::format::Bar {
             ts_micros: days * 86_400 * 1_000_000 + 6 * 3_600 * 1_000_000,
             open: 100,

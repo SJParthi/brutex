@@ -3010,7 +3010,8 @@ mod cloud_mutant_tests {
             report
                 .scanned_why
                 .iter()
-                .any(|why| why.contains("2031-01") && why.contains("failed when it was read")),
+                .filter(|why| why.contains("2031-01"))
+                .any(|why| why.contains("failed when it was read")),
             "January was set aside and the page asked again: {report:?}"
         );
         assert_eq!(
@@ -4191,10 +4192,7 @@ mod cloud_mutant_tests {
         );
         assert!(
             matches!(&refused, Err(super::Attempt::Refused(why)) if why == "a value page needs a value column"),
-            "{:?}",
-            refused.as_ref().map(|_| ()).err().map(|why| match why {
-                super::Attempt::Refused(why) | super::Attempt::Broken { why, .. } => why.clone(),
-            })
+            "a time order given to page_once is refused in exactly these words"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4324,10 +4322,13 @@ mod cloud_mutant_tests {
             "the stale row is not served"
         );
         assert!(
-            got.faults.iter().any(|fault| fault.contains(&format!(
-                "the sort index names a c of Some({}) at {}",
-                rows[moved].close, indexed[moved].ts_micros
-            )) && fault.contains("cli srt-build")),
+            got.faults
+                .iter()
+                .filter(|fault| fault.contains(&format!(
+                    "the sort index names a c of Some({}) at {}",
+                    rows[moved].close, indexed[moved].ts_micros
+                )))
+                .any(|fault| fault.contains("cli srt-build")),
             "{:?}",
             got.faults
         );

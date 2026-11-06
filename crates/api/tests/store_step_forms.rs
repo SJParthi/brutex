@@ -55,13 +55,11 @@ fn every_spot_and_fno_body_of_the_steps_list_parses() {
     // No built line posts /pull/fno at this head: S-48's line, read here
     // when it was built, was refused (`series=futures` is no slug, and the
     // route takes one `underlying=` a request), so it is `planned:` until
-    // R4-28 builds the form for all underlyings at once.
+    // R4-28 builds the form for all underlyings at once. A built line fails
+    // this assert first, so its builder parses its body here as the spot
+    // lines are parsed above (a loop over an empty list here ran nothing).
     let fno = bodies("/pull/fno");
     assert!(fno.is_empty(), "{fno:#?}");
-    for body in &fno {
-        let parsed = api::ingest::parse_fno(body, today());
-        assert!(parsed.is_ok(), "{body}: {parsed:?}");
-    }
 }
 
 /// S-48's planned body is one today's route refuses, by the field it lacks:

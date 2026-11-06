@@ -2385,3 +2385,186 @@ async fn a_root_no_folder_an_unlisted_rung_an_escaped_symbol_and_a_full_memo() {
     assert_eq!(memo.get(&1), None, "the one entry left is the newest");
     let _ = fs::remove_dir_all(&masters);
 }
+
+/// **THE INTEGER COMPARISONS, THE MONTH WALKS AND THE FOLD GRID ANSWER AT
+/// THEIR EDGES.** The route tests reach these helpers through stores whose
+/// prices, volumes and months are all well formed, so the edges below were
+/// never asked of them.
+///
+/// Extremes: (1) a negative price against a positive one is no comparison;
+/// (2) a price against zero is none; (3) a negative volume is none; (4) a
+/// ratio over a zero denominator, or of a negative numerator, is none; (5) a
+/// factor against a zero or negative `z` never differs; (6) a factor step
+/// from a zero or negative base never steps; (7) each tolerance's exact edge
+/// (1 bp, 0.5 %, 0.2 %) is within it and one unit more is beyond; (8) holes
+/// past `MAX_NAMED` are all counted and only the first `MAX_NAMED` named;
+/// (9) months held that the source lacks are walked past, not reported.
+/// Combined: (10) two adjacent months beside a 35-month hole count 35 and
+/// name 24; (11) one source month held and one missing beside two held
+/// months the source never names. Out of the box: (12) an instant at the end
+/// of `i64` its grid's anchor points to (`i64::MIN` for a minute, whose grid
+/// starts at the open; `i64::MAX` for a day, whose grid starts at IST
+/// midnight) is one `pull::fold` cannot place: a 400 in its words.
+#[test]
+fn the_integer_comparisons_month_walks_and_fold_grid_answer_at_their_edges() {
+    let month = |y: u16, m: u8| YearMonth::new(y, m).expect("a month");
+    assert_eq!(price_cmp(-1, 10_000), None, "a negative price");
+    assert_eq!(price_cmp(10_000, 0), None, "against no price");
+    assert_eq!(volume_cmp(-1, 1_000), None, "a negative volume");
+    assert_eq!(ratio4(1, 0), None, "over nothing");
+    assert_eq!(ratio4(-1, 5), None, "of a negative count");
+    assert_eq!(ratio4(1, 3), Some(n("0.3333")));
+    assert!(!basis_differs(1_000, 0), "against a zero z");
+    assert!(!basis_differs(1_000, -10), "against a negative z");
+    assert!(!factor_stepped((0, 100), (100, 100)), "from a zero base");
+    assert!(
+        !factor_stepped((-5, 100), (100, 100)),
+        "from a negative base"
+    );
+    // Each tolerance's edge is within it; one unit more is beyond.
+    assert_eq!(price_cmp(10_001, 10_000), Some((n("1.00"), false)));
+    assert_eq!(price_cmp(10_002, 10_000), Some((n("2.00"), true)));
+    assert_eq!(volume_cmp(1_005, 1_000), Some((n("0.50"), false)));
+    assert_eq!(volume_cmp(1_006, 1_000), Some((n("0.60"), true)));
+    assert!(!basis_differs(1_002, 1_000) && basis_differs(1_003, 1_000));
+    assert!(!factor_stepped((1_000, 1_000), (1_002, 1_000)));
+    assert!(factor_stepped((1_000, 1_000), (1_003, 1_000)));
+
+    let (count, named) = holes_of(&[month(2019, 12), month(2020, 1), month(2023, 1)]);
+    assert_eq!(count, 35, "February 2020 to December 2022");
+    assert_eq!(named.len(), MAX_NAMED);
+    assert_eq!(named.first().map(String::as_str), Some("2020-02"));
+    assert_eq!(named.last().map(String::as_str), Some("2022-01"));
+    assert_eq!(
+        missing_from(
+            &[month(2020, 1), month(2020, 3)],
+            &[month(2019, 11), month(2020, 1), month(2020, 2)],
+        ),
+        vec![month(2020, 3)],
+        "a held month the source lacks is walked past"
+    );
+
+    for (ts, secs) in [(i64::MIN, 60), (i64::MAX, 86_400)] {
+        let bucket = Bucket::of_secs(secs).expect("a bucket");
+        let refused = bucket_start(ts, bucket).expect_err("no grid places this instant");
+        assert_eq!(refused.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            refused
+                .why
+                .starts_with(&format!("pull::fold refused the instant {ts}")),
+            "{}",
+            refused.why
+        );
+    }
+}
+
+/// **A ROW IS COMPARED BY ITS FEEDS' ROLES, AND TALLIED BY WHAT IT WAS.**
+/// The timeline tests always set a non-base GDFL cell first against a base
+/// Zerodha one; here `compare_row` and `Tally::count` meet every other order
+/// and every edge of a cell, from the feeds' own declared bases (GDFL raw,
+/// Zerodha vendor-adjusted with an official day close, Dhan unverified).
+///
+/// Extremes: (1) two cells of one vendor are not compared at all; (2) the
+/// base on the first side is not swapped; (3) when neither feed is a base the
+/// cells keep their order; (4) a zero price on the base side is "not a
+/// price"; (5) a volume twice the base's is flagged `v`; (6) a base with no
+/// volume leaves none to compare; (7) feeds of no measured price basis are
+/// "unverified"; (8) a share whose bases differ but whose closes are equal is
+/// "adjusted but equal here". Combined: (9) a zero price beside a doubled
+/// volume in one row names the price and flags only the volume; (10) a
+/// one-vendor row and compared rows tallied together all count as rows of
+/// both feeds, and none disagrees. Out of the box: (11) every price at
+/// `i64::MAX` on both sides compares exactly, in integers, as equal.
+#[test]
+fn a_row_is_compared_by_its_feeds_roles_and_tallied_by_what_it_was() {
+    let inst = Instrument {
+        exchange: Exchange::Nse,
+        segment: Segment::Cash,
+        symbol: "INVENTEDCO".to_owned(),
+        contract: None,
+    };
+    let source = |feed: Feed| Source {
+        feed,
+        kind: Kind::Stored,
+        series: Series {
+            inst: inst.clone(),
+            vendor: feed.store_vendor().expect("every feed has a prefix"),
+            rung: Timeframe::MINUTE_1,
+        },
+        held: Arc::from(Vec::new()),
+    };
+    let at = t(day_a(), 10, 0, 0);
+    let cell = |prices: (i64, i64, i64, i64), volume: i64| Folded {
+        bar: bar(at, prices, volume, OI_NULL),
+        rows: 1,
+        first: at,
+    };
+    let compare =
+        |present: &[(&Source, Folded)]| compare_row(present, Timeframe::MINUTE_1, Segment::Cash);
+    let (zerodha, gdfl, dhan) = (
+        source(Feed::Zerodha),
+        source(Feed::Gdfl),
+        source(Feed::Dhan),
+    );
+    let level = (52_100, 52_300, 52_000, 52_200);
+
+    let one_vendor = [(&zerodha, cell(level, 10)), (&zerodha, cell(level, 20))];
+    let not_compared = compare(&one_vendor);
+    assert_eq!(not_compared.basis, RowBasis::NotCompared);
+    assert_eq!(not_compared.json, Value::Null);
+    assert_eq!(not_compared.equal, None);
+
+    let base_first = [(&zerodha, cell(level, 10)), (&gdfl, cell(level, 10))];
+    let adjusted = compare(&base_first);
+    assert_eq!(
+        adjusted.json["base"],
+        json!({ "of": "zerodha", "against": "gdfl" }),
+        "the base on the first side stays the base"
+    );
+    assert_eq!(adjusted.basis, RowBasis::One);
+    assert_eq!(adjusted.json["basis"], "adjusted_but_equal_here");
+
+    let no_base = [
+        (&gdfl, cell((0, 52_300, 52_000, 52_200), 1_000)),
+        (&dhan, cell(level, 2_000)),
+    ];
+    let unverified = compare(&no_base);
+    assert_eq!(
+        unverified.json["base"],
+        json!({ "of": "gdfl", "against": "dhan" }),
+        "with no base the order stands"
+    );
+    assert_eq!(unverified.json["basis"], "unverified");
+    assert_eq!(unverified.json["o"], json!({ "why": "not_a_price" }));
+    assert_eq!(
+        unverified.json["v"],
+        json!({ "percent": n("100.00"), "flag": true, "equal": false })
+    );
+    assert_eq!(unverified.flags, vec!["v"], "only the volume is flagged");
+    assert_eq!(unverified.disagree, 0);
+
+    let no_volume = [(&gdfl, cell(level, 0)), (&dhan, cell(level, 2_000))];
+    assert_eq!(
+        compare(&no_volume).json["v"],
+        json!({ "why": "no_volume_to_compare" })
+    );
+
+    let top = (i64::MAX, i64::MAX, i64::MAX, i64::MAX);
+    let at_the_top = [(&gdfl, cell(top, 1)), (&dhan, cell(top, 1))];
+    let exact = compare(&at_the_top);
+    assert_eq!(
+        exact.json["c"],
+        json!({ "bps": n("0.00"), "flag": false, "equal": true, "paisa": 0 })
+    );
+    assert_eq!(exact.equal, Some([true; 4]));
+
+    let mut tally = Tally::default();
+    tally.count(&not_compared, &one_vendor);
+    tally.count(&adjusted, &base_first);
+    tally.count(&unverified, &no_base);
+    let summed = tally.json();
+    assert_eq!(summed["rows"], 3);
+    assert_eq!(summed["both_feeds"], 3);
+    assert_eq!(summed["prices_within_tolerance"], 3);
+    assert_eq!(summed["prices_disagree"], 0);
+}

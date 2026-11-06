@@ -252,15 +252,20 @@ async fn a_direct_write_while_the_head_clock_runs_starts_a_response() {
         .await
         .expect("a flush answers at once")
         .expect("a flush");
-    let HeadState::Awaiting {
-        deadline,
-        progress,
-        partial,
-    } = wrapped.state
-    else {
+    assert!(
+        matches!(
+            wrapped.state,
+            HeadState::Awaiting {
+                progress: 0,
+                partial: false,
+                ..
+            }
+        ),
+        "the flush re-arms the head clock, with no byte of the next head read"
+    );
+    let HeadState::Awaiting { deadline, .. } = wrapped.state else {
         panic!("the flush re-arms the head clock");
     };
-    assert_eq!((progress, partial), (0, false));
     assert!(deadline > tokio::time::Instant::now() + std::time::Duration::from_secs(25));
 
     let mut got = [0_u8; 17];
@@ -307,9 +312,10 @@ async fn a_router_served_without_the_limited_listener_passes_through_the_watch()
 /// ends on `to`: refused while `to` is today and today's session has not
 /// settled, with the reason today is held back, and accepted otherwise.
 /// Built from the same parts the guard reads (the calendar of record, the
-/// venue's dated close, the minute of the day), but asked of them here.
-fn ending_on(to: Day) -> Result<(), String> {
-    let now = ingest::ist_moment(std::time::SystemTime::now()).expect("a usable clock");
+/// venue's dated close, the minute of the day), but asked of them here, at
+/// the instant `at`.
+fn ending_on(to: Day, at: std::time::SystemTime) -> Result<(), String> {
+    let now = ingest::ist_moment(at).expect("a usable clock");
     let today = now.day();
     if to != today {
         // The day turned between building the window and asking: it ended
@@ -354,12 +360,78 @@ fn a_window_ending_today_is_held_back_exactly_while_today_is_unsettled() {
     )
     .expect("a one-day window ending today, parsed as of tomorrow");
     assert_eq!(asked.window.to(), today);
-    let before = ending_on(today);
+    let before = ending_on(today, std::time::SystemTime::now());
     let got = finished_day_only(&asked);
-    let after = ending_on(today);
+    let after = ending_on(today, std::time::SystemTime::now());
     assert!(
-        got == before || got == after,
+        [&before, &after].contains(&&got),
         "got {got:?}; the guard's parts said {before:?} then {after:?}"
+    );
+}
+
+/// **THE TEST ABOVE ASKS A MODEL WITH BOTH ANSWERS.** Which one `ending_on`
+/// gives at the moment of a run depends on the hour, so a run only ever
+/// reads one of them; here both are read at fixed instants, so the model the
+/// test above compares the guard with is never one that answers a single way.
+///
+/// Extremes: (1) an open day before its session (10:00 IST) is held back by
+/// name; (2) the same day five minutes past its 15:30 close (15:35) is
+/// askable; (3) one minute before that (15:34) is still held back; (4) the
+/// last minute of the day (23:59) is askable; (5) a Sunday at 10:00 is
+/// askable; (6) a weekday holiday of the record (Independence Day 2025, a
+/// Friday) at 10:00 is askable; (7) a window that ended the day before the
+/// instant is askable whatever the hour; (8) the first minute of the open
+/// day (00:00) is held back. Combined: (9) a Sunday window asked at 10:00
+/// the next day, a Monday before its session, is askable, because it ended
+/// before that day; (10) the open day asked at 10:00 the day after it is
+/// askable while that next day's own 10:00 is held back. Out of the box:
+/// (11) a window that ends tomorrow, asked today, is no day the model
+/// answers for: askable here, and the parse refuses it first in the route.
+#[test]
+fn the_held_back_model_answers_both_ways_at_fixed_instants() {
+    fn at(day: Day, hour: u64, minute: u64) -> std::time::SystemTime {
+        // IST is UTC+05:30, so the instant is 19,800 s earlier in UTC.
+        let secs = u64::from(day.days_from_epoch()) * 86_400 + hour * 3_600 + minute * 60 - 19_800;
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+    let tuesday = Day::new(2025, 7, 1).expect("a trading Tuesday");
+    let wednesday = tuesday.succ().expect("the next day");
+    let sunday = Day::new(2025, 7, 6).expect("a Sunday");
+    let monday = sunday.succ().expect("the next day");
+    let holiday = Day::new(2025, 8, 15).expect("Independence Day, a Friday");
+    let held = |answer: Result<(), String>, what: &str| {
+        let why = answer.expect_err(what);
+        assert!(why.contains(" Today: "), "{what}: {why}");
+    };
+    held(ending_on(tuesday, at(tuesday, 10, 0)), "before the session");
+    assert_eq!(
+        ending_on(tuesday, at(tuesday, 15, 35)),
+        Ok(()),
+        "past close"
+    );
+    held(ending_on(tuesday, at(tuesday, 15, 34)), "a minute short");
+    assert_eq!(ending_on(tuesday, at(tuesday, 23, 59)), Ok(()), "late");
+    assert_eq!(ending_on(sunday, at(sunday, 10, 0)), Ok(()), "a Sunday");
+    assert_eq!(ending_on(holiday, at(holiday, 10, 0)), Ok(()), "a holiday");
+    assert_eq!(ending_on(tuesday, at(wednesday, 0, 0)), Ok(()), "yesterday");
+    held(
+        ending_on(tuesday, at(tuesday, 0, 0)),
+        "the day's first minute",
+    );
+    assert_eq!(ending_on(sunday, at(monday, 10, 0)), Ok(()), "ended Sunday");
+    assert_eq!(ending_on(tuesday, at(wednesday, 10, 0)), Ok(()), "ended");
+    held(
+        ending_on(wednesday, at(wednesday, 10, 0)),
+        "the next day's own",
+    );
+    assert_eq!(ending_on(wednesday, at(tuesday, 10, 0)), Ok(()), "tomorrow");
+    assert!(
+        ingest::parse_spot(
+            &format!("target=swept&vendor=dhan&granularity=1day&from={wednesday}&to={wednesday}"),
+            tuesday,
+        )
+        .is_err(),
+        "a window past the parse's own today is refused before the guard is asked"
     );
 }
 

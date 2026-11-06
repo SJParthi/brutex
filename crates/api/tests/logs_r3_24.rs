@@ -242,7 +242,6 @@ fn refusals(sink: &telemetry::Sink, n: usize) {
 fn a_torn_line_never_cuts_a_span_short() {
     const TOTAL: usize = 40;
     let to = telemetry::now_millis() + 86_400_000;
-    let mut short = Vec::new();
     for k in 1..TOTAL {
         let served = scratch(&format!("torn-{k}"));
         let store = scratch(&format!("torn-store-{k}"));
@@ -270,17 +269,14 @@ fn a_torn_line_never_cuts_a_span_short() {
             let got = logs(&served, &store, &query);
             let records = got["records"].as_array().map_or(0, Vec::len);
             let said = got["keyed"]["index"]["said"].as_str().unwrap_or_default();
-            if records != TOTAL {
-                short.push(format!("k={k} {query}: {records} line(s), said {said:?}"));
-            }
+            assert_eq!(
+                records, TOTAL,
+                "a span lost lines after a torn line: k={k} {query}: said {said:?}"
+            );
         }
         let _ignored = std::fs::remove_dir_all(&served);
         let _ignored = std::fs::remove_dir_all(&store);
     }
-    assert!(
-        short.is_empty(),
-        "a span lost lines after a torn line: {short:#?}"
-    );
 }
 
 /// **R3-24 REPAIR ROUND 1: A LINE WRITTEN PER REQUEST NEVER REACHES THE
@@ -330,9 +326,9 @@ fn a_line_written_per_request_never_reaches_the_never_rolling_stream() {
 }
 
 /// Every record a span alone answers, page after page, following `next`
-/// (`before=<next>`) until there is none; `None` when 200 pages did not
+/// (`before=<next>`) until there is none. Panics when 200 pages did not
 /// reach the end, which only a cursor that stands still can do here.
-fn every_page(served: &Path, store: &Path, query: &str) -> Option<(Vec<u64>, String)> {
+fn every_page(served: &Path, store: &Path, query: &str) -> (Vec<u64>, String) {
     let (mut seqs, mut before) = (Vec::new(), None::<String>);
     for _ in 0..200 {
         let asked = before
@@ -348,11 +344,11 @@ fn every_page(served: &Path, store: &Path, query: &str) -> Option<(Vec<u64>, Str
         );
         let Some(next) = got["keyed"]["next"].as_str() else {
             let said = got["keyed"]["index"]["said"].as_str().unwrap_or_default();
-            return Some((seqs, said.to_owned()));
+            return (seqs, said.to_owned());
         };
         before = Some(next.to_owned());
     }
-    None
+    panic!("{query}: no end in 200 pages, {} line(s) read", seqs.len());
 }
 
 /// **R3-24 REPAIR ROUND 2: A RUN OF DAMAGE LONGER THAN A PROBE'S WINDOW
@@ -373,7 +369,6 @@ fn a_long_run_of_damage_never_cuts_a_span_short() {
     const BEFORE: usize = 40;
     const AFTER: usize = 150;
     let to = telemetry::now_millis() + 86_400_000;
-    let mut short = Vec::new();
     for run in [200 * 1024, 512 * 1024, 3 * 1024 * 1024] {
         let served = scratch(&format!("long-run-{run}"));
         let store = scratch(&format!("long-run-store-{run}"));
@@ -395,25 +390,16 @@ fn a_long_run_of_damage_never_cuts_a_span_short() {
         }
         for limit in [20, 500] {
             let query = format!("from=0&to={to}&limit={limit}");
-            match every_page(&served, &store, &query) {
-                None => short.push(format!("run {run} limit {limit}: no end in 200 pages")),
-                Some((seqs, said)) => {
-                    let distinct: std::collections::BTreeSet<u64> = seqs.iter().copied().collect();
-                    if seqs.len() != BEFORE + AFTER || distinct.len() != BEFORE + AFTER {
-                        short.push(format!(
-                            "run {run} limit {limit}: {} line(s), {} distinct, last said {said:?}",
-                            seqs.len(),
-                            distinct.len()
-                        ));
-                    }
-                }
-            }
+            let (seqs, said) = every_page(&served, &store, &query);
+            let distinct: std::collections::BTreeSet<u64> = seqs.iter().copied().collect();
+            assert_eq!(
+                (seqs.len(), distinct.len()),
+                (BEFORE + AFTER, BEFORE + AFTER),
+                "a span lost lines across a run of damage: run {run} limit {limit} \
+                 (lines, distinct), last said {said:?}"
+            );
         }
         let _ignored = std::fs::remove_dir_all(&served);
         let _ignored = std::fs::remove_dir_all(&store);
     }
-    assert!(
-        short.is_empty(),
-        "a span lost lines across a run of damage: {short:#?}"
-    );
 }

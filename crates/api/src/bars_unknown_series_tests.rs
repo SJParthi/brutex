@@ -429,6 +429,18 @@ fn a_rung_directory_that_holds_no_bin_is_refused() {
 
 #[test]
 fn a_rung_directory_that_cannot_be_listed_keeps_its_own_error() {
+    // Mode bits do not bind root, where this test used to take a second
+    // path ("a superuser lists it anyway") that a non-root run never took,
+    // and the refusal it names was never read there. It now runs where they
+    // bind, so the same refusal is read on every host (D-0995).
+    crate::isolated::where_permission_binds(
+        "bars::unknown_series_tests::a_rung_directory_that_cannot_be_listed_keeps_its_own_error",
+        a_rung_directory_that_cannot_be_listed_keeps_its_own_error_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_rung_directory_that_cannot_be_listed_keeps_its_own_error_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = scratch("unlisted");
     let index = format!("NSE-INDEX-{INDEX}");
@@ -442,7 +454,10 @@ fn a_rung_directory_that_cannot_be_listed_keeps_its_own_error() {
     );
     let dir = root.join(format!("bars/zerodha/NSE/INDEX/{INDEX}/1min"));
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-    let listable = std::fs::read_dir(&dir).is_ok();
+    assert!(
+        std::fs::read_dir(&dir).is_err(),
+        "the mode bits bind in this process"
+    );
     let answer = ask(
         &root,
         Vendor::Zerodha,
@@ -452,14 +467,9 @@ fn a_rung_directory_that_cannot_be_listed_keeps_its_own_error() {
         ym(2024, 3),
     );
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
-    if listable {
-        // A superuser lists it anyway: then it is simply held.
-        assert_eq!(answer.expect("held").total, 2);
-    } else {
-        let why = answer.expect_err("an unlistable directory is not an empty one");
-        assert!(why.starts_with("cannot list "), "{why}");
-        assert!(!why.contains("unknown_series"), "{why}");
-    }
+    let why = answer.expect_err("an unlistable directory is not an empty one");
+    assert!(why.starts_with("cannot list "), "{why}");
+    assert!(!why.contains("unknown_series"), "{why}");
     let _ = std::fs::remove_dir_all(&root);
 }
 

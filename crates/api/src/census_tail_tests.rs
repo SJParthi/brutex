@@ -105,10 +105,10 @@ impl Disk {
 
 /// The census's loaded half, or a failure naming what it was instead.
 fn held(census: &VendorCensus) -> &Manifests {
-    match census.state {
-        Census::Held { ref manifest } => manifest,
-        Census::Absent | Census::Unreadable { .. } => panic!("not held: {}", census.note()),
-    }
+    let Census::Held { ref manifest } = census.state else {
+        panic!("not held: {}", census.note());
+    };
+    manifest
 }
 
 /// Every counter and every key's newest row agree between two censuses.
@@ -493,13 +493,11 @@ fn a_partition_is_bounded_by_its_own_header_capacity() {
     bytes.resize(bytes.len() + 3 * 128, 0);
     std::fs::write(&tight.path, &bytes).expect("grown");
     let over = read_vendor(&refused_dir, Vendor::Gdfl);
-    match over.state {
-        Census::Unreadable { ref reason, fault } => {
-            assert_eq!(fault, Fault::Refused);
-            assert!(reason.contains("declares 2 entries"), "{reason}");
-        }
-        Census::Absent | Census::Held { .. } => panic!("served past its capacity: {}", over.note()),
-    }
+    let Census::Unreadable { ref reason, fault } = over.state else {
+        panic!("served past its capacity: {}", over.note());
+    };
+    assert_eq!(fault, Fault::Refused);
+    assert!(reason.contains("declares 2 entries"), "{reason}");
 }
 
 /// **A PARTITION'S TAIL IS READ AS THE SINGLE FILE'S IS, AND A NEW EPOCH IS

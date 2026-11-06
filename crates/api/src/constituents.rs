@@ -1616,13 +1616,15 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("NO ISIN") && l.contains("DUMMYINXGN")),
+                .filter(|l| l.contains("NO ISIN"))
+                .any(|l| l.contains("DUMMYINXGN")),
             "{lines:?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("NO ISIN") && l.contains("not a legal symbol")),
+                .filter(|l| l.contains("NO ISIN"))
+                .any(|l| l.contains("not a legal symbol")),
             "{lines:?}"
         );
     }

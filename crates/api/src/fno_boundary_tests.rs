@@ -23,6 +23,10 @@ struct Fixture {
 }
 
 impl Fixture {
+    #[allow(
+        clippy::panic,
+        reason = "a fixture whose feed is not HTTP must fail the test loudly"
+    )]
     fn new(count: usize) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let ordinal = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -37,11 +41,9 @@ impl Fixture {
             today,
         )
         .expect("generated named-chain request");
-        let shipped = match asked.feed.descriptor().transport {
-            pull::vendor::Transport::Http(spec) => Some(spec),
-            pull::vendor::Transport::LocalArchive(_) => None,
-        }
-        .expect("named-chain fixture requires an HTTP descriptor");
+        let pull::vendor::Transport::Http(shipped) = asked.feed.descriptor().transport else {
+            panic!("named-chain fixture requires an HTTP descriptor");
+        };
         let spec = pull::vendor::HttpSpec {
             // No real credential or vendor connection can enter this fixture.
             base_url: "http://127.0.0.1:0",
@@ -173,9 +175,11 @@ impl Fixture {
                 )
             }
         });
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("loopback fixture");
-        });
+        // The serve future itself, which never returns before `Drop` aborts
+        // it: a block awaiting it would end in a line no run reaches.
+        let task = tokio::spawn(std::future::IntoFuture::into_future(axum::serve(
+            listener, app,
+        )));
         self.wire.spec.base_url = Box::leak(format!("http://{address}").into_boxed_str());
         self.wire.source = pull::http::HttpSource::new(
             self.wire.spec,
@@ -209,17 +213,19 @@ impl Fixture {
         assert!(self.asked.rate.is_some());
     }
 
+    #[allow(
+        clippy::panic,
+        reason = "a fixture whose feed is not HTTP must fail the test loudly"
+    )]
     fn enable_rolling_pricing(&mut self) {
         self.asked = ingest::parse_fno(
             "underlying=NIFTY&series=opt&vendor=dhan&from=2025-07-01&to=2025-07-01&rate=0",
             self.today,
         )
         .expect("generated rolling request with an operator-supplied rate");
-        let spec = match self.asked.feed.descriptor().transport {
-            pull::vendor::Transport::Http(spec) => Some(spec),
-            pull::vendor::Transport::LocalArchive(_) => None,
-        }
-        .expect("the rolling fixture requires an HTTP descriptor");
+        let pull::vendor::Transport::Http(spec) = self.asked.feed.descriptor().transport else {
+            panic!("the rolling fixture requires an HTTP descriptor");
+        };
         self.wire.spec = pull::vendor::HttpSpec {
             base_url: "http://127.0.0.1:0",
             ..spec
@@ -378,7 +384,7 @@ impl Fixture {
 }
 
 struct MockVendor {
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
     seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 

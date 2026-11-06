@@ -1,13 +1,14 @@
 STATUS: IN PROGRESS
 
-# report-BASE-COV-API-AS2 (BASE-COV-API repair round 3, shard G2, 5 Nov 2026)
+# report-BASE-COV-API-AS2 (BASE-COV-API repair round 3, shard G2, 5-6 Nov 2026)
 
 Branch `cloud/cov-api-as2-20261105`, cut from the kit commit
 `f4111a0132473d8771d8624a9538b1362926f70b`; START `6ea46e59c07488eeccff388407976041852aae2c`.
 Owners in order: token `BASE-COV-API-AS2-20261105-1` (commits `dd7f285b`..`f13f4f57`), the main
-session's pause `PAUSED-BY-MAIN-20261105-1420` (`0eff0822`), and this continuation,
-`BASE-COV-API-AS2-20261105-3` (from `8ed8a90f`). The earlier session wrote no report, so its
-commits are its record; this file is the shard's one report from here on.
+session's pause `PAUSED-BY-MAIN-20261105-1420` (`0eff0822`), `BASE-COV-API-AS2-20261105-3`
+(`8ed8a90f`..`c47e9a06`; the account's weekly limit cut it at about 21:28 IST on 5 Nov, its work
+intact), and this continuation, `BASE-COV-API-AS2-20261105-4` (from `725e11d5`, 6 Nov). The first
+session wrote no report, so its commits are its record; this file is the shard's one report.
 
 ## Kit check
 
@@ -32,7 +33,7 @@ free disk; TMPDIR on a tmpfs folder of mode 1777.
 - Two `should_panic` tests close the GAP rows `sources_tests.rs:429` and
   `research_doors_tests.rs:35`.
 
-## This session
+## Session -3 (5 Nov)
 
 Work in progress: item (a), G2's GAP rows (1,972 rows at r2: 1,192 / 131 / 110 lines and
 412 / 115 / 12 sides, production / test / ignored).
@@ -80,4 +81,124 @@ Host reds met so far (4-core root host):
 - `tests/cloud_mutants_bars.rs` `spot_json_is_refused_by_name_when_every_store_read_slot_is_held`
   (G2's file): the same defect on the store-read pool; FIXED in this shard (0.53 s here).
 
-NEXT: close G2 production GAP rows file by file with tests; push after each file.
+Session -3 ended (weekly limit) with this NEXT: close G2 production GAP rows file by file
+with tests; push after each file.
+
+## Session -4 (6 Nov)
+
+### Host and pins
+
+A fresh container: Linux, root, 4 cores, 15 GB memory, 29 GB free disk, TMPDIR
+`/dev/shm/as2tmp` (tmpfs, mode 1777). The pinned nightly was installed again as
+`nightly-2026-08-08`: `rustc -V` prints exactly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`;
+its llvm-cov and llvm-profdata print `LLVM version 23.1.0-rust-1.99.0-nightly`. fmt and clippy
+use the repository's pinned toolchain, `1.97.1` (`rust-toolchain.toml`). One
+`CARGO_TARGET_DIR`; `CARGO_PROFILE_DEV_DEBUG=0` (allowed by CONTEXT for room; no coverage
+mapping depends on it).
+
+### Baseline: Route B on the tip this session took over
+
+`d3-route-b-cloud.sh /home/user/rb /home/user/tgt <new profile folder> <new log folder> <set> api
+-- --skip a_full_calendar_pool_refuses_the_census_and_the_audit`, tree `/home/user/rb` (a
+detached worktree at `725e11d5`, whose code is `c47e9a06`'s), the readout limited to G2's 58
+files (a set file of their 58 `coverage ... whole` lines taken from the kit's set). The skipped
+test is G3's, the 4-core hang session -3 named (see host reds). The profile folder was opened to
+uid 65534 so the children of `isolated::where_permission_binds` write their profiles.
+
+- build rc 0 in 3 min (170 artifacts); `== test api rc=101 END 2026-11-06 08:24:00 IST (5 min);
+  tests passed 3103 failed 14 ignored 16`; lib: `test result: FAILED. 3019 passed; 13 failed;
+  16 ignored; 0 measured; 1 filtered out; finished in 188.37s`; `ROUTE-B DONE 2026-11-06
+  08:29:47 IST: every package measured and read (api)`.
+- G2's 58 files on this host: lines 63,325/64,808 (1,483 uncovered), branches 4,493/5,432 (939
+  uncovered sides), (F) rows included. Repair r2's figures for the same files (Mac,
+  8091e72f7): 61,694/63,260 (1,566) and 4,442/5,438 (996). The two hosts differ in what
+  each reaches (macOS-only lines, root, 4 cores), so the comparison is a size, not a proof.
+- The 14 reds: `server::head_deadline_body_tests::` (G2, five: see host reds), and nine of
+  other shards' files: `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`,
+  `detail::tests::a_refused_admission_names_what_its_bound_and_why` (a 4-slot pool),
+  `pullrun::cloud_mutant_tests::newest_records_that_cannot_be_read_leave_the_answer_not_known`,
+  `pullrun::restart_tests::the_journals_own_extremes`,
+  `server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`
+  ("the test needs a reader the mode refuses (not root)"),
+  `server::cloud_mutant_tests_c::a_store_that_takes_no_write_trips_the_store_breaker`,
+  `server::cloud_mutant_tests_c::a_store_whose_audit_dir_cannot_be_made_is_at_fault`,
+  `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted` ("this
+  host reads a 000 directory (root?)") and `tests/pool_load.rs`
+  `the_feed_list_stays_fast_while_32_clients_loop_each_route` (L-BCA-4). Their files are
+  G1's and G3's, so they are named here and not taken up.
+
+### Test-code GAP rows closed by restructure (no check weakened)
+
+Each row was a collector branch, a `match` arm that panics, an `||`/`&&` side inside a closure,
+or a guard a run cannot take; each is now a direct `assert!`/`assert_eq!`, a one-line let-else
+whose else panics (the (F) forms repair r2's reading kept), a branch-free form of the same
+check, or code that runs:
+
+- `tests/logs_r3_24.rs` (274, 355, 399, 403-407; 273:16, 402:24, 402:56): the two collectors
+  are per-case `assert_eq!`s; `every_page` panics by name past 200 pages.
+- `tests/store_step_forms.rs` (62-63): a loop over a list asserted empty on the line before it
+  could never run; removed, with the reason.
+- `census_tail_tests.rs` (110, 501), `calendar_of.rs` (1349), `fno_boundary_tests.rs` (42, 220):
+  match arms that panic are let-else.
+- `fno_boundary_tests.rs` (178): the mock vendor spawns the serve future itself, not a block
+  whose tail no run reaches; `head_deadline_body_tests.rs` (138-139): the shutdown future is one
+  expression for the same reason.
+- `head_deadline_body_tests.rs` (199, 218, 243, 857, 890, 893-895, 903-904): `paced`'s and
+  `drain`'s timeouts panic by name (`drain`'s callers all asserted the close, so `drain`
+  returns only the text); the pattern check is an `assert_eq!`; the reader's end of socket and
+  the write's error are assertions; the waits are recorded and judged after the loop, so which
+  kinds a host meets no longer decides which lines run.
+- `bars_unknown_series_tests.rs` (455-457): runs through `isolated::where_permission_binds`
+  (D-0995), so the refusal is read on every host and no root-only path is left.
+- `bars_sort_tests.rs` (499, 955, 1082-1083, 1508-1510): a range `contains`, `min_by_key` /
+  `max_by_key` for the tie-break, the one field the holes line names its series by (`key`,
+  bars.rs:713), and the foreign-index page asserted as it is (no row served, 360 named faults).
+- `bars_sort.rs` (3013, 4196-4197, 4327), `constituents.rs` (1619, 1625): `&&` inside `.any()`
+  is `.filter(..).any(..)`; a closure inside an assert's message is a fixed message.
+- `render.rs` (3230-3232, 3365, 3371, 4219, 4459): one discovery closure offered to both
+  switch positions; the capped note's expectation follows the process's switch in one
+  `matches!`; the share-bar and history checks assert the text the fixtures make.
+- `server_cloud_mutant_tests_e.rs` (255, 314, 317, 328, 361): a `matches!` assert plus a
+  one-line let-else; `ending_on` takes its instant; `[before, after].contains`.
+
+### New tests (each with an `Extremes:` doc line)
+
+| file | test | extremes (single / combined / out of the box) | rows it reaches (baseline numbering) |
+|---|---|---|---|
+| `sources_tests.rs` | `the_integer_comparisons_month_walks_and_fold_grid_answer_at_their_edges` | 12 (9 / 2 / 1) | sources.rs 196-201, 896:18 T, 908:18 T, 926:5 F, 939:5 F, 1638:16 F, 1653:15 T |
+| `sources_tests.rs` | `a_row_is_compared_by_its_feeds_roles_and_tallied_by_what_it_was` | 11 (8 / 2 / 1) | sources.rs 2387:8 T, 2388, 2400:55 F, 2400:72 F, 2403, 2433:35 T, 2461:13 F, 2462-2463, 2534:24 T, 2535, 2539, 2560, 2598 |
+| `render.rs` | `the_finder_names_a_handler_by_its_shape_and_lets_prose_be` | 12 (8 / 2 / 2) | render.rs 5133:19 F, 5136:29 T, 5137 |
+| `server_cloud_mutant_tests_e.rs` | `the_held_back_model_answers_both_ways_at_fixed_instants` | 11 (8 / 2 / 1) | the file's 314:8 T, 317, 328 |
+
+Instrumented filtered run of every touched file's tests (`devtest.sh r4`, one `cargo test`):
+lib `337 passed; 5 failed; 1 ignored` (the five head-deadline host-red candidates only),
+`tests/logs_r3_24.rs` 3 passed, `tests/store_step_forms.rs` 3 passed; each target row read
+covered with `llvm-cov show` of that run's profile, the rows left in the edited regions being
+(F) forms. `cargo fmt --all --check` rc 0; `cargo clippy -p api --all-targets --locked --
+-D warnings` rc 0 (1.97.1).
+
+### Rows proved (U) so far (platform independent; proofs go in `fu-AS2.txt.md`)
+
+- server.rs `let Some(store_vendor) = feed.store_vendor() else` (tip 9463, 9464-9469):
+  `Feed::store_vendor` (crates/pull/src/vendor.rs:3891-3906) is Some on every arm.
+- server.rs `let Some(layout) = archive.layout(Segment::Fno) else` (tip 9960, 9961-9967): the
+  only two archive descriptors (vendor.rs:5670, :5784) each declare an Fno layout (:5707,
+  :5801; TRUEDATA_FNO :5647, GDFL_FNO :5756).
+- sources.rs 1632:13 F, 1633: `windows(2)` yields only two-element slices.
+- sources.rs 2458:16 F: `at` enumerates a four-element array and `equal` is `[false; 4]`.
+
+### Host reds (G2's files)
+
+- The five `server::head_deadline_body_tests::` slow-reader tests
+  (`a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole`,
+  `a_chunked_body_reaches_a_slow_reader_whole`,
+  `a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`,
+  `slow_readers_at_the_cap_are_served_whole_and_the_next_waits`,
+  `pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is`) fail on this host in
+  every run so far, in the baseline (the file as at START) and filtered: each response is cut
+  at the stall deadline after about 5.4 MB of 16 or 8 MiB ("cut after 5374637 of 16777216
+  bytes at 1.633183617s"), and one reader meets a connection reset. Proof on START with the
+  same command: pending (NEXT).
+
+NEXT: red round for the four new tests (a hand change each, in the scratch worktree);
+head-deadline reds on START; then G2 production rows, sources.rs first, file by file.

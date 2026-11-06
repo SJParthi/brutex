@@ -3225,18 +3225,18 @@ mod archive_suggestion_tests {
     use super::*;
     #[test]
     fn disabled_archive_suggestions_never_enter_the_filesystem_discovery() {
-        let mut called = false;
-        let absent = folders_when(false, || {
-            called = true;
-            vec!["unexpected".to_owned()]
-        });
-        assert!(!called);
-        assert!(absent.is_empty());
-        let found = folders_when(true, || {
-            called = true;
+        // One discovery, offered to both: the switch alone decides whether
+        // it runs.
+        let calls = std::cell::Cell::new(0_u32);
+        let discover = || {
+            calls.set(calls.get() + 1);
             vec!["fixture".to_owned()]
-        });
-        assert!(called);
+        };
+        let absent = folders_when(false, discover);
+        assert_eq!(calls.get(), 0, "a disabled switch never runs the discovery");
+        assert!(absent.is_empty());
+        let found = folders_when(true, discover);
+        assert_eq!(calls.get(), 1, "an enabled switch runs it once");
         assert_eq!(found, vec!["fixture".to_owned()]);
     }
 }
@@ -3362,13 +3362,16 @@ mod tests {
                 html.matches("<option value=").count(),
                 made.min(MAX_FOLDER_SUGGESTIONS)
             );
-            if archive_suggestions() == Ok(true) {
-                assert_eq!(
-                    html.contains(&format!("capped at {MAX_FOLDER_SUGGESTIONS}")),
-                    capped,
-                    "{html}"
-                );
-            }
+            // With suggestions off (BRUTEX_ARCHIVE_SUGGESTIONS) the input says
+            // so instead and carries no note; a test cannot set its own
+            // environment, so the note is owed exactly when the walk was
+            // capped AND this process's switch is on.
+            let noted = matches!((capped, archive_suggestions()), (true, Ok(true)));
+            assert_eq!(
+                html.contains(&format!("capped at {MAX_FOLDER_SUGGESTIONS}")),
+                noted,
+                "{html}"
+            );
         }
     }
 
@@ -4215,10 +4218,10 @@ mod tests {
         // the last taking the rounding remainder so there is never a gap that
         // is really a division leftover.
         assert!(html.contains("class=\"share\""), "{html}");
-        assert!(
-            html.contains("class=\"r0\"") || html.contains("class=\"r1\""),
-            "{html}"
-        );
+        // This fixture's first reason dropped nothing, and a reason of no
+        // width draws no segment, so the bar's first segment is r1's.
+        assert!(!html.contains("class=\"r0\""), "{html}");
+        assert!(html.contains("class=\"r1\""), "{html}");
         assert!(html.contains("class=\"key r3\""), "and a legend: {html}");
 
         // ── THE HALF OF A-09 THIS TEST DID NOT PROVE ────────────────────────
@@ -4455,10 +4458,7 @@ mod tests {
             "two records in, two rows out: {html}"
         );
         assert!(html.contains("#41") && html.contains("#40"), "{html}");
-        assert!(
-            html.contains("2 record(s) held") || html.contains("showing 2"),
-            "{html}"
-        );
+        assert!(html.contains("showing 2"), "{html}");
 
         // Every figure the operator asked for is on the row: what was asked,
         // what landed, what dropped and why, what failed, and how long it took.
@@ -5138,6 +5138,40 @@ mod tests {
             }
         }
         None
+    }
+
+    /// **THE FINDER NAMES A HANDLER BY ITS SHAPE AND LETS PROSE BE.** The
+    /// page tests only ever give `inline_handler` pages with no handler, so
+    /// its answer for one was never read; here it is, at its edges.
+    ///
+    /// Extremes: (1) `onclick=` after a space is named; (2) `onload=` after a
+    /// tab; (3) `onerror=` straight after a closing quote; (4) `onfocus=`
+    /// after a slash; (5) `on` inside words (`front`, `session`, a bare
+    /// `one`) is prose; (6) `on=` names nothing; (7) `onclick` running to the
+    /// text's end with no `=`; (8) a text that opens with `onclick=`, with no
+    /// byte in attribute position before it. Combined: (9) prose `on` ahead
+    /// of a real handler in one text names the handler; (10) two handlers
+    /// name the first. Out of the box: (11) letters past ASCII after `on`
+    /// end the name, which is then no handler; (12) an upper-case page is
+    /// the caller's to lower: `ONCLICK=` here is not read as one.
+    #[test]
+    fn the_finder_names_a_handler_by_its_shape_and_lets_prose_be() {
+        for (text, want) in [
+            ("<a onclick=\"x\">", Some("onclick")),
+            ("<a\tonload=x>", Some("onload")),
+            ("<a title=\"1\"onerror=y>", Some("onerror")),
+            ("<br/onfocus=z>", Some("onfocus")),
+            ("<p>a front session, one</p>", None),
+            ("<a on=1>", None),
+            ("<a onclick", None),
+            ("onclick=x", None),
+            ("<p>session</p><a onmouseover=x>", Some("onmouseover")),
+            ("<a onload=x onclick=y>", Some("onload")),
+            ("<a onkl\u{ef}ck=x>", None),
+            ("<A ONCLICK=X>", None),
+        ] {
+            assert_eq!(inline_handler(text).as_deref(), want, "{text:?}");
+        }
     }
 
     /// **A-20, over the whole surface: the browser runs exactly what this

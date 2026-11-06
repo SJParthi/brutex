@@ -130,13 +130,12 @@ async fn start_app(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    // One expression: no test stops its server before the runtime ends, so
+    // a statement after the await would be a line no run reaches.
     let _served = tokio::spawn(serve_limited(
         listener,
         router,
-        Box::pin(async move {
-            let _ = stopped.await;
-            Ok(())
-        }),
+        Box::pin(async move { stopped.await.map_or(Ok(()), Ok) }),
         limits,
     ));
     (addr, stop)
@@ -193,10 +192,13 @@ async fn paced(
     let mut buf = vec![0_u8; chunk];
     while have.len() < want {
         let room = (want - have.len()).min(chunk);
-        match tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf[..room])).await {
-            Ok(Ok(0) | Err(_)) => return (have, true),
-            Ok(Ok(n)) => have.extend_from_slice(&buf[..n]),
-            Err(elapsed) => panic!("{elapsed}: no byte for 10 s after {} of {want}", have.len()),
+        let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf[..room]));
+        let Ok(read) = read.await else {
+            panic!("no byte for 10 s after {} of {want}", have.len());
+        };
+        match read {
+            Ok(0) | Err(_) => return (have, true),
+            Ok(n) => have.extend_from_slice(&buf[..n]),
         }
         if !pace.is_zero() {
             tokio::time::sleep(pace).await;
@@ -205,17 +207,22 @@ async fn paced(
     (have, false)
 }
 
-/// Everything the server sends until it closes, or until `limit` passes, and
-/// whether it closed.
-async fn drain(stream: &mut TcpStream, limit: Duration) -> (String, bool) {
+/// Everything the server sends until it closes. Every caller needs the close:
+/// a socket still held when `limit` passes fails the test here, by name.
+async fn drain(stream: &mut TcpStream, limit: Duration) -> String {
     let mut got = Vec::new();
     let mut chunk = [0_u8; 4096];
     let until = Instant::now() + limit;
     loop {
-        match tokio::time::timeout_at(until, stream.read(&mut chunk)).await {
-            Ok(Ok(0) | Err(_)) => return (String::from_utf8_lossy(&got).into_owned(), true),
-            Ok(Ok(n)) => got.extend_from_slice(&chunk[..n]),
-            Err(_elapsed) => return (String::from_utf8_lossy(&got).into_owned(), false),
+        let Ok(read) = tokio::time::timeout_at(until, stream.read(&mut chunk)).await else {
+            panic!(
+                "the socket was held past {limit:?}; {} byte(s) came",
+                got.len()
+            );
+        };
+        match read {
+            Ok(0) | Err(_) => return String::from_utf8_lossy(&got).into_owned(),
+            Ok(n) => got.extend_from_slice(&chunk[..n]),
         }
     }
 }
@@ -240,9 +247,13 @@ async fn one_response(stream: &mut TcpStream, tail: &str) -> String {
 }
 
 fn assert_pattern(body: &[u8]) {
-    if let Some(at) = body.iter().enumerate().position(|(i, b)| *b != pattern(i)) {
-        panic!("byte {at} of {} is not the byte sent there", body.len());
-    }
+    let wrong = body.iter().enumerate().position(|(i, b)| *b != pattern(i));
+    assert_eq!(
+        wrong,
+        None,
+        "the first byte of {} that is not the byte sent there",
+        body.len()
+    );
 }
 
 /// The `api.serve` lines carrying `message` since `from` whose path names `tag`.
@@ -299,9 +310,9 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
         took >= T * 4,
         "the body drained in {took:?}: too fast to prove a slow reader is safe"
     );
-    let (said, closed) = drain(&mut client, T * 10).await;
+    let said = drain(&mut client, T * 10).await;
     assert!(
-        closed && said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
+        said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
         "{said:?}"
     );
     let _ = stop.send(());
@@ -333,9 +344,9 @@ async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
     next.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
-    let (said, closed) = drain(&mut next, T * 20).await;
+    let said = drain(&mut next, T * 20).await;
     let freed = stopped.elapsed();
-    assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+    assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
     assert!(
         freed + EARLY >= T,
         "the slot came back at {freed:?}, before a stall deadline"
@@ -468,9 +479,9 @@ async fn an_idle_kept_alive_connection_still_closes_after_the_deadline() {
     let (body, closed) = paced(&mut client, rest, length, 1 << 20, Duration::ZERO).await;
     assert!(!closed && body.len() == length);
     let idle = Instant::now();
-    let (said, closed) = drain(&mut client, T * 10).await;
+    let said = drain(&mut client, T * 10).await;
     let took = idle.elapsed();
-    assert!(closed, "an idle kept-alive socket was held");
+    // `drain` fails the test by name if the idle kept-alive socket was held.
     assert_eq!(said, "", "no request, no reply");
     assert!(took + EARLY >= T, "closed early at {took:?}");
     assert!(took < T + SLACK, "closed late at {took:?}");
@@ -562,9 +573,9 @@ async fn a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole() {
     let (body, closed) = paced(&mut client, part, length, CHUNK, PACE).await;
     assert!(!closed, "cut after {} of {length}", body.len());
     assert_pattern(&body);
-    let (said, closed) = drain(&mut client, T * 20).await;
+    let said = drain(&mut client, T * 20).await;
     assert!(
-        closed && said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
+        said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
         "{said:?}"
     );
     let _ = stop.send(());
@@ -605,9 +616,9 @@ async fn head_204_304_and_empty_bodies_complete_and_restart_the_head_clock() {
             "{request}: {second:?}"
         );
         let idle = Instant::now();
-        let (said, closed) = drain(&mut client, T * 10).await;
+        let said = drain(&mut client, T * 10).await;
         let took = idle.elapsed();
-        assert!(closed && said.is_empty(), "{request}: {said:?}");
+        assert!(said.is_empty(), "{request}: {said:?}");
         assert!(took + EARLY >= T, "{request}: closed early at {took:?}");
         assert!(took < T + SLACK, "{request}: closed late at {took:?}");
     }
@@ -716,8 +727,8 @@ async fn bodies_at_the_kernel_send_buffer_size_complete_for_a_reader_that_comes_
         let (body, _) = paced(&mut client, rest, size, 1 << 20, Duration::ZERO).await;
         assert_eq!(body.len(), size, "{size}: short");
         assert_pattern(&body);
-        let (said, closed) = drain(&mut client, T * 10).await;
-        assert!(closed && said.is_empty(), "{size}: {said:?}");
+        let said = drain(&mut client, T * 10).await;
+        assert!(said.is_empty(), "{size}: {said:?}");
         let tag = format!("test=kbuf-{size}");
         assert!(lines(from, "response cut", &tag).is_empty(), "{size}: cut");
         assert!(
@@ -753,8 +764,8 @@ async fn a_client_that_closes_mid_body_is_logged_as_its_close_not_a_cut() {
     next.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
-    let (said, closed) = drain(&mut next, long * 2).await;
-    assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+    let said = drain(&mut next, long * 2).await;
+    assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
     assert!(
         left.elapsed() < long,
         "the slot came back at {:?}, as late as a stall cut",
@@ -797,9 +808,9 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
     next.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
-    let (said, closed) = drain(&mut next, Duration::from_secs(30)).await;
+    let said = drain(&mut next, Duration::from_secs(30)).await;
     let answered = began.elapsed();
-    assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+    assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
     let mut first_done = Duration::MAX;
     for reader in readers {
         first_done = first_done.min(reader.await.unwrap());
@@ -853,10 +864,13 @@ async fn a_progressing_write_touches_no_timer_and_a_stall_resets_it_once() {
         let mut read = 0_usize;
         while *reading.borrow() {
             tokio::select! {
-                n = client.read(&mut buf) => match n {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => read += n,
-                },
+                // The test holds the writer until this reader stops, so its
+                // socket cannot end while it reads: an end is a failure here.
+                n = client.read(&mut buf) => {
+                    let n = n.expect("the reader's socket stays open while it reads");
+                    assert!(n > 0, "the writer's socket ended while it was read");
+                    read += n;
+                }
                 _ = reading.changed() => {}
             }
         }
@@ -864,8 +878,10 @@ async fn a_progressing_write_touches_no_timer_and_a_stall_resets_it_once() {
     });
     let chunk = [7_u8; 1024];
     let mut moved = Vec::with_capacity(400);
-    let mut waited = 0_u32;
-    let mut resets = 0_u32;
+    // Each wait, as (a stall was already running, the timer moved). Which
+    // kinds a run meets depends on the host's socket buffers, so each kind
+    // is judged once, after the loop, over all of them.
+    let mut waits: Vec<(bool, bool)> = Vec::new();
     while moved.len() < 400 {
         let (timer, stall) = (wrapped.alarm.deadline(), wrapped.stalled_since);
         let began = std::time::Instant::now();
@@ -874,7 +890,8 @@ async fn a_progressing_write_touches_no_timer_and_a_stall_resets_it_once() {
                 .await;
         let took = began.elapsed();
         match polled {
-            Poll::Ready(Ok(n)) => {
+            Poll::Ready(written) => {
+                let n = written.expect("a write that moves is no error");
                 assert_eq!(n, chunk.len());
                 moved.push(took);
                 assert!(
@@ -887,22 +904,24 @@ async fn a_progressing_write_touches_no_timer_and_a_stall_resets_it_once() {
                     "a moving write touched the timer"
                 );
             }
-            Poll::Ready(Err(why)) => panic!("{why}"),
             Poll::Pending => {
-                waited += 1;
-                if stall.is_some() {
-                    assert_eq!(wrapped.alarm.deadline(), timer, "a stall reset twice");
-                } else if wrapped.alarm.deadline() != timer {
-                    resets += 1;
-                }
+                waits.push((stall.is_some(), wrapped.alarm.deadline() != timer));
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
     }
-    assert!(resets <= waited, "{resets} resets for {waited} waits");
-    if waited == 0 {
-        assert_eq!(wrapped.alarm.deadline(), armed, "no wait, no reset");
-    }
+    assert!(
+        !waits.contains(&(true, true)),
+        "a stall reset twice: {waits:?}"
+    );
+    let waited = waits.len();
+    let resets = waits.iter().filter(|wait| **wait == (false, true)).count();
+    // With no wait at all the timer stands where delivery armed it.
+    assert_eq!(
+        waits.is_empty().then_some(wrapped.alarm.deadline()),
+        waits.is_empty().then_some(armed),
+        "no wait, no reset"
+    );
     assert_eq!(wrapped.written, 400 * 1024);
     keep_reading.send(false).unwrap();
     let (_client, _read) = reader.await.unwrap();
