@@ -2553,10 +2553,7 @@ mod tests {
         std::fs::create_dir_all(empty.join("audit/recovery-v1")).unwrap();
         std::fs::write(empty.join("audit/recovery-v1/active.bin"), [0x5a_u8; 256]).unwrap();
         let why = at_start_with(&site, true, |_, _, _| driven.set(driven.get() + 1)).unwrap_err();
-        assert!(
-            why.contains("trailing bytes") || why.contains("recovery"),
-            "{why}"
-        );
+        assert!(why.contains("trailing bytes"), "{why}");
         assert_eq!(
             std::fs::read(empty.join("audit/recovery-v1/active.bin")).unwrap(),
             [0x5a_u8; 256]
@@ -2661,12 +2658,12 @@ mod tests {
         stale.status = Status::Unverified;
         attempts.append(stale).unwrap();
         let ran = execute(&site, &mut plan, &mut attempts, false).await;
-        if let Err(why) = &ran {
-            assert!(
-                !why.contains("recovery requires explicit F&O spot members"),
-                "a row outside this plan blocked it: {why}"
-            );
-        }
+        assert!(
+            !ran.as_ref()
+                .err()
+                .is_some_and(|why| why.contains("recovery requires explicit F&O spot members")),
+            "a row outside this plan blocked it: {ran:?}"
+        );
         drop((plan, attempts));
         std::fs::remove_dir_all(root).unwrap();
     }
