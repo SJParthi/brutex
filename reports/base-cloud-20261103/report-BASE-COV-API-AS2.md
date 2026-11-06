@@ -263,6 +263,24 @@ each at its own assertion:
 The worktree was restored (`git checkout -- .`) and the main tree's tracked files touched
 before its next build (OPS-10).
 
+### Red round 2 (the five tests after round 1)
+
+Scratch worktree at `a34aceca`, five hand changes, the same build and command: `test result:
+FAILED. 0 passed; 5 failed` (the limits test once more as its child), each at its own
+assertion:
+
+- `sources.rs` `absent_why` saying `no_feed_stores_this_rung` for a series of no month:
+  "assertion `left == right` failed: 2024-03-04; left: \"no_feed_stores_this_rung\"".
+- `booleanlaunch.rs` `parse` with the alphabet bound at 8,192: the long alphabet is refused by
+  another check, "qualified search alphabet exceeds input admission".
+- `booleanlaunch.rs` `observation_limits` without the replay comparison: the `replay` child
+  fails, owed "Boolean dashboard observation/replay limits cannot read the admitted search".
+- `instruments_route.rs` a 503 for any unread master: `left: 503` for GDFL.
+- `trades.rs` the absence check's sentence changed: "cause: ... the child was absent at its
+  open. ..." without "could not be checked for absence".
+
+Restored and touched as before.
+
 ### Batch 3 (after the interim measurement's tree)
 
 | file | test | extremes (single / combined / out of the box) | rows it reaches |
@@ -355,7 +373,6 @@ is tracked. It is not repeated.
   run as uid 65534 here).
 - Gate 23 on the Mac's CI shell gates, and the D1 landing.
 
-NEXT: red round 2 (the tests after round 1: the three of batch 2, the two of batch 3); then G2
-production rows file by file (disk_route, calendar_of, scrub_route, topjson, calendar_record,
+NEXT: G2 production rows file by file (disk_route, calendar_of, scrub_route, topjson, calendar_record,
 sources' day table, provenance, bars_sort's guards as (U) proofs, census_cache, server); then
 the final Route B whole:api on the final code tip, the lists and the FIX json again.
