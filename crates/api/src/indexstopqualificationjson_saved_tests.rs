@@ -323,6 +323,36 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
         assert_eq!(status, StatusCode::OK, "{readmitted}");
         assert_eq!(readmitted["rows"], settings["rows"], "{readmitted}");
 
+        // A KEPT READER ANSWERS ONLY ITS OWN ROOT (BASE-COV-API-AS3): the same
+        // identity asked under another root drops it, and that root's open
+        // refuses by name rather than serving the kept rows.
+        let asked = super::Asked::parse(&format!("identity={identity}")).expect("an ask");
+        let elsewhere = super::render(&root.join("another-root"), &asked)
+            .expect_err("no qualification is saved under another root");
+        assert!(
+            elsewhere.contains("Native qualification") && elsewhere.contains("another-root"),
+            "{elsewhere}"
+        );
+        // THE RANKING HAS A BUDGET OF ITS OWN (BASE-COV-API-AS3): over the
+        // saved qualification, a budget its admitted bytes already fill, and
+        // none at all, are refused by name before any row is ranked.
+        let budget = crate::detail::BooleanObservationBudget::load().expect("the child's budget");
+        let reader = super::Reader::open_with_replay_bounds(
+            &root,
+            asked.identity,
+            budget.bytes(),
+            budget.bytes() / 64,
+            super::replay_bounds(budget.bytes()).expect("the replay bounds"),
+        )
+        .expect("the saved qualification opens");
+        for tight in [0, reader.admitted_bytes()] {
+            assert_eq!(
+                super::rank(&reader, tight).map(|(ranked, _)| ranked.len()),
+                Err("native ranking plus retained evidence exceeds read admission".to_owned()),
+                "a budget of {tight}"
+            );
+        }
+
         let original = &settings["original"];
         let source = original["identity"].as_str().expect("a source");
         let source_pin = original["completion"].as_str().expect("its completion");
