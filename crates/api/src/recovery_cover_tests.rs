@@ -1032,3 +1032,120 @@ async fn a_start_counts_every_window_and_reconciles_only_its_own_pending_days() 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&forged_root);
 }
+
+/// **THE PAGE NAMES EVERY STATE IN ITS OWN WORDS, AND A POINTER THAT NAMES
+/// ANOTHER PLAN, OR A PLAN THAT WILL NOT READ, IS REFUSED BY NAME**
+/// (BASE-COV-API repair 3, D-8661). `page_html` over a row of each state and
+/// a run's feed line; `latest_view` over a real run's plain pointer and over
+/// pointers written by hand. Extremes: a queued row; a reserved one; a
+/// checked window; a window not applicable; an unverified one; one at its
+/// retry limit; a blocked one; a row naming no member (not shown); a run
+/// with a feed line (its windows done of all, and what it is doing); a real
+/// run's pointer of one plain identity (its plan read, no predecessor); a
+/// pointer whose key is not the identity its body names (refused); a plan
+/// whose journal is a folder (refused, never read as missing); and, at once,
+/// every state in one table beside the feed line, and the folder plan behind
+/// a pointer that is itself sound; out of the box, a feed line whose doing is
+/// markup (escaped, never rendered).
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every state the page names, then each pointer it may be handed"
+)]
+async fn the_page_names_every_state_and_a_pointer_to_another_plan_is_refused() {
+    let day = on(2026, 7, 1);
+    let row = |status: Status| Record {
+        status,
+        ..record(canonical(
+            "NIFTY",
+            "1min",
+            Window::new(day, day).expect("a day"),
+            "gap",
+        ))
+    };
+    let states = [
+        (Status::Queued, "Queued"),
+        (Status::InFlight, "Attempt reserved"),
+        (Status::Verified, "Stored window checked"),
+        (Status::NotApplicable, "Not applicable"),
+        (Status::Unverified, "Unverified"),
+        (Status::Exhausted, "Missing / retry limit"),
+        (Status::Blocked, "Blocked"),
+    ];
+    let mut rows: Vec<Record> = states.iter().map(|&(status, _)| row(status)).collect();
+    rows.push(record("recovery_kind=seal".to_owned()));
+    let progress = Progress {
+        feeds: vec![FeedReport {
+            vendor: "zerodha".to_owned(),
+            legs: 5,
+            legs_done: 3,
+            doing: "<b>Audit</b> NIFTY".to_owned(),
+            ..FeedReport::default()
+        }],
+        ..Progress::default()
+    };
+    let html = page_html(&progress, Ok(rows), None);
+    for (_, label) in states {
+        assert!(
+            html.contains(&format!("<td class=\"state\">{label}</td>")),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        html.matches("<tr><td>").count(),
+        7,
+        "the row with no member is not shown"
+    );
+    assert!(html.contains("zerodha: 3 of 5 scan windows checked. &lt;b&gt;Audit&lt;/b&gt; NIFTY"));
+
+    // A REAL RUN'S POINTER: one plain identity, its plan read.
+    let (root, site) = mapped_site("recovery-cover-page");
+    source_month(
+        &root,
+        "NIFTY",
+        "1min",
+        day.year_month().expect("a month"),
+        &session_of(day),
+    );
+    let (id, _) = started(&site, legs_of(&[("NIFTY", "1min", day, day)])).await;
+    let view = latest_view(&site).expect("a view");
+    assert_eq!(view.plan, Some(id));
+    assert_eq!(
+        view.predecessor, None,
+        "a plain pointer names no predecessor"
+    );
+    assert!(
+        view.records
+            .iter()
+            .any(|row| row.status == Status::Verified
+                && server::param(&row.body, "member") == "NIFTY"),
+        "{:?}",
+        view.records
+    );
+    let page = page(State(Loaded::clone(&site))).await.0;
+    assert!(page.contains("Stored window checked"), "{page}");
+
+    // A PLAN WHOSE JOURNAL IS A FOLDER, behind the sound pointer.
+    let plan = plan_path(&site, id);
+    std::fs::rename(&plan, plan.with_extension("moved")).expect("moved aside");
+    std::fs::create_dir_all(&plan).expect("a folder at the plan's name");
+    let why = latest_view(&site)
+        .map(|view| view.plan)
+        .expect_err("a folder plan");
+    assert!(!why.contains("missing"), "never read as missing: {why}");
+    // A POINTER WHOSE KEY IS NOT ITS BODY'S IDENTITY.
+    {
+        let mut active = Journal::open(&active_path(&site)).expect("the pointer journal");
+        active
+            .append(Record {
+                key: [1; 32],
+                ..record(hex([2; 32]))
+            })
+            .expect("a forged pointer");
+    }
+    let why = latest_view(&site)
+        .map(|view| view.plan)
+        .expect_err("refused");
+    assert_eq!(why, "active recovery identity mismatch");
+    let _ = std::fs::remove_dir_all(&root);
+}
