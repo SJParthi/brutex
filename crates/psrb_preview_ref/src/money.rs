@@ -18,7 +18,11 @@ pub const fn ceil_div(n: i128, d: i128) -> i128 {
 /// `n / d` rounded to the nearest integer, an exact half upwards (toward plus infinity).
 #[must_use]
 pub const fn half_up(n: i128, d: i128) -> i128 {
-    if d <= 0 { 0 } else { (2 * n + d).div_euclid(2 * d) }
+    if d <= 0 {
+        0
+    } else {
+        (2 * n + d).div_euclid(2 * d)
+    }
 }
 
 /// Paise rounded to the nearest rupee, 50 paise up, returned in paise.

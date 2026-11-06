@@ -14,7 +14,10 @@ fn a_distribution_reads_by_nearest_rank() {
     assert_eq!((d.p50(), d.p99(), d.max(), d.n()), (50, 99, 100, 100));
     assert_eq!(d.at(0), 1);
     let empty = Dist::of(Vec::new());
-    assert_eq!((empty.p50(), empty.p99(), empty.max(), empty.n()), (0, 0, 0, 0));
+    assert_eq!(
+        (empty.p50(), empty.p99(), empty.max(), empty.n()),
+        (0, 0, 0, 0)
+    );
     assert_eq!(Dist::of(vec![7]).p99(), 7);
 }
 
@@ -24,14 +27,30 @@ fn the_ratio_passes_at_the_ceiling_and_breaches_past_it() {
     assert_eq!(ratio(1_000, 3_000), Verdict::Flat(3_000));
     assert_eq!(ratio(1_000, 3_001), Verdict::Breach(3_001));
     assert_eq!(ratio(7, 7), Verdict::Flat(1_000));
-    let flat = [Dist::of(vec![10; 4]), Dist::of(vec![10; 4]), Dist::of(vec![20; 4])];
+    let flat = [
+        Dist::of(vec![10; 4]),
+        Dist::of(vec![10; 4]),
+        Dist::of(vec![20; 4]),
+    ];
     let (line, ok) = row("flat", &flat);
     assert!(ok && line.starts_with("flat: 1x p50 10"));
-    let breach = [Dist::of(vec![10; 4]), Dist::of(vec![10; 4]), Dist::of(vec![31; 4])];
+    let breach = [
+        Dist::of(vec![10; 4]),
+        Dist::of(vec![10; 4]),
+        Dist::of(vec![31; 4]),
+    ];
     assert!(!row("breach", &breach).1);
-    let zero = [Dist::of(vec![0; 4]), Dist::of(vec![10; 4]), Dist::of(vec![10; 4])];
+    let zero = [
+        Dist::of(vec![0; 4]),
+        Dist::of(vec![10; 4]),
+        Dist::of(vec![10; 4]),
+    ];
     assert!(!row("zero", &zero).1);
-    let first = [Dist::of(vec![10; 4]), Dist::of(vec![31; 4]), Dist::of(vec![10; 4])];
+    let first = [
+        Dist::of(vec![10; 4]),
+        Dist::of(vec![31; 4]),
+        Dist::of(vec![10; 4]),
+    ];
     assert!(!row("first", &first).1);
 }
 

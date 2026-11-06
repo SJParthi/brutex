@@ -34,7 +34,13 @@ pub fn ratio_source(minutes: &[Minute], seconds: &[Second], t: u32) -> Option<Ra
         .iter()
         .rev()
         .filter(|m| !m.padded() && m.start >= OPEN && m.start + 60 <= t)
-        .find_map(|m| last_second_close(seconds, m.start).map(|g| Ratio { z: m.bar.close, g, minute: m.start }))
+        .find_map(|m| {
+            last_second_close(seconds, m.start).map(|g| Ratio {
+                z: m.bar.close,
+                g,
+                minute: m.start,
+            })
+        })
 }
 
 /// Why a mapped level was refused.

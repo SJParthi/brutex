@@ -97,11 +97,20 @@ pub struct DuplicateKey {
 /// # Errors
 /// [`DuplicateKey`] when one (day, T, symbol) appears twice.
 pub fn merge(per_stock: &[Vec<Candidate>], view: View) -> Result<Vec<Candidate>, DuplicateKey> {
-    let mut out: Vec<Candidate> = per_stock.iter().flatten().filter(|c| view.takes(c.side)).cloned().collect();
+    let mut out: Vec<Candidate> = per_stock
+        .iter()
+        .flatten()
+        .filter(|c| view.takes(c.side))
+        .cloned()
+        .collect();
     out.sort_by(|a, b| a.key().cmp(&b.key()));
     for (a, b) in out.iter().zip(out.iter().skip(1)) {
         if a.key() == b.key() {
-            return Err(DuplicateKey { day: b.day, t: b.t, symbol: b.symbol.clone() });
+            return Err(DuplicateKey {
+                day: b.day,
+                t: b.t,
+                symbol: b.symbol.clone(),
+            });
         }
     }
     Ok(out)

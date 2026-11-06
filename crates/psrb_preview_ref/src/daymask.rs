@@ -85,7 +85,11 @@ pub fn admit(day: Day, facts: &Facts) -> Verdict {
     if !fails.is_empty() {
         return Verdict::NoTrade(fails);
     }
-    if Some(day) == vendor_late_day() { Verdict::TradeFallback } else { Verdict::Trade }
+    if Some(day) == vendor_late_day() {
+        Verdict::TradeFallback
+    } else {
+        Verdict::Trade
+    }
 }
 
 #[cfg(test)]

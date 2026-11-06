@@ -59,7 +59,11 @@ impl WilliamsR {
     #[must_use]
     pub fn new(period: u16) -> Self {
         let period = usize::from(period.max(1));
-        Self { period, ring: VecDeque::with_capacity(period + 1), close: 0 }
+        Self {
+            period,
+            ring: VecDeque::with_capacity(period + 1),
+            close: 0,
+        }
     }
 
     /// Folds one evaluable candle.
@@ -85,6 +89,10 @@ impl WilliamsR {
         }
         let highest = self.ring.iter().map(|(h, _)| *h).max()?;
         let lowest = self.ring.iter().map(|(_, l)| *l).min()?;
-        Some(Reading { highest, lowest, close: self.close })
+        Some(Reading {
+            highest,
+            lowest,
+            close: self.close,
+        })
     }
 }

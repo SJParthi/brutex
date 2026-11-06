@@ -33,7 +33,14 @@ pub enum Kind {
 }
 
 /// Every reading kind, in table order.
-pub const KINDS: [Kind; 6] = [Kind::Supertrend, Kind::Bollinger, Kind::Rsi, Kind::WilliamsR, Kind::Cci, Kind::Ema];
+pub const KINDS: [Kind; 6] = [
+    Kind::Supertrend,
+    Kind::Bollinger,
+    Kind::Rsi,
+    Kind::WilliamsR,
+    Kind::Cci,
+    Kind::Ema,
+];
 
 impl Kind {
     /// The clean candles a reading needs after a hole: 10, 20, 14, 14, 20, 200.
@@ -117,7 +124,11 @@ impl Taint {
     /// The reading has folded its own period of clean candles since the last hole.
     #[must_use]
     pub fn untainted(&self, kind: Kind) -> bool {
-        self.clean.get(kind.index()).copied().flatten().is_none_or(|c| c >= kind.taint_period())
+        self.clean
+            .get(kind.index())
+            .copied()
+            .flatten()
+            .is_none_or(|c| c >= kind.taint_period())
     }
 }
 

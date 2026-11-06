@@ -3,6 +3,7 @@
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::many_single_char_names,
     reason = "the same exception every test module in this workspace takes: a test that cannot panic cannot fail."
 )]
 
@@ -22,10 +23,16 @@ fn check(period: u16, factor: u32, candles: &[(i64, i64, i64)], want: &[Want]) {
     let mut st = SuperTrend::new(period, factor);
     for (i, ((h, l, c), w)) in candles.iter().zip(want).enumerate() {
         st.fold(&hlc(*h, *l, *c));
-        let got = st.reading().map(|r| (r.trend == Trend::Up, r.line, r.upper, r.lower));
+        let got = st
+            .reading()
+            .map(|r| (r.trend == Trend::Up, r.line, r.upper, r.lower));
         assert_eq!(got, *w, "candle {i}");
         if let Some(r) = st.reading() {
-            assert_eq!(r.settled, w.is_some() && i > first_reading(want), "settled at {i}");
+            assert_eq!(
+                r.settled,
+                w.is_some() && i > first_reading(want),
+                "settled at {i}"
+            );
         }
     }
 }
@@ -43,8 +50,24 @@ fn st1_the_seed_starts_down() {
     check(
         2,
         1_000,
-        &[(110, 90, 100), (112, 100, 110), (115, 105, 114), (116, 108, 115), (116, 109, 111), (112, 96, 98), (100, 90, 95)],
-        &[None, Some((D, 122, 122, 90)), Some((D, 122, 122, 97)), Some((D, 122, 122, 102)), Some((D, 120, 120, 104)), Some((D, 116, 116, 104)), Some((D, 106, 106, 84))],
+        &[
+            (110, 90, 100),
+            (112, 100, 110),
+            (115, 105, 114),
+            (116, 108, 115),
+            (116, 109, 111),
+            (112, 96, 98),
+            (100, 90, 95),
+        ],
+        &[
+            None,
+            Some((D, 122, 122, 90)),
+            Some((D, 122, 122, 97)),
+            Some((D, 122, 122, 102)),
+            Some((D, 120, 120, 104)),
+            Some((D, 116, 116, 104)),
+            Some((D, 106, 106, 84)),
+        ],
     );
 }
 
@@ -89,8 +112,26 @@ fn st3_turns_down_one_candle_before_the_latch() {
     check(
         2,
         1_000,
-        &[(143, 138, 142), (142, 126, 126), (128, 119, 124), (144, 123, 140), (142, 119, 124), (137, 123, 137), (141, 119, 119), (123, 114, 116)],
-        &[None, Some((D, 144, 144, 124)), Some((D, 132, 132, 124)), Some((U, 124, 132, 124)), Some((U, 124, 149, 124)), Some((U, 124, 146, 124)), Some((D, 146, 146, 124)), Some((D, 132, 132, 104))],
+        &[
+            (143, 138, 142),
+            (142, 126, 126),
+            (128, 119, 124),
+            (144, 123, 140),
+            (142, 119, 124),
+            (137, 123, 137),
+            (141, 119, 119),
+            (123, 114, 116),
+        ],
+        &[
+            None,
+            Some((D, 144, 144, 124)),
+            Some((D, 132, 132, 124)),
+            Some((U, 124, 132, 124)),
+            Some((U, 124, 149, 124)),
+            Some((U, 124, 146, 124)),
+            Some((D, 146, 146, 124)),
+            Some((D, 132, 132, 104)),
+        ],
     );
 }
 
@@ -98,7 +139,18 @@ fn st3_turns_down_one_candle_before_the_latch() {
 #[test]
 fn st4_a_flat_series_reads_down() {
     let flat = (100, 100, 100);
-    check(3, 3_000, &[flat; 5], &[None, None, Some((D, 100, 100, 100)), Some((D, 100, 100, 100)), Some((D, 100, 100, 100))]);
+    check(
+        3,
+        3_000,
+        &[flat; 5],
+        &[
+            None,
+            None,
+            Some((D, 100, 100, 100)),
+            Some((D, 100, 100, 100)),
+            Some((D, 100, 100, 100)),
+        ],
+    );
 }
 
 /// ST-5 (period 2, factor 0.500): a wide candle's basic lower band above its close.
@@ -107,22 +159,59 @@ fn st5_a_wide_candle_turns_down_at_once() {
     check(
         2,
         500,
-        &[(121, 101, 118), (118, 102, 105), (106, 101, 103), (107, 101, 106), (120, 104, 118), (138, 109, 111), (113, 104, 104)],
-        &[None, Some((D, 119, 119, 101)), Some((D, 108, 108, 101)), Some((D, 108, 108, 101)), Some((U, 106, 108, 106)), Some((D, 133, 133, 113)), Some((D, 115, 115, 101))],
+        &[
+            (121, 101, 118),
+            (118, 102, 105),
+            (106, 101, 103),
+            (107, 101, 106),
+            (120, 104, 118),
+            (138, 109, 111),
+            (113, 104, 104),
+        ],
+        &[
+            None,
+            Some((D, 119, 119, 101)),
+            Some((D, 108, 108, 101)),
+            Some((D, 108, 108, 101)),
+            Some((U, 106, 108, 106)),
+            Some((D, 133, 133, 113)),
+            Some((D, 115, 115, 101)),
+        ],
     );
 }
 
 /// ST-6 (period 1, factor 1.000): the first candle's upper band is the previous 0.
 #[test]
 fn st6_period_one_keeps_the_zero_upper_band() {
-    check(1, 1_000, &[(110, 90, 100), (106, 100, 105), (109, 104, 108)], &[Some((D, 0, 0, 80)), Some((D, 109, 109, 97)), Some((D, 109, 109, 101))]);
+    check(
+        1,
+        1_000,
+        &[(110, 90, 100), (106, 100, 105), (109, 104, 108)],
+        &[
+            Some((D, 0, 0, 80)),
+            Some((D, 109, 109, 97)),
+            Some((D, 109, 109, 101)),
+        ],
+    );
 }
 
 /// ST-7 and ST-8 (period 2, factor 1.000): gaps through the bands.
 #[test]
 fn st7_and_st8_gaps_cross_the_bands() {
-    let up = [(101, 99, 100), (101, 99, 100), (102, 100, 101), (121, 118, 120), (122, 119, 121)];
-    let up_want = [None, Some((D, 102, 102, 98)), Some((D, 102, 102, 99)), Some((U, 108, 102, 108)), Some((U, 113, 127, 113))];
+    let up = [
+        (101, 99, 100),
+        (101, 99, 100),
+        (102, 100, 101),
+        (121, 118, 120),
+        (122, 119, 121),
+    ];
+    let up_want = [
+        None,
+        Some((D, 102, 102, 98)),
+        Some((D, 102, 102, 99)),
+        Some((U, 108, 102, 108)),
+        Some((U, 113, 127, 113)),
+    ];
     check(2, 1_000, &up, &up_want);
     let mut down = up.to_vec();
     down.push((96, 93, 94));
@@ -137,8 +226,26 @@ fn st9_equal_bands_follow_the_previous_trend() {
     check(
         2,
         500,
-        &[(119, 108, 108), (119, 105, 119), (129, 116, 128), (139, 128, 136), (156, 130, 151), (151, 138, 138), (142, 137, 141), (171, 124, 155)],
-        &[None, Some((D, 118, 118, 106)), Some((D, 128, 128, 116)), Some((U, 128, 128, 128)), Some((U, 134, 152, 134)), Some((U, 137, 151, 137)), Some((U, 137, 144, 137)), Some((U, 137, 144, 137))],
+        &[
+            (119, 108, 108),
+            (119, 105, 119),
+            (129, 116, 128),
+            (139, 128, 136),
+            (156, 130, 151),
+            (151, 138, 138),
+            (142, 137, 141),
+            (171, 124, 155),
+        ],
+        &[
+            None,
+            Some((D, 118, 118, 106)),
+            Some((D, 128, 128, 116)),
+            Some((U, 128, 128, 128)),
+            Some((U, 134, 152, 134)),
+            Some((U, 137, 151, 137)),
+            Some((U, 137, 144, 137)),
+            Some((U, 137, 144, 137)),
+        ],
     );
 }
 
@@ -218,7 +325,10 @@ fn rsi1_every_reading_is_exact() {
         Some((1_592_592, 1_530_864, 509_881)),
         Some((3_061_728, 1_020_576, 750_000)),
     ];
-    for (c, w) in [100, 103, 101, 104, 104, 98, 101, 107].into_iter().zip(want) {
+    for (c, w) in [100, 103, 101, 104, 104, 98, 101, 107]
+        .into_iter()
+        .zip(want)
+    {
         rsi.fold(&close(c));
         let got = rsi.reading().map(|r| (r.gain, r.loss, r.ppm()));
         assert_eq!(got, w, "close {c}");
@@ -263,7 +373,10 @@ fn boll1_and_boll2_decide_exactly_at_their_bands() {
         b.fold(&close(c));
     }
     let w = b.window().unwrap();
-    assert_eq!((w.sum, w.sum_sq, w.variance_numerator(), w.deviation()), (4_000, 2_320_000, 2_560_000, 3_200));
+    assert_eq!(
+        (w.sum, w.sum_sq, w.variance_numerator(), w.deviation()),
+        (4_000, 2_320_000, 2_560_000, 3_200)
+    );
     assert!(!w.above_upper(2_000) && w.above_upper(1_999) && !w.above_upper(2_001));
     assert!(!w.below_lower(1_000));
     let mut t = Bollinger::new(20);
@@ -271,7 +384,10 @@ fn boll1_and_boll2_decide_exactly_at_their_bands() {
         t.fold(&close(c));
     }
     let w = t.window().unwrap();
-    assert_eq!((w.sum, w.sum_sq, w.variance_numerator(), w.deviation()), (2_190, 240_470, 13_300, 190));
+    assert_eq!(
+        (w.sum, w.sum_sq, w.variance_numerator(), w.deviation()),
+        (2_190, 240_470, 13_300, 190)
+    );
     assert!(w.above_upper(1_647) && !w.above_upper(1_648));
     let mut m = Bollinger::new(20);
     for c in (100..=119).rev() {
@@ -292,8 +408,24 @@ fn boll1_and_boll2_decide_exactly_at_their_bands() {
 #[test]
 fn wr1_and_wr2_compare_exactly_on_both_levels() {
     let mut wr = WilliamsR::new(3);
-    let rows = [(110, 100, 105), (115, 104, 114), (113, 101, 102), (120, 108, 119), (118, 112, 112), (110, 100, 103), (121, 105, 120)];
-    let want = [None, None, Some((false, true)), Some((true, false)), Some((true, true)), Some((false, true)), Some((true, false))];
+    let rows = [
+        (110, 100, 105),
+        (115, 104, 114),
+        (113, 101, 102),
+        (120, 108, 119),
+        (118, 112, 112),
+        (110, 100, 103),
+        (121, 105, 120),
+    ];
+    let want = [
+        None,
+        None,
+        Some((false, true)),
+        Some((true, false)),
+        Some((true, true)),
+        Some((false, true)),
+        Some((true, false)),
+    ];
     for ((h, l, c), w) in rows.into_iter().zip(want) {
         wr.fold(&Bar::new(c, h, l, c, 1));
         let got = wr.reading().map(|r| (r.above(-850_000), r.below(-150_000)));
@@ -304,7 +436,9 @@ fn wr1_and_wr2_compare_exactly_on_both_levels() {
         flat.fold(&Bar::new(c, h, l, c, 1));
     }
     let r = flat.reading().unwrap();
-    assert!(r.flat() && !r.above(-850_000) && !r.below(-150_000) && !r.above(-1_000_000) && !r.below(0));
+    assert!(
+        r.flat() && !r.above(-850_000) && !r.below(-150_000) && !r.above(-1_000_000) && !r.below(0)
+    );
     flat.fold(&Bar::new(501, 501, 500, 501, 1));
     let r = flat.reading().unwrap();
     assert!(!r.flat() && r.above(-850_000) && !r.below(-150_000));
@@ -318,8 +452,24 @@ fn wr1_and_wr2_compare_exactly_on_both_levels() {
 #[test]
 fn cci_fixtures_decide_exactly_at_their_levels() {
     let mut cci = Cci::new(4);
-    let rows = [(110, 100, 105), (112, 104, 110), (108, 98, 100), (120, 106, 118), (125, 115, 124), (126, 120, 121), (118, 100, 101)];
-    let want = [None, None, None, Some((85, 196)), Some((116, 304)), Some((87, 324)), Some((-118, 272))];
+    let rows = [
+        (110, 100, 105),
+        (112, 104, 110),
+        (108, 98, 100),
+        (120, 106, 118),
+        (125, 115, 124),
+        (126, 120, 121),
+        (118, 100, 101),
+    ];
+    let want = [
+        None,
+        None,
+        None,
+        Some((85, 196)),
+        Some((116, 304)),
+        Some((87, 324)),
+        Some((-118, 272)),
+    ];
     for ((h, l, c), w) in rows.into_iter().zip(want) {
         cci.fold(&Bar::new(c, h, l, c, 1));
         let got = cci.reading().map(|r| (r.deviation, r.total_deviation));
@@ -342,7 +492,15 @@ fn cci_fixtures_decide_exactly_at_their_levels() {
     let ceiling = fold7(&[[(101, 99, 100); 6].as_slice(), &[(101, 99, 101)]].concat());
     assert_eq!((ceiling.deviation, ceiling.total_deviation), (6, 12));
     assert!(ceiling.above(200_000));
-    let flat = fold7(&[(101, 99, 100), (102, 98, 100), (101, 99, 100), (101, 99, 100), (101, 99, 100), (101, 99, 100), (101, 99, 100)]);
+    let flat = fold7(&[
+        (101, 99, 100),
+        (102, 98, 100),
+        (101, 99, 100),
+        (101, 99, 100),
+        (101, 99, 100),
+        (101, 99, 100),
+        (101, 99, 100),
+    ]);
     assert!(flat.flat() && !flat.above(-10_000_000) && !flat.below(10_000_000));
     assert_eq!(Cci::new(0), Cci::new(1));
 }
@@ -359,11 +517,70 @@ fn the_ema_seeds_on_the_simple_mean_and_smooths_floored() {
     assert!(ema.warm());
     assert_eq!(ema.scaled(), 100_995_000);
     ema.fold(&close(100));
-    assert_eq!(ema.scaled(), 100_995_000 + ((100 * SCALE - 100_995_000) * 2).div_euclid(201));
+    assert_eq!(
+        ema.scaled(),
+        100_995_000 + ((100 * SCALE - 100_995_000) * 2).div_euclid(201)
+    );
     let mut one = Ema::new(3);
     one.fold(&close(10));
     assert_eq!(one.scaled(), 10 * SCALE);
     one.fold(&close(11));
     assert_eq!(one.scaled(), 10 * SCALE + SCALE / 2);
     assert_eq!(Ema::new(0), Ema::new(1));
+}
+
+/// P-F15-1 and P-F18-1: RSI and EMA streams against from-scratch recomputations over the
+/// whole history at every candle, on the four seeds.
+#[test]
+fn p_f15_f18_rsi_and_ema_vs_from_scratch() {
+    for seed in crate::generator::SEEDS {
+        let mut r = crate::rng::SplitMix64::new(seed);
+        for _ in 0..20 {
+            let period = u16::try_from(r.below(20) + 1).unwrap();
+            let n = i128::from(period);
+            let mut rsi = Rsi::new(period);
+            let mut ema = Ema::new(period);
+            let mut closes: Vec<i64> = Vec::new();
+            for _ in 0..125 {
+                let c = 1_000 + i64::try_from(r.below(60)).unwrap();
+                closes.push(c);
+                rsi.fold(&close(c));
+                ema.fold(&close(c));
+                // RSI from scratch: seed on the first `period` changes, then Wilder.
+                let changes: Vec<i128> =
+                    closes.windows(2).map(|w| i128::from(w[1] - w[0])).collect();
+                let want = (changes.len() >= usize::from(period)).then(|| {
+                    let (seed_part, rest) = changes.split_at(usize::from(period));
+                    let mut g = seed_part
+                        .iter()
+                        .map(|d| d.max(&0) * SCALE)
+                        .sum::<i128>()
+                        .div_euclid(n);
+                    let mut l = seed_part
+                        .iter()
+                        .map(|d| (-d).max(0) * SCALE)
+                        .sum::<i128>()
+                        .div_euclid(n);
+                    for d in rest {
+                        g += (d.max(&0) * SCALE - g).div_euclid(n);
+                        l += ((-d).max(0) * SCALE - l).div_euclid(n);
+                    }
+                    (g, l)
+                });
+                assert_eq!(rsi.reading().map(|x| (x.gain, x.loss)), want);
+                // EMA from scratch: the running mean, then the recursion.
+                let k = closes.len().min(usize::from(period));
+                let mut e = closes[..k]
+                    .iter()
+                    .map(|c| i128::from(*c) * SCALE)
+                    .sum::<i128>()
+                    .div_euclid(i128::try_from(k).unwrap());
+                for c in &closes[k..] {
+                    e += ((i128::from(*c) * SCALE - e) * 2).div_euclid(n + 1);
+                }
+                assert_eq!(ema.scaled(), e);
+                assert_eq!(ema.warm(), closes.len() >= usize::from(period));
+            }
+        }
+    }
 }

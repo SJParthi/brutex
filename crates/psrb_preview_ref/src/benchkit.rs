@@ -78,7 +78,11 @@ pub fn ratio(base: u64, at: u64) -> Verdict {
         return Verdict::Unmeasurable;
     }
     let permille = u128::from(at) * 1_000 / u128::from(base);
-    if permille <= CEILING_PERMILLE { Verdict::Flat(permille) } else { Verdict::Breach(permille) }
+    if permille <= CEILING_PERMILLE {
+        Verdict::Flat(permille)
+    } else {
+        Verdict::Breach(permille)
+    }
 }
 
 /// Times `reps` calls of `step`, one clock pair around each.
@@ -98,7 +102,7 @@ pub fn time_calls(reps: usize, mut step: impl FnMut(usize)) -> Dist {
 pub fn candle(i: usize) -> Bar {
     let phase = i64::try_from(i % 400).unwrap_or(0);
     let drift = if phase < 200 { phase } else { 400 - phase };
-    let jump = if i % 97 == 0 { 300 } else { 0 };
+    let jump = if i.is_multiple_of(97) { 300 } else { 0 };
     let c = 100_000 + 5 * drift + jump;
     Bar::new(c, c + 7, c - 7, c, 10)
 }
@@ -116,7 +120,13 @@ pub fn per_candle(depth: usize, reps: usize) -> Dist {
         let bar = candle(depth + i);
         bank.step(Some(&bar), false);
         for set in &RULE_SETS {
-            let ctx = Context { bank: &bank, close: bar.close, prev, in_span: true, hole: false };
+            let ctx = Context {
+                bank: &bank,
+                close: bar.close,
+                prev,
+                in_span: true,
+                hole: false,
+            };
             std::hint::black_box(evaluate(set, &ctx));
         }
     })
@@ -129,15 +139,29 @@ pub fn per_second(scanned: usize, reps: usize) -> Dist {
     let prints: Vec<Print> = (0..scanned + reps)
         .map(|i| {
             let at = u32::try_from(i).unwrap_or(u32::MAX);
-            Print { start: at, slot: at, high: 100_010, low: 99_990 }
+            Print {
+                start: at,
+                slot: at,
+                high: 100_010,
+                low: 99_990,
+            }
         })
         .collect();
-    let mut scan = StopScan { stop: 90_000, side: Side::Long, cursor: 0 };
+    let mut scan = StopScan {
+        stop: 90_000,
+        side: Side::Long,
+        cursor: 0,
+    };
     for p in prints.iter().take(scanned) {
         scan.step(p);
     }
     time_calls(reps, |i| {
-        let p = prints.get(scanned + i).copied().unwrap_or(Print { start: 0, slot: 0, high: 0, low: 0 });
+        let p = prints.get(scanned + i).copied().unwrap_or(Print {
+            start: 0,
+            slot: 0,
+            high: 0,
+            low: 0,
+        });
         std::hint::black_box(scan.step(&p));
     })
 }

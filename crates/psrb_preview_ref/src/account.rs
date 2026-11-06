@@ -45,7 +45,14 @@ pub fn months(window: &Window, closed: &[Closed]) -> Vec<MonthRow> {
         let positive = capital > 0;
         let bp = positive.then(|| (10_000 * net).div_euclid(capital));
         let pass = positive && 10_000 * net >= 250 * capital;
-        out.push(MonthRow { month, capital_start: capital, net, trades, bp, pass });
+        out.push(MonthRow {
+            month,
+            capital_start: capital,
+            net,
+            trades,
+            bp,
+            pass,
+        });
         capital += net;
     }
     out
@@ -72,7 +79,12 @@ pub fn drawdown(closed: &[Closed]) -> Drawdown {
     let mut equity = i128::from(ACCOUNT);
     let mut peak = equity;
     let mut peak_day = None;
-    let mut deepest = Drawdown { bp: 0, paisa: 0, peak_day: None, low_day: None };
+    let mut deepest = Drawdown {
+        bp: 0,
+        paisa: 0,
+        peak_day: None,
+        low_day: None,
+    };
     for c in closed {
         equity += c.net;
         if equity > peak {
@@ -83,7 +95,12 @@ pub fn drawdown(closed: &[Closed]) -> Drawdown {
         let fall = peak - equity;
         let bp = (10_000 * fall).div_euclid(peak);
         if fall > 0 && (deepest.low_day.is_none() || bp > deepest.bp) {
-            deepest = Drawdown { bp, paisa: fall, peak_day, low_day: Some(c.day) };
+            deepest = Drawdown {
+                bp,
+                paisa: fall,
+                peak_day,
+                low_day: Some(c.day),
+            };
         }
     }
     deepest

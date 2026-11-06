@@ -26,13 +26,21 @@ pub fn auction_eligible(day: Day, minutes: &[Minute]) -> Option<bool> {
     if day < switch {
         return None;
     }
-    minutes.iter().map(|m| m.start).max().map(|last| last <= LAST_AUCTION_MINUTE)
+    minutes
+        .iter()
+        .map(|m| m.start)
+        .max()
+        .map(|last| last <= LAST_AUCTION_MINUTE)
 }
 
 /// The continuous close of a stock-day: 15:15 when auction-eligible, else 15:30.
 #[must_use]
 pub fn session_close(day: Day, minutes: &[Minute]) -> u32 {
-    if auction_eligible(day, minutes) == Some(true) { CLOSE_AUCTION } else { CLOSE_FULL }
+    if auction_eligible(day, minutes) == Some(true) {
+        CLOSE_AUCTION
+    } else {
+        CLOSE_FULL
+    }
 }
 
 /// F08: the close instant of the bucket starting at `start` for k-minute candles: the
@@ -118,7 +126,13 @@ pub struct FoldCounts {
 /// that holds a bar or is a hole. `blocked` marks a withheld day or a refused month:
 /// then every scheduled bucket is a hole with no bar.
 #[must_use]
-pub fn fold_day(day: Day, minutes: &[Minute], k: u32, blocked: bool, counts: &mut FoldCounts) -> Vec<Bucket> {
+pub fn fold_day(
+    day: Day,
+    minutes: &[Minute],
+    k: u32,
+    blocked: bool,
+    counts: &mut FoldCounts,
+) -> Vec<Bucket> {
     let close = session_close(day, minutes);
     let mut out = Vec::new();
     if k == 0 {
@@ -127,12 +141,18 @@ pub fn fold_day(day: Day, minutes: &[Minute], k: u32, blocked: bool, counts: &mu
     let width = 60 * k;
     let in_session = |m: &&Minute| m.start >= OPEN && m.start < close;
     let outside = minutes.iter().filter(|m| !in_session(m)).count();
-    counts.outside_session = counts.outside_session.saturating_add(u64::try_from(outside).unwrap_or(u64::MAX));
+    counts.outside_session = counts
+        .outside_session
+        .saturating_add(u64::try_from(outside).unwrap_or(u64::MAX));
     let mut start = OPEN;
     while let Some(t) = close_instant(start, k, close) {
         let end = start + width;
-        let inside: Vec<Minute> =
-            minutes.iter().filter(in_session).filter(|m| m.start >= start && m.start < end).copied().collect();
+        let inside: Vec<Minute> = minutes
+            .iter()
+            .filter(in_session)
+            .filter(|m| m.start >= start && m.start < end)
+            .copied()
+            .collect();
         let scheduled = (t - start) / 60;
         let missing = u32::try_from(inside.len()).unwrap_or(u32::MAX) < scheduled;
         let hole = blocked || missing;
@@ -141,7 +161,13 @@ pub fn fold_day(day: Day, minutes: &[Minute], k: u32, blocked: bool, counts: &mu
             counts.holes += 1;
         }
         if hole || bar.is_some() {
-            out.push(Bucket { day, start, t, bar, hole });
+            out.push(Bucket {
+                day,
+                start,
+                t,
+                bar,
+                hole,
+            });
         }
         start = end;
     }

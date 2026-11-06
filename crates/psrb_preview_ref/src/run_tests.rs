@@ -20,7 +20,14 @@ fn gap_market() -> Market {
         .day(day(2018, 9, 3), &quiet, true)
         .day(day(2018, 9, 4), &event, true)
         .build();
-    market(Window { first: Month::of(2018, 9), last: Month::of(2018, 9) }, cal, vec![stock])
+    market(
+        Window {
+            first: Month::of(2018, 9),
+            last: Month::of(2018, 9),
+        },
+        cal,
+        vec![stock],
+    )
 }
 
 #[test]
@@ -28,7 +35,10 @@ fn a_jump_after_a_quiet_spell_is_a_signal_and_a_trade() {
     let out = run(&gap_market()).unwrap();
     for ((set, k), list) in &out.records {
         for r in list {
-            eprintln!("set {set} k {k} {:?} {} {:?}", r.candidate.day, r.candidate.t, r.candidate.outcome);
+            eprintln!(
+                "set {set} k {k} {:?} {} {:?}",
+                r.candidate.day, r.candidate.t, r.candidate.outcome
+            );
         }
     }
     let vo1 = out.records.get(&(0, 1)).unwrap();

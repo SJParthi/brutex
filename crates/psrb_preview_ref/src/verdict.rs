@@ -33,10 +33,18 @@ pub fn bar(months: &[MonthRow]) -> Bar {
         .iter()
         .enumerate()
         .filter(|(_, m)| !m.pass)
-        .map(|(index, m)| Gap { index, bp: m.bp.map(|b| 250 - b), exact: 250 * m.capital_start - 10_000 * m.net })
+        .map(|(index, m)| Gap {
+            index,
+            bp: m.bp.map(|b| 250 - b),
+            exact: 250 * m.capital_start - 10_000 * m.net,
+        })
         .collect();
     let floor = months.iter().filter_map(|m| m.bp).min();
-    Bar { pass: !months.is_empty() && gaps.is_empty(), gaps, floor }
+    Bar {
+        pass: !months.is_empty() && gaps.is_empty(),
+        gaps,
+        floor,
+    }
 }
 
 /// What the ranking reads of a row.
@@ -65,7 +73,10 @@ pub struct Rankable {
 pub fn compare(a: &Rankable, b: &Rankable) -> Ordering {
     let head = b.pass.cmp(&a.pass);
     let body = if a.pass && b.pass {
-        a.max_dd_bp.cmp(&b.max_dd_bp).then(b.total_net.cmp(&a.total_net)).then(b.win_rate.cmp(&a.win_rate))
+        a.max_dd_bp
+            .cmp(&b.max_dd_bp)
+            .then(b.total_net.cmp(&a.total_net))
+            .then(b.win_rate.cmp(&a.win_rate))
     } else {
         a.months_below
             .cmp(&b.months_below)

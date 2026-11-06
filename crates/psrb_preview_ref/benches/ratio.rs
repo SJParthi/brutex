@@ -15,12 +15,18 @@ fn main() {
     let candle: [Dist; 3] = sizes.map(|s| per_candle(s, reps));
     let second: [Dist; 3] = sizes.map(|s| per_second(s, reps));
     let mut all_ok = true;
-    for (label, dists) in [("B-candle per candle (bank + gate + 3 rule sets)", &candle), ("B-second per second (stop scan)", &second)] {
+    for (label, dists) in [
+        ("B-candle per candle (bank + gate + 3 rule sets)", &candle),
+        ("B-second per second (stop scan)", &second),
+    ] {
         let (line, ok) = row(label, dists);
         println!("{line}");
         all_ok &= ok;
     }
-    println!("mode {} sizes {sizes:?} reps {reps}", if full { "full" } else { "smoke (never gating)" });
+    println!(
+        "mode {} sizes {sizes:?} reps {reps}",
+        if full { "full" } else { "smoke (never gating)" }
+    );
     if full && !all_ok {
         std::process::exit(1);
     }

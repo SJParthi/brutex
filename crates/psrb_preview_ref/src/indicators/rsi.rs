@@ -78,7 +78,15 @@ impl Rsi {
     #[must_use]
     pub const fn new(period: u16) -> Self {
         let period = if period == 0 { 1 } else { period };
-        Self { period, previous: None, changes: 0, gain_sum: 0, loss_sum: 0, gain: 0, loss: 0 }
+        Self {
+            period,
+            previous: None,
+            changes: 0,
+            gain_sum: 0,
+            loss_sum: 0,
+            gain: 0,
+            loss: 0,
+        }
     }
 
     /// Folds one evaluable candle.
@@ -113,6 +121,10 @@ impl Rsi {
     /// The reading, once warm.
     #[must_use]
     pub fn reading(&self) -> Option<Reading> {
-        self.warm().then_some(Reading { period: self.period, gain: self.gain, loss: self.loss })
+        self.warm().then_some(Reading {
+            period: self.period,
+            gain: self.gain,
+            loss: self.loss,
+        })
     }
 }

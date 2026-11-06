@@ -41,8 +41,14 @@ fn x_f61_rupees_extremes() {
         (99_999, "999.99"),
         (100_000, "1,000.00"),
         (i128::from(i64::MIN), "-92,23,37,20,36,85,47,758.08"), // oob
-        (i128::MAX, "17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.27"),
-        (i128::MIN, "-17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.28"),
+        (
+            i128::MAX,
+            "17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.27",
+        ),
+        (
+            i128::MIN,
+            "-17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.28",
+        ),
     ];
     for (p, want) in cases {
         assert_eq!(rupees(p), want, "{p}");
@@ -65,11 +71,19 @@ fn digits_model(p: i128) -> String {
             groups.push(part.to_string());
             break;
         }
-        groups.push(if first { format!("{part:03}") } else { format!("{part:02}") });
+        groups.push(if first {
+            format!("{part:03}")
+        } else {
+            format!("{part:02}")
+        });
         first = false;
     }
     groups.reverse();
-    format!("{}{}.{paise:02}", if neg { "-" } else { "" }, groups.join(","))
+    format!(
+        "{}{}.{paise:02}",
+        if neg { "-" } else { "" },
+        groups.join(",")
+    )
 }
 
 /// P-F61-1: 10,000 values against the digit model.

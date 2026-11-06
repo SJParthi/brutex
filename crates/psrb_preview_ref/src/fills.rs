@@ -26,7 +26,15 @@ pub struct Print {
 /// is used as stored and counted, Q7).
 #[must_use]
 pub fn second_prints(seconds: &[Second]) -> Vec<Print> {
-    seconds.iter().map(|s| Print { start: s.at, slot: s.at, high: s.bar.high, low: s.bar.low }).collect()
+    seconds
+        .iter()
+        .map(|s| Print {
+            start: s.at,
+            slot: s.at,
+            high: s.bar.high,
+            low: s.bar.low,
+        })
+        .collect()
 }
 
 /// F38: the prints of a fallback stock-day: every in-session minute with volume above 0.
@@ -35,7 +43,12 @@ pub fn minute_prints(minutes: &[Minute], close: u32) -> Vec<Print> {
     minutes
         .iter()
         .filter(|m| !m.padded() && m.start >= OPEN && m.start < close)
-        .map(|m| Print { start: m.start, slot: m.start + 59, high: m.bar.high, low: m.bar.low })
+        .map(|m| Print {
+            start: m.start,
+            slot: m.start + 59,
+            high: m.bar.high,
+            low: m.bar.low,
+        })
         .collect()
 }
 

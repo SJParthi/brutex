@@ -104,12 +104,24 @@ pub fn load_with(text: &[u8], id: fn(&[u8]) -> u32) -> Result<Vec<Name>, Vec<Ref
         let series = if *name == ALIAS.0 { ALIAS.1 } else { name };
         let h = id(series.as_bytes());
         if let Some(other) = ids.insert(h, name) {
-            refusals.push(Refusal::IdCollision((*other).to_owned(), (*name).to_owned()));
+            refusals.push(Refusal::IdCollision(
+                (*other).to_owned(),
+                (*name).to_owned(),
+            ));
         }
-        out.push(Name { name: (*name).to_owned(), series: series.to_owned(), ordinal, id: h });
+        out.push(Name {
+            name: (*name).to_owned(),
+            series: series.to_owned(),
+            ordinal,
+            id: h,
+        });
     }
     refusals.extend(duplicate);
-    if refusals.is_empty() { Ok(out) } else { Err(refusals) }
+    if refusals.is_empty() {
+        Ok(out)
+    } else {
+        Err(refusals)
+    }
 }
 
 #[cfg(test)]

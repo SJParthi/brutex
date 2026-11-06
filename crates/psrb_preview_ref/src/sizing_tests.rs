@@ -20,9 +20,9 @@ fn x_f40_qty_extremes() {
         (1, 50_000_000),
         (0, 0),
         (-5, 0),
-        (i64::MAX, 0),     // combo: no costs call, no slot held
-        (25_000_000, 2),   // combo: an exact divisor at the top
-        (16_666_667, 2),   // oob: 3 x price is 1 paisa past the exposure
+        (i64::MAX, 0),   // combo: no costs call, no slot held
+        (25_000_000, 2), // combo: an exact divisor at the top
+        (16_666_667, 2), // oob: 3 x price is 1 paisa past the exposure
     ];
     for (price, want) in cases {
         assert_eq!(qty(price), want, "{price}");

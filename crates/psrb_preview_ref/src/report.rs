@@ -45,7 +45,11 @@ pub struct RowStats {
 pub fn row_stats(months: &[MonthRow], nets: &[i128], charges: i128) -> RowStats {
     let mut bps: Vec<i128> = months.iter().filter_map(|m| m.bp).collect();
     bps.sort_unstable();
-    let median_bp = bps.len().checked_sub(1).and_then(|i| bps.get(i / 2)).copied();
+    let median_bp = bps
+        .len()
+        .checked_sub(1)
+        .and_then(|i| bps.get(i / 2))
+        .copied();
     let total_net: i128 = nets.iter().sum();
     let wins: Vec<i128> = nets.iter().copied().filter(|n| *n > 0).collect();
     let losses: Vec<i128> = nets.iter().copied().filter(|n| *n < 0).collect();

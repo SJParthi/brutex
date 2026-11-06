@@ -34,7 +34,11 @@ impl Side {
 
 /// `x = 2C - H - L` and `T = H + L + C` of the previous session.
 fn x_and_t(prev: &AcceptedBar) -> (i128, i128) {
-    let (h, l, c) = (i128::from(prev.high()), i128::from(prev.low()), i128::from(prev.close()));
+    let (h, l, c) = (
+        i128::from(prev.high()),
+        i128::from(prev.low()),
+        i128::from(prev.close()),
+    );
     (2 * c - h - l, h + l + c)
 }
 
@@ -60,7 +64,11 @@ pub fn c2_beyond_r1_s1(prev: &AcceptedBar, close: i64, side: Side) -> bool {
 /// F22 (C3): the Supertrend reading is settled and up (long) or down (short).
 #[must_use]
 pub fn c3_supertrend_side(reading: Option<&StReading>, side: Side) -> bool {
-    let want = if side == Side::Long { Trend::Up } else { Trend::Down };
+    let want = if side == Side::Long {
+        Trend::Up
+    } else {
+        Trend::Down
+    };
     reading.is_some_and(|r| r.settled && r.trend == want)
 }
 
@@ -75,7 +83,12 @@ pub fn c4_bollinger_beyond(window: Option<&Window>, z_milli: u32, side: Side) ->
 
 /// F24 (C5): a faithful RSI above `long_ppm` (long) or below `short_ppm` (short).
 #[must_use]
-pub fn c5_rsi_beyond(reading: Option<&rsi::Reading>, long_ppm: u32, short_ppm: u32, side: Side) -> bool {
+pub fn c5_rsi_beyond(
+    reading: Option<&rsi::Reading>,
+    long_ppm: u32,
+    short_ppm: u32,
+    side: Side,
+) -> bool {
     reading.is_some_and(|r| {
         r.faithful()
             && match side {
@@ -87,7 +100,12 @@ pub fn c5_rsi_beyond(reading: Option<&rsi::Reading>, long_ppm: u32, short_ppm: u
 
 /// F25 (C6): a %R that is not flat, above `long_ppm` (long) or below `short_ppm` (short).
 #[must_use]
-pub fn c6_willr_level(reading: Option<&willr::Reading>, long_ppm: i32, short_ppm: i32, side: Side) -> bool {
+pub fn c6_willr_level(
+    reading: Option<&willr::Reading>,
+    long_ppm: i32,
+    short_ppm: i32,
+    side: Side,
+) -> bool {
     reading.is_some_and(|r| {
         !r.flat()
             && match side {
@@ -99,7 +117,12 @@ pub fn c6_willr_level(reading: Option<&willr::Reading>, long_ppm: i32, short_ppm
 
 /// F26 (C7): a CCI that is not flat, above `long_milli` (long) or below `short_milli` (short).
 #[must_use]
-pub fn c7_cci_beyond(reading: Option<&cci::Reading>, long_milli: i32, short_milli: i32, side: Side) -> bool {
+pub fn c7_cci_beyond(
+    reading: Option<&cci::Reading>,
+    long_milli: i32,
+    short_milli: i32,
+    side: Side,
+) -> bool {
     reading.is_some_and(|r| {
         !r.flat()
             && match side {

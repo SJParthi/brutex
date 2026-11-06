@@ -60,7 +60,10 @@ fn months_step_and_label() {
     assert_eq!(m.start(), m.first_day().unwrap());
     assert_eq!(m.end().label(), "2018-12-31");
     assert_eq!(Month::of(2300, 1).first_day(), None);
-    assert_eq!(Month::of(2300, 1).end().index() + 1, Month::of(2300, 2).start().index());
+    assert_eq!(
+        Month::of(2300, 1).end().index() + 1,
+        Month::of(2300, 2).start().index()
+    );
 }
 
 #[test]
@@ -76,7 +79,10 @@ fn ist_seconds_and_utc_instants() {
     let u = utc_micros(d, OPEN);
     assert_eq!(from_utc_micros(u), Some((d, OPEN)));
     // 09:15 IST is 03:45 UTC; IST midnight is the previous UTC day's 18:30.
-    assert_eq!(u.rem_euclid(86_400_000_000), (3 * 3_600 + 45 * 60) * 1_000_000);
+    assert_eq!(
+        u.rem_euclid(86_400_000_000),
+        (3 * 3_600 + 45 * 60) * 1_000_000
+    );
     assert_eq!(from_utc_micros(utc_micros(d, 0)), Some((d, 0)));
     assert_eq!(from_utc_micros(u + 1), None);
     assert_eq!(from_utc_micros(i64::MIN / 2), None);

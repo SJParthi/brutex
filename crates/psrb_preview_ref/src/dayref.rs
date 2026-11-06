@@ -47,10 +47,18 @@ impl AcceptedBar {
 #[must_use]
 pub fn day_bar(day: Day, minutes: &[Minute]) -> Option<AcceptedBar> {
     let close = session_close(day, minutes);
-    let inside: Vec<Minute> = minutes.iter().filter(|m| m.start >= OPEN && m.start < close).copied().collect();
+    let inside: Vec<Minute> = minutes
+        .iter()
+        .filter(|m| m.start >= OPEN && m.start < close)
+        .copied()
+        .collect();
     let bar = crate::candles::fold_bar(&inside)?;
     check_evaluable(&bar).ok()?;
-    Some(AcceptedBar { high: bar.high, low: bar.low, close: bar.close })
+    Some(AcceptedBar {
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+    })
 }
 
 /// The previous-session reference, rolled once per full session of the candle span.

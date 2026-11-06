@@ -54,14 +54,22 @@ impl Cci {
     #[must_use]
     pub fn new(period: u16) -> Self {
         let period = usize::from(period.max(1));
-        Self { period, ring: VecDeque::with_capacity(period + 1), sum: 0 }
+        Self {
+            period,
+            ring: VecDeque::with_capacity(period + 1),
+            sum: 0,
+        }
     }
 
     /// Folds one evaluable candle.
     pub fn fold(&mut self, bar: &Bar) {
         let t = i128::from(bar.high) + i128::from(bar.low) + i128::from(bar.close);
         self.ring.push_back(t);
-        let old = if self.ring.len() > self.period { self.ring.pop_front().unwrap_or(0) } else { 0 };
+        let old = if self.ring.len() > self.period {
+            self.ring.pop_front().unwrap_or(0)
+        } else {
+            0
+        };
         self.sum += t - old;
     }
 
@@ -80,6 +88,10 @@ impl Cci {
         let n = i128::try_from(self.period).ok()?;
         let last = self.ring.back().copied()?;
         let total_deviation = self.ring.iter().map(|t| (n * t - self.sum).abs()).sum();
-        Some(Reading { n, deviation: n * last - self.sum, total_deviation })
+        Some(Reading {
+            n,
+            deviation: n * last - self.sum,
+            total_deviation,
+        })
     }
 }

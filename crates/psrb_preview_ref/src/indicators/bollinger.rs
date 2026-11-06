@@ -67,14 +67,23 @@ impl Bollinger {
     #[must_use]
     pub fn new(period: u16) -> Self {
         let period = usize::from(period.max(1));
-        Self { period, ring: VecDeque::with_capacity(period + 1), sum: 0, sum_sq: 0 }
+        Self {
+            period,
+            ring: VecDeque::with_capacity(period + 1),
+            sum: 0,
+            sum_sq: 0,
+        }
     }
 
     /// Folds one close (`1..=MAX_CLOSE`, checked by the caller).
     pub fn fold(&mut self, bar: &Bar) {
         let close = i128::from(bar.close);
         self.ring.push_back(bar.close);
-        let old = if self.ring.len() > self.period { i128::from(self.ring.pop_front().unwrap_or(0)) } else { 0 };
+        let old = if self.ring.len() > self.period {
+            i128::from(self.ring.pop_front().unwrap_or(0))
+        } else {
+            0
+        };
         self.sum += close - old;
         self.sum_sq += close * close - old * old;
     }
@@ -93,6 +102,11 @@ impl Bollinger {
         }
         let n = i128::try_from(self.period).ok()?;
         let last = self.ring.back().copied()?;
-        Some(Window { n, sum: self.sum, sum_sq: self.sum_sq, last })
+        Some(Window {
+            n,
+            sum: self.sum,
+            sum_sq: self.sum_sq,
+            last,
+        })
     }
 }

@@ -46,7 +46,14 @@ fn answer_word(a: Answer) -> &'static str {
 
 fn months_line(label: &str, months: &mut dyn Iterator<Item = Month>) -> String {
     let list: Vec<String> = months.map(Month::label).collect();
-    format!("{label} {}", if list.is_empty() { "-".to_owned() } else { list.join(" ") })
+    format!(
+        "{label} {}",
+        if list.is_empty() {
+            "-".to_owned()
+        } else {
+            list.join(" ")
+        }
+    )
 }
 
 fn bar_text(b: &Bar) -> String {
@@ -55,7 +62,13 @@ fn bar_text(b: &Bar) -> String {
 
 /// Run-length lines: `(start, bar)` items whose starts step by `stride` with one bar
 /// become one line `tag time bar x<count> [every <stride>]`.
-fn runs(out: &mut String, tag: &str, items: &[(u32, Bar)], fixed_stride: Option<u32>, time: fn(u32) -> String) {
+fn runs(
+    out: &mut String,
+    tag: &str,
+    items: &[(u32, Bar)],
+    fixed_stride: Option<u32>,
+    time: fn(u32) -> String,
+) {
     let mut i = 0;
     while let Some((start, bar)) = items.get(i).copied() {
         let next = items.get(i + 1).copied();
@@ -81,13 +94,39 @@ fn runs(out: &mut String, tag: &str, items: &[(u32, Bar)], fixed_stride: Option<
 
 fn render_stock(out: &mut String, stock: &Stock) {
     let _ = writeln!(out, "stock {}", stock.name);
-    let _ = writeln!(out, "{}", months_line("zerodha-months", &mut stock.zerodha_months.iter().copied()));
-    let _ = writeln!(out, "{}", months_line("gdfl-months", &mut stock.gdfl_months.iter().copied()));
-    let _ = writeln!(out, "{}", months_line("gdfl-refused", &mut stock.gdfl_refused.iter().copied()));
+    let _ = writeln!(
+        out,
+        "{}",
+        months_line("zerodha-months", &mut stock.zerodha_months.iter().copied())
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        months_line("gdfl-months", &mut stock.gdfl_months.iter().copied())
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        months_line("gdfl-refused", &mut stock.gdfl_refused.iter().copied())
+    );
     let withheld: Vec<String> = stock.withheld.iter().map(|d| d.label()).collect();
-    let _ = writeln!(out, "withheld {}", if withheld.is_empty() { "-".to_owned() } else { withheld.join(" ") });
+    let _ = writeln!(
+        out,
+        "withheld {}",
+        if withheld.is_empty() {
+            "-".to_owned()
+        } else {
+            withheld.join(" ")
+        }
+    );
     for (day, sd) in &stock.days {
-        let _ = writeln!(out, "day {} minutes={} seconds={}", day.label(), sd.minutes.len(), sd.seconds.len());
+        let _ = writeln!(
+            out,
+            "day {} minutes={} seconds={}",
+            day.label(),
+            sd.minutes.len(),
+            sd.seconds.len()
+        );
         let minutes: Vec<(u32, Bar)> = sd.minutes.iter().map(|m| (m.start, m.bar)).collect();
         runs(out, "m", &minutes, Some(60), hm_or_hms);
         let seconds: Vec<(u32, Bar)> = sd.seconds.iter().map(|s| (s.at, s.bar)).collect();
@@ -98,17 +137,31 @@ fn render_stock(out: &mut String, stock: &Stock) {
 
 /// A minute stamp as `hh:mm`, or `hh:mm:ss` when it is off the minute grid.
 fn hm_or_hms(sec: u32) -> String {
-    if sec.is_multiple_of(60) { hm(sec) } else { hms(sec) }
+    if sec.is_multiple_of(60) {
+        hm(sec)
+    } else {
+        hms(sec)
+    }
 }
 
 /// The inputs section's body.
 #[must_use]
 pub fn render_inputs(market: &Market) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "window {} {}", market.window.first.label(), market.window.last.label());
+    let _ = writeln!(
+        out,
+        "window {} {}",
+        market.window.first.label(),
+        market.window.last.label()
+    );
     let _ = writeln!(out, "calendar weekdays=full weekends=closed");
     for (day, kind) in &market.calendar.overrides {
-        let _ = writeln!(out, "calendar-override {} {}", day.label(), kind_word(*kind));
+        let _ = writeln!(
+            out,
+            "calendar-override {} {}",
+            day.label(),
+            kind_word(*kind)
+        );
     }
     let p = &market.membership.probe;
     let _ = writeln!(
@@ -119,12 +172,25 @@ pub fn render_inputs(market: &Market) -> String {
         answer_word(p.reliance_last),
         answer_word(p.syrma_last)
     );
-    let carry = market.membership.carry_from.map_or_else(|| "-".to_owned(), Day::label);
+    let carry = market
+        .membership
+        .carry_from
+        .map_or_else(|| "-".to_owned(), Day::label);
     let _ = writeln!(out, "membership-carry-from {carry}");
-    let listed: Vec<&str> = market.membership.listed.iter().map(String::as_str).collect();
+    let listed: Vec<&str> = market
+        .membership
+        .listed
+        .iter()
+        .map(String::as_str)
+        .collect();
     let _ = writeln!(out, "membership-listed {}", listed.join(" "));
     for ((name, day), answer) in &market.membership.answers {
-        let _ = writeln!(out, "membership-answer {name} {} {}", day.label(), answer_word(*answer));
+        let _ = writeln!(
+            out,
+            "membership-answer {name} {} {}",
+            day.label(),
+            answer_word(*answer)
+        );
     }
     let mut stocks: Vec<&Stock> = market.stocks.iter().collect();
     stocks.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
@@ -148,7 +214,13 @@ fn opt(v: Option<i128>) -> String {
 /// last-stop trail-no-ratio gross headline clock net`.
 fn candidate_line(id: usize, r: &Record) -> String {
     let c = &r.candidate;
-    let head = format!("c {id} {} {} {} {}", c.day.label(), hms(c.t), c.symbol, c.side.label());
+    let head = format!(
+        "c {id} {} {} {} {}",
+        c.day.label(),
+        hms(c.t),
+        c.symbol,
+        c.side.label()
+    );
     let Some(t) = r.trade else {
         let word = match c.outcome {
             Outcome::NotFilled => "not-filled",
@@ -158,7 +230,11 @@ fn candidate_line(id: usize, r: &Record) -> String {
         return format!("{head} {word}");
     };
     let s = t.sim;
-    let from = if t.priced.from == Clock::Dated { "dated" } else { "today" };
+    let from = if t.priced.from == Clock::Dated {
+        "dated"
+    } else {
+        "today"
+    };
     format!(
         "{head} filled {} {} {} {} {} {} {} {} {} {} {} {} {} {from} {}",
         hms(s.entry.second),
@@ -192,7 +268,11 @@ fn fees_line(id: usize, r: &Record) -> Option<String> {
 }
 
 fn per_kind(counts: &[u64; 6]) -> String {
-    let parts: Vec<String> = KINDS.iter().zip(counts.iter()).map(|(k, c)| format!("{}:{c}", k.label())).collect();
+    let parts: Vec<String> = KINDS
+        .iter()
+        .zip(counts.iter())
+        .map(|(k, c)| format!("{}:{c}", k.label()))
+        .collect();
     parts.join(",")
 }
 
@@ -249,9 +329,22 @@ fn row_lines(out: &mut String, row: &Row) {
         per_kind(&c.blocked_taint),
     );
     let ids: Vec<String> = row.admitted.iter().map(usize::to_string).collect();
-    let _ = writeln!(out, "admitted {}", if ids.is_empty() { "-".to_owned() } else { ids.join(" ") });
+    let _ = writeln!(
+        out,
+        "admitted {}",
+        if ids.is_empty() {
+            "-".to_owned()
+        } else {
+            ids.join(" ")
+        }
+    );
     for (i, m) in row.months.iter().enumerate() {
-        let gap = row.bar.gaps.iter().find(|g| g.index == i).map_or_else(|| "-".to_owned(), |g| g.exact.to_string());
+        let gap = row
+            .bar
+            .gaps
+            .iter()
+            .find(|g| g.index == i)
+            .map_or_else(|| "-".to_owned(), |g| g.exact.to_string());
         let _ = writeln!(
             out,
             "month {} capital={} net={} trades={} bp={} pass={} gap={gap}",
@@ -270,19 +363,32 @@ fn row_lines(out: &mut String, row: &Row) {
 pub fn render_outputs(out_run: &Output) -> String {
     let mut out = String::new();
     for f in &out_run.stocks {
-        let span = f.span.map_or_else(|| "none".to_owned(), |(a, b)| format!("{}..{}", a.label(), b.label()));
+        let span = f.span.map_or_else(
+            || "none".to_owned(),
+            |(a, b)| format!("{}..{}", a.label(), b.label()),
+        );
         let warm = f.warmup.map_or_else(|| "none".to_owned(), Month::label);
-        let refused = f.refused.map_or_else(|| "none".to_owned(), |r| format!("{r:?}"));
+        let refused = f
+            .refused
+            .map_or_else(|| "none".to_owned(), |r| format!("{r:?}"));
         let errors: Vec<String> = f.fold_errors.iter().map(|m| m.label()).collect();
         let _ = writeln!(
             out,
             "stock {} span={span} warmup={warm} refused={refused} fold-errors={} membership-unknown={}",
             f.name,
-            if errors.is_empty() { "-".to_owned() } else { errors.join(",") },
+            if errors.is_empty() {
+                "-".to_owned()
+            } else {
+                errors.join(",")
+            },
             f.membership_unknown
         );
         for (k, fc) in TIMEFRAMES.iter().zip(f.fold.iter()) {
-            let _ = writeln!(out, "fold {} k={k} holes={} outside-session={}", f.name, fc.holes, fc.outside_session);
+            let _ = writeln!(
+                out,
+                "fold {} k={k} holes={} outside-session={}",
+                f.name, fc.holes, fc.outside_session
+            );
         }
     }
     for ((set, k), list) in &out_run.records {
@@ -297,7 +403,10 @@ pub fn render_outputs(out_run: &Output) -> String {
             .filter(|row| row.key.set == *set && row.key.k == *k)
             .flat_map(|row| row.admitted.iter().copied())
             .collect();
-        for line in admitted.iter().filter_map(|id| list.get(*id).and_then(|r| fees_line(*id, r))) {
+        for line in admitted
+            .iter()
+            .filter_map(|id| list.get(*id).and_then(|r| fees_line(*id, r)))
+        {
             let _ = writeln!(out, "{line}");
         }
     }
@@ -314,12 +423,26 @@ pub fn render_outputs(out_run: &Output) -> String {
             win_rate: r.stats.win_rate.unwrap_or(0),
             months_below: r.bar.gaps.len(),
             worst: r.bar.floor,
-            tie: (r.key.set, r.key.k, View::ALL.iter().position(|v| *v == r.key.view).unwrap_or(0)),
+            tie: (
+                r.key.set,
+                r.key.k,
+                View::ALL.iter().position(|v| *v == r.key.view).unwrap_or(0),
+            ),
         })
         .collect();
-    for (place, r) in rank(&rankables).iter().filter_map(|i| out_run.rows.get(*i)).enumerate() {
+    for (place, r) in rank(&rankables)
+        .iter()
+        .filter_map(|i| out_run.rows.get(*i))
+        .enumerate()
+    {
         let set = RULE_SETS.get(r.key.set).map_or("?", |s| s.short);
-        let _ = writeln!(out, "rank {} {set} {} {}", place + 1, r.key.k, r.key.view.label());
+        let _ = writeln!(
+            out,
+            "rank {} {set} {} {}",
+            place + 1,
+            r.key.k,
+            r.key.view.label()
+        );
     }
     out
 }
@@ -335,10 +458,16 @@ pub fn render(scenario: &Scenario) -> String {
         "PREVIEW: a synthetic reference scenario for differential testing of the PSRB preview tool; not the PSRB result; every price and trade here is generated with a fixed seed."
     );
     let _ = writeln!(out);
-    let _ = writeln!(out, "- format: `{FORMAT}`; written by crate `psrb_preview_ref`, session token `{TOKEN}`");
+    let _ = writeln!(
+        out,
+        "- format: `{FORMAT}`; written by crate `psrb_preview_ref`, session token `{TOKEN}`"
+    );
     let _ = writeln!(out, "- seed: `{:#018x}`", scenario.seed);
     let _ = writeln!(out, "- plants: {}", scenario.about);
-    let _ = writeln!(out, "- money in paisa; times IST; `x<n>` repeats a line n times (minutes every 60 s, seconds every `every` s)");
+    let _ = writeln!(
+        out,
+        "- money in paisa; times IST; `x<n>` repeats a line n times (minutes every 60 s, seconds every `every` s)"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "## Inputs");
     let _ = writeln!(out);
@@ -361,8 +490,16 @@ pub fn render(scenario: &Scenario) -> String {
 #[must_use]
 pub fn render_error(e: &RunError) -> String {
     match e {
-        RunError::Charge { symbol, day, error } => format!("run-stopped charge-refusal {symbol} {} {error:?}\n", day.label()),
-        RunError::Duplicate(d) => format!("run-stopped duplicate-candidate {} {} {}\n", d.symbol, d.day.label(), hms(d.t)),
+        RunError::Charge { symbol, day, error } => format!(
+            "run-stopped charge-refusal {symbol} {} {error:?}\n",
+            day.label()
+        ),
+        RunError::Duplicate(d) => format!(
+            "run-stopped duplicate-candidate {} {} {}\n",
+            d.symbol,
+            d.day.label(),
+            hms(d.t)
+        ),
     }
 }
 
@@ -395,7 +532,11 @@ pub fn write_all(dir: &Path, scenarios: &[Scenario]) -> std::io::Result<Vec<(Str
                 Status::Written
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if std::fs::read(&path)? == text.as_bytes() { Status::Same } else { Status::Differs }
+                if std::fs::read(&path)? == text.as_bytes() {
+                    Status::Same
+                } else {
+                    Status::Differs
+                }
             }
             Err(e) => return Err(e),
         };

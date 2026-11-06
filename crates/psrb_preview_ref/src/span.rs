@@ -65,7 +65,10 @@ pub fn trading_span(
         return Ok(None);
     };
     let from = month_first.max(window_first);
-    Ok(calendar.full_days(from, window_last).first().map(|start| (*start, window_last)))
+    Ok(calendar
+        .full_days(from, window_last)
+        .first()
+        .map(|start| (*start, window_last)))
 }
 
 /// F05: the first month of the contiguous run of Zerodha months that holds the trading

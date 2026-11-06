@@ -90,14 +90,27 @@ pub struct RuleSet {
     pub conds: &'static [Cond],
 }
 
-const RSI: Cond = Cond::Rsi { long_ppm: 700_000, short_ppm: 300_000 };
-const CCI: Cond = Cond::Cci { long_milli: 200_000, short_milli: -200_000 };
+const RSI: Cond = Cond::Rsi {
+    long_ppm: 700_000,
+    short_ppm: 300_000,
+};
+const CCI: Cond = Cond::Cci {
+    long_milli: 200_000,
+    short_milli: -200_000,
+};
 
 /// VIDEO-ORIGINAL = C2 + C3(10, 3.000) + C4(20, 2.000) + C5.
 pub const VIDEO_ORIGINAL: RuleSet = RuleSet {
     name: "VIDEO-ORIGINAL",
     short: "VO",
-    conds: &[Cond::BeyondR1S1, Cond::Supertrend { factor_milli: 3_000 }, Cond::Bollinger { width_milli: 2_000 }, RSI],
+    conds: &[
+        Cond::BeyondR1S1,
+        Cond::Supertrend {
+            factor_milli: 3_000,
+        },
+        Cond::Bollinger { width_milli: 2_000 },
+        RSI,
+    ],
 };
 
 /// AUTHOR-V2 = C1 (20 bp) + C2 + C3(10, 2.000) + C4(20, 3.000) + C5 + C6 (long above -85,
@@ -108,10 +121,15 @@ pub const AUTHOR_V2: RuleSet = RuleSet {
     conds: &[
         Cond::NarrowCpr { bp: 20 },
         Cond::BeyondR1S1,
-        Cond::Supertrend { factor_milli: 2_000 },
+        Cond::Supertrend {
+            factor_milli: 2_000,
+        },
         Cond::Bollinger { width_milli: 3_000 },
         RSI,
-        Cond::WilliamsR { long_ppm: -850_000, short_ppm: -150_000 },
+        Cond::WilliamsR {
+            long_ppm: -850_000,
+            short_ppm: -150_000,
+        },
         CCI,
         Cond::Ema,
     ],
@@ -124,10 +142,15 @@ pub const VIDEO_SCREEN: RuleSet = RuleSet {
     conds: &[
         Cond::NarrowCpr { bp: 20 },
         Cond::BeyondR1S1,
-        Cond::Supertrend { factor_milli: 2_000 },
+        Cond::Supertrend {
+            factor_milli: 2_000,
+        },
         Cond::Bollinger { width_milli: 3_000 },
         RSI,
-        Cond::WilliamsR { long_ppm: -150_000, short_ppm: -850_000 },
+        Cond::WilliamsR {
+            long_ppm: -150_000,
+            short_ppm: -850_000,
+        },
         CCI,
         Cond::Ema,
     ],
@@ -165,7 +188,12 @@ pub fn check(set: &RuleSet) -> Result<(), Refusal> {
     if let Some(spec) = spec
         && spec.conds != set.conds
     {
-        let first = spec.conds.iter().zip(set.conds.iter()).find(|(a, b)| a != b).map_or("length", |(a, _)| a.id());
+        let first = spec
+            .conds
+            .iter()
+            .zip(set.conds.iter())
+            .find(|(a, b)| a != b)
+            .map_or("length", |(a, _)| a.id());
         return Err(Refusal::NotTheSpec(first));
     }
     Ok(())

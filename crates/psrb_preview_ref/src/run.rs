@@ -12,7 +12,7 @@ use crate::costs::{ChargeError, Priced, gross_and_net, price_trade, trade_orders
 use crate::daymask::{Facts, Verdict, admit};
 use crate::dayref::{PrevSession, day_bar};
 use crate::indicators::supertrend::Reading as StReading;
-use crate::market::{DayKind, Market, Stock};
+use crate::market::{DayKind, Market, Stock, StockDay};
 use crate::membership::Answer;
 use crate::readings::{Bank, KINDS, Step};
 use crate::report::{RowStats, row_stats};
@@ -183,7 +183,11 @@ struct Tally {
 
 /// Adds one to the counter of `kind` in a per-reading array.
 fn bump(counts: &mut [u64; 6], kind: crate::readings::Kind) {
-    counts.iter_mut().zip(KINDS).filter(|(_, k)| *k == kind).for_each(|(c, _)| *c += 1);
+    counts
+        .iter_mut()
+        .zip(KINDS)
+        .filter(|(_, k)| *k == kind)
+        .for_each(|(c, _)| *c += 1);
 }
 
 /// One signal waiting for its trade walk.
@@ -201,12 +205,182 @@ fn spans(market: &Market, stock: &Stock, facts: &mut StockFacts) -> Option<((Day
     // order refusals cannot arise here; only the start-month refusal (Q1) can.
     let zerodha: Vec<Month> = stock.zerodha_months.iter().copied().collect();
     let gdfl: Vec<Month> = stock.gdfl_months.iter().copied().collect();
-    let span = trading_span(&zerodha, &gdfl, &market.window, &market.calendar).ok().flatten()?;
+    let span = trading_span(&zerodha, &gdfl, &market.window, &market.calendar)
+        .ok()
+        .flatten()?;
     facts.span = Some(span);
     let warm = warmup_start(&zerodha, span.0.month());
     facts.refused = warm.err();
     facts.warmup = warm.ok();
     Some((span, warm.ok()?))
+}
+
+/// What the day mask and the GDFL months say of one stock-day.
+struct DayFacts {
+    member: Answer,
+    in_span: bool,
+    trading: bool,
+    fallback: bool,
+}
+
+/// The day mask (F06), the membership answer (F03) and the fallback reasons (F38).
+fn day_facts(
+    market: &Market,
+    stock: &Stock,
+    day: Day,
+    span: (Day, Day),
+    sd: Option<&StockDay>,
+) -> DayFacts {
+    let (w_first, w_last) = (market.window.first.start(), market.window.last.end());
+    let has_minutes = sd.is_some_and(|s| !s.minutes.is_empty());
+    let no_seconds = sd.is_none_or(|s| s.seconds.is_empty());
+    let in_window = day >= w_first && day <= w_last;
+    let member = if in_window {
+        market
+            .membership
+            .may_trade(&stock.name, day, w_first, w_last)
+            .unwrap_or(Answer::No)
+    } else {
+        Answer::Yes
+    };
+    let in_span = day >= span.0 && day <= span.1;
+    let listed = market.membership.listed.contains(&stock.name);
+    let verdict = admit(
+        day,
+        &Facts {
+            listed,
+            kind: DayKind::Full,
+            member,
+            in_span,
+            has_minutes,
+        },
+    );
+    let month = day.month();
+    let fallback = verdict == Verdict::TradeFallback
+        || !stock.gdfl_months.contains(&month)
+        || stock.gdfl_refused.contains(&month)
+        || (no_seconds && has_minutes);
+    DayFacts {
+        member,
+        in_span,
+        trading: !matches!(verdict, Verdict::NoTrade(_)),
+        fallback,
+    }
+}
+
+/// The reading bank over one stock-day's buckets: every bucket as the trade walk reads
+/// it, and every rule set's signals on the clean ones (blocked decisions tallied).
+fn read_day(
+    bank: &mut Bank,
+    buckets: &[crate::candles::Bucket],
+    reference: Option<crate::dayref::AcceptedBar>,
+    trading: bool,
+    k: u32,
+    tallies: &mut BTreeMap<(usize, u32), Tally>,
+) -> (Vec<DayCandle>, Vec<Signal>) {
+    let mut candles: Vec<DayCandle> = Vec::with_capacity(buckets.len());
+    let mut signals: Vec<Signal> = Vec::new();
+    for b in buckets {
+        let clean = bank.step(b.bar.as_ref(), b.hole) == Step::Clean;
+        let close = b.bar.map_or(0, |bar| bar.close);
+        let candle = DayCandle {
+            t: b.t,
+            close,
+            hole: !clean,
+            st2: bank.st2.reading(),
+            st3: bank.st3.reading(),
+        };
+        candles.push(candle);
+        if !clean {
+            continue;
+        }
+        for (set, rule) in RULE_SETS.iter().enumerate() {
+            let ctx = Context {
+                bank,
+                close,
+                prev: reference,
+                in_span: trading,
+                hole: false,
+            };
+            let tally = tallies.entry((set, k)).or_default();
+            for blocker in ready_gate(rule, &ctx) {
+                match blocker {
+                    Blocker::Cold(kind) if trading => bump(&mut tally.cold, kind),
+                    Blocker::Tainted(kind) if trading => bump(&mut tally.taint, kind),
+                    _ => {}
+                }
+            }
+            if let Some(side) = evaluate(rule, &ctx) {
+                signals.push(Signal {
+                    set,
+                    rule: *rule,
+                    side,
+                    at: candles.len() - 1,
+                    candle,
+                });
+            }
+        }
+    }
+    (candles, signals)
+}
+
+/// Every signal of one stock-day: cut at or after 15:08, else its trade walked and priced.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one stock-day's context, passed once per day"
+)]
+fn walk_signals(
+    symbol: &str,
+    day: Day,
+    k: u32,
+    signals: Vec<Signal>,
+    candles: &[DayCandle],
+    tape: &Tape<'_>,
+    records: &mut BTreeMap<(usize, u32), Vec<Record>>,
+    tallies: &mut BTreeMap<(usize, u32), Tally>,
+) -> Result<(), RunError> {
+    for s in signals {
+        let tally = tallies.entry((s.set, k)).or_default();
+        if s.candle.t >= ENTRY_CUT {
+            if s.side == Side::Long {
+                tally.cut_long += 1;
+            } else {
+                tally.cut_short += 1;
+            }
+            continue;
+        }
+        let factor = supertrend_factor(&s.rule).unwrap_or(2_000);
+        let later: Vec<Later> = candles
+            .iter()
+            .skip(s.at + 1)
+            .map(|c| Later {
+                t: c.t,
+                close: c.close,
+                band: c.band(factor, s.side),
+                hole: c.hole,
+            })
+            .collect();
+        let outcome = simulate(
+            s.side,
+            s.candle.t,
+            s.candle.band(factor, s.side),
+            &later,
+            tape,
+        );
+        let trade = price(symbol, day, s.side, outcome)?;
+        let candidate = Candidate {
+            day,
+            t: s.candle.t,
+            symbol: symbol.to_owned(),
+            side: s.side,
+            outcome,
+        };
+        records
+            .entry((s.set, k))
+            .or_default()
+            .push(Record { candidate, trade });
+    }
+    Ok(())
 }
 
 /// Phase A for one stock: every candidate of every (rule set, timeframe).
@@ -216,15 +390,21 @@ fn phase_a(
     records: &mut BTreeMap<(usize, u32), Vec<Record>>,
     tallies: &mut BTreeMap<(usize, u32), Tally>,
 ) -> Result<StockFacts, RunError> {
-    let mut facts = StockFacts { name: stock.name.clone(), ..StockFacts::default() };
+    let mut facts = StockFacts {
+        name: stock.name.clone(),
+        ..StockFacts::default()
+    };
     let Some((span, warm)) = spans(market, stock, &mut facts) else {
         return Ok(facts);
     };
     let days = market.calendar.full_days(warm.start(), span.1);
-    let refused: BTreeSet<Month> =
-        stock.days.iter().filter(|(day, sd)| check_minutes(**day, &sd.minutes).is_err()).map(|(day, _)| day.month()).collect();
+    let refused: BTreeSet<Month> = stock
+        .days
+        .iter()
+        .filter(|(day, sd)| check_minutes(**day, &sd.minutes).is_err())
+        .map(|(day, _)| day.month())
+        .collect();
     facts.fold_errors = refused.iter().copied().collect();
-    let (w_first, w_last) = (market.window.first.start(), market.window.last.end());
     let mut fold = [FoldCounts::default(); 6];
     for (ki, (k, fold_k)) in TIMEFRAMES.iter().copied().zip(fold.iter_mut()).enumerate() {
         let mut bank = Bank::new();
@@ -235,73 +415,28 @@ fn phase_a(
             let seconds = sd.map_or(&[][..], |s| s.seconds.as_slice());
             let blocked = stock.withheld.contains(&day) || refused.contains(&day.month());
             let buckets = fold_day(day, minutes, k, blocked, fold_k);
-            let in_window = day >= w_first && day <= w_last;
-            let member = if in_window {
-                market.membership.may_trade(&stock.name, day, w_first, w_last).unwrap_or(Answer::No)
-            } else {
-                Answer::Yes
-            };
-            let in_span = day >= span.0 && day <= span.1;
-            if ki == 0 && in_span && member == Answer::Unknown {
+            let f = day_facts(market, stock, day, span, sd);
+            if ki == 0 && f.in_span && f.member == Answer::Unknown {
                 facts.membership_unknown += 1;
             }
-            let listed = market.membership.listed.contains(&stock.name);
-            let has_minutes = !minutes.is_empty();
-            let verdict = admit(day, &Facts { listed, kind: DayKind::Full, member, in_span, has_minutes });
-            let trading = !matches!(verdict, Verdict::NoTrade(_));
-            let month = day.month();
-            let fallback = verdict == Verdict::TradeFallback
-                || !stock.gdfl_months.contains(&month)
-                || stock.gdfl_refused.contains(&month)
-                || (seconds.is_empty() && has_minutes);
-            let reference = prev.reference();
-            let mut candles: Vec<DayCandle> = Vec::with_capacity(buckets.len());
-            let mut signals: Vec<Signal> = Vec::new();
-            for b in &buckets {
-                let clean = bank.step(b.bar.as_ref(), b.hole) == Step::Clean;
-                let close = b.bar.map_or(0, |bar| bar.close);
-                let candle = DayCandle { t: b.t, close, hole: !clean, st2: bank.st2.reading(), st3: bank.st3.reading() };
-                candles.push(candle);
-                if !clean {
-                    continue;
-                }
-                for (set, rule) in RULE_SETS.iter().enumerate() {
-                    let ctx = Context { bank: &bank, close, prev: reference, in_span: trading, hole: false };
-                    let tally = tallies.entry((set, k)).or_default();
-                    for blocker in ready_gate(rule, &ctx) {
-                        match blocker {
-                            Blocker::Cold(kind) if trading => bump(&mut tally.cold, kind),
-                            Blocker::Tainted(kind) if trading => bump(&mut tally.taint, kind),
-                            _ => {}
-                        }
-                    }
-                    if let Some(side) = evaluate(rule, &ctx) {
-                        signals.push(Signal { set, rule: *rule, side, at: candles.len() - 1, candle });
-                    }
-                }
-            }
-            let tape = Tape { minutes, seconds, fallback, close: session_close(day, minutes) };
-            for s in signals {
-                let tally = tallies.entry((s.set, k)).or_default();
-                if s.candle.t >= ENTRY_CUT {
-                    if s.side == Side::Long {
-                        tally.cut_long += 1;
-                    } else {
-                        tally.cut_short += 1;
-                    }
-                    continue;
-                }
-                let factor = supertrend_factor(&s.rule).unwrap_or(2_000);
-                let later: Vec<Later> = candles
-                    .iter()
-                    .skip(s.at + 1)
-                    .map(|c| Later { t: c.t, close: c.close, band: c.band(factor, s.side), hole: c.hole })
-                    .collect();
-                let outcome = simulate(s.side, s.candle.t, s.candle.band(factor, s.side), &later, &tape);
-                let trade = price(&stock.name, day, s.side, outcome)?;
-                let candidate = Candidate { day, t: s.candle.t, symbol: stock.name.clone(), side: s.side, outcome };
-                records.entry((s.set, k)).or_default().push(Record { candidate, trade });
-            }
+            let (candles, signals) =
+                read_day(&mut bank, &buckets, prev.reference(), f.trading, k, tallies);
+            let tape = Tape {
+                minutes,
+                seconds,
+                fallback: f.fallback,
+                close: session_close(day, minutes),
+            };
+            walk_signals(
+                &stock.name,
+                day,
+                k,
+                signals,
+                &candles,
+                &tape,
+                records,
+                tallies,
+            )?;
             prev.close_day(if blocked { None } else { day_bar(day, minutes) });
         }
     }
@@ -310,16 +445,41 @@ fn phase_a(
 }
 
 /// Prices a filled outcome (a refusal stops the run by name).
-fn price(symbol: &str, day: Day, side: Side, outcome: Outcome) -> Result<Option<PricedTrade>, RunError> {
+fn price(
+    symbol: &str,
+    day: Day,
+    side: Side,
+    outcome: Outcome,
+) -> Result<Option<PricedTrade>, RunError> {
     let Outcome::Filled(sim) = outcome else {
         return Ok(None);
     };
     let long = side == Side::Long;
-    let orders = trade_orders(long, sim.qty, sim.entry.price, sim.exit.price, sim.kind.by_broker());
-    let priced =
-        price_trade(&orders, day).map_err(|error| RunError::Charge { symbol: symbol.to_owned(), day, error })?;
-    let (gross, net) = gross_and_net(long, sim.qty, sim.entry.price, sim.exit.price, priced.headline);
-    Ok(Some(PricedTrade { sim, priced, gross, net }))
+    let orders = trade_orders(
+        long,
+        sim.qty,
+        sim.entry.price,
+        sim.exit.price,
+        sim.kind.by_broker(),
+    );
+    let priced = price_trade(&orders, day).map_err(|error| RunError::Charge {
+        symbol: symbol.to_owned(),
+        day,
+        error,
+    })?;
+    let (gross, net) = gross_and_net(
+        long,
+        sim.qty,
+        sim.entry.price,
+        sim.exit.price,
+        priced.headline,
+    );
+    Ok(Some(PricedTrade {
+        sim,
+        priced,
+        gross,
+        net,
+    }))
 }
 
 /// Phase B for one row.
@@ -329,11 +489,20 @@ fn phase_b(market: &Market, key: RowKey, records: &[Record], tally: Tally) -> Ro
         View::Short => tally.cut_short,
         View::Both => tally.cut_long + tally.cut_short,
     };
-    let mut counts =
-        Counts { cut, signals: cut, blocked_cold: tally.cold, blocked_taint: tally.taint, ..Counts::default() };
+    let mut counts = Counts {
+        cut,
+        signals: cut,
+        blocked_cold: tally.cold,
+        blocked_taint: tally.taint,
+        ..Counts::default()
+    };
     let mut slots = Slots::default();
     let mut admitted = Vec::new();
-    for (i, r) in records.iter().enumerate().filter(|(_, r)| key.view.takes(r.candidate.side)) {
+    for (i, r) in records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| key.view.takes(r.candidate.side))
+    {
         counts.signals += 1;
         match slots.offer(&r.candidate) {
             Admission::Admitted => admitted.push(i),
@@ -346,29 +515,59 @@ fn phase_b(market: &Market, key: RowKey, records: &[Record], tally: Tally) -> Ro
             },
         }
     }
-    let mut trades: Vec<(&Record, PricedTrade)> =
-        admitted.iter().filter_map(|i| records.get(*i)).filter_map(|r| r.trade.map(|t| (r, t))).collect();
+    let mut trades: Vec<(&Record, PricedTrade)> = admitted
+        .iter()
+        .filter_map(|i| records.get(*i))
+        .filter_map(|r| r.trade.map(|t| (r, t)))
+        .collect();
     let mut fallback_days = BTreeSet::new();
     for (r, t) in &trades {
         counts.late += u64::from(t.sim.late);
         counts.no_ratio_trail += u64::from(t.sim.no_ratio_trail);
-        counts.exits.iter_mut().zip(ExitKind::ALL).filter(|(_, k)| *k == t.sim.kind).for_each(|(c, _)| *c += 1);
+        counts
+            .exits
+            .iter_mut()
+            .zip(ExitKind::ALL)
+            .filter(|(_, k)| *k == t.sim.kind)
+            .for_each(|(c, _)| *c += 1);
         if t.sim.fallback {
             fallback_days.insert((r.candidate.symbol.as_str(), r.candidate.day));
         }
     }
     counts.fallback_days = u64::try_from(fallback_days.len()).unwrap_or(u64::MAX);
     trades.sort_by(|a, b| {
-        let ka = (a.0.candidate.day, a.1.sim.exit.second, a.0.candidate.symbol.as_bytes());
-        ka.cmp(&(b.0.candidate.day, b.1.sim.exit.second, b.0.candidate.symbol.as_bytes()))
+        let ka = (
+            a.0.candidate.day,
+            a.1.sim.exit.second,
+            a.0.candidate.symbol.as_bytes(),
+        );
+        ka.cmp(&(
+            b.0.candidate.day,
+            b.1.sim.exit.second,
+            b.0.candidate.symbol.as_bytes(),
+        ))
     });
-    let marks: Vec<Closed> =
-        trades.iter().map(|(r, t)| Closed { day: r.candidate.day, second: t.sim.exit.second, net: t.net }).collect();
+    let marks: Vec<Closed> = trades
+        .iter()
+        .map(|(r, t)| Closed {
+            day: r.candidate.day,
+            second: t.sim.exit.second,
+            net: t.net,
+        })
+        .collect();
     let month_rows = months(&market.window, &marks);
     let nets: Vec<i128> = trades.iter().map(|(_, t)| t.net).collect();
     let charges: i128 = trades.iter().map(|(_, t)| t.priced.headline).sum();
     let stats = row_stats(&month_rows, &nets, charges);
-    Row { key, admitted, drawdown: drawdown(&marks), bar: bar(&month_rows), months: month_rows, stats, counts }
+    Row {
+        key,
+        admitted,
+        drawdown: drawdown(&marks),
+        bar: bar(&month_rows),
+        months: month_rows,
+        stats,
+        counts,
+    }
 }
 
 /// Runs the whole recipe on a market.
@@ -387,7 +586,10 @@ pub fn run(market: &Market) -> Result<Output, RunError> {
         let mut own = BTreeMap::new();
         facts.push(phase_a(market, stock, &mut own, &mut tallies)?);
         for (key, list) in own {
-            per_stock.entry(key).or_default().push(list.iter().map(|r: &Record| r.candidate.clone()).collect());
+            per_stock
+                .entry(key)
+                .or_default()
+                .push(list.iter().map(|r: &Record| r.candidate.clone()).collect());
             all.entry(key).or_default().extend(list);
         }
     }
@@ -408,7 +610,11 @@ pub fn run(market: &Market) -> Result<Output, RunError> {
             }
         }
     }
-    Ok(Output { records, rows, stocks: facts })
+    Ok(Output {
+        records,
+        rows,
+        stocks: facts,
+    })
 }
 
 #[cfg(test)]

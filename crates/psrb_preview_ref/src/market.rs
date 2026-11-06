@@ -27,13 +27,25 @@ impl Bar {
     /// A bar whose four prices are all `price`.
     #[must_use]
     pub const fn flat(price: i64, volume: i64) -> Self {
-        Self { open: price, high: price, low: price, close: price, volume }
+        Self {
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume,
+        }
     }
 
     /// A bar from its five fields.
     #[must_use]
     pub const fn new(open: i64, high: i64, low: i64, close: i64, volume: i64) -> Self {
-        Self { open, high, low, close, volume }
+        Self {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        }
     }
 }
 

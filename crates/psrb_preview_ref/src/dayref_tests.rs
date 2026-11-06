@@ -12,13 +12,20 @@ use crate::market::Bar;
 use crate::time::CLOSE_FULL;
 
 fn minute(i: u32, bar: Bar) -> Minute {
-    Minute { start: OPEN + 60 * i, bar }
+    Minute {
+        start: OPEN + 60 * i,
+        bar,
+    }
 }
 
 #[test]
 fn t_f11_the_day_bar_is_the_session_high_low_and_last_traded_close() {
     let d = day(2018, 9, 4);
-    let minutes = [minute(0, Bar::new(100, 105, 99, 101, 5)), minute(1, Bar::new(101, 110, 100, 108, 5)), minute(2, Bar::new(108, 108, 108, 108, 0))];
+    let minutes = [
+        minute(0, Bar::new(100, 105, 99, 101, 5)),
+        minute(1, Bar::new(101, 110, 100, 108, 5)),
+        minute(2, Bar::new(108, 108, 108, 108, 0)),
+    ];
     let bar = day_bar(d, &minutes).unwrap();
     assert_eq!((bar.high(), bar.low(), bar.close()), (110, 99, 108));
     let mut prev = PrevSession::default();
@@ -35,7 +42,10 @@ fn x_f11_prev_session_extremes() {
     assert_eq!(day_bar(d, &[minute(0, Bar::flat(100, 0))]), None);
     assert_eq!(day_bar(d, &[]), None);
     // oob: an inverted stored bar is refused.
-    assert_eq!(day_bar(d, &[minute(0, Bar::new(100, 90, 110, 100, 5))]), None);
+    assert_eq!(
+        day_bar(d, &[minute(0, Bar::new(100, 90, 110, 100, 5))]),
+        None
+    );
     assert_eq!(AcceptedBar::from_hlc(90, 110, 100), None);
     assert_eq!(AcceptedBar::from_hlc(110, 90, 120), None);
     assert_eq!(AcceptedBar::from_hlc(110, 0, 100), None);
@@ -48,8 +58,17 @@ fn x_f11_prev_session_extremes() {
     assert_eq!(prev.reference(), None);
     // combo: a minute outside the session never enters the day bar, and an auction day
     // stops at 15:15
-    let outside = [minute(0, Bar::new(100, 101, 99, 100, 5)), Minute { start: CLOSE_FULL, bar: Bar::new(100, 500, 1, 100, 5) }];
+    let outside = [
+        minute(0, Bar::new(100, 101, 99, 100, 5)),
+        Minute {
+            start: CLOSE_FULL,
+            bar: Bar::new(100, 500, 1, 100, 5),
+        },
+    ];
     assert_eq!(day_bar(d, &outside).unwrap().high(), 101);
-    let auction = [minute(0, Bar::new(100, 101, 99, 100, 5)), minute(359, Bar::new(100, 104, 99, 103, 5))];
+    let auction = [
+        minute(0, Bar::new(100, 101, 99, 100, 5)),
+        minute(359, Bar::new(100, 104, 99, 103, 5)),
+    ];
     assert_eq!(day_bar(day(2026, 8, 3), &auction).unwrap().close(), 103);
 }

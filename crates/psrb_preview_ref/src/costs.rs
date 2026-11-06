@@ -33,7 +33,10 @@ impl Order {
     /// Its value in paisa.
     #[must_use]
     pub fn value(&self) -> i128 {
-        self.parts.iter().map(|p| i128::from(p.qty) * i128::from(p.price)).sum()
+        self.parts
+            .iter()
+            .map(|p| i128::from(p.qty) * i128::from(p.price))
+            .sum()
     }
 
     /// Its shares.
@@ -178,7 +181,11 @@ pub fn dated_rates(day: Day) -> Rates {
     } else {
         32_500
     };
-    let ipft = if on_or_after(day, 2026, 3, 1) || !on_or_after(day, 2023, 4, 1) { 1 } else { 1_000 };
+    let ipft = if on_or_after(day, 2026, 3, 1) || !on_or_after(day, 2023, 4, 1) {
+        1
+    } else {
+        1_000
+    };
     let sebi = if on_or_after(day, 2021, 4, 1) {
         1_000
     } else if on_or_after(day, 2020, 6, 1) {
@@ -200,7 +207,13 @@ pub fn dated_rates(day: Day) -> Rates {
 /// Today's clock: Dhan's rates of 2026-10-30 on every date.
 #[must_use]
 pub const fn today_rates() -> Rates {
-    Rates { exchange: 30_699, ipft: 1, sebi: 1_000, gst_on_sebi: true, state_stamp: false }
+    Rates {
+        exchange: 30_699,
+        ipft: 1,
+        sebi: 1_000,
+        gst_on_sebi: true,
+        state_stamp: false,
+    }
 }
 
 /// A per-crore charge on `value` paisa, half-up to the paisa.
@@ -273,20 +286,31 @@ fn price_clock(orders: &[Order], rates: Rates) -> (Lines, Lines) {
     let ex_order: i128 = orders.iter().map(|o| per_crore(o.value(), both)).sum();
 
     let sebi_once = per_crore(turnover, rates.sebi);
-    let sebi_order: i128 = orders.iter().map(|o| per_crore(o.value(), rates.sebi)).sum();
+    let sebi_order: i128 = orders
+        .iter()
+        .map(|o| per_crore(o.value(), rates.sebi))
+        .sum();
 
     let squared = buy_qty.min(sell_qty);
     let vwap = half_up(turnover, buy_qty + sell_qty);
     let stt_vwap = to_rupee(half_up(squared * vwap * 25, 100_000));
     let stt_sell = stt_of(sell_value);
-    let stt_per_order: i128 = orders.iter().filter(|o| !o.buy).map(|o| stt_of(o.value())).sum();
+    let stt_per_order: i128 = orders
+        .iter()
+        .filter(|o| !o.buy)
+        .map(|o| stt_of(o.value()))
+        .sum();
 
     let (stamp_precise, stamp_worst) = if rates.state_stamp {
         let precise = state_stamp(turnover);
         (precise, precise.max(to_rupee(precise)))
     } else {
         let precise = stamp_nd_of(buy_value);
-        let per_order: i128 = orders.iter().filter(|o| o.buy).map(|o| stamp_nd_of(o.value())).sum();
+        let per_order: i128 = orders
+            .iter()
+            .filter(|o| o.buy)
+            .map(|o| stamp_nd_of(o.value()))
+            .sum();
         (precise, precise.max(per_order))
     };
 
@@ -356,7 +380,14 @@ pub fn price_trade(orders: &[Order], day: Day) -> Result<Priced, ChargeError> {
     } else {
         (today_worst.total(), Clock::Today)
     };
-    Ok(Priced { dated_precise, dated_worst, today_precise, today_worst, headline, from })
+    Ok(Priced {
+        dated_precise,
+        dated_worst,
+        today_precise,
+        today_worst,
+        headline,
+        from,
+    })
 }
 
 /// F41: a trade's two orders: the entry (a long buys, a short sells) and the exit, one
@@ -364,8 +395,16 @@ pub fn price_trade(orders: &[Order], day: Day) -> Result<Priced, ChargeError> {
 #[must_use]
 pub fn trade_orders(long: bool, qty: i64, entry: i64, exit: i64, by_broker: bool) -> Vec<Order> {
     vec![
-        Order { buy: long, by_broker: false, parts: vec![Part { qty, price: entry }] },
-        Order { buy: !long, by_broker, parts: vec![Part { qty, price: exit }] },
+        Order {
+            buy: long,
+            by_broker: false,
+            parts: vec![Part { qty, price: entry }],
+        },
+        Order {
+            buy: !long,
+            by_broker,
+            parts: vec![Part { qty, price: exit }],
+        },
     ]
 }
 

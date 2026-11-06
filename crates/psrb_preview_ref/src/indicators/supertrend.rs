@@ -77,14 +77,24 @@ impl SuperTrend {
         let trend = if !self.seen_atr {
             Trend::Down
         } else if self.trend == Trend::Down {
-            if close > upper { Trend::Up } else { Trend::Down }
+            if close > upper {
+                Trend::Up
+            } else {
+                Trend::Down
+            }
         } else if close < lower {
             Trend::Down
         } else {
             Trend::Up
         };
         let line = if trend == Trend::Up { lower } else { upper };
-        self.reading = Some(Reading { trend, line, upper, lower, settled: self.seen_atr });
+        self.reading = Some(Reading {
+            trend,
+            line,
+            upper,
+            lower,
+            settled: self.seen_atr,
+        });
         self.upper = upper;
         self.lower = lower;
         self.trend = trend;

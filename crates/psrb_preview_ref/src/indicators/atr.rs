@@ -20,7 +20,13 @@ impl Atr {
     #[must_use]
     pub const fn new(period: u16) -> Self {
         let period = if period == 0 { 1 } else { period };
-        Self { period, count: 0, sum: 0, value: 0, previous_close: None }
+        Self {
+            period,
+            count: 0,
+            sum: 0,
+            value: 0,
+            previous_close: None,
+        }
     }
 
     /// The true range of `bar` after the previous close.

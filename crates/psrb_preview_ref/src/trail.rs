@@ -41,7 +41,14 @@ pub enum Step {
 /// One trailing decision: `mapped` is the candle's side band mapped at its close, or
 /// `None` when it could not be mapped.
 #[must_use]
-pub fn step(side: Side, close: i64, band: i128, hole: bool, mapped: Option<i64>, stop: i64) -> Step {
+pub fn step(
+    side: Side,
+    close: i64,
+    band: i128,
+    hole: bool,
+    mapped: Option<i64>,
+    stop: i64,
+) -> Step {
     if hole {
         return Step::Hold;
     }

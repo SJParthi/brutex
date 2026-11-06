@@ -16,7 +16,12 @@ use crate::rng::SplitMix64;
 use crate::time::{CLOSE_FULL, Day, Month, OPEN};
 
 /// The four base seeds of TEST-PLAN section 0.1.
-pub const SEEDS: [u64; 4] = [0x5053_5242_0000_0001, 0x5053_5242_0000_0002, 0x5053_5242_0000_0003, 0x5053_5242_0000_0004];
+pub const SEEDS: [u64; 4] = [
+    0x5053_5242_0000_0001,
+    0x5053_5242_0000_0002,
+    0x5053_5242_0000_0003,
+    0x5053_5242_0000_0004,
+];
 
 /// One named scenario: its inputs and what it plants.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +80,11 @@ impl DayPlan {
     /// A day of 375 flat minutes at `price` (or 360 when `minutes` says so).
     #[must_use]
     pub fn flat(price: i64, count: u32) -> Self {
-        let mut plan = Self { factor: 1, rule: Some(Seconds::OnePerMinute), ..Self::default() };
+        let mut plan = Self {
+            factor: 1,
+            rule: Some(Seconds::OnePerMinute),
+            ..Self::default()
+        };
         for i in 0..count {
             plan.minutes.insert(i, Bar::flat(price, VOLUME));
         }
@@ -123,7 +132,11 @@ impl DayPlan {
     #[must_use]
     pub fn pad(mut self, from: u32, to: u32) -> Self {
         for i in from..to {
-            let price = self.minutes.range(..i).next_back().map_or(100_000, |(_, b)| b.close);
+            let price = self
+                .minutes
+                .range(..i)
+                .next_back()
+                .map_or(100_000, |(_, b)| b.close);
             self.minutes.insert(i, Bar::flat(price, 0));
         }
         self
@@ -164,11 +177,17 @@ impl DayPlan {
             .minutes
             .iter()
             .filter(|(i, _)| !self.drop_minutes.contains(i))
-            .map(|(i, bar)| Minute { start: OPEN + 60 * i, bar: *bar })
+            .map(|(i, bar)| Minute {
+                start: OPEN + 60 * i,
+                bar: *bar,
+            })
             .collect();
         let mut seconds: BTreeMap<u32, Bar> = BTreeMap::new();
         if self.rule == Some(Seconds::OnePerMinute) {
-            for m in minutes.iter().filter(|m| !m.padded() && m.start < CLOSE_FULL) {
+            for m in minutes
+                .iter()
+                .filter(|m| !m.padded() && m.start < CLOSE_FULL)
+            {
                 let p = m.bar.close * self.factor;
                 seconds.insert(m.start + 1, Bar::flat(p, 10));
             }
@@ -178,7 +197,9 @@ impl DayPlan {
         }
         let seconds: Vec<Second> = seconds
             .into_iter()
-            .filter(|(at, _)| !self.drop_seconds.contains(at) && self.halt_from.is_none_or(|h| *at < h))
+            .filter(|(at, _)| {
+                !self.drop_seconds.contains(at) && self.halt_from.is_none_or(|h| *at < h)
+            })
             .map(|(at, bar)| Second { at, bar })
             .collect();
         StockDay { minutes, seconds }
@@ -196,7 +217,12 @@ impl StockPlan {
     /// A stock named `name` with no data.
     #[must_use]
     pub fn new(name: &str) -> Self {
-        Self { stock: Stock { name: name.to_owned(), ..Stock::default() } }
+        Self {
+            stock: Stock {
+                name: name.to_owned(),
+                ..Stock::default()
+            },
+        }
     }
 
     /// Adds a day: its months join the Zerodha list (and the GDFL list when `gdfl`).
@@ -259,7 +285,12 @@ impl StockPlan {
 pub fn market(window: Window, calendar: Calendar, stocks: Vec<Stock>) -> Market {
     let names: Vec<&str> = stocks.iter().map(|s| s.name.as_str()).collect();
     let membership = Membership::all_members(&names);
-    Market { calendar, window, stocks, membership }
+    Market {
+        calendar,
+        window,
+        stocks,
+        membership,
+    }
 }
 
 /// A day that must exist (the catalogue names only real dates).
@@ -271,7 +302,10 @@ pub fn day(y: i32, m: u32, d: u32) -> Day {
 /// The membership of a market with one answer changed.
 #[must_use]
 pub fn with_answer(mut market: Market, name: &str, on: Day, answer: Answer) -> Market {
-    market.membership.answers.insert((name.to_owned(), on), answer);
+    market
+        .membership
+        .answers
+        .insert((name.to_owned(), on), answer);
     market
 }
 
@@ -285,7 +319,9 @@ pub const fn with_probe(mut market: Market, probe: Probe) -> Market {
 /// A calendar with overrides.
 #[must_use]
 pub fn calendar(overrides: &[(Day, DayKind)]) -> Calendar {
-    Calendar { overrides: overrides.iter().copied().collect() }
+    Calendar {
+        overrides: overrides.iter().copied().collect(),
+    }
 }
 
 /// A random draw helper over the seeded generator.
@@ -298,7 +334,9 @@ impl Draw {
     /// A draw from `seed`.
     #[must_use]
     pub const fn new(seed: u64) -> Self {
-        Self { rng: SplitMix64::new(seed) }
+        Self {
+            rng: SplitMix64::new(seed),
+        }
     }
 
     /// Uniform in `lo..=hi`.

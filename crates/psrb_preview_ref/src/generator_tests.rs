@@ -3,6 +3,7 @@
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::many_single_char_names,
     reason = "the same exception every test module in this workspace takes: a test that cannot panic cannot fail."
 )]
 
@@ -11,16 +12,24 @@ use crate::time::Month;
 
 #[test]
 fn a_day_plan_builds_minutes_and_one_second_per_traded_minute() {
-    let plan = DayPlan::flat(100, 3).minute(1, Bar::flat(101, VOLUME)).second(OPEN + 30, Bar::flat(500, 2));
+    let plan = DayPlan::flat(100, 3)
+        .minute(1, Bar::flat(101, VOLUME))
+        .second(OPEN + 30, Bar::flat(500, 2));
     let sd = plan.build();
     assert_eq!(sd.minutes.len(), 3);
-    assert_eq!(sd.seconds.iter().map(|s| s.at).collect::<Vec<_>>(), [OPEN + 1, OPEN + 30, OPEN + 61, OPEN + 121]);
+    assert_eq!(
+        sd.seconds.iter().map(|s| s.at).collect::<Vec<_>>(),
+        [OPEN + 1, OPEN + 30, OPEN + 61, OPEN + 121]
+    );
     assert_eq!(sd.seconds[2].bar.close, 101);
     let split = DayPlan::flat(100, 1).factor(5).build();
     assert_eq!(split.seconds[0].bar.close, 500);
     let none = DayPlan::flat(100, 2).seconds_rule(Seconds::None).build();
     assert!(none.seconds.is_empty());
-    let dropped = DayPlan::flat(100, 3).drop_minute(1).drop_second(OPEN + 1).build();
+    let dropped = DayPlan::flat(100, 3)
+        .drop_minute(1)
+        .drop_second(OPEN + 1)
+        .build();
     assert_eq!((dropped.minutes.len(), dropped.seconds.len()), (2, 1));
     let padded = DayPlan::flat(100, 3).pad(1, 3).build();
     assert!(padded.minutes[1].padded() && padded.seconds.len() == 1);
@@ -45,22 +54,39 @@ fn a_stock_plan_records_its_months_and_flags() {
         .withhold(day(2018, 9, 4))
         .build();
     assert_eq!(s.name, "S");
-    assert!(s.zerodha_months.contains(&Month::of(2018, 7)) && s.zerodha_months.contains(&Month::of(2018, 11)));
-    assert!(!s.gdfl_months.contains(&Month::of(2018, 9)) && s.gdfl_refused.contains(&Month::of(2018, 10)));
+    assert!(
+        s.zerodha_months.contains(&Month::of(2018, 7))
+            && s.zerodha_months.contains(&Month::of(2018, 11))
+    );
+    assert!(
+        !s.gdfl_months.contains(&Month::of(2018, 9))
+            && s.gdfl_refused.contains(&Month::of(2018, 10))
+    );
     assert!(s.withheld.contains(&day(2018, 9, 4)));
     assert!(!s.days.contains_key(&day(2018, 7, 2)) && s.days.contains_key(&day(2018, 7, 3)));
-    let gd = StockPlan::new("T").day(day(2018, 9, 4), &DayPlan::flat(100, 2), true).gdfl_month(Month::of(2018, 12), false).build();
+    let gd = StockPlan::new("T")
+        .day(day(2018, 9, 4), &DayPlan::flat(100, 2), true)
+        .gdfl_month(Month::of(2018, 12), false)
+        .build();
     assert!(gd.gdfl_months.contains(&Month::of(2018, 9)) && gd.gdfl_refused.is_empty());
 }
 
 #[test]
 fn markets_answers_probes_and_draws() {
-    let w = Window { first: Month::of(2018, 9), last: Month::of(2018, 9) };
+    let w = Window {
+        first: Month::of(2018, 9),
+        last: Month::of(2018, 9),
+    };
     let m = market(w, calendar(&[]), vec![StockPlan::new("A").build()]);
     assert!(m.membership.listed.contains("A"));
     let m = with_answer(m, "A", day(2018, 9, 4), Answer::No);
     assert_eq!(m.membership.answers.len(), 1);
-    let p = Probe { opened: false, reliance_first: Answer::No, reliance_last: Answer::No, syrma_last: Answer::No };
+    let p = Probe {
+        opened: false,
+        reliance_first: Answer::No,
+        reliance_last: Answer::No,
+        syrma_last: Answer::No,
+    };
     assert!(!with_probe(m, p).membership.probe.opened);
     assert_eq!(day(2018, 2, 30), Day::from_index(0));
     let mut d = Draw::new(SEEDS[0]);

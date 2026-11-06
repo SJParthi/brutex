@@ -4,7 +4,10 @@
 //! (PREVIEW-SPEC section 3.5; pins Q3, Q4 and Q5 of TEST-PLAN section 7).
 
 use crate::cond::Side;
-use crate::fills::{Print, StopScan, entry, exit_price, first_at_or_after, minute_prints, reaches, second_prints, worst_since};
+use crate::fills::{
+    Print, StopScan, entry, exit_price, first_at_or_after, minute_prints, reaches, second_prints,
+    worst_since,
+};
 use crate::market::{Minute, Second};
 use crate::pricemap::{map_level, ratio_source, unmapped_level};
 use crate::sizing::qty;
@@ -28,7 +31,13 @@ pub enum ExitKind {
 
 impl ExitKind {
     /// Every kind, in report order.
-    pub const ALL: [Self; 5] = [Self::Stop, Self::Flip, Self::Time, Self::SquareOff, Self::Unclosable];
+    pub const ALL: [Self; 5] = [
+        Self::Stop,
+        Self::Flip,
+        Self::Time,
+        Self::SquareOff,
+        Self::Unclosable,
+    ];
 
     /// The broker placed the exit order.
     #[must_use]
@@ -131,14 +140,21 @@ fn level_at(tape: &Tape<'_>, band: i128, t: u32, side: Side) -> Option<i64> {
 }
 
 fn fill(prints: &[Print], i: usize, side: Side) -> Option<Fill> {
-    prints.get(i).map(|p| Fill { second: p.slot, price: exit_price(p, side) })
+    prints.get(i).map(|p| Fill {
+        second: p.slot,
+        price: exit_price(p, side),
+    })
 }
 
 /// F39: simulates the trade of a signal on `side` at candle close `t`, whose own side band
 /// is `band`, against the day's later candles and its tape.
 #[must_use]
 pub fn simulate(side: Side, t: u32, band: i128, later: &[Later], tape: &Tape<'_>) -> Outcome {
-    let prints = if tape.fallback { minute_prints(tape.minutes, tape.close) } else { second_prints(tape.seconds) };
+    let prints = if tape.fallback {
+        minute_prints(tape.minutes, tape.close)
+    } else {
+        second_prints(tape.seconds)
+    };
     let Some((e, entry_price)) = entry(&prints, t, side) else {
         return Outcome::NotFilled;
     };
@@ -149,12 +165,23 @@ pub fn simulate(side: Side, t: u32, band: i128, later: &[Later], tape: &Tape<'_>
     if shares <= 0 {
         return Outcome::ZeroQuantity;
     }
-    let entry_print = prints.get(e).copied().unwrap_or(Print { start: t, slot: t, high: entry_price, low: entry_price });
+    let entry_print = prints.get(e).copied().unwrap_or(Print {
+        start: t,
+        slot: t,
+        high: entry_price,
+        low: entry_price,
+    });
     let late = entry_print.slot > t + 60;
     let mut trade = Simulated {
-        entry: Fill { second: entry_print.slot, price: entry_price },
+        entry: Fill {
+            second: entry_print.slot,
+            price: entry_price,
+        },
         qty: shares,
-        exit: Fill { second: tape.close, price: entry_price },
+        exit: Fill {
+            second: tape.close,
+            price: entry_price,
+        },
         kind: ExitKind::Unclosable,
         fallback: tape.fallback,
         late,
@@ -168,7 +195,10 @@ pub fn simulate(side: Side, t: u32, band: i128, later: &[Later], tape: &Tape<'_>
         trade.exit = exit;
     } else {
         let price = worst_since(&prints, e, side).unwrap_or(entry_price);
-        trade.exit = Fill { second: tape.close, price };
+        trade.exit = Fill {
+            second: tape.close,
+            price,
+        };
     }
     Outcome::Filled(trade)
 }
@@ -183,14 +213,31 @@ fn walk(
     entry_print: Print,
     trade: &mut Simulated,
 ) -> (ExitKind, Option<usize>) {
-    let mut scan = StopScan { stop: trade.last_stop, side, cursor: entry_at + 1 };
-    let candles = later.iter().filter(|c| c.t > entry_print.slot && c.t <= TIME_EXIT);
+    let mut scan = StopScan {
+        stop: trade.last_stop,
+        side,
+        cursor: entry_at + 1,
+    };
+    let candles = later
+        .iter()
+        .filter(|c| c.t > entry_print.slot && c.t <= TIME_EXIT);
     for candle in candles {
         if let Some(at) = scan.until(prints, candle.t) {
             return (ExitKind::Stop, Some(at));
         }
-        let mapped = if candle.hole { None } else { level_at(tape, candle.band, candle.t, side) };
-        match step(side, candle.close, candle.band, candle.hole, mapped, scan.stop) {
+        let mapped = if candle.hole {
+            None
+        } else {
+            level_at(tape, candle.band, candle.t, side)
+        };
+        match step(
+            side,
+            candle.close,
+            candle.band,
+            candle.hole,
+            mapped,
+            scan.stop,
+        ) {
             Step::Flip => {
                 let at = first_at_or_after(prints, candle.t).max(entry_at + 1);
                 return match prints.get(at) {

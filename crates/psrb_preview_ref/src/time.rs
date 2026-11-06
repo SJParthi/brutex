@@ -197,7 +197,9 @@ impl Month {
     #[must_use]
     pub fn days(self) -> Vec<Day> {
         let (y, m) = self.ym();
-        (1..=month_length(y, m)).filter_map(|d| Day::from_ymd(y, m, d)).collect()
+        (1..=month_length(y, m))
+            .filter_map(|d| Day::from_ymd(y, m, d))
+            .collect()
     }
 
     /// `YYYY-MM`.

@@ -57,10 +57,18 @@ fn t_g1_no_float_token_anywhere() {
 /// T-G-2: no `as` cast and no indexing allowance in production code.
 #[test]
 fn t_g2_no_as_casts_no_indexing_allowance_in_production() {
-    let lib = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
+    let lib =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
     assert!(lib.contains(&["#![deny(clippy::", "as_conversions)]"].concat()));
-    for (path, text) in sources().into_iter().filter(|(p, _)| !p.to_string_lossy().ends_with("_tests.rs")) {
-        assert!(!text.contains(&["allow(clippy::", "indexing_slicing"].concat()), "{}", path.display());
+    for (path, text) in sources()
+        .into_iter()
+        .filter(|(p, _)| !p.to_string_lossy().ends_with("_tests.rs"))
+    {
+        assert!(
+            !text.contains(&["allow(clippy::", "indexing_slicing"].concat()),
+            "{}",
+            path.display()
+        );
     }
 }
 
@@ -93,7 +101,11 @@ fn t_g5_only_rust_toml_md_files() {
 /// T-G-6: one common path: the rule sets' names appear only in their table and in tests.
 #[test]
 fn t_g6_one_common_path() {
-    let names = [["VIDEO", "_ORIGINAL"].concat(), ["AUTHOR", "_V2"].concat(), ["VIDEO", "_SCREEN"].concat()];
+    let names = [
+        ["VIDEO", "_ORIGINAL"].concat(),
+        ["AUTHOR", "_V2"].concat(),
+        ["VIDEO", "_SCREEN"].concat(),
+    ];
     for (path, text) in sources() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         if name == "ruleset.rs" || name.ends_with("_tests.rs") || name == "lib.rs" {

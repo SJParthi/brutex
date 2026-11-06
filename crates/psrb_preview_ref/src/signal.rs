@@ -5,8 +5,8 @@
 //! conjunction is then read per side; a candle never yields both sides.
 
 use crate::cond::{
-    Side, c1_narrow_cpr, c2_beyond_r1_s1, c3_supertrend_side, c4_bollinger_beyond, c5_rsi_beyond, c6_willr_level,
-    c7_cci_beyond, c8_ema_side,
+    Side, c1_narrow_cpr, c2_beyond_r1_s1, c3_supertrend_side, c4_bollinger_beyond, c5_rsi_beyond,
+    c6_willr_level, c7_cci_beyond, c8_ema_side,
 };
 use crate::dayref::AcceptedBar;
 use crate::readings::{Bank, KINDS, Kind};
@@ -43,7 +43,11 @@ pub enum Blocker {
 /// The readings a rule set uses, in table order, each once.
 #[must_use]
 pub fn readings_used(set: &RuleSet) -> Vec<Kind> {
-    KINDS.iter().copied().filter(|k| set.conds.iter().any(|c| c.reading() == Some(*k))).collect()
+    KINDS
+        .iter()
+        .copied()
+        .filter(|k| set.conds.iter().any(|c| c.reading() == Some(*k)))
+        .collect()
 }
 
 /// F28: every blocker, in order (span, hole, then each used reading cold or tainted);
@@ -73,19 +77,32 @@ pub fn condition(cond: &Cond, ctx: &Context<'_>, side: Side) -> bool {
     let bank = ctx.bank;
     match *cond {
         Cond::NarrowCpr { bp } => ctx.prev.is_some_and(|p| c1_narrow_cpr(&p, bp)),
-        Cond::BeyondR1S1 => ctx.prev.is_some_and(|p| c2_beyond_r1_s1(&p, ctx.close, side)),
+        Cond::BeyondR1S1 => ctx
+            .prev
+            .is_some_and(|p| c2_beyond_r1_s1(&p, ctx.close, side)),
         Cond::Supertrend { factor_milli } => {
-            let st = if factor_milli == 2_000 { &bank.st2 } else { &bank.st3 };
+            let st = if factor_milli == 2_000 {
+                &bank.st2
+            } else {
+                &bank.st3
+            };
             c3_supertrend_side(st.reading().as_ref(), side)
         }
-        Cond::Bollinger { width_milli } => c4_bollinger_beyond(bank.bb.window().as_ref(), width_milli, side),
-        Cond::Rsi { long_ppm, short_ppm } => c5_rsi_beyond(bank.rsi.reading().as_ref(), long_ppm, short_ppm, side),
-        Cond::WilliamsR { long_ppm, short_ppm } => {
-            c6_willr_level(bank.wr.reading().as_ref(), long_ppm, short_ppm, side)
+        Cond::Bollinger { width_milli } => {
+            c4_bollinger_beyond(bank.bb.window().as_ref(), width_milli, side)
         }
-        Cond::Cci { long_milli, short_milli } => {
-            c7_cci_beyond(bank.cci.reading().as_ref(), long_milli, short_milli, side)
-        }
+        Cond::Rsi {
+            long_ppm,
+            short_ppm,
+        } => c5_rsi_beyond(bank.rsi.reading().as_ref(), long_ppm, short_ppm, side),
+        Cond::WilliamsR {
+            long_ppm,
+            short_ppm,
+        } => c6_willr_level(bank.wr.reading().as_ref(), long_ppm, short_ppm, side),
+        Cond::Cci {
+            long_milli,
+            short_milli,
+        } => c7_cci_beyond(bank.cci.reading().as_ref(), long_milli, short_milli, side),
         Cond::Ema => c8_ema_side(&bank.ema, ctx.close, side),
     }
 }
@@ -97,7 +114,9 @@ pub fn evaluate(set: &RuleSet, ctx: &Context<'_>) -> Option<Side> {
     if !ready_gate(set, ctx).is_empty() {
         return None;
     }
-    Side::BOTH.into_iter().find(|side| set.conds.iter().all(|c| condition(c, ctx, *side)))
+    Side::BOTH
+        .into_iter()
+        .find(|side| set.conds.iter().all(|c| condition(c, ctx, *side)))
 }
 
 #[cfg(test)]

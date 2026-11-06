@@ -12,7 +12,11 @@ pub const SLOTS: usize = 20;
 /// the exposure or a price that is not positive (an impossible fill).
 #[must_use]
 pub const fn qty(entry_fill: i64) -> i64 {
-    if entry_fill <= 0 { 0 } else { EXPOSURE.div_euclid(entry_fill) }
+    if entry_fill <= 0 {
+        0
+    } else {
+        EXPOSURE.div_euclid(entry_fill)
+    }
 }
 
 #[cfg(test)]

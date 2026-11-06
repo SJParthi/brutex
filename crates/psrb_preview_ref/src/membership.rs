@@ -57,7 +57,11 @@ pub fn probe(p: &Probe) -> (Mode, Vec<&'static str>) {
     if p.syrma_last == Answer::Yes {
         reasons.push("SYRMA 2026-09-30 is Ok(true)");
     }
-    let mode = if reasons.is_empty() { Mode::Dated } else { Mode::TodaysList };
+    let mode = if reasons.is_empty() {
+        Mode::Dated
+    } else {
+        Mode::TodaysList
+    };
     (mode, reasons)
 }
 
@@ -111,7 +115,13 @@ impl Membership {
     ///
     /// # Errors
     /// [`Refusal::OutsideWindow`] for a day outside the window: the folder is never asked.
-    pub fn may_trade(&self, name: &str, day: Day, first: Day, last: Day) -> Result<Answer, Refusal> {
+    pub fn may_trade(
+        &self,
+        name: &str,
+        day: Day,
+        first: Day,
+        last: Day,
+    ) -> Result<Answer, Refusal> {
         if day < first || day > last {
             return Err(Refusal::OutsideWindow);
         }
@@ -122,7 +132,11 @@ impl Membership {
             return Ok(Answer::Yes);
         }
         let asked = self.asked_day(day);
-        Ok(self.answers.get(&(name.to_owned(), asked)).copied().unwrap_or(Answer::Yes))
+        Ok(self
+            .answers
+            .get(&(name.to_owned(), asked))
+            .copied()
+            .unwrap_or(Answer::Yes))
     }
 }
 

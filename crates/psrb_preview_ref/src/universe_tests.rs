@@ -19,7 +19,10 @@ fn names(list: &[Name]) -> Vec<&str> {
 fn t_f01_loads_in_byte_order_with_ordinals_and_ids() {
     let list = load(b"RELIANCE\nM&M\nICICILIFE\n").unwrap();
     assert_eq!(names(&list), ["ICICILIFE", "M&M", "RELIANCE"]);
-    assert_eq!(list.iter().map(|n| n.ordinal).collect::<Vec<_>>(), [0, 1, 2]);
+    assert_eq!(
+        list.iter().map(|n| n.ordinal).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
     assert_eq!(list[0].series, "ICICIPRULI");
     assert_eq!(list[0].id, fnv1a32(b"ICICIPRULI"));
     assert_eq!(list[2].series, "RELIANCE");
@@ -37,16 +40,26 @@ fn x_f01_universe_extremes() {
     assert_eq!(load(b" RELIANCE\n"), Err(vec![Refusal::BadName(1)]));
     assert_eq!(load(b"RELIANCE \n"), Err(vec![Refusal::BadName(1)]));
     let order = load(b"MANAPPURAM\nM&MFIN\nM&M\nBAJAJFINSV\nBAJAJ-AUTO\n").unwrap();
-    assert_eq!(names(&order), ["BAJAJ-AUTO", "BAJAJFINSV", "M&M", "M&MFIN", "MANAPPURAM"]);
+    assert_eq!(
+        names(&order),
+        ["BAJAJ-AUTO", "BAJAJFINSV", "M&M", "M&MFIN", "MANAPPURAM"]
+    );
     assert_eq!(load(b""), Err(vec![Refusal::Empty]));
     assert_eq!(load(b"\n"), Err(vec![Refusal::Empty]));
     // combo: the alias and its target listed together.
-    assert_eq!(load(b"ICICILIFE\nICICIPRULI\n"), Err(vec![Refusal::AliasAndTarget]));
+    assert_eq!(
+        load(b"ICICILIFE\nICICIPRULI\n"),
+        Err(vec![Refusal::AliasAndTarget])
+    );
     // combo: a forced id collision and a duplicate spelling, the collision first.
     let collide = load_with(b"A\nB\nC\nC\n", |_| 7);
     assert_eq!(
         collide,
-        Err(vec![Refusal::IdCollision("A".to_owned(), "B".to_owned()), Refusal::IdCollision("B".to_owned(), "C".to_owned()), Refusal::Duplicate(3, 4)])
+        Err(vec![
+            Refusal::IdCollision("A".to_owned(), "B".to_owned()),
+            Refusal::IdCollision("B".to_owned(), "C".to_owned()),
+            Refusal::Duplicate(3, 4)
+        ])
     );
     // oob: a byte-order mark, a carriage return and a byte that is not UTF-8.
     assert_eq!(load(b"\xEF\xBB\xBFA\n"), Err(vec![Refusal::Encoding]));
@@ -65,7 +78,9 @@ fn p_f01_load_vs_btreeset_model() {
             let mut lines: Vec<String> = Vec::new();
             for _ in 0..n {
                 let len = r.below(3) + 1;
-                let s: String = (0..len).map(|_| char::from(alphabet[usize::try_from(r.below(8)).unwrap()])).collect();
+                let s: String = (0..len)
+                    .map(|_| char::from(alphabet[usize::try_from(r.below(8)).unwrap()]))
+                    .collect();
                 lines.push(s);
             }
             let text = lines.join("\n");

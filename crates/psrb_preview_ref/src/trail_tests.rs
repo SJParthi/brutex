@@ -29,7 +29,10 @@ fn t_f33_every_trailing_permutation() {
                     } else {
                         Step::Hold
                     };
-                    assert_eq!(got, want, "{side:?} across {across_now} {band_vs_stop} hole {hole}");
+                    assert_eq!(
+                        got, want,
+                        "{side:?} across {across_now} {band_vs_stop} hole {hole}"
+                    );
                 }
             }
         }
@@ -40,7 +43,10 @@ fn t_f33_every_trailing_permutation() {
 #[test]
 fn x_f33_trailing_extremes() {
     // equal band: not tighter, no move
-    assert_eq!(step(Side::Long, 105, 100, false, Some(100), 100), Step::Hold);
+    assert_eq!(
+        step(Side::Long, 105, 100, false, Some(100), 100),
+        Step::Hold
+    );
     // the close exactly on the band is not across
     assert!(!across(100, 100, Side::Long) && !across(100, 100, Side::Short));
     // combo: across and tighter at once: the flip wins
@@ -50,7 +56,10 @@ fn x_f33_trailing_extremes() {
     // combo: a hole that is also across: nothing
     assert_eq!(step(Side::Short, 120, 100, true, Some(50), 100), Step::Hold);
     // oob: a long's new stop above the market and above its entry is still a move
-    assert_eq!(step(Side::Long, 101, 100, false, Some(1_000), 100), Step::Move(1_000));
+    assert_eq!(
+        step(Side::Long, 101, 100, false, Some(1_000), 100),
+        Step::Move(1_000)
+    );
     assert!(tighter(101, 100, Side::Long) && !tighter(100, 100, Side::Long));
     assert!(tighter(99, 100, Side::Short) && !tighter(101, 100, Side::Short));
     // an i128 band beyond every close
