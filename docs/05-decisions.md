@@ -87197,6 +87197,223 @@ refusal still by `pull::gdfl_cm::tests::date_mismatch_refuses` and
 **Store step.** None of its own: a day closed `done with refusals` for
 `date_mismatch` is read again only by `--retry-refused`, as any closed day.
 
+### D-8640 — PSRB-WILLR: Williams %R is `indicators::williams_r`, a reading with no vocabulary position, the published form over the last `period` candles, the first reading after `period` candles — 2026-11-05
+
+**Decision.** Williams %R for the PSRB strategy family (narrow CPR and Pivot
+R1, Supertrend, Bollinger Bands, RSI, Williams %R, CCI and EMA 200; NSE F&O
+stocks, cash, intraday) is the module `indicators::williams_r`:
+`WilliamsR::new(period)` takes a runtime `u16` period, 1 to 65,535, and
+`WilliamsR::fold` takes one candle. It emits no condition bit and holds no
+vocabulary position; it is a reading for the F&O strategy path, whose first
+caller is PSRB-STRAT. The definition is the published one, the form of
+`TradingView`'s built-in Williams %R script as PARTS-WILLR-CCI.md 5 states it:
+with `HH` the highest high and `LL` the lowest low of the last `period`
+candles, the current one included, and `C` the current close,
+`%R = 100 (C - HH) / (HH - LL) = -100 (HH - C) / (HH - LL)`, in `-100..=0`.
+The first reading is after exactly `period` candles, at candle `period - 1`
+counting from 0, where `ta.highest(n)` and `ta.lowest(n)` first have a value.
+A state carried across sessions keeps its window across the boundary, as
+`TradingView`'s intraday charts do; a daily reset is a new state. A hole in
+the minutes is the caller's (PSRB-STRAT's): the module reads OHLC only.
+
+**Rejected.** A vocabulary position: the strategy reads the value against
+searched levels, which a fixed bit cannot carry. A window that excludes the
+current candle: the published form includes it, and a caller that wants the
+engine's "anchor excludes the candle" convention keeps the previous reading,
+which is `Copy`.
+
+**Why.** PSRB's confirmed rule set (AUTHOR-V2) adds Williams %R, which the
+engine did not have (PARTS-WILLR-CCI.md 5). Parity here is parity with the
+published definition: neither `TradingView`'s page nor its output was read or
+compared, so the form is UNVERIFIED until PSRB-LAW's charter rows
+(PARTS-WILLR-CCI.md section 8).
+
+**Proof.** `williams_r_matches_fixture_wr_1`,
+`the_first_reading_appears_after_exactly_period_candles`,
+`a_period_of_one_reads_the_candle_alone` in
+`crates/indicators/src/williams_r_tests.rs` (PSRB-WILLR-I01). Written 5 Nov
+2026 on `cloud/psrb-willr-20261105`.
+
+### D-8641 — PSRB-WILLR: levels in ppm of the 0..-100 scale; exact comparisons `10^6 (HH - C)` against `-level (HH - LL)` in `i128`, a tie neither; `ppm` the floor, for records only; bounds const-asserted; a window of one price has no value — 2026-11-05
+
+**Decision.** A `Level` is in parts per million of the 0..-100 scale, so -85
+is -850,000, and `Level::from_ppm` refuses anything outside -1,000,000..=0 by
+name (`LevelOutOfRange { ppm }`). With `U = HH - C` and `R = HH - LL`, both
+widened to `i128` with `0 <= U <= R` (the window's highest high is at least
+the current high, its lowest low at most the current low, and the close lies
+between them), the reading is above level `l` exactly when
+`10^6 U < -l R` and below it exactly when `10^6 U > -l R`: for `R > 0`,
+`%R > l / 10^4` iff `-100 U / R > l / 10^4` iff `10^6 U < -l R`. At -85 that
+is `100 (HH - C) < 85 (HH - LL)`, the form the rule "%R > -85" reads. A tie is
+neither above nor below. `Reading::ppm()` is
+`floor(-10^6 U / R)` (`div_euclid`), in -1,000,000..=0, narrowed by
+`i32::try_from(q).ok()`, for records and seeds only: the floor can equal a
+level the exact %R is above. The bounds are const-asserted with `checked_mul`:
+`U, R < 2^63`, `10^6` and every `|l|` below `2^20`, so every product and the
+floor's dividend are below `2^83`, far inside `i128`, and no checked or
+saturating arithmetic is needed. A window of one price (`HH == LL`, so
+`U = R = 0`) is `Reading::flat()`: `ppm()` is `None` and every comparison and
+crossing is false, as `TradingView`'s division by zero gives `na`
+(UNVERIFIED). The comparisons carry no separate `R > 0` test: there both
+products are 0 and a strict comparison is false, so the conjunct would change
+no result and would only leave a mutant no test can kill. The two default
+levels overlap: every %R strictly between -85 and -15 is both above -85 and
+below -15, and the module says so rather than hiding it; the strategy's side
+comes from its other conditions.
+
+**Rejected.** A fixed-point scale or a float (`CLAUDE.md` section 7): every
+quantity is an exact integer, so no truncation bound exists to state.
+Deciding on `ppm`: the candle (2,000,001, 1,000,000, 1,150,001) floors to
+-850,000 yet its exact %R is -84.999915..., above -85
+(`a_floored_ppm_equal_to_the_level_is_not_a_tie`). A division by zero, a
+sentinel value or a clamp for the window of one price: a fallback that hides
+a failure (`CLAUDE.md` section 4).
+
+**Why.** Deterministic integers on every machine, every comparison exact on
+the published definition, and the one undefined case named.
+
+**Proof.** `a_tie_at_the_level_is_neither_above_nor_below`,
+`a_floored_ppm_equal_to_the_level_is_not_a_tie`,
+`ppm_is_the_floor_of_the_exact_ratio`,
+`every_reading_lies_between_minus_one_hundred_and_zero`,
+`a_flat_window_has_no_value_and_compares_false`,
+`the_long_and_short_levels_overlap_between_minus_eighty_five_and_minus_fifteen`,
+`parity_with_the_published_definition`,
+`the_largest_prices_and_period_never_overflow` in
+`crates/indicators/src/williams_r_tests.rs` (PSRB-WILLR-I02, -I03, -I04,
+-I05).
+
+### D-8642 — PSRB-WILLR: the crossings in `TradingView`'s `ta.crossover` / `ta.crossunder` form, false next to a window of one price or across periods; the previous reading is the caller's copy — 2026-11-05
+
+**Decision.** `Reading::crossed_above(previous, level)` is
+`previous.period == self.period`, and `!previous.flat()`, and
+`!previous.above(level)`, and `self.above(level)`, each a short-circuit
+`&&`: the previous reading at or below the level and the
+current one strictly above it, the form of `ta.crossover` (the current value
+strictly beyond, the previous one at or on the other side).
+`crossed_below` is the mirror with `below`, the form of `ta.crossunder`. Both
+are false when either reading is a window of one price, as `na` on either side
+gives false, and false when the two readings were taken at different periods.
+The period check catches a reading of another period only; two streams of
+one period are the caller's to keep apart. The caller keeps the previous
+candle's reading (a `Reading` is `Copy`); the module stores none. This is what
+the operator's "crosses above -85" variant reads.
+
+**Rejected.** Storing the previous reading inside `WilliamsR`: the strategy
+decides which reading is "previous" (a hole in the minutes, a session
+boundary), so the module would guess. A crossing from or onto the level
+counted as strict on both sides: `ta.crossover` counts a previous value on
+the level as not yet above (WR-1 candle 6 crosses from exactly -85).
+
+**Why.** The published crossing semantics, with the undefined reading and the
+mixed-period pair refused by construction rather than by the caller's care.
+
+**Proof.** `the_crossings_follow_tradingviews_crossover`,
+`a_flat_window_has_no_value_and_compares_false`,
+`williams_r_matches_fixture_wr_1` in
+`crates/indicators/src/williams_r_tests.rs` (PSRB-WILLR-I03).
+
+### D-8643 — PSRB-WILLR: two monotonic deques, expiry first, then back-pops and one push; allocated once in `new`; a wrapping `u64` candle number and a saturating `u32` warm count; refusals before any move; timestamps not read; no look-ahead — 2026-11-05
+
+**Decision.** The window is two `VecDeque<(u64, i64)>`s of (candle number,
+price), each built by `VecDeque::with_capacity(period)` in `WilliamsR::new`:
+`highs`, the highs falling strictly front to back, so its front is `HH`, and
+`lows`, the lows rising strictly, so its front is `LL`. Each fold, with `s`
+this candle's number and `n` the period: (1) **expire**: if a deque's front
+has `s.wrapping_sub(t) >= n`, pop it, one `if` per deque, because numbers
+rise by one per fold and after the previous fold every entry was at most
+`n - 1` old, so only the entry numbered `s - n` can be out; (2) **push**: pop
+from the back every entry whose high is at most this candle's high
+(`while highs.back().is_some_and(...)`), push `(s, high)`, and mirror it for
+`lows` with `>=`; (3) **count**: `next = s.wrapping_add(1)`,
+`seen = seen.saturating_add(1)`, keep the close. Expiry runs first, so a
+deque holds at most `n - 1` entries before the push and `n` after: the
+capacity reserved in `new` is never exceeded and a state built by `new` never
+reallocates. A clone reserves only its length (the pinned 1.97.1 std builds a
+cloned `VecDeque` with its length as the capacity, PARTS-WILLR-CCI.md 2), so a
+cloned state reallocates as it fills; the measured path never clones. Each
+entry is pushed once and removed at most once, so the removals over any run
+are at most the candles folded: amortized O(1) per candle; at p99 at most 100
+per deque by counting; the worst candle back-pops `period - 1` and removes
+`period` with its expiry (L-PSRB-WILLR-01). The pop test counts back-pops
+white-box as `len_before + 1 - len_after - expired`, `expired` 1 when before
+the fold the front is at least `period` old. The candle number is a `u64`
+that wraps, ages read as wrapping differences, exact while no entry is `2^64`
+candles old, which none can be at a `u16` period; the warm count is a `u32`
+that saturates at `u32::MAX`, far above every period, so `warm()` never turns
+false again. Where a deque's `front()` cannot be `None` (`reading()` after
+warm-up: the fold that made the state warm pushed onto both deques, and a fold
+that pops pushes before it returns), it is read with
+`map_or(close, ...)`, never a `match` or `if let`, whose second arm no test
+could take. `fold` refuses a candle with its own `Candle::check_evaluable`
+reason (`Refusal::Corrupt`) before anything moves; `PeriodZero` and
+`LevelOutOfRange` refuse before a state exists; every refusal leaves the
+state unchanged. The fold reads high, low and close only: timestamps are not
+read, and a reading after candle `t` depends on candles `0..=t` only.
+
+**Rejected.** A ring of the last `period` candles rescanned per reading:
+O(period) per candle. A `u16` warm count: at period 65,535 it would saturate
+at the period itself, which is harmless for `warm()` but leaves no margin, and
+a `u32` costs nothing. A `match` on `front()`: an arm no input can reach, and
+the 100% branch bar would fail on it.
+
+**Why.** The monotonic-deque window is the standard amortized-constant
+sliding maximum, and every bound it needs is either proved by counting or
+pinned by a white-box test.
+
+**Proof.** `the_pops_stay_bounded_at_the_ninety_ninth_percentile`,
+`at_most_one_entry_expires_per_candle`,
+`the_deques_never_grow_past_their_period_or_reallocate`,
+`the_deques_equal_a_brute_force_window`,
+`the_candle_counter_wraps_without_changing_a_reading`,
+`the_warm_counter_saturates_and_stays_warm`,
+`a_corrupt_candle_is_refused_and_changes_nothing`,
+`a_time_gap_reads_as_contiguous_candles`,
+`no_reading_depends_on_a_later_candle` in
+`crates/indicators/src/williams_r_tests.rs` (PSRB-WILLR-I04, -I05, -I06).
+
+### D-8644 — PSRB-WILLR: `C-PSRB-WILLR-01` and `C-PSRB-WILLR-02`, their sizes, ceiling and 2 µs budget, the bench's hashed series; the helpers copied per part — 2026-11-05
+
+**Decision.** `C-PSRB-WILLR-01` times one step, one `fold` plus `reading()`,
+both comparisons and `crossed_above` against the previous reading, at period
+14 after 2,000, 20,000 and 200,000 candles; `C-PSRB-WILLR-02` times the same
+step after 20,000 candles at periods 14, 140 and 1,400. Each size runs 9
+rounds of 20,000 samples, one clock read either side of each step; the best
+round's p99 is judged within the harness's `CEILING_PERMILLE` (3.0x) of the
+first size's and inside a 2 µs budget (PARTS-WILLR-CCI.md's 300 ns target is
+an ESTIMATE). The measuring functions (`measure_step`, `measure_period`,
+`StepCost`, `summarize`, `flat_within`) live in the module and are this part's
+own copy of the F&O form (PARTS.md 2.4: a shared helper would make one part
+wait on another, an accepted duplication); the wrapper
+`benches/ratio/psrb_willr.rs` sorts, prints and judges, and its row is one
+statement under the PSRB-WILLR slot of `crates/indicators/benches/ratio.rs`
+naming both ids. The bench's candles are a deterministic series: the close
+one of 4,001 prices 13 paisa apart around 25,000.00 and the high and low
+offsets each picked by a fixed integer hash (`SplitMix64`'s finalizer) of the
+minute and the field, so two runs time the same work.
+
+**Rejected.** A stride through the prices (the first wave's form): 7,919 is
+-83 modulo 4,001, so the closes fall by 1,079 paisa a candle and jump back up
+about every 48 candles, a sawtooth whose highs fall within each tooth, so each
+jump back-pops the whole highs deque. Derived from the series and not
+measured: the bench would then time the staircase of L-PSRB-WILLR-01 on about
+one candle in 48, inside the p99, with up to `period` back-pops (about 48 at
+the longer periods) rather than the typical step; the worst case is stated in
+L-PSRB-WILLR-01 instead. On the hashed series at period 14 each deque holds up
+to 9 entries and pops from the back on about half of 10,000 folds
+(`the_bench_measures_both_rows_at_tiny_sizes`).
+
+**Why.** The rows measure what `CLAUDE.md` section 3 rule 4 asks of a fold,
+on a series whose deques behave like a market's, with the worst case recorded
+as a limit rather than averaged in.
+
+**Proof.** `one_step_however_long_the_history` and
+`one_step_whatever_the_period` in
+`crates/indicators/benches/ratio/psrb_willr.rs`;
+`the_bench_measures_both_rows_at_tiny_sizes`,
+`a_cost_is_read_by_rank_and_judged_flat_or_not` in
+`crates/indicators/src/williams_r_tests.rs` (C-PSRB-WILLR-01, -02).
+
 ### D-7315 — R4-19: one not-owed authority — `pull::gaps::not_owed` names the session a series did not owe (NSE's withdrawal, before its listing, after its delisting, unread), the classifier's fifth reason; every classifier door and the repair plan ask it — 2026-10-26
 
 **Number** taken at landing from the ledger's head (amendment A6): D-7314

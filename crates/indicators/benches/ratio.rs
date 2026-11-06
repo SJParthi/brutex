@@ -65,6 +65,8 @@ use indicators::{Candle, OI_NULL};
 // ---- PSRB second wave (state/strategy-psrb-20261103/PARTS-WILLR-CCI.md 3). One slot
 // ---- per part, in the form of the PSRB slots below.
 // slot bench-mod PSRB-WILLR
+#[path = "ratio/psrb_willr.rs"]
+mod psrb_willr;
 
 // slot bench-mod PSRB-CCI
 
@@ -789,6 +791,14 @@ fn main() {
     // PSRB second-wave rows (state/strategy-psrb-20261103/PARTS-WILLR-CCI.md 3): one
     // statement per part directly under its slot, in the form of the PSRB rows below.
     // slot bench-row PSRB-WILLR
+    let verdicts: Vec<bool> = verdicts
+        .iter()
+        .copied()
+        .chain([psrb_willr::row(
+            floor,
+            &["C-PSRB-WILLR-01", "C-PSRB-WILLR-02"],
+        )])
+        .collect();
 
     // slot bench-row PSRB-CCI
 
