@@ -69,3 +69,7 @@ pub mod trade;
 pub mod trail;
 pub mod universe;
 pub mod verdict;
+
+#[cfg(test)]
+#[path = "gates_tests.rs"]
+mod gates;

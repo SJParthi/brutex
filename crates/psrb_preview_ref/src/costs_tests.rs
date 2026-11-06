@@ -3,6 +3,7 @@
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::unreadable_literal,
     reason = "the same exception every test module in this workspace takes: a test that cannot panic cannot fail."
 )]
 
@@ -15,13 +16,16 @@ enum Side {
     Sell,
 }
 
+/// One order of a vector: its side, `by_broker`, and its fills (shares, paisa).
+type OrderRow = (Side, bool, &'static [(i64, i64)]);
+
 /// One of COSTS section 9's 24 contract notes (`costs-table.json` `test_vectors`), every
 /// amount in paisa; lines in the order brokerage, exchange + IPFT, SEBI, STT, stamp, GST,
 /// DP, DP GST, square-off, square-off GST, total.
 struct Vector {
     id: &'static str,
     day: (i32, u32, u32),
-    orders: &'static [(Side, bool, &'static [(i64, i64)])],
+    orders: &'static [OrderRow],
     dated_precise: [i128; 11],
     dated_worst: [i128; 11],
     today_precise: [i128; 11],
@@ -30,7 +34,7 @@ struct Vector {
     net: i128,
 }
 
-const VECTORS: [Vector; 24] = [
+static VECTORS: [Vector; 24] = [
     Vector { id: "CN01", day: (2018, 9, 3), orders: &[(Side::Buy, false, &[(400, 125000)]), (Side::Sell, false, &[(400, 126250)])], dated_precise: [4000, 3266, 151, 12600, 10000, 1308, 0, 0, 0, 0, 31325], dated_worst: [4000, 3266, 151, 12600, 10000, 1308, 1250, 225, 0, 0, 32800], today_precise: [4000, 3085, 101, 12600, 1500, 1293, 0, 0, 0, 0, 22579], today_worst: [4000, 3085, 101, 12600, 1500, 1294, 1250, 225, 0, 0, 24055], headline: 32800, net: 467200 },
     Vector { id: "CN02", day: (2019, 3, 29), orders: &[(Side::Sell, false, &[(615, 81235)]), (Side::Buy, false, &[(615, 80500)])], dated_precise: [4000, 3233, 149, 12400, 9947, 1302, 0, 0, 0, 0, 31031], dated_worst: [4000, 3233, 149, 12500, 9947, 1302, 1250, 225, 0, 0, 32606], today_precise: [4000, 3054, 99, 12400, 1500, 1288, 0, 0, 0, 0, 22341], today_worst: [4000, 3054, 100, 12500, 1500, 1288, 1250, 225, 0, 0, 23917], headline: 32606, net: 419419 },
     Vector { id: "CN03", day: (2019, 4, 1), orders: &[(Side::Buy, false, &[(213, 234565)]), (Side::Sell, false, &[(213, 233010)])], dated_precise: [4000, 3237, 100, 12400, 9959, 1303, 0, 0, 0, 0, 30999], dated_worst: [4000, 3237, 100, 12400, 10000, 1303, 1250, 225, 0, 0, 32515], today_precise: [4000, 3058, 100, 12400, 1500, 1288, 0, 0, 0, 0, 22346], today_worst: [4000, 3058, 100, 12400, 1500, 1288, 1250, 225, 0, 0, 23821], headline: 32515, net: -363730 },
@@ -103,4 +107,132 @@ fn every_contract_note_vector_matches_line_by_line() {
         }
     }
     assert!(misses.is_empty(), "{} misses:\n{}", misses.len(), misses.join("\n"));
+}
+
+fn day(y: i32, m: u32, d: u32) -> Day {
+    Day::from_ymd(y, m, d).unwrap()
+}
+
+fn one_trade(long: bool, qty: i64, entry: i64, exit: i64, broker: bool, d: Day) -> Priced {
+    price_trade(&trade_orders(long, qty, entry, exit, broker), d).unwrap()
+}
+
+/// X-F42..X-F49: each line at its edges.
+#[test]
+fn x_f42_f49_line_extremes() {
+    let d = day(2024, 10, 1);
+    // brokerage: 0.03% under Rs 20, the cap above, the cross point at Rs 66,666.67
+    assert_eq!(one_trade(true, 1, 1_000_000, 1_000_000, false, d).today_worst.brokerage, 600);
+    assert_eq!(one_trade(true, 1, 6_666_667, 6_666_667, false, d).today_worst.brokerage, 4_000);
+    assert_eq!(one_trade(true, 1, 6_666_666, 6_666_666, false, d).today_worst.brokerage, 2 * 2_000);
+    assert_eq!(one_trade(true, 1, 6_666_500, 6_666_500, false, d).today_worst.brokerage, 2 * 2_000);
+    assert_eq!(one_trade(true, 1, 1, 1, false, d).today_worst.brokerage, 0);
+    // combo: one order under the cap and one over
+    assert_eq!(one_trade(true, 100, 50_000, 700_000, false, d).today_worst.brokerage, 1_500 + 2_000);
+    // the square-off: Rs 20 + GST on top of the exit's brokerage, only by the broker
+    let sq = one_trade(true, 400, 125_000, 125_000, true, d);
+    assert_eq!((sq.today_worst.square_off, sq.today_worst.square_off_gst, sq.today_worst.brokerage), (2_000, 360, 4_000));
+    assert_eq!(one_trade(true, 400, 125_000, 125_000, false, d).today_worst.square_off, 0);
+    // DP: only in the worst reading, Rs 12.50 + Rs 2.25
+    assert_eq!((sq.today_precise.dp, sq.today_worst.dp, sq.today_worst.dp_gst), (0, 1_250, 225));
+    // STT on the sell side only: a short's entry; a tiny sell rounds to 0 rupees
+    let short = one_trade(false, 400, 125_000, 124_000, false, d);
+    assert_eq!(short.today_worst.stt, 12_500);
+    assert_eq!(one_trade(true, 1, 1, 1, false, d).today_worst.stt, 0);
+    // stamp: 0.003% of the buy from 2020-07-01; the state levy before
+    assert_eq!(one_trade(true, 400, 125_000, 130_000, false, d).today_worst.stamp, 1_500);
+    assert_eq!(one_trade(true, 400, 125_000, 130_000, false, day(2020, 6, 30)).dated_worst.stamp, 10_000);
+    // GST on SEBI from 2022-07-18 on the dated clock (combo: the boundary)
+    let before = one_trade(true, 400, 125_000, 125_000, false, day(2022, 7, 15)).dated_precise;
+    let after = one_trade(true, 400, 125_000, 125_000, false, day(2022, 7, 18)).dated_precise;
+    assert_eq!(before.gst, crate::money::half_up((before.brokerage + before.exchange) * 18, 100));
+    assert_eq!(after.gst, crate::money::half_up((after.brokerage + after.exchange + after.sebi) * 18, 100));
+    assert!(after.gst > before.gst);
+    // oob: GST never on STT or stamp
+    let p = one_trade(true, 400, 125_000, 126_000, false, d);
+    assert_eq!(p.today_precise.gst, crate::money::half_up((p.today_precise.brokerage + p.today_precise.exchange + p.today_precise.sebi) * 18, 100));
+}
+
+/// X-F45, X-F46, X-F48: every dated row at its first day and the day before it.
+#[test]
+fn x_f45_f46_f48_every_era_boundary() {
+    let ex = |y, m, dd| dated_rates(day(y, m, dd)).exchange;
+    let ip = |y, m, dd| dated_rates(day(y, m, dd)).ipft;
+    let sf = |y, m, dd| dated_rates(day(y, m, dd)).sebi;
+    assert_eq!([ex(2020, 12, 31), ex(2021, 1, 1), ex(2023, 3, 31), ex(2023, 4, 1)], [32_500, 34_500, 34_500, 32_500]);
+    assert_eq!([ex(2024, 3, 31), ex(2024, 4, 1), ex(2024, 9, 30), ex(2024, 10, 1)], [32_500, 32_200, 32_200, 29_700]);
+    assert_eq!([ex(2026, 2, 28), ex(2026, 3, 1)], [29_700, 30_699]);
+    assert_eq!([ip(2023, 3, 31), ip(2023, 4, 1), ip(2026, 2, 28), ip(2026, 3, 1)], [1, 1_000, 1_000, 1]);
+    assert_eq!([sf(2019, 3, 31), sf(2019, 4, 1), sf(2020, 5, 31), sf(2020, 6, 1), sf(2021, 3, 31), sf(2021, 4, 1)], [1_500, 1_000, 1_000, 500, 500, 1_000]);
+    assert!(dated_rates(day(2020, 6, 30)).state_stamp && !dated_rates(day(2020, 7, 1)).state_stamp);
+    assert!(!dated_rates(day(2022, 7, 17)).gst_on_sebi && dated_rates(day(2022, 7, 18)).gst_on_sebi);
+    assert_eq!(today_rates(), dated_rates(day(2026, 10, 30)));
+}
+
+/// X-F48: the worst listed state across turnovers (COSTS section 3's table).
+#[test]
+fn x_f48_the_worst_state_by_turnover() {
+    // Rs 10 lakh: Telangana's Rs 100 cap
+    assert_eq!(state_stamp(100_000_000), 10_000);
+    // above Rs 16.67 lakh Tamil Nadu's uncapped 0.006% passes it
+    assert_eq!(state_stamp(200_000_000), 12_000);
+    // Rs 3 lakh: Himachal's flat Rs 50 a day passes Telangana's Rs 30
+    assert_eq!(state_stamp(30_000_000), 5_000);
+    assert_eq!(state_stamp(0), 5_000);
+    // Rs 6 lakh: Telangana's Rs 60
+    assert_eq!(state_stamp(60_000_000), 6_000);
+}
+
+/// X-F51, X-F52: the headline, the net and the refusals.
+#[test]
+fn x_f51_f52_headline_and_net_extremes() {
+    // from 2026-03-01 the two clocks agree: the dated clock on a tie (Q8)
+    let tie = one_trade(true, 400, 125_000, 125_000, false, day(2026, 10, 30));
+    assert_eq!((tie.from, tie.headline), (Clock::Dated, tie.today_worst.total()));
+    // before 2024-10-01 the dated clock is dearer
+    assert_eq!(one_trade(true, 400, 125_000, 125_000, false, day(2023, 1, 2)).from, Clock::Dated);
+    // the 2020-21 SEBI relief: the today clock's Rs 10 can win on a tiny trade
+    let relief = one_trade(true, 1, 100, 100, false, day(2020, 9, 1));
+    assert!(relief.dated_worst.total() >= relief.today_worst.total() || relief.from == Clock::Today);
+    let cheap = price_trade(&trade_orders(true, 50_000_000, 1, 1, false), day(2020, 9, 1)).unwrap();
+    assert_eq!(cheap.headline, cheap.dated_worst.total().max(cheap.today_worst.total()));
+    // net = gross - headline; a net of exactly 0 is neither win nor loss
+    assert_eq!(gross_and_net(true, 400, 125_000, 126_000, 300), (400_000, 399_700));
+    assert_eq!(gross_and_net(false, 400, 125_000, 126_000, 300), (-400_000, -400_300));
+    assert_eq!(gross_and_net(true, 1, 100, 100 + 7, 7), (7, 0));
+    // refusals stop the run by name
+    assert_eq!(price_trade(&trade_orders(true, 1, 1, 1, false), day(2018, 9, 2)), Err(ChargeError::OutsideWindow(day(2018, 9, 2))));
+    assert_eq!(price_trade(&trade_orders(true, 1, 1, 1, false), day(2026, 10, 31)), Err(ChargeError::OutsideWindow(day(2026, 10, 31))));
+    assert_eq!(price_trade(&[], day(2020, 1, 1)), Err(ChargeError::Empty));
+    let no_part = [Order { buy: true, by_broker: false, parts: vec![] }];
+    assert_eq!(price_trade(&no_part, day(2020, 1, 1)), Err(ChargeError::Empty));
+    let open = [Order { buy: true, by_broker: false, parts: vec![Part { qty: 2, price: 5 }] }, Order { buy: false, by_broker: false, parts: vec![Part { qty: 1, price: 5 }] }];
+    assert_eq!(price_trade(&open, day(2020, 1, 1)), Err(ChargeError::OpenIntradayPosition));
+    assert_eq!(check_window(), (Some(day(2018, 9, 3)), Some(day(2026, 10, 30))));
+}
+
+/// P-F42..P-F52: 10,000 generated trades over the window: every worst line at or above
+/// its official one, the totals the sums of their lines, the headline the larger clock.
+#[test]
+fn p_costs_hold_their_invariants() {
+    let first = day(2018, 9, 3).index();
+    for seed in crate::generator::SEEDS {
+        let mut r = crate::rng::SplitMix64::new(seed);
+        for _ in 0..2_500 {
+            let d = Day::from_index(first + i32::try_from(r.below(2_980)).unwrap());
+            let entry = i64::try_from(r.below(5_000_000)).unwrap() + 1;
+            let exit = (entry + r.between(-entry / 10, entry / 10)).max(1);
+            let qty = crate::sizing::qty(entry).max(1);
+            let long = r.chance(1, 2);
+            let p = one_trade(long, qty, entry, exit, r.chance(1, 5), d);
+            for (precise, worst) in [(p.dated_precise, p.dated_worst), (p.today_precise, p.today_worst)] {
+                for (a, b) in precise.as_array().iter().zip(worst.as_array()) {
+                    assert!(*a <= b, "{d:?} {precise:?} {worst:?}");
+                }
+                assert_eq!(worst.total(), worst.as_array().iter().sum::<i128>());
+            }
+            assert_eq!(p.headline, p.dated_worst.total().max(p.today_worst.total()));
+            assert_eq!(p.from == Clock::Dated, p.dated_worst.total() >= p.today_worst.total());
+        }
+    }
 }

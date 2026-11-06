@@ -74,6 +74,36 @@ pub const fn reaches(stop: i64, print: &Print, side: Side) -> bool {
     }
 }
 
+/// F34: the resting stop's scan over a stock-day's prints, one print per step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StopScan {
+    /// The stop in force.
+    pub stop: i64,
+    /// The trade's side.
+    pub side: Side,
+    /// The next print to read.
+    pub cursor: usize,
+}
+
+impl StopScan {
+    /// One print: reads it, moves past it, and says whether it reached the stop.
+    pub const fn step(&mut self, print: &Print) -> bool {
+        self.cursor += 1;
+        reaches(self.stop, print, self.side)
+    }
+
+    /// Steps over every print before `limit`: the index of the first that reaches the
+    /// stop, or `None` with the cursor on the first print at or after `limit`.
+    pub fn until(&mut self, prints: &[Print], limit: u32) -> Option<usize> {
+        while let Some(print) = prints.get(self.cursor).filter(|p| p.start < limit) {
+            if self.step(print) {
+                return Some(self.cursor - 1);
+            }
+        }
+        None
+    }
+}
+
 /// The exit order's fill price (the worst print for the closing side).
 #[must_use]
 pub fn exit_price(print: &Print, side: Side) -> i64 {

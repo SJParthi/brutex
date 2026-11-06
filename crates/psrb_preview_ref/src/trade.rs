@@ -4,7 +4,7 @@
 //! (PREVIEW-SPEC section 3.5; pins Q3, Q4 and Q5 of TEST-PLAN section 7).
 
 use crate::cond::Side;
-use crate::fills::{Print, entry, exit_price, first_at_or_after, minute_prints, reaches, second_prints, worst_since};
+use crate::fills::{Print, StopScan, entry, exit_price, first_at_or_after, minute_prints, reaches, second_prints, worst_since};
 use crate::market::{Minute, Second};
 use crate::pricemap::{map_level, ratio_source, unmapped_level};
 use crate::sizing::qty;
@@ -183,17 +183,14 @@ fn walk(
     entry_print: Print,
     trade: &mut Simulated,
 ) -> (ExitKind, Option<usize>) {
-    let mut cursor = entry_at + 1;
+    let mut scan = StopScan { stop: trade.last_stop, side, cursor: entry_at + 1 };
     let candles = later.iter().filter(|c| c.t > entry_print.slot && c.t <= TIME_EXIT);
     for candle in candles {
-        while let Some(print) = prints.get(cursor).filter(|p| p.start < candle.t) {
-            if reaches(trade.last_stop, print, side) {
-                return (ExitKind::Stop, Some(cursor));
-            }
-            cursor += 1;
+        if let Some(at) = scan.until(prints, candle.t) {
+            return (ExitKind::Stop, Some(at));
         }
         let mapped = if candle.hole { None } else { level_at(tape, candle.band, candle.t, side) };
-        match step(side, candle.close, candle.band, candle.hole, mapped, trade.last_stop) {
+        match step(side, candle.close, candle.band, candle.hole, mapped, scan.stop) {
             Step::Flip => {
                 let at = first_at_or_after(prints, candle.t).max(entry_at + 1);
                 return match prints.get(at) {
@@ -202,19 +199,20 @@ fn walk(
                     Some(_) => (ExitKind::Flip, Some(at)),
                 };
             }
-            Step::Move(level) => trade.last_stop = level,
+            Step::Move(level) => {
+                scan.stop = level;
+                trade.last_stop = level;
+            }
             Step::NoRatio => trade.no_ratio_trail += 1,
             Step::Hold => {}
         }
     }
     let time_rule = entry_print.start < TIME_EXIT;
     let limit = if time_rule { TIME_EXIT } else { SQUARE_OFF };
-    while let Some(print) = prints.get(cursor).filter(|p| p.start < limit) {
-        if reaches(trade.last_stop, print, side) {
-            return (ExitKind::Stop, Some(cursor));
-        }
-        cursor += 1;
+    if let Some(at) = scan.until(prints, limit) {
+        return (ExitKind::Stop, Some(at));
     }
+    let cursor = scan.cursor;
     let Some(print) = prints.get(cursor) else {
         return (ExitKind::Unclosable, None);
     };
