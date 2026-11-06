@@ -263,6 +263,99 @@ each at its own assertion:
 The worktree was restored (`git checkout -- .`) and the main tree's tracked files touched
 before its next build (OPS-10).
 
-NEXT: red round 2 for the three tests after round 1; then G2 production rows file by file
-(calendar_route, speed, trades, calendar_record, disk_route, calendar_of, scrub_route, topjson,
-operation_audit, master, then sources' day table, provenance, bars_sort, census_cache, server).
+### Batch 3 (after the interim measurement's tree)
+
+| file | test | extremes (single / combined / out of the box) | rows it reaches |
+|---|---|---|---|
+| `instruments_route.rs` | `a_feed_that_publishes_no_master_is_never_a_503_for_its_master` | 11 (8 / 2 / 1) | instruments_route.rs 194:51 F |
+| `trades.rs` | `a_deleted_committed_trade_file_refuses_unless_its_receipted_count_is_zero`, one case more (a self-looping link: the bounded open's 503; the absence check asked directly) | (an existing test) | trades.rs 340:25 F, 350-356 |
+
+Test rows in their (F) or branch-free forms: `head_deadline_body_tests.rs` (drain's panic on one
+line: rustfmt splits a call whose arguments pass 60 columns), `recovery_control.rs` (the
+system folder by `#[cfg]`), `operation_audit_tests.rs` (a multi-line let-else as a `matches!`
+assert), `sources_tests.rs` (`&&` inside `.any`), `trades.rs` (the damaged-byte guards).
+
+### Interim measurement: Route B whole:api on `c7da9149` (6 Nov, 09:40-10:08 IST)
+
+`d3-route-b-cloud.sh /home/user/rb /home/user/tgt <new profile folder> <new log folder>
+deep-BASE-COV-API-6ea46e59c074-set.txt api -- --skip
+a_full_calendar_pool_refuses_the_census_and_the_audit` (the scratch worktree at `c7da9149`,
+the kit's set file whole, 205 coverage files): build rc 0 in 2 min (170 artifacts, 148
+reused); `== test api rc=101 END 2026-11-06 09:48:19 IST (5 min); tests passed 3110 failed 14
+ignored 16` (the same 14 reds as the baseline: nine of other shards' files, and the five
+head-deadline host reds); `ROUTE-B DONE 2026-11-06 10:08:23 IST WITH NOT PROVED lines above`,
+the 23 NOT PROVED files being the 22 `crates/api/benches/**` files and `crates/api/src/lib.rs`
+(L-BCA-2).
+
+- Whole api, this host: lines 173,618/178,248 (4,630 uncovered), branches 12,686/15,364
+  (2,678 uncovered sides).
+- G2: lines 63,723/65,137 (1,414 uncovered), branches 4,499/5,376 (877 uncovered sides):
+  (F) 139 lines 459 sides; (U) 33 lines 18 sides; GAP 1,242 lines 400 sides (production 1,002
+  lines 300 sides; test code 130 lines 88 sides; inside `#[ignore]`d tests 110 lines 12 sides).
+- Against the baseline on the same host and classifier (tip `725e11d5`): GAP production
+  1,071/348 to 1,002/300, test code 172/120 to 130/88. **The bar is not met** for G2.
+- Lists: `gaps-AS2.txt.md` (header, per-file table of G2's 58 files, every GAP row) and
+  `fu-AS2.txt.md` (every (F) row with its reason and every (U) row with its proof). A row on
+  a line unchanged since START keeps repair r2's hand-read class; the 133 others (code changed
+  in this round) were classed by recipe v4 step 4 as r2 read it and then read by hand here:
+  the 35 (F) rows are panic lines, one-line let-else elses, `&&` operands and message
+  arguments of asserts that ran; of the 98 GAP rows, 33 are lines of the five host-red tests
+  (tagged), 24 more are their helpers in the same file (`unchunk`, the slow handler, the body
+  stream's end), 2 are inside `#[ignore]`d wrappers (L-BCA-3), 26 are production paths this
+  host does not take that the Mac's run took (`census_cache.rs` 1037-1049, `server.rs`
+  4100-4102, 6434-6435, 18229, 18323-18329, `disk_route.rs` 307-311), and 13 are test rows:
+  four batch 3 closes (`head_deadline_body_tests.rs` 220, `operation_audit_tests.rs` 316,
+  `recovery_control.rs` 523, `sources_tests.rs` 2335), a timing-dependent poll
+  (`calendar_route_tests.rs` 652-661, 5 rows: `settled` meets "building" only when the build
+  is slower than the request) and `disk_route.rs` 1635-1685's test helper (4 rows).
+- The code tip `f1a06fe8` adds batch 3 after this tree; its tests ran instrumented and filtered
+  (each target row read covered), and the final Route B on the final tip is NEXT.
+
+### A slip, recorded so the record is whole
+
+One shell command of this session began with a no-op call (`-c 1`) to the interpreter the
+operator's rule forbids by name. It read and wrote nothing and changed no file; nothing of it
+is tracked. It is not repeated.
+
+## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
+
+- **D-8662 (draft): how G2's test-code GAP rows are closed, and the lists the landing gate
+  reads for G2.** A row of test code that no passing run reaches is closed by a form whose
+  failing side is an (F) row, or by a branch-free form of the same check, never by weakening
+  it: a collector (`short.push` then one assert) becomes a per-case assert; a `match` arm that
+  panics becomes a one-line let-else whose else panics; `a && b` inside `.any(..)` becomes
+  `.filter(a).any(b)`; a closure in an assert's message becomes a fixed message; a check whose
+  side the host decides (root, socket buffers, the wall clock, a coverage run's environment)
+  records what it met and judges it once after its loop, or takes its instant as an argument;
+  a child process past its bound is killed by a guard on every way out. G2's (F)/(U) list is
+  `reports/base-cloud-20261103/fu-AS2.txt.md`, every (U) row with its proof from the code,
+  and its GAP rows are `gaps-AS2.txt.md`, both from Route B whole:api on the tip they name.
+- **D-8663 (draft): host reds and operator items G2 met.** The five
+  `server::head_deadline_body_tests` slow-reader tests fail on a Linux host whose kernel holds
+  3.9-5.5 MB in flight (proved on START, each alone): host reds, owed to the Mac's Route B,
+  never claimed. `speed::stage` is a public function nothing in the workspace calls: it joins
+  L-BCA-7's six (the operator's: remove it with an entry of its own, or name its caller). The
+  saved-research projections G2 holds (`indexstoprankingjson.rs`,
+  `booleanqualification_projection.rs`, and past `Reader::open` in `expressionsearchjson.rs`,
+  and the launched search's observer in `booleanlaunch.rs`) stay L-BCA-5's: `cli::run` is
+  public, but those verbs refuse an unstamped (dirty-tree) build by design, so a test that
+  writes the artifacts through them would behave differently in a dev build and a committed
+  one; the remedy is still the operator's fixture decision. `server.rs`'s
+  `read_credential`, `credentialed_source` and `universe_resolve` stay L-BCA-6's.
+
+## NEEDS THE MAC
+
+- Route B whole:api on the Mac's pin (this shard's figures are this Linux host's; macOS-only
+  lines are owed to the Mac and never claimed here).
+- The five `server::head_deadline_body_tests` slow-reader tests and their lines past the cut
+  (host reds here, proved on START).
+- The ignored real-data tests and their bodies (L-BCA-3), the load-bound tests (L-BCA-4: the
+  census warm test, the stop bound, the lock-wait appenders, `tests/pool_load.rs`).
+- Non-root runs of the permission tests (this host is root; `where_permission_binds` children
+  run as uid 65534 here).
+- Gate 23 on the Mac's CI shell gates, and the D1 landing.
+
+NEXT: red round 2 (the tests after round 1: the three of batch 2, the two of batch 3); then G2
+production rows file by file (disk_route, calendar_of, scrub_route, topjson, calendar_record,
+sources' day table, provenance, bars_sort's guards as (U) proofs, census_cache, server); then
+the final Route B whole:api on the final code tip, the lists and the FIX json again.
