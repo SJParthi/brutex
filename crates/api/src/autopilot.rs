@@ -7485,13 +7485,17 @@ mod tests {
     /// WORDS** (BASE-COV-API-AS3). Only `AlreadyExists` gains the sentence
     /// about something holding the probe's name; any other refusal at the
     /// open is passed on as the host said it, under the probe path, and
-    /// nothing is left in the root. Driven by a vendor word whose probe file
-    /// name runs past the 255-byte name limit of the host's filesystem.
-    /// Extremes: a name one byte past the limit; a name four times past it;
-    /// a name past it in multi-byte characters; and, at once, an over-long
-    /// name beside an occupied probe name in the same root, each refused
-    /// for its own reason; out of the box, the longest name that still fits
-    /// is accepted and removed.
+    /// nothing is left in the root. Driven by vendor words the host refuses
+    /// for reasons of its own: a probe file name past the 255-byte name limit
+    /// of the host's filesystem, a name holding a NUL byte, and a name whose
+    /// slash points into a folder that is not there.
+    /// Extremes: singles — a name one byte past the limit; a name four times
+    /// past it; a name past it in multi-byte characters; a NUL byte inside the
+    /// name; a slash into a missing folder; combinations — an over-long name
+    /// beside an occupied probe name in the same root, and a NUL-bearing name
+    /// beside the same occupied name, each refused for its own reason at once;
+    /// out of the box — the longest name that still fits is accepted and
+    /// removed.
     #[test]
     fn a_probe_name_the_host_refuses_keeps_the_hosts_own_words() {
         let root = crate::scratch::path("autopilot-probe-long-name");
@@ -7501,8 +7505,14 @@ mod tests {
         let long = |n: usize| "v".repeat(n);
         // Past the limit in bytes AND in characters, so a filesystem that
         // counts either refuses each.
-        for vendor in [long(room + 1), long(4 * 255), "é".repeat(room + 1)] {
-            let why = store_writable(&root, &vendor).expect_err("a name past the limit");
+        for vendor in [
+            long(room + 1),
+            long(4 * 255),
+            "é".repeat(room + 1),
+            "dh\0an".to_owned(),
+            "missing-folder/dhan".to_owned(),
+        ] {
+            let why = store_writable(&root, &vendor).expect_err("a name the host refuses");
             assert!(why.contains(STORE_PROBE_PREFIX), "the probe path: {why}");
             assert!(
                 !why.contains("something already holds the probe's name"),
@@ -7511,16 +7521,18 @@ mod tests {
         }
         std::fs::create_dir_all(root.join(format!("{STORE_PROBE_PREFIX}groww")))
             .expect("an occupied probe name");
-        let held = store_writable(&root, "groww").expect_err("an occupied name");
-        let past = store_writable(&root, &long(room + 1)).expect_err("a name past the limit");
-        assert!(
-            held.contains("something already holds the probe's name"),
-            "{held}"
-        );
-        assert!(
-            !past.contains("something already holds the probe's name"),
-            "{past}"
-        );
+        for other in [long(room + 1), "gro\0ww".to_owned()] {
+            let held = store_writable(&root, "groww").expect_err("an occupied name");
+            let refused = store_writable(&root, &other).expect_err("a name the host refuses");
+            assert!(
+                held.contains("something already holds the probe's name"),
+                "{held}"
+            );
+            assert!(
+                !refused.contains("something already holds the probe's name"),
+                "{refused}"
+            );
+        }
         store_writable(&root, &long(room)).expect("the longest name that fits");
         let left: Vec<_> = std::fs::read_dir(&root)
             .expect("the root lists")

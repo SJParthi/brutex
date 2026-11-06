@@ -149,6 +149,7 @@ fn json(answered: Answered) -> (axum::http::StatusCode, serde_json::Value) {
 /// (BASE-COV-API-AS3). The store's grammar is `YYYY-MM-DD-<paisa>-CE|PE`, so
 /// each field's width is checked before any number is read. Extremes: a
 /// one-digit month; a one-digit day; a two-digit year; a three-digit month;
+/// an empty year field;
 /// and, at once, a one-digit month and a one-digit day, and a five-digit year
 /// with a one-digit day; out of the box, the right widths for a day the
 /// month does not have (refused by the date, not the widths). The control: the
@@ -160,6 +161,7 @@ fn a_contract_date_of_the_wrong_widths_is_not_an_option_segment() {
         "2026-08-7-2500000-PE",
         "26-08-27-2500000-CE",
         "2026-008-27-2500000-CE",
+        "-08-27-2500000-CE",
         "2026-8-7-2500000-CE",
         "20260-08-7-2500000-PE",
         "2026-09-31-2500000-CE",
