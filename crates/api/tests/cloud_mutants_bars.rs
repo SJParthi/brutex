@@ -310,13 +310,22 @@ mod spot_rs {
             .map_or(1, std::num::NonZeroUsize::get)
             .clamp(1, api::detail::MAX_STORE_READ_CONCURRENT);
         let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // THE HOLDERS THAT STARTED, COUNTED UNDER A LOCK THE TEST WAITS ON: each
+        // takes its slot before its closure runs, so once this host's slots
+        // have all started the pool is full, and no polling loop lets a host's
+        // timing decide which of its sides a run takes (D-8662).
+        let reached =
+            std::sync::Arc::new((std::sync::Mutex::new(0_usize), std::sync::Condvar::new()));
         let holders: Vec<_> = (0..api::detail::MAX_STORE_READ_CONCURRENT)
             .map(|_| {
                 let gate = std::sync::Arc::clone(&gate);
                 let reached = std::sync::Arc::clone(&reached);
                 tokio::spawn(api::detail::run_store_read(move || {
-                    reached.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    {
+                        let (count, changed) = &*reached;
+                        *count.lock().expect("the count") += 1;
+                        changed.notify_all();
+                    }
                     let (open, opened) = &*gate;
                     let mut is_open = open.lock().expect("the gate");
                     while !*is_open {
@@ -325,16 +334,25 @@ mod spot_rs {
                 }))
             })
             .collect();
-        // THE POOL IS FULL ONCE A PROBE IS REFUSED: each holder takes its
-        // slot before its closure runs, so this waits only for them to start.
-        let mut full = false;
-        for _ in 0..200 {
-            if api::detail::run_store_read(|| ()).await == Err(api::detail::RunError::Saturated) {
-                full = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // THE POOL IS FULL ONCE EVERY ADMITTED HOLDER HAS STARTED, and a probe
+        // then is refused.
+        {
+            let (count, changed) = &*reached;
+            let (started, waited) = changed
+                .wait_timeout_while(
+                    count.lock().expect("the count"),
+                    std::time::Duration::from_mins(1),
+                    |started| *started < slots,
+                )
+                .expect("the count");
+            assert!(
+                !waited.timed_out(),
+                "only {} of {slots} holders started",
+                *started
+            );
         }
+        let full =
+            api::detail::run_store_read(|| ()).await == Err(api::detail::RunError::Saturated);
         let uri: axum::http::Uri = format!("/spot.json?{}", spot_query(&[open_second()]))
             .parse()
             .expect("a URI");
@@ -361,7 +379,7 @@ mod spot_rs {
             "{outcomes:?}"
         );
         assert_eq!(
-            reached.load(std::sync::atomic::Ordering::SeqCst),
+            *reached.0.lock().expect("the count"),
             slots,
             "a holder refused at admission never runs its body"
         );
