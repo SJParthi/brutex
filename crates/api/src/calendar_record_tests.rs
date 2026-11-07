@@ -678,3 +678,85 @@ fn months_out_of_order_or_twice_and_days_that_are_no_civil_day() {
     assert_eq!(iso(i64::MIN), i64::MIN.to_string());
     assert_eq!(iso(i64::MAX), i64::MAX.to_string());
 }
+
+/// **NO HOLDER IS "THE SERIES ASKED", AND A RUN OF UNREAD DAYS BEFORE THE
+/// RECORD IS WITHHELD WHERE THE RECORD BEGINS** (BASE-COV-API-AS2).
+/// Extremes: 10 (6 single, 2 combined, 2 out of the box): (1) no holder at all
+/// is withheld, its reason naming "the series asked", never an empty list of
+/// names; (2) it holds an empty day string, counts no session and keeps its
+/// generation; (3) a holder whose bars straddle the record's first day: the
+/// three days before 2018-01-01 are `-`; (4) 2018-01-01 itself is the record's
+/// `R`; (5) the `-` run is withheld as one `{from, to}` closed where the record
+/// begins, not at the span's end; (6) the held digits are the holder's own,
+/// `1001`, and one session is held. Combined: (7) attesters AND no holder: still
+/// withheld for the series asked; (8) the straddling holder AND attesting for
+/// itself: its days before the record are observed, `U..R`, and nothing is
+/// withheld. Out of the box: (9) an attester that read only the record's first
+/// day speaks for none of the days before it; (10) an attester of no month at
+/// all is asked of every such day and speaks for none.
+#[test]
+fn no_holder_is_the_series_asked_and_unread_days_before_the_record_are_withheld_there() {
+    let asked = Asked {
+        feed: "zerodha",
+        rung: Timeframe::DAY_1,
+        rung_asked: true,
+        target: Target::Exchange,
+        generation: Some(9),
+    };
+    let observed_on = |days: &[i64]| {
+        let observed: Vec<pull::calendar::Observed> = days
+            .iter()
+            .map(|day| pull::calendar::Observed::from_runs(*day, &[]))
+            .collect();
+        pull::calendar::Calendar::from_observed(&observed)
+    };
+    let nifty = Reading::from_calendar("NIFTY", &observed_on(&[at(2017, 12, 29), at(2018, 1, 1)]));
+    // (1), (2), (7): nobody holds a bar.
+    let nobody: &[Reading] = &[];
+    for attest in [nobody, std::slice::from_ref(&nifty)] {
+        let refused = parse(&answer(&asked, nobody, attest, &[]));
+        assert_eq!(refused["status"], "withheld", "{refused}");
+        assert_eq!(
+            refused["reason"],
+            "zerodha holds no 1day bar for the series asked: there is no span to give a \
+             calendar for"
+        );
+        assert_eq!(refused["days"], "");
+        assert_eq!(refused["sessions"], 0);
+        assert_eq!(refused["generation"], 9);
+    }
+    // (3), (4), (5), (6), (9), (10): a holder straddling the record's first day.
+    let first_day = Reading::from_calendar("BANKNIFTY", &observed_on(&[at(2018, 1, 1)]));
+    let no_month = Reading::from_months("NONE", &[]);
+    let straddle = parse(&answer(
+        &asked,
+        std::slice::from_ref(&nifty),
+        &[first_day, no_month],
+        &[],
+    ));
+    assert_eq!(straddle["status"], "ok", "{straddle}");
+    assert_eq!(straddle["days"], "---R");
+    assert_eq!(straddle["held"], "1001");
+    assert_eq!(
+        straddle["withheld"],
+        serde_json::json!([{ "from": at(2017, 12, 29), "to": at(2017, 12, 31) }])
+    );
+    assert_eq!(straddle["calendarSessions"], 1);
+    assert_eq!(straddle["sessions"], 1);
+    assert_eq!(straddle["basis"]["observed"]["days"], 0);
+    assert_eq!(
+        straddle["derivedFrom"],
+        serde_json::json!(["BANKNIFTY", "NONE"])
+    );
+    // (8): the same holder attesting for itself.
+    let itself = parse(&answer(
+        &asked,
+        std::slice::from_ref(&nifty),
+        std::slice::from_ref(&nifty),
+        &[],
+    ));
+    assert_eq!(itself["days"], "U..R", "{itself}");
+    assert_eq!(itself["withheld"], serde_json::json!([]));
+    assert_eq!(itself["basis"]["observed"]["days"], 1);
+    assert_eq!(itself["calendarSessions"], 2);
+}

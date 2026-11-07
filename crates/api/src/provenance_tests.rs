@@ -1946,3 +1946,1245 @@ fn every_store_state_between_not_held_and_served_is_said_by_what_it_is() {
     assert_eq!(got.body["path"], relative);
     assert!(got.body.get("bars").is_none(), "never served: {}", got.body);
 }
+
+/// **EVERY REFUSAL BEFORE THE MONTH IS SERVED NAMES WHAT REFUSED**
+/// (BASE-COV-API-AS2): a symbol no store path can hold is the path's own
+/// refusal; a promoted revision whose bar file is gone is "not held", naming
+/// the file looked for; and a generation pointer damaged after the month opened
+/// is the pointer's refusal, from the step that resolves the served generation.
+/// Extremes: 12 (8 single, 2 combined, 2 out of the box): (1) a symbol in lower
+/// case is a 400 naming its first wrong-case byte; (2) a symbol of 25 bytes is
+/// a 400 naming its length and the 24 a segment holds; (3) each of those echoes
+/// the request and carries no `path` and no `held`, since no file was looked
+/// for; (4) a promoted revision whose `.bin` is gone is a 404 with `held`
+/// false; (5) that 404 names the revision's missing file in `error` and the
+/// original's path under `path`; (6) a pointer damaged after the month opened
+/// is a 500 naming the pointer and that none of its records verifies; (7) that
+/// 500 carries the original's path and no `bars`; (8) the same pointer met by a
+/// fresh request is refused at the open, a 500 in the same words. Combined:
+/// (9) a symbol in lower case AND too long is refused for its length, the check
+/// that runs first; (10) a revision that is gone AND a request for one bar by
+/// `t`: the same 404, and no bar is looked for. Out of the box: (11) `..` as a
+/// symbol is refused as a traversal, never resolved; (12) the vendor's own file
+/// stem `NIFTY 50` as a symbol is refused for its space byte.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every refusal its Extremes: line names, in order"
+)]
+fn every_refusal_before_the_month_is_served_names_what_refused() {
+    // (1), (2), (3), (9), (11), (12): symbols no store path can hold.
+    let root = root_of("as2-g2-unpathable");
+    for (instrument, key, said) in [
+        (
+            "NSE-INDEX-nifty",
+            "NSE-INDEX-nifty",
+            "path segment symbol holds byte 0x6e in the wrong case",
+        ),
+        (
+            "NSE-INDEX-ABCDEFGHIJKLMNOPQRSTUVWXY",
+            "NSE-INDEX-ABCDEFGHIJKLMNOPQRSTUVWXY",
+            "path segment symbol is 25 bytes, max 24",
+        ),
+        (
+            "NSE-INDEX-abcdefghijklmnopqrstuvwxy",
+            "NSE-INDEX-abcdefghijklmnopqrstuvwxy",
+            "path segment symbol is 25 bytes, max 24",
+        ),
+        (
+            "NSE-INDEX-..",
+            "NSE-INDEX-..",
+            "path segment symbol is a traversal and would escape",
+        ),
+        (
+            "NSE-INDEX-NIFTY%2050",
+            "NSE-INDEX-NIFTY 50",
+            "path segment symbol holds byte 0x20",
+        ),
+    ] {
+        let got = get(
+            &root,
+            &format!("feed=gdfl&instrument={instrument}&timeframe=1s&month=2019-03"),
+        );
+        assert_eq!(got.status, StatusCode::BAD_REQUEST, "{}", got.body);
+        assert_eq!(got.body["error"], format!("{key} 2019-03: {said}"));
+        assert_eq!(got.body["instrument"], key);
+        assert_eq!(got.body["feed"], "gdfl");
+        assert!(
+            got.body.get("path").is_none() && got.body.get("held").is_none(),
+            "no file was looked for: {}",
+            got.body
+        );
+    }
+    // (4), (5), (10): a promoted revision whose bar file is gone.
+    let relative = "bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin";
+    let path = path_of(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        "2019-03",
+    );
+    let root = root_of("as2-g2-revision-gone");
+    let _month = nifty_march(&root);
+    let repaired = store::repair::repair_month(
+        &root,
+        path,
+        symbol_id("NIFTY"),
+        &seconds("2019-03-04", 4),
+        INDEX_REPAIR,
+    )
+    .unwrap();
+    assert!(
+        matches!(repaired, store::repair::MonthRepair::Repaired { .. }),
+        "{repaired:?}"
+    );
+    let revision = path.to_path_buf(&root.join("bar-revisions-v1").join("1"));
+    std::fs::remove_file(&revision).unwrap();
+    let fifth = ist_midnight("2019-03-05") + 9 * 3_600 + 15 * 60;
+    for query in [GDFL_NIFTY.to_owned(), format!("{GDFL_NIFTY}&t={fifth}")] {
+        let got = get(&root, &query);
+        assert_eq!(got.status, StatusCode::NOT_FOUND, "{}", got.body);
+        assert_eq!(got.body["held"], false);
+        assert_eq!(got.body["path"], relative);
+        assert_eq!(
+            got.body["error"],
+            format!(
+                "{} does not exist, opening it: this month is not held",
+                revision.display()
+            )
+        );
+        assert!(got.body.get("bar").is_none(), "{}", got.body);
+    }
+    // (6), (7), (8): a generation pointer damaged after the month opened.
+    let root = root_of("as2-g2-pointer-after-open");
+    land(&root, path, "NIFTY", &[seconds("2019-03-01", 2)]);
+    let bars = BarFile::open_existing(&root, path, symbol_id("NIFTY")).unwrap();
+    let meta = std::fs::metadata(path.to_path_buf(&root)).unwrap();
+    let pointer = store::generation::pointer_path(&root, path);
+    std::fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+    std::fs::write(&pointer, [0_u8; 64]).unwrap();
+    let refused = format!(
+        "{}: the month's generation pointer refused: none of its 1 record(s) verifies, so \
+         which generation the month serves cannot be told; nothing is served in its place",
+        pointer.display()
+    );
+    let served = served_answer(
+        &root,
+        &ask(GDFL_NIFTY),
+        (path, relative.to_owned(), &meta),
+        &bars,
+        None,
+    );
+    drop(bars);
+    assert_eq!(
+        served.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        served.body
+    );
+    assert_eq!(served.body["error"], refused);
+    assert_eq!(served.body["path"], relative);
+    assert!(served.body.get("bars").is_none(), "{}", served.body);
+    let fresh = get(&root, GDFL_NIFTY);
+    assert_eq!(
+        fresh.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        fresh.body
+    );
+    assert_eq!(fresh.body["error"], refused);
+    assert_eq!(fresh.body["path"], relative);
+}
+
+/// **AN IMPORT JOURNAL THAT WILL NOT READ, OR A RECORD DATED ON A DAY NO
+/// CALENDAR NAMES, IS SAID WHERE ITS JOURNAL ROW WOULD BE** (BASE-COV-API-AS2).
+/// Extremes: 11 (7 single, 2 combined, 2 out of the box): (1) an import journal
+/// whose folder is a file: a recorded landing's `journal` is the journal's own
+/// refusal, under its source; (2) the reconstruction of the month's unrecorded
+/// bars is the same refusal, and lists no day; (3) the month is still a 200
+/// over its bars; (4) its label says recorded and reconstructed at once; (5) a
+/// landing dated 1969-12-31, a day the sidecar keeps and the calendar refuses,
+/// is "not a day the calendar can name"; (6) each record still serves its own
+/// `day` as stored; (7) a month every record covers is `recorded`, with no
+/// reconstruction. Combined: (8) a pre-epoch day AND an import journal that
+/// reads: the day is refused, never the journal, and no journal row is shown;
+/// (9) no journal read at all (a direct call): the reconstruction says the
+/// import journal was not read AND a record's journal is `null`. Out of the
+/// box: (10) a landing dated 0001-01-01, year one, is written in four digits
+/// and refused the same way; (11) the refusal names the path the store would
+/// read, below a folder that is a file.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every journal state its Extremes: line names, in order"
+)]
+fn an_import_journal_that_will_not_read_or_a_day_no_calendar_names_is_said() {
+    let path = path_of(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        "2019-03",
+    );
+    // (1), (2), (3), (4), (11): the import journal's folder is a file.
+    let root = root_of("as2-g2-imports-file");
+    std::fs::write(root.join("imports"), b"not a folder").unwrap();
+    let mut bars = BarFile::open_or_create(&root, path, symbol_id("NIFTY")).unwrap();
+    let _unrecorded = bars.append(&seconds("2019-03-01", 3)).unwrap();
+    let landed = bars.append(&seconds("2019-03-05", 2)).unwrap();
+    store::provenance::record(
+        &root,
+        &bars,
+        path,
+        landed,
+        &member_landing("m.zip!a.csv", "2019-03-05", 7),
+    )
+    .unwrap();
+    drop(bars);
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let journal = &got.body["recorded"][0]["journal"];
+    assert_eq!(journal["source"], "imports/gdfl.journal", "{}", got.body);
+    let why = journal["error"].as_str().unwrap();
+    assert!(
+        why.starts_with(&format!(
+            "{}: ",
+            pull::gdfl_import::journal_path(&root).display()
+        )) && why.contains("Not a directory"),
+        "{why}"
+    );
+    assert_eq!(
+        got.body["reconstruction"],
+        serde_json::json!({ "source": "imports/gdfl.journal", "error": why })
+    );
+    assert!(
+        got.body["label"]
+            .as_str()
+            .unwrap()
+            .starts_with("recorded for the bars the sidecar's records hold"),
+        "{}",
+        got.body
+    );
+    // (5), (6), (7), (8), (10): landings dated on days no calendar names.
+    let root = root_of("as2-g2-pre-epoch-days");
+    gdfl_journal(&root, NIFTY_MARCH);
+    let mut bars = BarFile::open_or_create(&root, path, symbol_id("NIFTY")).unwrap();
+    for (batch, on) in [
+        (seconds("2019-03-01", 3), "1969-12-31"),
+        (seconds("2019-03-05", 2), "0001-01-01"),
+    ] {
+        let landed = bars.append(&batch).unwrap();
+        store::provenance::record(
+            &root,
+            &bars,
+            path,
+            landed,
+            &member_landing("m.zip!a.csv", on, 2),
+        )
+        .unwrap();
+    }
+    drop(bars);
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["label"], "recorded");
+    assert!(got.body["reconstruction"].is_null(), "{}", got.body);
+    let records = got.body["recorded"].as_array().unwrap();
+    assert_eq!(records.len(), 2, "{}", got.body);
+    for (record, on) in records.iter().zip(["1969-12-31", "0001-01-01"]) {
+        assert_eq!(record["day"], on);
+        assert_eq!(
+            record["journal"],
+            serde_json::json!({
+                "source": "imports/gdfl.journal",
+                "error": format!("{on} is not a day the calendar can name"),
+            })
+        );
+    }
+    // (9): no journal read at all.
+    let unread = Journals {
+        gdfl: None,
+        pull: None,
+    };
+    let asked = ask(GDFL_NIFTY);
+    let month = BarFile::open_existing(&root, path, symbol_id("NIFTY")).unwrap();
+    assert_eq!(
+        gdfl_reconstruction(&unread, &asked, &month, 0),
+        serde_json::json!({
+            "source": "imports/gdfl.journal",
+            "error": "the import journal was not read",
+        })
+    );
+    let Found::Present(sidecar) = store::provenance::read(&root, path).unwrap() else {
+        panic!("the sidecar is present");
+    };
+    assert!(journal_of_record(&sidecar.records()[0], &unread, &asked).is_null());
+}
+
+/// One GDFL index month's journal: two filters closing the 1st under run 11,
+/// the 5th under run 22, and a third run line that no close names.
+const TWO_FILTERS: &str = "\
+run 11 source=zip archive=/archives/a.zip
+run 22 source=tickstore archive=/ticks/cm
+run 33 source=zip archive=/archives/unused.zip
+begin indices 2019-03-01 *
+done indices 2019-03-01 * definition=2 files=2 seconds=3 failures=0 late=0 late_unresolved=0 max_back_s=0 run=11
+begin indices 2019-03-01 NIFTY
+done indices 2019-03-01 NIFTY definition=2 files=1 seconds=3 failures=0 late=0 late_unresolved=0 max_back_s=0 run=11
+begin indices 2019-03-05 *
+done indices 2019-03-05 * definition=2 files=2 seconds=2 failures=0 late=0 late_unresolved=0 max_back_s=0 run=22
+";
+
+/// **A RUN NAMED BY TWO CLOSES IS LISTED ONCE, AND TWO FILTERS CLOSING ONE DAY
+/// SHARE ONE LOOKUP OF ITS BARS** (BASE-COV-API-AS2).
+/// Extremes: 11 (7 single, 2 combined, 2 out of the box): (1) one day closed
+/// under two filters is two rows, in filter order; (2) the second row's bars
+/// are the first's span, answered from the day already looked up; (3) a run
+/// named by both closes of that day is listed once; (4) the later day's run
+/// follows it, in the order the rows first name them; (5) the archive is
+/// recorded: every row names a run the journal holds; (6) the rows count three
+/// journal days while two days hold bars, and the five bars are counted once;
+/// (7) the commits agree with the days holding bars, two and two. Combined:
+/// (8) the same day AND the same run on two rows: one span and one run line for
+/// both; (9) the run-id index built for one snapshot answers a later id from
+/// the same build AND an id the journal never wrote is `None`. Out of the box:
+/// (10) a filter naming the instrument itself (`NIFTY`) beside the whole
+/// tree's `*` on one day; (11) a run line no close names is never listed as an
+/// archive, though the index finds it.
+#[test]
+fn a_run_named_by_two_closes_is_listed_once_and_one_days_filters_share_its_bars() {
+    let root = root_of("as2-g2-two-filters");
+    gdfl_journal(&root, TWO_FILTERS);
+    let path = path_of(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        "2019-03",
+    );
+    land(
+        &root,
+        path,
+        "NIFTY",
+        &[seconds("2019-03-01", 3), seconds("2019-03-05", 2)],
+    );
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let rebuilt = &got.body["reconstruction"];
+    // (1), (10)
+    let by_day: Vec<(&str, u64, u64)> = rebuilt["days"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["filter"].as_str().unwrap(),
+                row["line"].as_u64().unwrap(),
+                row["run"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_day,
+        [("*", 5, 11), ("NIFTY", 7, 11), ("*", 9, 22)],
+        "{rebuilt}"
+    );
+    // (2), (8)
+    let first = serde_json::json!({ "first_index": 0, "end": 3, "count": 3 });
+    assert_eq!(rebuilt["days"][0]["bars"], first);
+    assert_eq!(rebuilt["days"][1]["bars"], first);
+    assert_eq!(
+        rebuilt["days"][2]["bars"],
+        serde_json::json!({ "first_index": 3, "end": 5, "count": 2 })
+    );
+    // (6), (7)
+    assert_eq!(rebuilt["journal_days"], 3);
+    assert_eq!(rebuilt["journal_days_with_bars"], 2);
+    assert_eq!(rebuilt["bars_on_journal_days"], 5);
+    assert_eq!(rebuilt["bars_on_no_journal_day"], 0);
+    assert_eq!(rebuilt["commits_agree"], true);
+    // (3), (4), (5), (11)
+    let archive = &rebuilt["archive"];
+    let listed: Vec<(u64, u64)> = archive["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|named| {
+            (
+                named["id"].as_u64().unwrap(),
+                named["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(listed, [(11, 1), (22, 2)], "{archive}");
+    assert_eq!(
+        archive["runs"][1]["fields"],
+        serde_json::json!({ "source": "tickstore", "archive": "/ticks/cm" })
+    );
+    assert_eq!(archive["recorded"], true);
+    assert_eq!(archive["days_naming_no_run"], 0);
+    assert_eq!(archive["runs_named_and_absent"], 0);
+    // (9), (11): the run-id index of this snapshot, asked again.
+    let parsed = super::super::import_journal::snapshot(&root)
+        .unwrap()
+        .parsed;
+    let found: Vec<Option<(u64, u64)>> = [22, 33, 11, 44]
+        .into_iter()
+        .map(|id| run_line(&parsed, id).map(|line| (line.id, line.line)))
+        .collect();
+    assert_eq!(found, [Some((22, 2)), Some((33, 3)), Some((11, 1)), None]);
+}
+
+/// **A DAY WHOSE BARS WILL NOT READ IS A LOOKUP ERROR NAMED BY ITS DAY, NEVER A
+/// DAY HOLDING NO BAR** (BASE-COV-API-AS2). One byte of bar 0 is flipped, so the
+/// checksum block that holds all five bars of the month no longer verifies.
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) the 1st's lookup
+/// is an error named `2019-03-01: `; (2) the 5th's is too, though the 1st
+/// failed: a failed day lends no start to the next; (3) both name block 0 and
+/// the bytes that were not committed; (4) `bar_lookup_errors` counts the two
+/// days; (5) no bar is counted on a journal day; (6) no journal day is said to
+/// hold a bar; (7) the two commits disagree with the zero days holding bars;
+/// (8) the month is still a 200, labelled reconstructed, its sidecar absent.
+/// Combined: (9) the damage AND a request for one bar by `t`: a 404 naming `t`
+/// and the block, before any journal is read; (10) the damage AND the whole
+/// month: the five bars no lookup could place are never claimed to lie on no
+/// journal day: the figure is null, beside the two errors that say why. Out
+/// of the box: (11) one flipped byte in
+/// bar 0 withholds the 5th's bars too, which share its 73-record block.
+#[test]
+fn a_day_whose_bars_will_not_read_is_a_lookup_error_named_by_its_day() {
+    let root = root_of("as2-g2-damaged-block");
+    let _month = nifty_march(&root);
+    let path = path_of(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        "2019-03",
+    );
+    // Byte 9 of bar 0: inside its open price, under block 0's checksum.
+    let offset = store::format::HEADER_LEN + 9;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.to_path_buf(&root))
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    std::os::unix::fs::FileExt::read_exact_at(&file, &mut byte, offset).unwrap();
+    byte[0] ^= 0x5A;
+    std::os::unix::fs::FileExt::write_all_at(&file, &byte, offset).unwrap();
+    drop(file);
+    // (8)
+    let got = get(&root, GDFL_NIFTY);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["label"], RECONSTRUCTED);
+    assert_eq!(got.body["sidecar"]["state"], "absent");
+    // (1), (2), (3), (11)
+    let rebuilt = &got.body["reconstruction"];
+    let errors: Vec<&str> = rebuilt["days"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["bars"]["error"].as_str().unwrap())
+        .collect();
+    assert_eq!(errors.len(), 2, "{rebuilt}");
+    for (why, on) in errors.iter().zip(["2019-03-01: ", "2019-03-05: "]) {
+        assert!(
+            why.starts_with(on)
+                && why.contains("block 0 was sealed")
+                && why.ends_with("those are not the bytes that were committed"),
+            "{why}"
+        );
+    }
+    // (4), (5), (6), (7), (10)
+    assert_eq!(rebuilt["bar_lookup_errors"], 2);
+    assert_eq!(rebuilt["bars_on_journal_days"], 0);
+    assert_eq!(rebuilt["journal_days_with_bars"], 0);
+    assert_eq!(rebuilt["bar_file_commits"], 2);
+    assert_eq!(rebuilt["commits_agree"], false);
+    assert_eq!(
+        rebuilt["bars_on_no_journal_day"],
+        serde_json::Value::Null,
+        "(10) bars of a day whose lookup failed are never claimed off the journal"
+    );
+    // (9)
+    let fifth = ist_midnight("2019-03-05") + 9 * 3_600 + 15 * 60;
+    let one = get(&root, &format!("{GDFL_NIFTY}&t={fifth}"));
+    assert_eq!(one.status, StatusCode::NOT_FOUND, "{}", one.body);
+    let why = one.body["error"].as_str().unwrap();
+    assert!(
+        why.starts_with(&format!("t={fifth}: ")) && why.contains("block 0 was sealed"),
+        "{why}"
+    );
+    assert!(one.body.get("reconstruction").is_none(), "{}", one.body);
+}
+
+/// **A DAY IS LOOKED UP AFRESH WHEN IT COMES BEFORE THE LAST DAY ASKED, AND IS
+/// ANSWERED FROM THE LAST ENTRY WHEN IT IS THAT DAY** (BASE-COV-API-AS2), over
+/// `DaySpans` directly: the route asks days in day order, a direct caller need
+/// not.
+/// Extremes: 10 (6 single, 2 combined, 2 out of the box): (1) the 5th asked
+/// first is its two bars; (2) the 1st asked after it is looked up afresh, never
+/// given the 5th's end, and is its three bars; (3) the 1st asked again is the
+/// last entry, not entered twice; (4) the 3rd, a day with no bar, is an empty
+/// span at bar 3; (5) the 31st, past every bar, is empty at the bar count;
+/// (6) the totals count each bar once and no error, and two days hold bars.
+/// Combined: (7) a day before the last asked AND the same day at once: one
+/// lookup, two equal answers; (8) the 3rd after the 1st: the 1st's end is the
+/// 3rd's start AND its end, an empty day settled by one bar read. Out of the
+/// box: (9) days asked backwards; (10) a day past the month's last bar answers
+/// the bar count twice, never a bar.
+#[test]
+fn day_spans_asked_out_of_day_order_look_each_earlier_day_up_afresh() {
+    let root = root_of("as2-g2-day-spans");
+    let path = path_of(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        "2019-03",
+    );
+    land(
+        &root,
+        path,
+        "NIFTY",
+        &[seconds("2019-03-01", 3), seconds("2019-03-05", 2)],
+    );
+    let bars = BarFile::open_existing(&root, path, symbol_id("NIFTY")).unwrap();
+    let mut spans = DaySpans::with_capacity(4);
+    // (1)
+    assert_eq!(spans.of(&bars, day("2019-03-05")), Ok((3, 5)));
+    // (2), (9)
+    assert_eq!(
+        spans.of(&bars, day("2019-03-01")),
+        Ok((0, 3)),
+        "a day before the last one asked is looked up afresh"
+    );
+    // (3), (7)
+    assert_eq!(
+        spans.of(&bars, day("2019-03-01")),
+        Ok((0, 3)),
+        "the same day again is the last entry"
+    );
+    // (4), (8)
+    assert_eq!(spans.of(&bars, day("2019-03-03")), Ok((3, 3)));
+    // (5), (10)
+    assert_eq!(spans.of(&bars, day("2019-03-31")), Ok((5, 5)));
+    // (3), (6)
+    assert_eq!(spans.seen.len(), 4, "the repeated day is entered once");
+    assert_eq!(spans.totals(), (5, 0));
+    assert_eq!(spans.days_with_bars(), 2);
+}
+
+/// **A CONTRACT IS NAMED BY NO CAPITAL-MARKET STEM, WHATEVER KIND OR SCOPE IT
+/// IS ASKED WITH** (BASE-COV-API-AS2), over `vendor_files` directly: the route
+/// asks an option only of the options kind, a direct caller may ask it of any.
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a contract asked
+/// of the indices kind names the indices day folder and no stem; (2) of the
+/// stocks kind, the stock day folder and no stem; (3) its day zip and
+/// tick-store day are the indices kind's; (4) it is named by the
+/// capital-market readers; (5) the contract asked of its own kind names the
+/// options day folder, no stem and no zip; (6) the index asked of its kind with
+/// its scope names its stem; (7) the index with no scope names none; (8) a
+/// contract has no capital-market scope of its own. Combined: (9) a contract
+/// AND the index's scope passed: still no stem, of either kind; (10) a contract
+/// AND every capital-market kind AND no scope: no stem. Out of the box: (11) the
+/// index asked of the stocks kind keeps its own stem beside the stock day
+/// folder: the stem is the instrument's, the folder the kind's.
+#[test]
+fn a_contract_asked_of_a_capital_market_kind_names_no_stem() {
+    let on = day("2019-03-01");
+    let option =
+        ask("feed=gdfl&instrument=NSE-FNO-NIFTY-2019-03-28-1150000-CE&timeframe=1s&month=2019-03");
+    let index = ask(GDFL_NIFTY);
+    let index_scope = cm_scope(&index);
+    // (8)
+    assert!(index_scope.is_some());
+    assert!(cm_scope(&option).is_none());
+    // (1), (2), (4), (9), (10)
+    for (kind, folder) in [
+        (ImportKind::Indices, "GFDLCM_INDICES_TICK_01032019"),
+        (ImportKind::Stocks, "GFDLCM_STOCK_TICK_01032019"),
+    ] {
+        for scope in [None, index_scope.as_ref()] {
+            let files = vendor_files(&option, kind, on, scope);
+            assert_eq!(files["day_folder"], folder, "{files}");
+            assert!(files["stem"].is_null(), "{files}");
+            assert!(
+                files["named_by"]
+                    .as_str()
+                    .unwrap()
+                    .contains("capital-market readers"),
+                "{files}"
+            );
+        }
+    }
+    // (3)
+    let indices = vendor_files(&option, ImportKind::Indices, on, None);
+    assert_eq!(
+        indices["zip_day"],
+        "INDICES/2019/MAR_2019/GFDLCM_INDICES_TICK_01032019.zip"
+    );
+    assert_eq!(
+        indices["tickstore_day"],
+        "cm/INDICES/2019/MAR_2019/GFDLCM_INDICES_TICK_01032019.bts"
+    );
+    // (5)
+    let own = vendor_files(&option, ImportKind::Options, on, None);
+    assert_eq!(own["day_folder"], "GFDLNFO_TICK_01032019");
+    assert!(
+        own["stem"].is_null() && own.get("zip_day").is_none(),
+        "{own}"
+    );
+    // (6), (7)
+    assert_eq!(
+        vendor_files(&index, ImportKind::Indices, on, index_scope.as_ref())["stem"],
+        "NIFTY 50.NSE_IDX"
+    );
+    assert!(vendor_files(&index, ImportKind::Indices, on, None)["stem"].is_null());
+    // (11)
+    let crossed = vendor_files(&index, ImportKind::Stocks, on, index_scope.as_ref());
+    assert_eq!(crossed["day_folder"], "GFDLCM_STOCK_TICK_01032019");
+    assert_eq!(crossed["stem"], "NIFTY 50.NSE_IDX");
+}
+
+/// **A PULL RECORD THE JOURNAL CANNOT GIVE IS SAID BY WHY** (BASE-COV-API-AS2):
+/// a record that will not decode is named with its ordinal and its fault, a
+/// page the journal cannot read is the read's refusal, and no journal at all is
+/// `null`.
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a sidecar record
+/// naming a journal record of zeros: its `journal` names that ordinal and "not
+/// an audit record"; (2) nothing else is put in its place: no run's fields;
+/// (3) the record's own `journal_ordinal` is served beside it; (4) the walk
+/// over the same journal counts the zero record undecodable; (5) nine records,
+/// seven of them runs; (6) a page past the bytes the journal holds is the
+/// read's refusal, naming the journal; (7) an ordinal at the count given is
+/// past the journal; (8) no pull journal at all is `null`. Combined: (9) an
+/// unrecorded bar AND an undecodable named record: the reconstruction and the
+/// record both speak of the one zero record; (10) a count of 100 AND a journal
+/// of nine: the page is refused by its read, never answered empty. Out of the
+/// box: (11) a record of 256 zero bytes, whose kind byte reads as a run.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every journal fault its Extremes: line names, in order"
+)]
+fn a_pull_record_the_journal_cannot_give_is_said_by_why() {
+    let root = root_of("as2-g2-pull-undecodable");
+    pull_journal(&root);
+    // (11): record 8 is 256 zero bytes.
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(audit::journal_path(&root))
+            .unwrap();
+        file.write_all(&[0_u8; audit::RECORD_LEN]).unwrap();
+    }
+    let path = path_of(
+        Vendor::Zerodha,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::DAY_1,
+        "2015-01",
+    );
+    let mut bars = BarFile::open_or_create(&root, path, symbol_id("NIFTY")).unwrap();
+    let _unrecorded = bars
+        .append(&[bar(ist_midnight("2015-01-01"), 5_55)])
+        .unwrap();
+    let landed = bars
+        .append(&[bar(ist_midnight("2015-01-02"), 5_55)])
+        .unwrap();
+    let landing = Landing {
+        source: Source {
+            kind: SourceKind::VendorEndpoint,
+            name: "/instruments/historical/999999/day",
+            bytes: 99,
+            crc32: 0,
+        },
+        journal_ordinal: 8,
+        ..member_landing("unused", "2015-01-02", 0)
+    };
+    store::provenance::record(&root, &bars, path, landed, &landing).unwrap();
+    drop(bars);
+    // (1), (2), (3), (9)
+    let got = get(&root, ZERODHA_2015);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let records = got.body["recorded"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "{}", got.body);
+    assert_eq!(records[0]["journal_ordinal"], 8);
+    assert_eq!(
+        records[0]["journal"],
+        serde_json::json!({
+            "source": "audit/pull.journal",
+            "ordinal": 8,
+            "error": "not an audit record",
+        })
+    );
+    // (4), (5)
+    let walked = &got.body["reconstruction"]["journal"];
+    assert_eq!(walked["records"], 9, "{}", got.body);
+    assert_eq!(walked["runs"], 7);
+    assert_eq!(walked["undecodable"], 1);
+    // (6), (7), (8), (10): the journal of a record, asked directly.
+    let asked = ask(ZERODHA_2015);
+    let Found::Present(sidecar) = store::provenance::read(&root, path).unwrap() else {
+        panic!("the sidecar is present");
+    };
+    let mut named = sidecar.records()[0].clone();
+    named.journal_ordinal = 50;
+    let inflated = Journals {
+        gdfl: None,
+        pull: Some((audit::Journal::at(&root), 100)),
+    };
+    let unread = journal_of_record(&named, &inflated, &asked);
+    assert_eq!(unread["source"], "audit/pull.journal", "{unread}");
+    assert!(
+        unread["error"].as_str().unwrap().starts_with(&format!(
+            "{}: cannot read 1 record(s)",
+            audit::journal_path(&root).display()
+        )),
+        "{unread}"
+    );
+    named.journal_ordinal = 100;
+    assert!(
+        journal_of_record(&named, &inflated, &asked)["error"]
+            .as_str()
+            .unwrap()
+            .contains("record 100 is past the journal's 100 records")
+    );
+    let none = Journals {
+        gdfl: None,
+        pull: None,
+    };
+    assert!(journal_of_record(&named, &none, &asked).is_null());
+}
+
+/// **THE PULL JOURNAL'S WALK SAYS A LONG FIRST READ, REFUSES A JOURNAL IT
+/// CANNOT MEASURE, AND READS ONE THAT SHRANK IN PLACE AGAIN FROM ITS START**
+/// (BASE-COV-API-AS2).
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a journal of
+/// 100,001 records is a first walk the answer names in `notes`, with the count;
+/// (2) and with the time it took, in ms; (3) every zero record is counted
+/// undecodable and none is a run; (4) the next request reads nothing and names
+/// nothing; (5) a journal whose folder is a file: the walk's refusal stands in
+/// for the reconstruction, under its source and nothing else; (6) that refusal
+/// names the journal's path; (7) the month is still a 200, reconstructed;
+/// (8) a journal truncated in place to one record is read again from its
+/// start: one record, one run, and that run windowless. Combined: (9) a sparse
+/// file of zeros AND a month with no sidecar: the note and the counts at once;
+/// (10) a file where the journal's folder goes AND a walk asked directly: the
+/// same words. Out of the box: (11) a 25.6 MB hole standing for the journal.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every journal shape its Extremes: line names, in order"
+)]
+fn the_pull_journal_walk_says_a_long_first_read_and_a_journal_it_cannot_measure() {
+    // (1), (2), (3), (4), (9), (11): 100,001 records of zeros, a sparse file.
+    let root = root_of("as2-g2-pull-long-walk");
+    let journal = audit::journal_path(&root);
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let whole = FIRST_WALK_RECORDS + 1;
+    std::fs::File::create(&journal)
+        .unwrap()
+        .set_len(whole * audit::RECORD_LEN_U64)
+        .unwrap();
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 1);
+    let first = get(&root, ZERODHA_2015);
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    let walked = &first.body["reconstruction"]["journal"];
+    assert_eq!(walked["records"], whole, "{}", first.body);
+    assert_eq!(walked["read_now"], whole);
+    assert_eq!(walked["undecodable"], whole);
+    assert_eq!(walked["runs"], 0);
+    let notes: Vec<&str> = first.body["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|note| note.as_str().unwrap())
+        .collect();
+    let lead = format!(
+        "the pull journal keeps no index of its runs, so this process's first read of it \
+         decoded {whole} records in "
+    );
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with(&lead)
+            && notes[0].ends_with(" ms; later requests read only what is appended"),
+        "{notes:?}"
+    );
+    let again = get(&root, ZERODHA_2015);
+    assert_eq!(again.body["reconstruction"]["journal"]["read_now"], 0);
+    assert_eq!(again.body["notes"], serde_json::json!([]), "{}", again.body);
+    // (5), (6), (7), (10): a file where the journal's folder goes.
+    let root = root_of("as2-g2-audit-file");
+    std::fs::write(root.join("audit"), b"not a folder").unwrap();
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 1);
+    let refused = get(&root, ZERODHA_2015);
+    assert_eq!(refused.status, StatusCode::OK, "{}", refused.body);
+    assert_eq!(refused.body["label"], RECONSTRUCTED);
+    let why = refused.body["reconstruction"]["error"].as_str().unwrap();
+    assert!(
+        why.starts_with(&format!("{}: ", audit::journal_path(&root).display()))
+            && why.contains("Not a directory"),
+        "{why}"
+    );
+    assert_eq!(
+        refused.body["reconstruction"],
+        serde_json::json!({ "source": "audit/pull.journal", "error": why })
+    );
+    let Err(direct) = read_runs(&root) else {
+        panic!("a journal below a file is refused");
+    };
+    assert_eq!(direct, why);
+    // (8): truncated in place to one record.
+    let root = root_of("as2-g2-pull-shrunk");
+    pull_journal(&root);
+    assert_eq!(read_runs(&root).unwrap().records, 8);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(audit::journal_path(&root))
+        .unwrap()
+        .set_len(audit::RECORD_LEN_U64)
+        .unwrap();
+    let shrunk = read_runs(&root).unwrap();
+    assert_eq!(
+        (
+            shrunk.records,
+            shrunk.read_now,
+            shrunk.index.runs.len(),
+            shrunk.index.unwindowed
+        ),
+        (1, 1, 1, 1)
+    );
+}
+
+/// **A PULL JOURNAL THAT ENDS BEFORE THE LENGTH ITS HOST GIVES IS REFUSED BY
+/// THE RECORD IT ENDED BEFORE** (BASE-COV-API-AS2). A kernel attribute file
+/// reports a page of length and holds a few bytes, so one linked at the
+/// journal's name is a journal whose measure promises records its bytes do not
+/// hold: the shape of a journal cut short between its measure and its read.
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a journal whose
+/// length promises whole records and whose bytes end inside the first is
+/// refused; (2) the refusal names record 0 and the whole count the length
+/// promised; (3) it names the journal by the path the store reads, the link's
+/// own name; (4) a second walk refuses the same, since the failed walk kept
+/// nothing; (5) the answer over it carries the refusal as its reconstruction,
+/// under its source; (6) and nothing else: no candidate, no count; (7) the
+/// month is still a 200; (8) labelled reconstructed. Combined: (9) a journal
+/// cut short AND a month with no sidecar: the refusal stands in for the whole
+/// reconstruction; (10) a journal cut short AND two walks in a row: the same
+/// words both times. Out of the box: (11) a kernel attribute file standing at
+/// the journal's name.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_pull_journal_that_ends_before_its_length_is_refused_by_the_record_it_ended_before() {
+    // (11)
+    let attribute = Path::new("/sys/devices/system/cpu/online");
+    let claimed = std::fs::metadata(attribute)
+        .expect("sysfs is mounted")
+        .len();
+    let held = std::fs::read(attribute).expect("the attribute reads").len();
+    assert!(
+        claimed >= audit::RECORD_LEN_U64 && held < audit::RECORD_LEN,
+        "the attribute claims {claimed} bytes and holds {held}"
+    );
+    let root = root_of("as2-g2-pull-cut-short");
+    let journal = audit::journal_path(&root);
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(attribute, &journal).unwrap();
+    // (1), (2), (3), (4), (10)
+    let said = format!(
+        "{}: the file ended before record 0 of {}",
+        journal.display(),
+        claimed / audit::RECORD_LEN_U64
+    );
+    for _ in 0..2 {
+        let Err(why) = read_runs(&root) else {
+            panic!("a journal that ends before its length is refused");
+        };
+        assert_eq!(why, said);
+    }
+    // (5), (6), (7), (8), (9)
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 1);
+    let got = get(&root, ZERODHA_2015);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    assert_eq!(got.body["label"], RECONSTRUCTED);
+    assert_eq!(
+        got.body["reconstruction"],
+        serde_json::json!({ "source": "audit/pull.journal", "error": said })
+    );
+}
+
+/// **EVERY RUN COVERING THE MONTH IS SORTED BY WHAT IT CAN SAY OF ITS BARS**
+/// (BASE-COV-API-AS2): refused, never started or offering no bar is counted and
+/// never a candidate; a window that misses `t`'s day, starts at the epoch, or
+/// ends before it begins is filed by what it names; an option's month takes
+/// only its feed's expired-F&O runs.
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a refused run of
+/// this feed and form covering the month is counted refused, never a
+/// candidate; (2) a run that never started is counted with it; (3) a run that
+/// stored and offered no bar is counted as offering none; (4) a run whose
+/// window starts after `t`'s day misses it, though it covers the month; (5) a
+/// window starting on the epoch's own day is filed under the month and is a
+/// candidate, its start shown as no day; (6) a reversed window is walked on
+/// every request and misses every day; (7) the epoch-day candidate is named the
+/// writer: one commit, written inside its run alone; (8) an option's month
+/// takes only the expired-F&O run, its feed's spot runs being the other form.
+/// Combined: (9) the whole month AND the late-starting run: a candidate there,
+/// excluded only by `t`; (10) a direct walk AND a position no run holds: passed
+/// over and counted nowhere. Out of the box: (11) a window that ends before it
+/// begins.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every run shape its Extremes: line names, in order"
+)]
+fn every_run_covering_the_month_is_sorted_by_what_it_can_say_of_its_bars() {
+    use audit::{Outcome, Scope};
+    let january = Some(("2015-01-01", "2015-01-31"));
+    let ordinals = |runs: &Value| -> Vec<u64> {
+        runs.as_array()
+            .unwrap()
+            .iter()
+            .map(|one| one["ordinal"].as_u64().unwrap())
+            .collect()
+    };
+    // (1)-(7), (9), (11): six runs of one feed and form over January 2015.
+    let root = root_of("as2-g2-sorted");
+    let mut epoch = run(Scope::Spot, Outcome::Stored, T0, 10, KITE, january, 4);
+    epoch.from_days = 0;
+    let mut reversed = run(Scope::Spot, Outcome::Stored, T0 + 60, 5, KITE, january, 4);
+    reversed.from_days = day("2015-02-01").days_from_epoch();
+    reversed.to_days = day("2015-01-01").days_from_epoch();
+    let journal = audit::Journal::at(&root);
+    for record in [
+        run(Scope::Spot, Outcome::Refused, T0 - 300, 0, KITE, january, 0),
+        run(
+            Scope::Spot,
+            Outcome::NotStarted,
+            T0 - 200,
+            0,
+            KITE,
+            january,
+            0,
+        ),
+        run(Scope::Spot, Outcome::Stored, T0 - 100, 5, KITE, january, 0),
+        run(
+            Scope::Spot,
+            Outcome::Stored,
+            T0 + 50,
+            5,
+            KITE,
+            Some(("2015-01-05", "2015-01-31")),
+            4,
+        ),
+        epoch,
+        reversed,
+    ] {
+        journal.append(&record).unwrap();
+    }
+    zerodha_days(&root, "2015-01", &["2015-01-01", "2015-01-02"], 1, T0 + 5);
+    let month = get(&root, ZERODHA_2015);
+    assert_eq!(month.status, StatusCode::OK, "{}", month.body);
+    let rebuilt = &month.body["reconstruction"];
+    assert_eq!(ordinals(&rebuilt["candidates"]), [3, 4], "{rebuilt}");
+    assert_eq!(
+        rebuilt["excluded"],
+        serde_json::json!({
+            "other_feed": 0,
+            "names_no_feed": 0,
+            "other_scope": 0,
+            "window_misses_t": 1,
+            "refused_or_not_started": 2,
+            "offered_no_bar": 1,
+        })
+    );
+    assert_eq!(rebuilt["journal"]["runs"], 6);
+    assert_eq!(rebuilt["journal"]["runs_without_window"], 0);
+    assert_eq!(rebuilt["journal"]["runs_walked_on_every_request"], 1);
+    assert_eq!(
+        rebuilt["candidates"][1]["window"],
+        serde_json::json!({ "from": null, "to": "2015-01-31" })
+    );
+    assert_eq!(rebuilt["attributed"]["run"], 4);
+    let second = get(
+        &root,
+        &format!("{ZERODHA_2015}&t={}", ist_midnight("2015-01-02")),
+    );
+    assert_eq!(second.status, StatusCode::OK, "{}", second.body);
+    let rebuilt = &second.body["reconstruction"];
+    assert_eq!(ordinals(&rebuilt["candidates"]), [4], "{rebuilt}");
+    assert_eq!(rebuilt["excluded"]["window_misses_t"], 2);
+    assert_eq!(rebuilt["excluded"]["refused_or_not_started"], 2);
+    assert_eq!(rebuilt["excluded"]["offered_no_bar"], 1);
+    assert_eq!(rebuilt["attributed"]["run"], 4);
+    // (8): an option's month over the pull-journal fixture.
+    let root = root_of("as2-g2-sorted-option");
+    pull_journal(&root);
+    let contract = Contract::parse("2015-01-29-850000-CE").unwrap();
+    let option = path_of(
+        Vendor::Zerodha,
+        "FNO",
+        "NIFTY",
+        Some(contract),
+        Timeframe::DAY_1,
+        "2015-01",
+    );
+    land(
+        &root,
+        option,
+        "NIFTY",
+        &[vec![bar(ist_midnight("2015-01-01"), 5_55)]],
+    );
+    std::fs::File::options()
+        .write(true)
+        .open(option.to_path_buf(&root))
+        .unwrap()
+        .set_modified(at(T0 + 9_010))
+        .unwrap();
+    let got = get(
+        &root,
+        "feed=zerodha&instrument=NSE-FNO-NIFTY-2015-01-29-850000-CE&timeframe=1day&month=2015-01",
+    );
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let rebuilt = &got.body["reconstruction"];
+    assert_eq!(ordinals(&rebuilt["candidates"]), [6], "{rebuilt}");
+    assert_eq!(rebuilt["candidates"][0]["scope"], "expired F&O");
+    assert_eq!(rebuilt["excluded"]["other_scope"], 2);
+    assert_eq!(rebuilt["excluded"]["names_no_feed"], 1);
+    assert_eq!(rebuilt["attributed"]["run"], 6);
+    // (10): a direct walk over a position no run holds.
+    let mut index = RunIndex::empty();
+    index.push(PullRun {
+        ordinal: 0,
+        vendor: Some(Vendor::Zerodha),
+        record: run(Scope::Spot, Outcome::Stored, T0, 10, KITE, january, 4),
+    });
+    let asked = ask(ZERODHA_2015);
+    let walked = sorted(
+        &index,
+        &[0, 7],
+        &asked,
+        (day("2015-01-01"), day("2015-01-31")),
+    );
+    assert_eq!(
+        walked
+            .candidates
+            .iter()
+            .map(|one| one.ordinal)
+            .collect::<Vec<_>>(),
+        [0]
+    );
+    assert_eq!(
+        (
+            walked.closing.len(),
+            walked.opened.len(),
+            walked.continuations
+        ),
+        (1, 0, 0)
+    );
+    let excluded = &walked.excluded;
+    assert_eq!(
+        [
+            excluded.other_feed,
+            excluded.unattributed,
+            excluded.other_scope,
+            excluded.other_day,
+            excluded.not_run,
+            excluded.offered_nothing,
+        ],
+        [0; 6],
+        "a position no run holds is passed over and counted nowhere"
+    );
+}
+
+/// **AN OPENING RECORD IS ANSWERED ONLY BY A LATER CLOSE OF ITS OWN WINDOW THAT
+/// WAS UNDER WAY WHEN IT OPENED** (BASE-COV-API-AS2; D-3341).
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a close written
+/// before the open never answers it; (2) a later close whose window starts a
+/// day later does not; (3) a later close whose window ends a day earlier does
+/// not; (4) a later close of the same window that began after the open does
+/// not; (5) the later close of the same window under way at the open answers
+/// it; (6) the answered open is counted opened and closed and listed nowhere
+/// else; (7) every close of the feed and form that offered bars is a candidate,
+/// oldest first; (8) the close under way at the last write is named the writer.
+/// Combined: (9) four closes that do not answer AND one that does, in one
+/// journal: the open is answered by the fifth alone; (10) a close written
+/// before its open AND under way when it opened: the open stays unclosed and
+/// keeps that close from being named the writer. Out of the box: (11) the other
+/// form's close of the very same window, under way at the opening: never its
+/// answer.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every pairing its Extremes: line names, in order"
+)]
+fn an_open_is_answered_only_by_a_later_close_of_its_window_under_way_when_it_opened() {
+    use audit::{Outcome, Scope};
+    let span = Some(("2015-01-01", "2020-12-31"));
+    let opened = || {
+        audit::Record::opened(
+            Scope::Spot,
+            at(T0 + 1),
+            KITE,
+            window("2015-01-01", "2020-12-31"),
+            3,
+            0,
+        )
+    };
+    let candidates = |body: &Value| -> Vec<u64> {
+        body["reconstruction"]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|one| one["ordinal"].as_u64().unwrap())
+            .collect()
+    };
+    // (1)-(9): four closes that do not answer the open, then the one that does.
+    let root = root_of("as2-g2-pairing");
+    let journal = audit::Journal::at(&root);
+    for record in [
+        run(Scope::Spot, Outcome::Failed, T0 - 5_000, 10, KITE, span, 9),
+        opened(),
+        run(
+            Scope::Spot,
+            Outcome::Failed,
+            T0 - 4_000,
+            10,
+            KITE,
+            Some(("2015-01-02", "2020-12-31")),
+            9,
+        ),
+        run(
+            Scope::Spot,
+            Outcome::Failed,
+            T0 - 3_000,
+            10,
+            KITE,
+            Some(("2015-01-01", "2020-12-30")),
+            9,
+        ),
+        run(Scope::Spot, Outcome::Failed, T0 + 100, 10, KITE, span, 9),
+        run(Scope::Spot, Outcome::Failed, T0, 1_000, KITE, span, 9),
+    ] {
+        journal.append(&record).unwrap();
+    }
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
+    let got = get(&root, ZERODHA_2015);
+    assert_eq!(got.status, StatusCode::OK, "{}", got.body);
+    let rebuilt = &got.body["reconstruction"];
+    assert_eq!(candidates(&got.body), [0, 2, 3, 4, 5], "{rebuilt}");
+    assert_eq!(rebuilt["opened_never_closed"], serde_json::json!([]));
+    assert_eq!(rebuilt["opened_and_closed"], 1);
+    assert_eq!(rebuilt["last_write"]["inside_runs"], serde_json::json!([5]));
+    assert_eq!(rebuilt["attributed"]["run"], 5);
+    // (10): a close written before its open, though under way when it opened.
+    let root = root_of("as2-g2-pairing-before");
+    let journal = audit::Journal::at(&root);
+    for record in [
+        run(Scope::Spot, Outcome::Failed, T0, 1_000, KITE, span, 9),
+        opened(),
+    ] {
+        journal.append(&record).unwrap();
+    }
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
+    let got = get(&root, ZERODHA_2015);
+    let rebuilt = &got.body["reconstruction"];
+    let unclosed = rebuilt["opened_never_closed"].as_array().unwrap();
+    assert_eq!(unclosed.len(), 1, "{}", got.body);
+    assert_eq!(unclosed[0]["ordinal"], 1);
+    assert_eq!(rebuilt["opened_and_closed"], 0);
+    assert_eq!(rebuilt["last_write"]["inside_runs"], serde_json::json!([0]));
+    assert!(rebuilt["attributed"].is_null(), "{rebuilt}");
+    // (11): the other form's close of the same window.
+    let root = root_of("as2-g2-pairing-other-form");
+    let journal = audit::Journal::at(&root);
+    for record in [
+        opened(),
+        run(Scope::Fno, Outcome::Failed, T0, 1_000, KITE, span, 9),
+    ] {
+        journal.append(&record).unwrap();
+    }
+    zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
+    let got = get(&root, ZERODHA_2015);
+    let rebuilt = &got.body["reconstruction"];
+    assert_eq!(
+        rebuilt["opened_never_closed"][0]["ordinal"], 0,
+        "{}",
+        got.body
+    );
+    assert_eq!(rebuilt["excluded"]["other_scope"], 1);
+    assert!(candidates(&got.body).is_empty(), "{rebuilt}");
+}
+
+/// **THE OPERATOR'S WINDOW LABELS A WHOLE MONTH, INSIDE IT OR OUTSIDE IT ON
+/// EITHER SIDE, AND A FEED WITH NO WINDOW CARRIES NONE** (BASE-COV-API-AS2;
+/// D-3338), over `window_json` directly.
+/// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) 1970-01, the
+/// first month a store path can name, is outside; (2) 2017-12, the last month
+/// before the window, is outside; (3) 2018-01, its first month, is inside with
+/// no label; (4) 2026-09, its last month, is inside; (5) 2026-10, the first
+/// month after it, is outside; (6) 9999-12, the last month a store path can
+/// name, is outside; (7) a GDFL month carries no window; (8) a Dhan month
+/// carries none either. Combined: (9) 2026-10 AND `t` on its first day:
+/// labelled by the whole month; (10) 2017-12 AND `t` on its last day: outside.
+/// Out of the box: (11) a futures contract's month: the feed's window holds for
+/// every segment.
+#[test]
+fn the_operators_window_labels_whole_months_on_either_side_of_it() {
+    let zerodha = |month: &str, rest: &str| {
+        window_json(&ask(&format!(
+            "feed=zerodha&instrument=NSE-INDEX-NIFTY&timeframe=1day&month={month}{rest}"
+        )))
+    };
+    let after = format!("&t={}", ist_midnight("2026-10-01"));
+    let before = format!("&t={}", ist_midnight("2017-12-31"));
+    // (1)-(6), (9), (10)
+    for (month, rest, inside) in [
+        ("1970-01", "", false),
+        ("2017-12", "", false),
+        ("2018-01", "", true),
+        ("2026-09", "", true),
+        ("2026-10", "", false),
+        ("9999-12", "", false),
+        ("2026-10", after.as_str(), false),
+        ("2017-12", before.as_str(), false),
+    ] {
+        let span = zerodha(month, rest);
+        assert_eq!(span["inside"], inside, "{month}{rest}: {span}");
+        let label = if inside {
+            Value::Null
+        } else {
+            Value::from(OUTSIDE_WINDOW)
+        };
+        assert_eq!(span["label"], label, "{month}{rest}: {span}");
+        assert_eq!(span["from"], "2018-01-01");
+        assert_eq!(span["to"], "2026-09-30");
+        assert_eq!(span["standing"], "operator");
+        assert!(
+            span["source"].as_str().unwrap().contains("D-3338"),
+            "{span}"
+        );
+    }
+    // (11)
+    let future = window_json(&ask(
+        "feed=zerodha&instrument=NSE-FNO-NIFTY-2026-10-29-FUT&timeframe=1day&month=2026-10",
+    ));
+    assert_eq!(future["label"], OUTSIDE_WINDOW, "{future}");
+    // (7), (8)
+    assert!(window_json(&ask(GDFL_NIFTY)).is_null());
+    assert!(
+        window_json(&ask(
+            "feed=dhan&instrument=NSE-INDEX-NIFTY&timeframe=1min&month=2026-10"
+        ))
+        .is_null()
+    );
+}

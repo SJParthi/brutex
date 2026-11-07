@@ -1100,7 +1100,12 @@ fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile, serve
         "journal_days_done": done,
         "journal_days_with_bars": with_bars,
         "bars_on_journal_days": held_on_days,
-        "bars_on_no_journal_day": whole_month.then(|| header.n_valid.saturating_sub(held_on_days)),
+        // UNKNOWN WHEN A DAY'S BARS WOULD NOT READ (BASE-COV-API-AS2): a bar on
+        // a journal day whose lookup failed is in no `held_on_days`, so the
+        // difference would count it as on no journal day. `bar_lookup_errors`
+        // says why the figure is null.
+        "bars_on_no_journal_day": (whole_month && lookup_errors == 0)
+            .then(|| header.n_valid.saturating_sub(held_on_days)),
         "bar_lookup_errors": lookup_errors,
         "bar_file_commits": generation,
         "commits_agree": compared.then(|| u64::try_from(with_bars).ok() == Some(generation)),
