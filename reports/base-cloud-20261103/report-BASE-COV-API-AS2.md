@@ -846,6 +846,30 @@ stop-bound test passed this time. Every test this shard added or changed passed.
 - Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, rewritten from this readout by the same
   classifier.
 
+### A host that starts no thread (`2dc1534d`)
+
+Four of the rows named above as the host's (a thread the host does not start) are a child's to
+decide: `speed_tests.rs`' minute-thread test already runs a child whose `RUST_MIN_STACK` asks for
+1 EiB of stack, so every thread built without a stack size of its own is refused there, and
+libtest runs the child's one test on its main thread.
+
+| file | test | extremes (single / combined / out of the box) | rows |
+|---|---|---|---|
+| `census_cache.rs` | `a_host_that_starts_no_thread_is_said_and_nothing_waits_on_one` (that child, proving itself by a file) | 12 (8 / 2 / 2) | census_cache.rs 642:12 T and 643-653 (`refresh_in_background`'s refused re-read: false, its row failed with the reason, the cell left free), 1009:8 T and 1010-1012 (`start`'s refused warm: its error, its rows listed warming, no warm left marked running), 1132-1137 and 1141:12 F (`retire` with no thread drops each value before it returns, in order); calendar_route.rs 1314 (the calendar warm says its journal walk could not start) |
+
+fmt rc 0 and clippy rc 0 (1.97.1) on `2dc1534d`; the filtered instrumented run `dev-nt1`: `1
+passed`, each target row read covered, the test's own uncovered sides the (F) of its asserts.
+Red round 8: `census_cache.rs` 643 storing `true` (a refused re-read that leaves the cell
+refreshing): `test result: FAILED. 0 passed; 1 failed`, the child at its own case (7) (`thread
+'main' ... panicked at crates/api/src/census_cache.rs:3868:13: (7)`), restored with `git
+checkout`. Left of the host's kind in these files: census_cache.rs 1199 (a feed's warm thread
+refused inside `warm`, which only the started warm thread calls; the same child could call
+`warm` directly), 1209-1212 (a warm thread that panicked), 918:16 F and 1287-1303 (races),
+calendar_route.rs 1312 (a journal walk that unwound).
+
+Route B whole:api on `2dc1534d`: running (started 21:31 IST); until its readout lands the lists
+and the FIX json are `518b2355`'s.
+
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
 - **D-8662 (draft): how G2's test-code GAP rows are closed, and the lists the landing gate
@@ -934,7 +958,8 @@ spawning-arm test's shape; the port taken by binding `:0` first); (2) `calendar_
 and 827:35 T, a bar file with one record rewritten to repeat its neighbour's minute or to sit
 before 1970, its block's checksum recomputed with `store::block::seal` (`Bar::image` writes the
 record); (3) `server.rs` 6632-6633, a journal that takes a run's open and close and refuses a
-member's note, in a uid-65534 child where the mode bits bind; (4) the two indexstopvix tests for
+member's note, in a uid-65534 child where the mode bits bind; (4) `census_cache.rs` 1199, by
+calling `warm` directly in the no-thread child of `2dc1534d`; (5) the two indexstopvix tests for
 G1's `indexstopvix_projection_tests.rs` (G1 or ASA). Then Route B whole:api on the code tip
 again, the lists, and the FIX json. The rows named as host, race, clock, build or real-host rows
 stay named (20935 is reached only by a load whose thread panics; 20979-20986 by an unstamped
