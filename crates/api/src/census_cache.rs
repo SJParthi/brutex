@@ -3768,4 +3768,143 @@ mod tests {
             },
         );
     }
+
+    /// A value whose drop is noted, in order, so a test can tell whether it
+    /// was dropped where it was handed over or on another thread later.
+    struct Noted(u8, Arc<Mutex<Vec<u8>>>);
+
+    impl Drop for Noted {
+        fn drop(&mut self) {
+            self.1
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(self.0);
+        }
+    }
+
+    /// **A HOST THAT STARTS NO THREAD: THE CACHES SAY SO AND NOTHING WAITS
+    /// ON A THREAD THAT WAS NEVER THERE** (BASE-COV-API-AS2).
+    ///
+    /// The census cache starts three threads of its own (the warm at start, a
+    /// background re-read per vendor, the one that frees replaced reads) and
+    /// the calendar warm a fourth (the pull journal's walk). Each answers a
+    /// refused start by name, or does the work where it stands. Run in a child
+    /// whose `RUST_MIN_STACK` asks for more stack than any host gives, as
+    /// speed's minute-thread test is, so every thread built without a stack
+    /// size of its own is refused there; the child proves itself by a file.
+    ///
+    /// Extremes: (1) `start` answers the refused start as its error, an OS
+    /// error; (2) every row it lists is listed before that, warming; (3) no
+    /// warm is left marked running; (4) a background re-read that cannot start
+    /// answers false; (5) its census row says failed; (6) with a reason naming
+    /// the re-read and that readers read for themselves; (7) the cell is not
+    /// left refreshing; (8) a value handed to `retire` is dropped before
+    /// `retire` returns. Combined: (9) the warm refused AND a re-read refused
+    /// after it: the re-read's row says failed while every other row stays
+    /// warming; (10) two values retired in a row: both dropped at once, in
+    /// order. Out of the box: (11) a re-read asked again after its refusal is
+    /// refused again, never waiting; (12) the calendar warm, whose journal walk
+    /// cannot start either, builds nothing it was not asked for and says the
+    /// walk could not start.
+    #[test]
+    fn a_host_that_starts_no_thread_is_said_and_nothing_waits_on_one() {
+        use std::sync::atomic::Ordering;
+        const CHILD: &str = "BRUTEX_TEST_CENSUS_NO_THREAD_CHILD";
+        if let Some(proof) = std::env::var_os(CHILD) {
+            // (8), (10): first, before anything in this process asks for the
+            // thread that frees replaced reads.
+            let dropped = Arc::new(Mutex::new(Vec::new()));
+            retire(Noted(1, Arc::clone(&dropped)));
+            assert_eq!(
+                *dropped.lock().unwrap_or_else(PoisonError::into_inner),
+                [1],
+                "(8) dropped before retire returned"
+            );
+            retire(Noted(2, Arc::clone(&dropped)));
+            assert_eq!(
+                *dropped.lock().unwrap_or_else(PoisonError::into_inner),
+                [1, 2],
+                "(10)"
+            );
+            let site = loaded("census-no-thread");
+            let vendors = vendors_of(&site);
+            // (1)
+            let refused = start(&site, &[Vendor::Gdfl]).expect_err("(1) no warm thread starts");
+            assert!(refused.raw_os_error().is_some(), "(1) {refused}");
+            // (2)
+            let listed = warmth(&site);
+            assert!(!listed.is_empty(), "(2) start listed its rows");
+            assert!(
+                listed.iter().all(|row| row.state == WarmState::Warming),
+                "(2) {listed:?}"
+            );
+            // (3)
+            assert!(!vendors.warm_running.load(Ordering::Acquire), "(3)");
+            // (4)
+            assert!(
+                !refresh_in_background(&vendors, Vendor::Gdfl),
+                "(4) no re-read starts"
+            );
+            // (5), (6), (9)
+            let after = warmth(&site);
+            let gdfl = row_named(&after, CENSUS, Vendor::Gdfl);
+            assert_eq!(gdfl.state, WarmState::Failed, "(5)");
+            let reason = gdfl.reason.as_deref().unwrap_or("");
+            assert!(
+                reason.starts_with("the background re-read could not be started (")
+                    && reason.ends_with("); readers read it themselves"),
+                "(6) {reason}"
+            );
+            assert_eq!(
+                after
+                    .iter()
+                    .filter(|row| row.state == WarmState::Warming)
+                    .count(),
+                listed.len() - 1,
+                "(9) {after:?}"
+            );
+            // (7)
+            let cell = &vendors.cells[Vendor::Gdfl as usize];
+            assert!(!cell.refreshing.load(Ordering::Acquire), "(7)");
+            // (11)
+            assert!(
+                !refresh_in_background(&vendors, Vendor::Gdfl),
+                "(11) refused again"
+            );
+            assert!(!cell.refreshing.load(Ordering::Acquire), "(11)");
+            // (12)
+            let warmed = super::super::calendar_route::warm(&site, &[]);
+            assert_eq!(warmed.built, 0, "(12)");
+            let walked = warmed.journal.expect_err("(12) the walk did not start");
+            assert!(
+                walked.starts_with("the pull journal's walk could not start: "),
+                "(12) {walked}"
+            );
+            std::fs::write(
+                std::path::Path::new(&proof).join("child-ran"),
+                b"no thread started",
+            )
+            .expect("the child's proof");
+            return;
+        }
+        let proof = crate::scratch::path("census-no-thread-proof");
+        let _ = std::fs::remove_dir_all(&proof);
+        std::fs::create_dir_all(&proof).expect("the child's proof folder");
+        let _ = crate::isolated::rerun(
+            "server::census_cache::tests::a_host_that_starts_no_thread_is_said_and_nothing_waits_on_one",
+            &[
+                (CHILD, proof.as_os_str()),
+                (
+                    "RUST_MIN_STACK",
+                    std::ffi::OsStr::new("1152921504606846976"),
+                ),
+            ],
+        );
+        assert_eq!(
+            std::fs::read(proof.join("child-ran")).ok().as_deref(),
+            Some(&b"no thread started"[..]),
+            "the child started no thread and said so"
+        );
+        let _ = std::fs::remove_dir_all(&proof);
+    }
 }
