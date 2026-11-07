@@ -2,7 +2,7 @@
 
 PREVIEW: an independent reference build on seeded synthetic data; not a result, says nothing about profit
 
-267 scenarios. Readings other than the headline are named (report section 4).
+272 scenarios. Readings other than the headline are named (report section 4).
 
 | Id | Kind | Readings | Outputs | Title |
 |---|---|---|---:|---|
@@ -82,19 +82,20 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | E2-012 | e2 | headline | 41 | the same close below under S29b's labelled reading: the count ends |
 | E2-013 | e2 | headline | 47 | the resting reading is refused by name |
 | E2-014 | e2 | headline | 47 | out of top N at the return |
-| E2-015 | e2 | headline | 44 | a through candle wipes the bounce before the return |
-| E2-016 | e2 | headline | 41 | a Kite hole ends the count: touch_count_unknown |
-| E2-017 | e2 | headline | 49 | a new high mid-count restarts the running count |
-| E2-018 | e2 | headline | 49 | the same new high under the frozen ladder keeps the count |
-| E2-019 | e2 | headline | 47 | a re-touch before the bounce passes joins the touch (A07 headline) |
-| E2-020 | e2 | A07=ignore | 47 | the same re-touch ignored for the count (A07 other) |
-| E2-021 | e2 | headline | 44 | a touch from the unfavourable side is not a first touch |
-| E2-022 | e2 | headline | 47 | the touch book on 2 minute candles |
-| E2-023 | e2 | headline | 47 | the touch book on 3 minute candles |
-| E2-024 | e2 | headline | 45 | E2S armed at the bounce, triggered by a GDFL second, long |
-| E2-025 | e2 | headline | 45 | E2S armed at the bounce, triggered by a GDFL second, short |
-| E2-026 | e2 | headline | 45 | E2S with GDFL seconds missing until the return candle |
-| E2-027 | e2 | headline | 41 | E2S with no GDFL price in R1's minute: no_trigger_ratio |
+| E2-015 | e2 | headline | 47 | the return's minute has no GDFL trade: no_level_ratio on every mapped level |
+| E2-016 | e2 | headline | 44 | a through candle wipes the bounce before the return |
+| E2-017 | e2 | headline | 41 | a Kite hole ends the count: touch_count_unknown |
+| E2-018 | e2 | headline | 49 | a new high mid-count restarts the running count |
+| E2-019 | e2 | headline | 49 | the same new high under the frozen ladder keeps the count |
+| E2-020 | e2 | headline | 47 | a re-touch before the bounce passes joins the touch (A07 headline) |
+| E2-021 | e2 | A07=ignore | 47 | the same re-touch ignored for the count (A07 other) |
+| E2-022 | e2 | headline | 44 | a touch from the unfavourable side is not a first touch |
+| E2-023 | e2 | headline | 47 | the touch book on 2 minute candles |
+| E2-024 | e2 | headline | 47 | the touch book on 3 minute candles |
+| E2-025 | e2 | headline | 45 | E2S armed at the bounce, triggered by a GDFL second, long |
+| E2-026 | e2 | headline | 45 | E2S armed at the bounce, triggered by a GDFL second, short |
+| E2-027 | e2 | headline | 45 | E2S with GDFL seconds missing until the return candle |
+| E2-028 | e2 | headline | 41 | E2S with no GDFL price in R1's minute: no_trigger_ratio |
 | E3-001 | e3 | headline | 36 | ORB 1 minutes on 1 minute candles, close reading, long |
 | E3-002 | e3 | headline | 37 | ORB 2 minutes on 1 minute candles, close reading, short |
 | E3-003 | e3 | headline | 38 | ORB 3 minutes on 1 minute candles, close reading, long |
@@ -113,6 +114,8 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | E3-016 | e3 | headline | 9 | E3S on 5 minute candles, ORB 5: the boundary candle writes no record (A08 headline) |
 | E3-017 | e3 | A08=arms | 11 | the same, the boundary candle arms (A08 other) |
 | E3-018 | e3 | headline | 31 | E3S with GDFL seconds only from 09:35 |
+| E3-019 | e3 | headline | 21 | the range's only minute is missing: orb_tainted, with no price at all |
+| E3-020 | e3 | headline | 36 | E3S with the GDFL data start at 10:15: every arming refused by name, no_fill_data_window |
 | G001 | gate | headline | 1 | SNIPER.md 1.2 long, normal |
 | G002 | gate | headline | 1 | SNIPER.md 1.2 short, normal |
 | G003 | gate | headline | 1 | SNIPER.md 1.2 long, second reading, through: sn_stop_through_at_decision |
@@ -208,6 +211,7 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | C029 | charges | headline | 9 | a Rs 2.5 lakh round trip on 2019-06-03: Telangana's stamp (A15 headline) |
 | C030 | charges | A15=literal | 9 | the same trade, every listed state: Himachal Pradesh's Rs 50 (A15 other) |
 | C031 | charges | headline | 9 | a Rs 15 lakh round trip on 2019-06-03 above Rs 16.67 lakh of turnover: Tamil Nadu |
+| C038 | charges | headline | 6 | an entry closed whole by the broker's 15:10 square-off: its brokerage and Rs 20 + GST on top |
 | C032 | charges | headline | 6 | seeded multi-fill trade 1 on 2020-05-30 |
 | C033 | charges | headline | 6 | seeded multi-fill trade 2 on 2026-07-24 |
 | C034 | charges | headline | 6 | seeded multi-fill trade 3 on 2023-10-16 |
@@ -273,3 +277,4 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | X002 | e2e | headline | 14 | one flag day end to end, short, K = 2 |
 | X003 | e2e | headline | 7 | one flag day end to end, long, K = 3 |
 | X004 | e2e | headline | 49 | one flag day end to end, short, K = 1 |
+| X005 | e2e | headline | 1 | the flag's break minute has no GDFL trade: no_level_ratio, no lane walked for it |
