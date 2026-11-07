@@ -24110,6 +24110,26 @@ mod tests {
             )
             .is_err()
         );
+        // A MUHURAT PAST THE MEASURED CALENDAR (2026-11-08, sourced as traded
+        // with no recorded window, BASE-COV-API-AS2): the session verdict reads
+        // the measured calendar, so the day falls to the venue's regular hours,
+        // its 18:15 minute is past the close, and the body is not refused.
+        let friday = day(2026, 11, 6);
+        let muhurat = day(2026, 11, 8);
+        let no_window = Window::new(friday, muhurat).unwrap();
+        assert_eq!(
+            super::observed_cash_source_days(
+                &[(
+                    no_window,
+                    RawWindow {
+                        rows: vec![row(at(friday, 555)), row(at(muhurat, 18 * 60 + 15))]
+                    }
+                )],
+                TimestampEncoding::EpochSecondsUtc
+            )
+            .unwrap(),
+            vec![friday]
+        );
     }
 
     #[tokio::test]
