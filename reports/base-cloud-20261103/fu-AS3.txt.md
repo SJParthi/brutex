@@ -4,12 +4,605 @@ One fenced block: the (F), (U) and (H) rows of shard G3's files on the code tip 
 and the GAP rows).
 
 `````text
-(F)/(U)/(H) list of BASE-COV-API-AS3 (shard G3), tip 26003a036453c0c9012f32d7e5215d756ddb7166, whole:api, from /var/tmp/as3/routeb-final3.log.
+(F)/(U)/(H) list of BASE-COV-API-AS3 (shard G3), tip 4a86f4085b6ec5d0303b5e4de5a0a99801c868fe, whole:api, from /var/tmp/as3/routeb5.log (continuation -5, 7 Nov: every earlier row carried over through a line map from git diff 26003a03 4a86f408, its text checked; the 4 rows that did not carry over classified by hand).
 (F) = the failing side of an assert!/assert_eq!/assert_ne!/panic!/unreachable! in test code whose statement ran (recipe step 4): a panic line, a message argument of a check (evaluated only when it fails), the false side of a check's condition (an && operand, the last || operand, a matches! or its guard, an .all()/.is_some_and()/.is_ok_and() closure inside it, the no-match arm of a matches! that is the whole check), the else of a let-else that panics. Classified by the session's classify.mjs (node, the rule on each row); 52 of them read by hand against the source in two samples spread over the files (the first sample showed a closure inside a condition is no failing arm, and the rule was narrowed before this list).
 (U) = a row the code proves never runs, its proof beside it (no row rests on "hard to reach", "needs a fault" or "never happens").
 (H) = a row a root host red reaches only when its test runs as non-root: the three G3 root reds were run as uid 65534 with the same instrumented binary (the report names them); covered there, owed to the Mac's Route B.
-(F) 235 lines 310 sides; (U) 96 lines 51 sides; (H) 44 lines 2 sides.
+(F) 235 lines 312 sides; (U) 97 lines 52 sides; (H) 44 lines 2 sides.
 
+(F) BRANCH crates/api/src/autopilot.rs:4813:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
+(F) LINE crates/api/src/autopilot.rs:4814  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
+(F) BRANCH crates/api/src/autopilot.rs:4816:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::HistoryFloor::Rolling { years } = spec.history_floor else {
+(F) LINE crates/api/src/autopilot.rs:4817  [panic/unreachable line]  panic!("Dhan's floor is the rolling one");
+(F) BRANCH crates/api/src/autopilot.rs:4877:17 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+(F) LINE crates/api/src/autopilot.rs:4878  [panic/unreachable line]  panic!("{} is driven, so it is HTTP", feed.display());
+(F) LINE crates/api/src/autopilot.rs:4883  [a message argument of the statement at 4880, which ran: evaluated only when it fails]  feed.display()
+(F) LINE crates/api/src/autopilot.rs:4888  [a message argument of the statement at 4885, which ran: evaluated only when it fails]  feed.display()
+(F) LINE crates/api/src/autopilot.rs:4893  [a message argument of the statement at 4890, which ran: evaluated only when it fails]  feed.display()
+(F) LINE crates/api/src/autopilot.rs:4905  [a message argument of the statement at 4902, which ran: evaluated only when it fails]  feed.display()
+(F) LINE crates/api/src/autopilot.rs:4915  [a message argument of the statement at 4912, which ran: evaluated only when it fails]  feed.display()
+(F) BRANCH crates/api/src/autopilot.rs:4942:45 False  [the false side fails the check, and its line ran]  !path_names_the_rung || spec.granularity_token(rung).is_some(),
+(F) LINE crates/api/src/autopilot.rs:4945  [a message argument of the statement at 4941, which ran: evaluated only when it fails]  feed.display()
+(F) BRANCH crates/api/src/autopilot.rs:5057:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = state.observe(&dead) else {
+(F) LINE crates/api/src/autopilot.rs:5058  [panic/unreachable line]  panic!("a same-value verdict must halt");
+(F) BRANCH crates/api/src/autopilot.rs:5142:13 False  [the else of a let-else that panics, whose line ran]  let Some(Next::Stall { reason }) = verdicts.last() else {
+(F) LINE crates/api/src/autopilot.rs:5143  [panic/unreachable line]  panic!("attempt {MAX_MONTH_ATTEMPTS} must stall, got {verdicts:?}");
+(F) LINE crates/api/src/autopilot.rs:5161  [a message argument of the statement at 5158, which ran: evaluated only when it fails]  status.json()
+(F) BRANCH crates/api/src/autopilot.rs:5312:26 False  [the false side fails the check, and its line ran]  .all(|f| f.halt_kind == Some(Halt::Census) && f.halted.is_some()),
+(F) BRANCH crates/api/src/autopilot.rs:5317:17 False  [the false side fails the check, and its line ran]  report.halted.contains(drift) && report.halted.contains("is not known"),
+(F) BRANCH crates/api/src/autopilot.rs:5317:50 False  [the false side fails the check, and its line ran]  report.halted.contains(drift) && report.halted.contains("is not known"),
+(F) BRANCH crates/api/src/autopilot.rs:5337:50 False  [the false side fails the check, and its line ran]  Census::Unreadable { reason, .. } if reason == "entry 41 fails its own checksum"
+(F) BRANCH crates/api/src/autopilot.rs:5394:13 False  [the else of a let-else that panics, whose line ran]  let Census::Unreadable { reason, .. } = &refused.state else {
+(F) LINE crates/api/src/autopilot.rs:5395  [panic/unreachable line]  panic!("a census whose migration receipt will not read is refused, never held");
+(F) BRANCH crates/api/src/autopilot.rs:5398:13 False  [the false side fails the check, and its line ran]  reason.contains("is not known")
+(F) BRANCH crates/api/src/autopilot.rs:5399:20 False  [the false side fails the check, and its line ran]  && reason.contains("MIGRATED")
+(F) BRANCH crates/api/src/autopilot.rs:5400:20 False  [the false side fails the check, and its line ran]  && reason.contains("cannot be read"),
+(F) LINE crates/api/src/autopilot.rs:5464  [a message argument of the statement at 5460, which ran: evaluated only when it fails]  action.slug()
+(F) BRANCH crates/api/src/autopilot.rs:5531:13 False  [the false side fails the check, and its line ran]  body.contains("the broker credential is dead")
+(F) BRANCH crates/api/src/autopilot.rs:5532:20 False  [the false side fails the check, and its line ran]  && body.contains("the store refused the same write twice"),
+(F) BRANCH crates/api/src/autopilot.rs:6041:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = state.observe(&full) else {
+(F) LINE crates/api/src/autopilot.rs:6042  [panic/unreachable line]  panic!("a repeated disk failure must halt");
+(F) LINE crates/api/src/autopilot.rs:6767  [a message argument of the statement at 6764, which ran: evaluated only when it fails]  phase.state()
+(F) BRANCH crates/api/src/autopilot.rs:7120:13 False  [the false side fails the check, and its line ran]  state.halted.is_none() && state.halt_kind.is_none(),
+(F) BRANCH crates/api/src/autopilot.rs:7120:39 False  [the false side fails the check, and its line ran]  state.halted.is_none() && state.halt_kind.is_none(),
+(F) BRANCH crates/api/src/autopilot.rs:7140:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = token.observe(&dead) else {
+(F) LINE crates/api/src/autopilot.rs:7141  [panic/unreachable line]  panic!("a same-value verdict must halt");
+(F) BRANCH crates/api/src/autopilot.rs:7190:17 False  [the else of a let-else that panics, whose line ran]  let Next::Stall { reason: said } = state.observe(&out) else {
+(F) LINE crates/api/src/autopilot.rs:7191  [panic/unreachable line]  panic!("{credential:?}: the bound stalls the month, it does not halt the feed");
+(F) BRANCH crates/api/src/autopilot.rs:7223:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = state.observe(&blocked) else {
+(F) LINE crates/api/src/autopilot.rs:7224  [panic/unreachable line]  panic!("an unusable configuration halts");
+(F) BRANCH crates/api/src/autopilot.rs:7292:26 False  [the false side fails the check, and its line ran]  .all(|f| f.halt_kind == Some(Halt::Census) && f.halted.is_some()),
+(F) BRANCH crates/api/src/autopilot.rs:7320:26 False  [the false side fails the check, and its line ran]  .all(|f| f.halted.is_none() && f.halt_kind.is_none()),
+(F) BRANCH crates/api/src/autopilot.rs:7326:26 False  [the false side fails the check, and its line ran]  .all(|r| r.halted.is_empty() && r.last_reason.contains("manifest loads again")),
+(F) LINE crates/api/src/autopilot.rs:7328  [a message argument of the statement at 7323, which ran: evaluated only when it fails]  reports.iter().map(|r| &r.last_reason).collect::<Vec<_>>()
+(F) BRANCH crates/api/src/autopilot.rs:7364:13 False  [the else of a let-else that panics, whose line ran]  let Due::Spent { saying } = store_due(None, 0) else {
+(F) LINE crates/api/src/autopilot.rs:7365  [panic/unreachable line]  panic!("an unarmed feed must not answer Now");
+(F) BRANCH crates/api/src/autopilot.rs:7388:17 False  [the else of a let-else that panics, whose line ran]  let Due::Now { made } = store_due(Some(&probe), now) else {
+(F) LINE crates/api/src/autopilot.rs:7389  [panic/unreachable line]  panic!("probe {expected} of {STORE_PROBES} must be due, at {now}");
+(F) BRANCH crates/api/src/autopilot.rs:7400:13 False  [the else of a let-else that panics, whose line ran]  let Due::Spent { saying } = store_due(Some(&probe), now.saturating_add(1_000_000)) else {
+(F) LINE crates/api/src/autopilot.rs:7401  [panic/unreachable line]  panic!("the {STORE_PROBES}-probe allowance must be spent, not renewed by time");
+(F) LINE crates/api/src/autopilot.rs:7443  [a message argument of the statement at 7440, which ran: evaluated only when it fails]  missing.display()
+(F) BRANCH crates/api/src/autopilot.rs:7575:13 False  [the false side fails the check, and its line ran]  why.contains("already holds the probe's name") && why.contains(STORE_PROBE_PREFIX),
+(F) BRANCH crates/api/src/autopilot.rs:7575:63 False  [the false side fails the check, and its line ran]  why.contains("already holds the probe's name") && why.contains(STORE_PROBE_PREFIX),
+(F) BRANCH crates/api/src/autopilot.rs:7632:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { .. } = first.observe(&disk) else {
+(F) LINE crates/api/src/autopilot.rs:7633  [panic/unreachable line]  panic!("the same store refusal twice must halt");
+(F) BRANCH crates/api/src/autopilot.rs:7654:13 False  [the false side fails the check, and its line ran]  back.halted.is_none() && back.halt_kind.is_none() && back.probe.is_none(),
+(F) BRANCH crates/api/src/autopilot.rs:7654:38 False  [the false side fails the check, and its line ran]  back.halted.is_none() && back.halt_kind.is_none() && back.probe.is_none(),
+(F) BRANCH crates/api/src/autopilot.rs:7654:66 False  [the false side fails the check, and its line ran]  back.halted.is_none() && back.halt_kind.is_none() && back.probe.is_none(),
+(F) BRANCH crates/api/src/autopilot.rs:7729:17 False  [the false side fails the check, and its line ran]  saying.contains("2021-03") && saying.contains("being reconsidered"),
+(F) BRANCH crates/api/src/autopilot.rs:7729:47 False  [the false side fails the check, and its line ran]  saying.contains("2021-03") && saying.contains("being reconsidered"),
+(F) BRANCH crates/api/src/autopilot.rs:7849:13 False  [the else of a let-else that panics, whose line ran]  let Settled::Complete { instruments } = Settled::over(&one) else {
+(F) LINE crates/api/src/autopilot.rs:7850  [panic/unreachable line]  panic!("one tracked instrument is a universe");
+(F) BRANCH crates/api/src/autopilot.rs:7972:13 False  [the false side fails the check, and its line ran]  detail.contains("NOT COMPLETE") && detail.contains("NOTHING IS TRACKED"),
+(F) BRANCH crates/api/src/autopilot.rs:7972:48 False  [the false side fails the check, and its line ran]  detail.contains("NOT COMPLETE") && detail.contains("NOTHING IS TRACKED"),
+(F) LINE crates/api/src/autopilot.rs:8114  [a message argument of the statement at 8109, which ran: evaluated only when it fails]  kind.word()
+(F) BRANCH crates/api/src/autopilot.rs:8117:21 False  [the false side fails the check, and its line ran]  assert!(state.halted.is_none() && state.halt_kind.is_none());
+(F) BRANCH crates/api/src/autopilot.rs:8117:47 False  [the false side fails the check, and its line ran]  assert!(state.halted.is_none() && state.halt_kind.is_none());
+(F) BRANCH crates/api/src/autopilot.rs:8281:17 False  [the false side fails the check, and its line ran]  assert!(due > before && due <= before + 3, "{due} vs {before}");
+(F) BRANCH crates/api/src/autopilot.rs:8281:33 False  [the false side fails the check, and its line ran]  assert!(due > before && due <= before + 3, "{due} vs {before}");
+(F) LINE crates/api/src/autopilot.rs:8460  [a message argument of the statement at 8457, which ran: evaluated only when it fails]  site.autopilot.json()
+(F) LINE crates/api/src/autopilot.rs:8472  [a message argument of the statement at 8469, which ran: evaluated only when it fails]  site.autopilot.json()
+(F) BRANCH crates/api/src/autopilot.rs:8672:17 False  [the else of a let-else that panics, whose line ran]  let Some(&(_, flies, paused, why)) = CASES.iter().find(|(named, ..)| *named == case)
+(F) LINE crates/api/src/autopilot.rs:8674  [panic/unreachable line]  panic!("unknown case {case}");
+(F) LINE crates/api/src/autopilot.rs:8844  [a message argument of the statement at 8841, which ran: evaluated only when it fails]  reports[0].halted
+(F) BRANCH crates/api/src/autopilot.rs:8891:13 False  [the false side fails the check, and its line ran]  shown >= before && shown <= after,
+(F) BRANCH crates/api/src/autopilot.rs:8891:32 False  [the false side fails the check, and its line ran]  shown >= before && shown <= after,
+(F) LINE crates/api/src/autopilot.rs:8933  [a message argument of the statement at 8930, which ran: evaluated only when it fails]  site.autopilot.json()
+(F) LINE crates/api/src/autopilot.rs:9010  [a message argument of the statement at 9007, which ran: evaluated only when it fails]  site.autopilot.json()
+(F) BRANCH crates/api/src/autopilot.rs:9025:13 False  [the false side fails the check, and its line ran]  why.contains("did not complete. Attempt ") && why.contains("NO ROWS AT ALL"),
+(F) BRANCH crates/api/src/autopilot.rs:9025:59 False  [the false side fails the check, and its line ran]  why.contains("did not complete. Attempt ") && why.contains("NO ROWS AT ALL"),
+(F) BRANCH crates/api/src/autopilot.rs:9121:13 False  [the else of a let-else that panics, whose line ran]  let audit::Log::Held { records, .. } = journal.look() else {
+(F) LINE crates/api/src/autopilot.rs:9122  [panic/unreachable line]  panic!("the tick wrote its journal: {:?}", journal.look());
+(F) BRANCH crates/api/src/autopilot.rs:9143:13 False  [the false side fails the check, and its line ran]  whole.starts_with(&closed.note) && !closed.note.is_empty(),
+(F) BRANCH crates/api/src/autopilot.rs:9143:48 False  [the false side fails the check, and its line ran]  whole.starts_with(&closed.note) && !closed.note.is_empty(),
+(F) LINE crates/api/src/bars_export.rs:1183  [panic/unreachable line]  panic!("the pools stayed full");
+(F) BRANCH crates/api/src/bars_export.rs:1742:13 False  [the false side fails the check, and its line ran]  body.contains("export_not_whole") && body.contains("2025-06"),
+(F) BRANCH crates/api/src/bars_export.rs:1742:50 False  [the false side fails the check, and its line ran]  body.contains("export_not_whole") && body.contains("2025-06"),
+(F) BRANCH crates/api/src/bars_export.rs:1862:13 False  [the false side fails the check, and its line ran]  body.contains("export_not_whole") && body.contains("first: 2025-07: "),
+(F) BRANCH crates/api/src/bars_export.rs:1862:50 False  [the false side fails the check, and its line ran]  body.contains("export_not_whole") && body.contains("first: 2025-07: "),
+(F) BRANCH crates/api/src/bars_export.rs:1942:13 False  [the false side fails the check, and its line ran]  body.contains("\"being_written\":true") && body.contains("r3-10-export-writer"),
+(F) BRANCH crates/api/src/bars_export.rs:1942:56 False  [the false side fails the check, and its line ran]  body.contains("\"being_written\":true") && body.contains("r3-10-export-writer"),
+(F) LINE crates/api/src/bars_route.rs:1581  [a message argument of the statement at 1575, which ran: evaluated only when it fails]  &field[field.len() - 80..]
+(F) BRANCH crates/api/src/bars_route.rs:2028:25 False  [the else of a let-else that panics, whose line ran]  let Ok((status, body)) = got.as_ref() else {
+(F) LINE crates/api/src/bars_route.rs:2377  [panic/unreachable line]  panic!("the pool stayed full for two seconds");
+(F) LINE crates/api/src/bars_route.rs:2418  [panic/unreachable line]  panic!("the pool stayed full");
+(F) LINE crates/api/src/bars_route.rs:2446  [panic/unreachable line]  panic!("the pool stayed full");
+(F) BRANCH crates/api/src/bars_route.rs:2660:40 False  [the false side fails the check, and its line ran]  .is_some_and(|why| why.contains("not held") && why.contains("2024-01")),
+(F) BRANCH crates/api/src/bars_route.rs:2891:17 False  [the else of a let-else that panics, whose line ran]  let Err(why) = WindowAsk::parse(&format!("{base}&{bound}={text}")) else {
+(F) LINE crates/api/src/bars_route.rs:2892  [panic/unreachable line]  panic!("{bound}={text} was read");
+(F) LINE crates/api/src/bars_series.rs:1942  [a message argument of the statement at 1939, which ran: evaluated only when it fails]  memo.len(),
+(F) LINE crates/api/src/bars_series.rs:1943  [a message argument of the statement at 1939, which ran: evaluated only when it fails]  memo.turns()
+(F) BRANCH crates/api/src/bars_series.rs:2609:13 False  [the false side fails the check, and its line ran]  whole_s.keeps_seconds() && gapped_s.keeps_seconds(),
+(F) BRANCH crates/api/src/bars_series.rs:2609:40 False  [the false side fails the check, and its line ran]  whole_s.keeps_seconds() && gapped_s.keeps_seconds(),
+(F) LINE crates/api/src/bars_series.rs:2715  [a message argument of the statement at 2712, which ran: evaluated only when it fails]  memo.bytes()
+(F) LINE crates/api/src/bars_series.rs:2726  [a message argument of the statement at 2723, which ran: evaluated only when it fails]  memo.bytes()
+(F) LINE crates/api/src/bars_window_route_tests.rs:159  [panic/unreachable line]  panic!("the pool stayed full for two seconds");
+(F) BRANCH crates/api/src/bars_window_route_tests.rs:574:9 False  [the false side fails the check, and its line ran]  withheld[0].contains("`v`") && withheld[0].contains(&past.to_string()),
+(F) BRANCH crates/api/src/bars_window_route_tests.rs:574:40 False  [the false side fails the check, and its line ran]  withheld[0].contains("`v`") && withheld[0].contains(&past.to_string()),
+(F) BRANCH crates/api/src/bars_window_route_tests.rs:580:9 False  [the false side fails the check, and its line ran]  none.is_empty() && edge.contains("9007199254740991"),
+(F) BRANCH crates/api/src/bars_window_route_tests.rs:580:28 False  [the false side fails the check, and its line ran]  none.is_empty() && edge.contains("9007199254740991"),
+(F) LINE crates/api/src/bars_window_route_tests.rs:902  [a message argument of the statement at 899, which ran: evaluated only when it fails]  value(a),
+(F) LINE crates/api/src/bars_window_route_tests.rs:903  [a message argument of the statement at 899, which ran: evaluated only when it fails]  value(b)
+(F) BRANCH crates/api/src/bars_window_route_tests.rs:1263:24 False  [the false side fails the check, and its line ran]  .all(|row| !row.oi_applies && row.oichg_why == "not_a_derivative")
+(F) BRANCH crates/api/src/bars_window_route_tests.rs:2140:9 False  [the else of a let-else that panics, whose line ran]  let Some(note) = copied.iter().find(|note| note.starts_with(&copy)) else {
+(F) LINE crates/api/src/bars_window_route_tests.rs:2141  [panic/unreachable line]  panic!("{copied:?}");
+(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:165:13 False  [the false side fails the check, and its line ran]  why.contains("1610612736 bytes") && why.contains("BRUTEX_BOOLEAN_OBSERVATION_BYTES")
+(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:165:49 False  [the false side fails the check, and its line ran]  why.contains("1610612736 bytes") && why.contains("BRUTEX_BOOLEAN_OBSERVATION_BYTES")
+(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:167:17 False  [the false side fails the check, and its line ran]  assert!(why.contains(model.name()) && why.contains("no body prefix returned"));
+(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:167:47 False  [the false side fails the check, and its line ran]  assert!(why.contains(model.name()) && why.contains("no body prefix returned"));
+(F) BRANCH crates/api/src/census_request_tests.rs:327:81 False  [the false side fails the check, and its line ran]  || matches!(located, Err(Unlocated::NotHeld(ref unreadable)) if unreadable.is_empty()),
+(F) BRANCH crates/api/src/census_request_tests.rs:1001:9 False  [the false side fails the check, and its line ran]  page.contains("NSE/CASH") && page.contains("NSE/INDEX"),
+(F) BRANCH crates/api/src/census_request_tests.rs:1001:38 False  [the false side fails the check, and its line ran]  page.contains("NSE/CASH") && page.contains("NSE/INDEX"),
+(F) BRANCH crates/api/src/census_request_tests.rs:1069:9 False  [the false side fails the check, and its line ran]  exchange.contains(r#""target":{"kind":"exchange"}"#)
+(F) BRANCH crates/api/src/census_request_tests.rs:1070:16 False  [the false side fails the check, and its line ran]  && exchange.contains(r#""derivedFrom":[]"#),
+(F) LINE crates/api/src/census_request_tests.rs:1225  [a message argument of the statement at 1221, which ran: evaluated only when it fails]  path.display()
+(F) BRANCH crates/api/src/census_request_tests.rs:1425:13 False  [the false side fails the check, and its line ran]  page.contains("DHAN · CASH · 2025-05") && page.contains("<b>1</b> bar(s)"),
+(F) BRANCH crates/api/src/census_request_tests.rs:1425:57 False  [the false side fails the check, and its line ran]  page.contains("DHAN · CASH · 2025-05") && page.contains("<b>1</b> bar(s)"),
+(F) LINE crates/api/src/census_request_tests.rs:1807  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
+(F) LINE crates/api/src/census_request_tests.rs:1820  [a message argument of the statement at 1817, which ran: evaluated only when it fails]  dhan.note()
+(F) BRANCH crates/api/src/census_request_tests.rs:1977:42 False  [the false side fails the check, and its line ran]  matches!(direct, Err(ref why) if why.kind() == std::io::ErrorKind::InvalidInput),
+(F) LINE crates/api/src/census_request_tests.rs:1986  [a message argument of the statement at 1983, which ran: evaluated only when it fails]  at_path.file_type()
+(F) BRANCH crates/api/src/census_request_tests.rs:2037:9 False  [the else of a let-else that panics, whose line ran]  let census::Census::Unreadable { fault, .. } = &state else {
+(F) LINE crates/api/src/census_request_tests.rs:2038  [panic/unreachable line]  panic!("`read_vendor` names an unreadable census: {state:?}");
+(F) BRANCH crates/api/src/census_request_tests.rs:2040:9 False  [the else of a let-else that panics, whose line ran]  let census::Fault::Io(kind) = *fault else {
+(F) LINE crates/api/src/census_request_tests.rs:2041  [panic/unreachable line]  panic!("`read_vendor` names an I/O fault: {state:?}");
+(F) BRANCH crates/api/src/census_request_tests.rs:2231:73 False  [the false side fails the check, and its line ran]  matches!(state, census::Census::Unreadable { fault, .. } if fault == from),
+(F) BRANCH crates/api/src/census_request_tests.rs:2340:9 False  [the else of a let-else that panics, whose line ran]  let Some(dhan) = one_off.get_mut(1) else {
+(F) LINE crates/api/src/census_request_tests.rs:2341  [panic/unreachable line]  panic!("five rows");
+(F) BRANCH crates/api/src/census_request_tests.rs:2419:21 False  [the else of a let-else that panics, whose line ran]  let Census::Unreadable { ref reason, fault } = after.state else {
+(F) LINE crates/api/src/census_request_tests.rs:2420  [panic/unreachable line]  panic!("{why}: served unreadable, as {:?}", after.state);
+(F) LINE crates/api/src/census_request_tests.rs:2680  [a message argument of the statement at 2676, which ran: evaluated only when it fails]  fixture.fresh_states()
+(F) BRANCH crates/api/src/census_request_tests.rs:2832:31 False  [the false side fails the check, and its line ran]  .all(|record| record.level == telemetry::Level::Warn
+(F) BRANCH crates/api/src/census_request_tests.rs:3066:9 False  [the false side fails the check, and its line ran]  report.contains(concat!("eprintln", "!"))
+(F) BRANCH crates/api/src/census_request_tests.rs:3067:16 False  [the false side fails the check, and its line ran]  && report.contains(".compare_exchange(false, true,"),
+(F) BRANCH crates/api/src/census_request_tests.rs:3167:13 False  [the false side fails the check, and its line ran]  body.contains("NIFTY") && body.contains("2025-05"),
+(F) BRANCH crates/api/src/census_request_tests.rs:3167:39 False  [the false side fails the check, and its line ran]  body.contains("NIFTY") && body.contains("2025-05"),
+(F) LINE crates/api/src/census_request_tests.rs:3243  [a message argument of the statement at 3240, which ran: evaluated only when it fails]  partial.calendar.map(|calendar| calendar.sessions())
+(F) BRANCH crates/api/src/census_request_tests.rs:3300:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
+(F) LINE crates/api/src/census_request_tests.rs:3301  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
+(F) BRANCH crates/api/src/census_request_tests.rs:3686:17 False  [the false side fails the check, and its line ran]  raced.starts_with("503 ")
+(F) BRANCH crates/api/src/census_request_tests.rs:3687:24 False  [the false side fails the check, and its line ran]  && raced.contains(r#""census":"unreadable""#)
+(F) BRANCH crates/api/src/census_request_tests.rs:3688:24 False  [the false side fails the check, and its line ran]  && raced.contains(CONTRADICTED_ABSENCE),
+(F) BRANCH crates/api/src/dayflags.rs:6972:13 False  [the false side fails the check, and its line ran]  phases.contains(&"halted") && phases.contains(&"reopening_auction"),
+(F) BRANCH crates/api/src/dayflags.rs:6972:43 False  [the false side fails the check, and its line ran]  phases.contains(&"halted") && phases.contains(&"reopening_auction"),
+(F) LINE crates/api/src/dayflags.rs:7120  [a message argument of the statement at 7115, which ran: evaluated only when it fails]  none["lineage"]
+(F) LINE crates/api/src/dayflags.rs:8478  [a message argument of the statement at 8473, which ran: evaluated only when it fails]  says(muhurat)
+(F) LINE crates/api/src/dayflags.rs:8520  [a message argument of the statement at 8515, which ran: evaluated only when it fails]  says(nothing)
+(F) BRANCH crates/api/src/dayflags.rs:8556:58 False  [the false side fails the check, and its line ran]  matches!(first.via, Via::Walk { ref why } if why.contains("no index")),
+(F) BRANCH crates/api/src/dayflags.rs:8715:42 False  [the false side fails the check, and its line ran]  Via::Walk { ref why } if why.contains("1 of the index's entries cannot be read")
+(F) BRANCH crates/api/src/dayflags.rs:8787:42 False  [the false side fails the check, and its line ran]  Via::Walk { ref why } if why.contains("is not a refusal entry")
+(F) BRANCH crates/api/src/dayflags.rs:8788:24 False  [the false side fails the check, and its line ran]  && why.contains("ZZOIL.idx")
+(F) BRANCH crates/api/src/dayflags.rs:8847:42 False  [the false side fails the check, and its line ran]  Via::Walk { ref why } if why.contains("covers 4 records and the journal holds 2")
+(F) BRANCH crates/api/src/dayflags.rs:8936:13 False  [the else of a let-else that panics, whose line ran]  let Some(PullUnread::Warming { records, .. }) = unread else {
+(F) LINE crates/api/src/dayflags.rs:8937  [panic/unreachable line]  panic!("a request walked beside the start, or the journal is gone: {unread:?}");
+(F) LINE crates/api/src/dayflags.rs:8947  [a message argument of the statement at 8944, which ran: evaluated only when it fails]  got["sources"]
+(F) LINE crates/api/src/dayflags.rs:8959  [a message argument of the statement at 8950, which ran: evaluated only when it fails]  got["notes"]
+(F) BRANCH crates/api/src/dayflags.rs:9704:26 False  [the false side fails the check, and its line ran]  .all(|s| !s.starts_with("the import placed")
+(F) LINE crates/api/src/dayflags.rs:9862  [a message argument of the statement at 9859, which ran: evaluated only when it fails]  sampled_rule_held()
+(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1140:9 False  [the else of a let-else that panics, whose line ran]  let Some(PullUnread::Failed(failed)) = unread else {
+(F) LINE crates/api/src/dayflags_cover_tests.rs:1141  [panic/unreachable line]  panic!("a journal under a file is refused: {unread:?}");
+(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1197:9 False  [the else of a let-else that panics, whose line ran]  let Some(PullUnread::Failed(request)) = unread else {
+(F) LINE crates/api/src/dayflags_cover_tests.rs:1198  [panic/unreachable line]  panic!("a folder is refused on a request: {unread:?}");
+(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1305:13 False  [the else of a let-else that panics, whose line ran]  let Opened::Refused(why) = opened else {
+(F) LINE crates/api/src/dayflags_cover_tests.rs:1306  [panic/unreachable line]  panic!("{symbol:?}: a path the store cannot name is refused");
+(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1335:9 False  [the else of a let-else that panics, whose line ran]  let Opened::Refused(why) = gone else {
+(F) LINE crates/api/src/dayflags_cover_tests.rs:1336  [panic/unreachable line]  panic!("a served revision that is gone is refused");
+(F) LINE crates/api/src/dayflags_filter_tests.rs:144  [a message argument of the statement at 139, which ran: evaluated only when it fails]  says(&record)
+(F) LINE crates/api/src/dayflags_filter_tests.rs:248  [a message argument of the statement at 243, which ran: evaluated only when it fails]  says(&bank)
+(F) LINE crates/api/src/dayflags_filter_tests.rs:435  [a message argument of the statement at 430, which ran: evaluated only when it fails]  says(&put)
+(F) LINE crates/api/src/dayflags_filter_tests.rs:595  [a message argument of the statement at 590, which ran: evaluated only when it fails]  says(&bank)
+(F) LINE crates/api/src/dayflags_filter_tests.rs:871  [a message argument of the statement at 866, which ran: evaluated only when it fails]  says(&abcapital)
+(F) BRANCH crates/api/src/feeds_route.rs:1763:13 False  [the false side fails the check, and its line ran]  body.contains(r#""standing":"operator""#)
+(F) BRANCH crates/api/src/feeds_route.rs:1764:20 False  [the false side fails the check, and its line ran]  && body.contains(r#""standing":"vendor_doc""#),
+(F) BRANCH crates/api/src/feeds_route.rs:1786:13 False  [the false side fails the check, and its line ran]  oldest.starts_with("20") && oldest.contains('-'),
+(F) BRANCH crates/api/src/feeds_route.rs:1786:41 False  [the false side fails the check, and its line ran]  oldest.starts_with("20") && oldest.contains('-'),
+(F) BRANCH crates/api/src/feeds_route.rs:2011:13 False  [the false side fails the check, and its line ran]  fields.contains(r#""kind":"unknown""#) && fields.contains(r#""source":null"#),
+(F) BRANCH crates/api/src/feeds_route.rs:2011:55 False  [the false side fails the check, and its line ran]  fields.contains(r#""kind":"unknown""#) && fields.contains(r#""source":null"#),
+(F) BRANCH crates/api/src/feeds_route.rs:2233:13 False  [the false side fails the check, and its line ran]  !why.is_empty() && !why.contains("vendor-data"),
+(F) BRANCH crates/api/src/feeds_route.rs:2233:32 False  [the false side fails the check, and its line ran]  !why.is_empty() && !why.contains("vendor-data"),
+(F) BRANCH crates/api/src/feeds_route.rs:2434:17 False  [the false side fails the check, and its line ran]  feed["archive"].is_null() && feed["window"].is_null(),
+(F) BRANCH crates/api/src/feeds_route.rs:2434:46 False  [the false side fails the check, and its line ran]  feed["archive"].is_null() && feed["window"].is_null(),
+(F) BRANCH crates/api/src/feeds_route.rs:2452:13 False  [the false side fails the check, and its line ran]  tf.secs() > 60 && tf.secs() % 60 == 0 && *tf != store::path::Timeframe::DAY_1
+(F) BRANCH crates/api/src/feeds_route.rs:2452:31 False  [the false side fails the check, and its line ran]  tf.secs() > 60 && tf.secs() % 60 == 0 && *tf != store::path::Timeframe::DAY_1
+(F) BRANCH crates/api/src/feeds_route.rs:2487:17 False  [the false side fails the check, and its line ran]  assert!(!ready && why.contains("has no census row"), "{why}");
+(F) BRANCH crates/api/src/feeds_route.rs:2487:27 False  [the false side fails the check, and its line ran]  assert!(!ready && why.contains("has no census row"), "{why}");
+(F) BRANCH crates/api/src/feeds_route.rs:2775:13 False  [the false side fails the check, and its line ran]  why.contains("2099-01-01") && why.contains("2026-10-15"),
+(F) BRANCH crates/api/src/feeds_route.rs:2775:43 False  [the false side fails the check, and its line ran]  why.contains("2099-01-01") && why.contains("2026-10-15"),
+(F) BRANCH crates/api/src/feeds_route.rs:2829:13 False  [the false side fails the check, and its line ran]  source.contains("2099-01-01") && source.contains("passed over"),
+(F) BRANCH crates/api/src/feeds_route.rs:2829:46 False  [the false side fails the check, and its line ran]  source.contains("2099-01-01") && source.contains("passed over"),
+(F) LINE crates/api/src/feeds_route.rs:3233  [a message argument of the statement at 3229, which ran: evaluated only when it fails]  3 * reps
+(F) BRANCH crates/api/src/feeds_route.rs:3565:36 False  [the false side fails the check, and its line ran]  .is_some_and(|why| why.contains("cannot be read") && why.contains(hole)),
+(F) LINE crates/api/src/feeds_route.rs:3591  [a message argument of the statement at 3588, which ran: evaluated only when it fails]  feed.display()
+(F) BRANCH crates/api/src/feeds_route.rs:3595:42 False  [the false side fails the check, and its line ran]  feed.serves(rung) || feed.descriptor().history_row(rung).is_none(),
+(F) LINE crates/api/src/feeds_route.rs:3597  [a message argument of the statement at 3594, which ran: evaluated only when it fails]  feed.display(),
+(F) LINE crates/api/src/feeds_route.rs:3598  [a message argument of the statement at 3594, which ran: evaluated only when it fails]  rung.dir()
+(F) BRANCH crates/api/src/feeds_route.rs:3607:32 False  [the false side fails the check, and its line ran]  || spec.fno.by_token().is_some(),
+(F) LINE crates/api/src/feeds_route.rs:3609  [a message argument of the statement at 3604, which ran: evaluated only when it fails]  feed.display()
+(F) LINE crates/api/src/feeds_route.rs:3618  [a message argument of the statement at 3614, which ran: evaluated only when it fails]  feed.display()
+(F) LINE crates/api/src/feeds_route.rs:3626  [a message argument of the statement at 3623, which ran: evaluated only when it fails]  feed.display()
+(F) LINE crates/api/src/feeds_route.rs:3638  [a message argument of the statement at 3635, which ran: evaluated only when it fails]  target.as_str()
+(F) BRANCH crates/api/src/frontierjson.rs:1085:13 False  [the false side fails the check, and its line ran]  receipt < child && child < reconcile,
+(F) BRANCH crates/api/src/frontierjson.rs:1085:32 False  [the false side fails the check, and its line ran]  receipt < child && child < reconcile,
+(F) BRANCH crates/api/src/frontierjson.rs:1275:13 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":2"#) && !body.contains(r#""rank":1"#),
+(F) BRANCH crates/api/src/frontierjson.rs:1275:45 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":2"#) && !body.contains(r#""rank":1"#),
+(F) BRANCH crates/api/src/frontierjson.rs:1284:17 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":1"#) && body.contains(r#""rank":2"#),
+(F) BRANCH crates/api/src/frontierjson.rs:1284:49 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":1"#) && body.contains(r#""rank":2"#),
+(F) LINE crates/api/src/frontierjson.rs:1620  [a message argument of the statement at 1616, which ran: evaluated only when it fails]  root.display()
+(F) BRANCH crates/api/src/frontierjson.rs:1623:17 False  [the false side fails the check, and its line ran]  body.contains(&format!("{why}. "))
+(F) BRANCH crates/api/src/frontierjson.rs:1624:24 False  [the false side fails the check, and its line ran]  && body.contains("could not be checked for absence: "),
+(F) LINE crates/api/src/frontierjson.rs:1626  [a message argument of the statement at 1622, which ran: evaluated only when it fails]  root.display()
+(F) LINE crates/api/src/gaps_route.rs:2636  [panic/unreachable line]  panic!("a reader gone first: no month is read")
+(F) BRANCH crates/api/src/gaps_route.rs:3161:13 False  [the false side fails the check, and its line ran]  three.contains(r#""months":3"#) && three.contains(r#""months_absent":2"#),
+(F) BRANCH crates/api/src/gaps_route.rs:3161:48 False  [the false side fails the check, and its line ran]  three.contains(r#""months":3"#) && three.contains(r#""months_absent":2"#),
+(F) BRANCH crates/api/src/gaps_route.rs:3179:13 False  [the false side fails the check, and its line ran]  one.contains(r#""months":1"#) && one.contains(r#""months_absent":0"#),
+(F) BRANCH crates/api/src/gaps_route.rs:3179:46 False  [the false side fails the check, and its line ran]  one.contains(r#""months":1"#) && one.contains(r#""months_absent":0"#),
+(F) BRANCH crates/api/src/gaps_route.rs:3203:13 False  [the false side fails the check, and its line ran]  typo.contains("YYYY-MM") && typo.contains("to"),
+(F) BRANCH crates/api/src/gaps_route.rs:3203:41 False  [the false side fails the check, and its line ran]  typo.contains("YYYY-MM") && typo.contains("to"),
+(F) BRANCH crates/api/src/gaps_route.rs:3241:13 False  [the false side fails the check, and its line ran]  three.contains(r#""source":"record""#) && three.contains(r#""voted_by":[]"#),
+(F) BRANCH crates/api/src/gaps_route.rs:3241:55 False  [the false side fails the check, and its line ran]  three.contains(r#""source":"record""#) && three.contains(r#""voted_by":[]"#),
+(F) BRANCH crates/api/src/gaps_route.rs:3475:13 False  [the false side fails the check, and its line ran]  reasons.contains("no-print") && reasons.contains("expired"),
+(F) BRANCH crates/api/src/gaps_route.rs:3475:45 False  [the false side fails the check, and its line ran]  reasons.contains("no-print") && reasons.contains("expired"),
+(F) BRANCH crates/api/src/gaps_route.rs:3657:37 False  [the false side fails the check, and its line ran]  .is_some_and(|from| from.contains("import journal") && from.contains("indices")),
+(F) BRANCH crates/api/src/gaps_route.rs:3666:28 False  [the false side fails the check, and its line ran]  .all(|run| run["reason"] == "not-imported" && run["minutes"] == 375),
+(F) BRANCH crates/api/src/gaps_route.rs:3742:37 False  [the false side fails the check, and its line ran]  .is_some_and(|from| from.contains("2099-01-01") && from.contains("passed over")),
+(F) BRANCH crates/api/src/gaps_route.rs:3797:21 False  [the false side fails the check, and its line ran]  assert!(reach.not_yet(day(16)) && !reach.not_imported(day(16)));
+(F) BRANCH crates/api/src/gaps_route.rs:3797:47 False  [the false side fails the check, and its line ran]  assert!(reach.not_yet(day(16)) && !reach.not_imported(day(16)));
+(F) BRANCH crates/api/src/gaps_route.rs:4014:13 False  [the false side fails the check, and its line ran]  why.contains("NSE/INDEX") && why.contains("NSE/CASH"),
+(F) BRANCH crates/api/src/gaps_route.rs:4014:42 False  [the false side fails the check, and its line ran]  why.contains("NSE/INDEX") && why.contains("NSE/CASH"),
+(F) LINE crates/api/src/gaps_route.rs:4463  [a message argument of the statement at 4459, which ran: evaluated only when it fails]  iso(*halt)
+(F) BRANCH crates/api/src/gaps_route.rs:4687:17 False  [the false side fails the check, and its line ran]  !faults.is_empty()
+(F) BRANCH crates/api/src/gaps_route.rs:4688:24 False  [the false side fails the check, and its line ran]  && !faults
+(F) BRANCH crates/api/src/gaps_route.rs:5026:59 False  [the false side fails the check, and its line ran]  pull::calendar::DayKind::Open(session) if session.expects(555)
+(F) BRANCH crates/api/src/gaps_route.rs:5296:13 False  [the false side fails the check, and its line ran]  body.contains(&crate::calendar_of::build::MAX_BUILDS.to_string())
+(F) BRANCH crates/api/src/gaps_route.rs:5297:20 False  [the false side fails the check, and its line ran]  && body.contains("calendar=record"),
+(F) BRANCH crates/api/src/gaps_route.rs:5470:17 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = answer else {
+(F) LINE crates/api/src/gaps_route.rs:5471  [panic/unreachable line]  panic!("a vote with no build behind it answered");
+(F) BRANCH crates/api/src/gaps_route.rs:5489:13 False  [the else of a let-else that panics, whose line ran]  let Joined::Lead(queued) = builds.votes.join(&key, Some(&now), None) else {
+(F) LINE crates/api/src/gaps_route.rs:5490  [panic/unreachable line]  panic!("the first join leads");
+(F) BRANCH crates/api/src/gaps_route.rs:5500:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = voted(&site, &asked).await else {
+(F) LINE crates/api/src/gaps_route.rs:5501  [panic/unreachable line]  panic!("a parked refusal is handed out as it is");
+(F) BRANCH crates/api/src/gaps_route.rs:5508:17 False  [the else of a let-else that panics, whose line ran]  let Joined::Lead(build) = builds.votes.join(&key, Some(&now), None) else {
+(F) LINE crates/api/src/gaps_route.rs:5509  [panic/unreachable line]  panic!("room for build {other}");
+(F) BRANCH crates/api/src/gaps_route.rs:5513:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = voted(&site, &asked).await else {
+(F) LINE crates/api/src/gaps_route.rs:5514  [panic/unreachable line]  panic!("a full build map admits no vote");
+(F) BRANCH crates/api/src/gaps_route.rs:5562:17 False  [the false side fails the check, and its line ran]  output.status.success() && stdout.contains("1 passed"),
+(F) BRANCH crates/api/src/gaps_route.rs:5562:44 False  [the false side fails the check, and its line ran]  output.status.success() && stdout.contains("1 passed"),
+(F) LINE crates/api/src/gaps_route.rs:5564  [a message argument of the statement at 5561, which ran: evaluated only when it fails]  String::from_utf8_lossy(&output.stderr)
+(F) BRANCH crates/api/src/gaps_route.rs:5623:17 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = voted(&site, &asked).await else {
+(F) LINE crates/api/src/gaps_route.rs:5624  [panic/unreachable line]  panic!("a vote whose reading was not admitted answered");
+(F) LINE crates/api/src/http_admission_tests.rs:686  [a message argument of the statement at 683, which ran: evaluated only when it fails]  String::from_utf8_lossy(&output.stderr)
+(F) BRANCH crates/api/src/imports.rs:2088:17 False  [the false side fails the check, and its line ran]  assert!(why.contains("bogus") && why.contains("reasn"), "{why}");
+(F) BRANCH crates/api/src/imports.rs:2088:42 False  [the false side fails the check, and its line ran]  assert!(why.contains("bogus") && why.contains("reasn"), "{why}");
+(F) LINE crates/api/src/imports.rs:2563  [a message argument of the statement at 2559, which ran: evaluated only when it fails]  ids(&ends_inside)
+(F) BRANCH crates/api/src/indexstoplaunch_tests.rs:600:13 False  [the false side fails the check, and its line ran]  start.elapsed() <= std::time::Duration::from_secs(45)
+(F) BRANCH crates/api/src/indexstoplaunch_tests.rs:601:20 False  [the false side fails the check, and its line ran]  && std::fs::metadata(&log).unwrap().len() <= 1024 * 1024,
+(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:358:13 False  [the false side fails the check, and its line ran]  elsewhere.contains("Native qualification") && elsewhere.contains("another-root"),
+(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:358:59 False  [the false side fails the check, and its line ran]  elsewhere.contains("Native qualification") && elsewhere.contains("another-root"),
+(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:495:13 False  [the false side fails the check, and its line ran]  elsewhere.starts_with("original_context_refused: ") && elsewhere.contains("(os error 2)"),
+(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:495:68 False  [the false side fails the check, and its line ran]  elsewhere.starts_with("original_context_refused: ") && elsewhere.contains("(os error 2)"),
+(F) LINE crates/api/src/ingest.rs:2518  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
+(F) BRANCH crates/api/src/ingest.rs:2623:13 False  [the false side fails the check, and its line ran]  text.contains("2026-08-08") && text.contains("2026-08-07"),
+(F) BRANCH crates/api/src/ingest.rs:2623:44 False  [the false side fails the check, and its line ran]  text.contains("2026-08-08") && text.contains("2026-08-07"),
+(F) BRANCH crates/api/src/ingest.rs:2732:13 False  [the false side fails the check, and its line ran]  text.contains("expiry") && text.contains("2024-2-9"),
+(F) BRANCH crates/api/src/ingest.rs:2732:40 False  [the false side fails the check, and its line ran]  text.contains("expiry") && text.contains("2024-2-9"),
+(F) BRANCH crates/api/src/ingest.rs:2770:13 False  [the false side fails the check, and its line ran]  text.contains("2022-02-08") && text.contains("2022-01-08"),
+(F) BRANCH crates/api/src/ingest.rs:2770:44 False  [the false side fails the check, and its line ran]  text.contains("2022-02-08") && text.contains("2022-01-08"),
+(F) BRANCH crates/api/src/ingest.rs:2816:17 False  [the false side fails the check, and its line ran]  assert!(text.contains("3654") && text.contains("3653"), "{text}");
+(F) BRANCH crates/api/src/ingest.rs:2816:42 False  [the false side fails the check, and its line ran]  assert!(text.contains("3654") && text.contains("3653"), "{text}");
+(F) LINE crates/api/src/ingest.rs:2832  [a message argument of the statement at 2829, which ran: evaluated only when it fails]  target.slug(),
+(F) LINE crates/api/src/ingest.rs:2833  [a message argument of the statement at 2829, which ran: evaluated only when it fails]  target.note()
+(F) LINE crates/api/src/ingest.rs:2840  [a message argument of the statement at 2837, which ran: evaluated only when it fails]  target.slug(),
+(F) LINE crates/api/src/ingest.rs:2841  [a message argument of the statement at 2837, which ran: evaluated only when it fails]  target.note()
+(F) LINE crates/api/src/ingest.rs:2847  [a message argument of the statement at 2844, which ran: evaluated only when it fails]  target.slug(),
+(F) LINE crates/api/src/ingest.rs:2848  [a message argument of the statement at 2844, which ran: evaluated only when it fails]  target.note()
+(F) LINE crates/api/src/ingest.rs:3110  [a message argument of the statement at 3105, which ran: evaluated only when it fails]  target.slug()
+(F) LINE crates/api/src/ingest.rs:3145  [a message argument of the statement at 3142, which ran: evaluated only when it fails]  tier.slug()
+(F) LINE crates/api/src/ingest.rs:3190  [a message argument of the statement at 3183, which ran: evaluated only when it fails]  target.slug()
+(F) LINE crates/api/src/ingest.rs:3403  [a message argument of the statement at 3400, which ran: evaluated only when it fails]  target.slug()
+(F) BRANCH crates/api/src/ingest.rs:3910:21 False  [the false side fails the check, and its line ran]  assert!(text.contains(live) && text.contains("2026-08-07"), "{text}");
+(F) BRANCH crates/api/src/ingest.rs:3910:44 False  [the false side fails the check, and its line ran]  assert!(text.contains(live) && text.contains("2026-08-07"), "{text}");
+(F) LINE crates/api/src/ingest.rs:3928  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
+(F) LINE crates/api/src/ingest.rs:4584  [a message argument of the statement at 4580, which ran: evaluated only when it fails]  root.display()
+(F) BRANCH crates/api/src/ingest.rs:4941:13 False  [the false side fails the check, and its line ran]  idle["in_flight"].is_null() && idle["run_target"].is_null(),
+(F) BRANCH crates/api/src/ingest.rs:4941:44 False  [the false side fails the check, and its line ran]  idle["in_flight"].is_null() && idle["run_target"].is_null(),
+(F) BRANCH crates/api/src/ingest_cover_tests.rs:118:13 False  [the else of a let-else that panics, whose line ran]  let Refusal::UnreadableRate { ref got } = refused else {
+(F) LINE crates/api/src/ingest_cover_tests.rs:119  [panic/unreachable line]  panic!("{typed}: {refused:?}");
+(F) BRANCH crates/api/src/ingest_cover_tests.rs:132:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::UnreadableRate { ref got } = refused else {
+(F) LINE crates/api/src/ingest_cover_tests.rs:133  [panic/unreachable line]  panic!("{refused:?}");
+(F) BRANCH crates/api/src/ingest_cover_tests.rs:165:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::ClockUnusable { .. } = refused else {
+(F) LINE crates/api/src/ingest_cover_tests.rs:166  [panic/unreachable line]  panic!("{refused:?}");
+(F) BRANCH crates/api/src/ingest_cover_tests.rs:180:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::ClockUnusable { .. } = named else {
+(F) LINE crates/api/src/ingest_cover_tests.rs:181  [panic/unreachable line]  panic!("{named:?}");
+(F) BRANCH crates/api/src/ingest_cover_tests.rs:188:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::ClockUnusable { .. } = first else {
+(F) LINE crates/api/src/ingest_cover_tests.rs:189  [panic/unreachable line]  panic!("{first:?}");
+(F) BRANCH crates/api/src/ingest_cover_tests.rs:231:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::DateImpossible { field, ref got, .. } = zeros else {
+(F) LINE crates/api/src/ingest_cover_tests.rs:232  [panic/unreachable line]  panic!("{zeros:?}");
+(F) LINE crates/api/src/ladder.rs:1077  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
+(F) LINE crates/api/src/ladder.rs:1092  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
+(F) LINE crates/api/src/ladder.rs:1297  [a message argument of the statement at 1293, which ran: evaluated only when it fails]  tf.as_str()
+(F) LINE crates/api/src/ladder.rs:1310  [a message argument of the statement at 1307, which ran: evaluated only when it fails]  tf.as_str()
+(F) BRANCH crates/api/src/logs.rs:6746:17 False  [the false side fails the check, and its line ran]  assert!(with("cross-site") && with("same-site"));
+(F) BRANCH crates/api/src/logs.rs:6746:39 False  [the false side fails the check, and its line ran]  assert!(with("cross-site") && with("same-site"));
+(F) BRANCH crates/api/src/logs.rs:6747:17 False  [the false side fails the check, and its line ran]  assert!(!with("same-origin") && !with("none"));
+(F) BRANCH crates/api/src/logs.rs:6747:41 False  [the false side fails the check, and its line ran]  assert!(!with("same-origin") && !with("none"));
+(F) BRANCH crates/api/src/logs.rs:6890:13 False  [the false side fails the check, and its line ran]  json.contains(r#""hit_scan_cap":false"#) && json.contains(r#""malformed":0"#),
+(F) BRANCH crates/api/src/logs.rs:6890:57 False  [the false side fails the check, and its line ran]  json.contains(r#""hit_scan_cap":false"#) && json.contains(r#""malformed":0"#),
+(F) BRANCH crates/api/src/logs.rs:7203:13 False  [the false side fails the check, and its line ran]  all.contains("landed") && all.contains("did not land"),
+(F) BRANCH crates/api/src/logs.rs:7203:39 False  [the false side fails the check, and its line ran]  all.contains("landed") && all.contains("did not land"),
+(F) BRANCH crates/api/src/logs.rs:7328:13 False  [the false side fails the check, and its line ran]  plain.contains("BRUTEX_LOG_LEVEL=debug") && !plain.contains("the filters in force"),
+(F) BRANCH crates/api/src/logs.rs:7328:57 False  [the false side fails the check, and its line ran]  plain.contains("BRUTEX_LOG_LEVEL=debug") && !plain.contains("the filters in force"),
+(F) LINE crates/api/src/logs.rs:7371  [a message argument of the statement at 7367, which ran: evaluated only when it fails]  note_of(&after_restart)
+(F) LINE crates/api/src/logs.rs:7376  [a message argument of the statement at 7373, which ran: evaluated only when it fails]  note_of(&after_restart)
+(F) LINE crates/api/src/logs.rs:7385  [a message argument of the statement at 7382, which ran: evaluated only when it fails]  note_of(&same_process)
+(F) LINE crates/api/src/logs.rs:7395  [a message argument of the statement at 7392, which ran: evaluated only when it fails]  note_of(&rolled)
+(F) LINE crates/api/src/logs.rs:7403  [a message argument of the statement at 7400, which ran: evaluated only when it fails]  note_of(&none)
+(F) BRANCH crates/api/src/logs.rs:7442:13 False  [the false side fails the check, and its line ran]  page.contains("clock is held") && page.contains("3 event(s)"),
+(F) BRANCH crates/api/src/logs.rs:7442:47 False  [the false side fails the check, and its line ran]  page.contains("clock is held") && page.contains("3 event(s)"),
+(F) BRANCH crates/api/src/logs.rs:7448:13 False  [the false side fails the check, and its line ran]  json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
+(F) BRANCH crates/api/src/logs.rs:7448:51 False  [the false side fails the check, and its line ran]  json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
+(F) BRANCH crates/api/src/logs.rs:7525:13 False  [the false side fails the check, and its line ran]  page.contains("halt") && page.contains("2 roll(s) failed"),
+(F) BRANCH crates/api/src/logs.rs:7525:38 False  [the false side fails the check, and its line ran]  page.contains("halt") && page.contains("2 roll(s) failed"),
+(F) BRANCH crates/api/src/logs.rs:7542:13 False  [the false side fails the check, and its line ran]  none.contains("No sink") && none.contains("older run"),
+(F) BRANCH crates/api/src/logs.rs:7542:41 False  [the false side fails the check, and its line ran]  none.contains("No sink") && none.contains("older run"),
+(F) BRANCH crates/api/src/logs.rs:7864:13 False  [the false side fails the check, and its line ran]  both.contains("<code>/tmp/served</code>")
+(F) BRANCH crates/api/src/logs.rs:7865:20 False  [the false side fails the check, and its line ran]  && both.contains("<code>/tmp/served/cli</code>"),
+(F) BRANCH crates/api/src/logs.rs:8040:13 False  [the false side fails the check, and its line ran]  body.starts_with(r#"{"records":["#) && body.ends_with('}'),
+(F) BRANCH crates/api/src/logs.rs:8040:52 False  [the false side fails the check, and its line ran]  body.starts_with(r#"{"records":["#) && body.ends_with('}'),
+(F) BRANCH crates/api/src/logs.rs:8774:17 False  [the false side fails the check, and its line ran]  assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
+(F) BRANCH crates/api/src/logs.rs:8774:45 False  [the false side fails the check, and its line ran]  assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
+(F) LINE crates/api/src/logs.rs:9076  [a message argument of the statement at 9073, which ran: evaluated only when it fails]  dir.name()
+(F) LINE crates/api/src/logs.rs:9092  [a message argument of the statement at 9089, which ran: evaluated only when it fails]  kind.as_str(),
+(F) LINE crates/api/src/logs.rs:9100  [a message argument of the statement at 9095, which ran: evaluated only when it fails]  written.name()
+(F) LINE crates/api/src/logs.rs:9123  [a message argument of the statement at 9118, which ran: evaluated only when it fails]  dir.display()
+(F) BRANCH crates/api/src/logs.rs:9173:17 False  [the else of a let-else that panics, whose line ran]  let DirState::Unreadable(why) = state else {
+(F) LINE crates/api/src/logs.rs:9174  [panic/unreachable line]  panic!("{half} reads {state:?}, not unreadable");
+(F) BRANCH crates/api/src/logs.rs:9222:21 False  [the false side fails the check, and its line ran]  said.starts_with(&format!("{dir} unreadable: "))
+(F) BRANCH crates/api/src/logs.rs:9223:28 False  [the false side fails the check, and its line ran]  && said.contains("Permission denied"),
+(F) LINE crates/api/src/logs.rs:9371  [a message argument of the statement at 9368, which ran: evaluated only when it fails]  first.errors
+(F) BRANCH crates/api/src/logs.rs:9513:28 False  [the false side fails the check, and its line ran]  .all(|row| row["half"] == "gdfl/indices" && row["source"] == "audit"),
+(F) BRANCH crates/api/src/logs.rs:10061:17 False  [the false side fails the check, and its line ran]  got.ignored.contains(&(bad.0, bad.1.to_owned()))
+(F) BRANCH crates/api/src/logs.rs:10062:24 False  [the false side fails the check, and its line ran]  && got.ignored.contains(&(good, said.to_owned())),
+(F) LINE crates/api/src/logs.rs:10142  [a message argument of the statement at 10138, which ran: evaluated only when it fails]  got["keyed"]
+(F) LINE crates/api/src/logs.rs:10149  [a message argument of the statement at 10146, which ran: evaluated only when it fails]  got["keyed"]
+(F) LINE crates/api/src/logs.rs:10237  [a message argument of the statement at 10233, which ran: evaluated only when it fails]  got["keyed"]
+(F) LINE crates/api/src/logs.rs:10280  [a message argument of the statement at 10273, which ran: evaluated only when it fails]  none["keyed"]
+(F) BRANCH crates/api/src/logs.rs:10802:17 False  [the false side fails the check, and its line ran]  assert!(none["audit_stream"].is_null() && none["state_stream"].is_null());
+(F) BRANCH crates/api/src/logs.rs:10802:51 False  [the false side fails the check, and its line ran]  assert!(none["audit_stream"].is_null() && none["state_stream"].is_null());
+(F) LINE crates/api/src/logs.rs:10879  [a message argument of the statement at 10876, which ran: evaluated only when it fails]  held.bytes - read
+(F) LINE crates/api/src/logs.rs:10927  [a message argument of the statement at 10924, which ran: evaluated only when it fails]  now.unread("options")
+(F) LINE crates/api/src/logs.rs:11031  [a message argument of the statement at 11028, which ran: evaluated only when it fails]  held.malformed
+(F) BRANCH crates/api/src/logs.rs:11262:17 False  [the false side fails the check, and its line ran]  assert!(none.pointers.is_empty() && !more);
+(F) BRANCH crates/api/src/logs.rs:11262:45 False  [the false side fails the check, and its line ran]  assert!(none.pointers.is_empty() && !more);
+(F) BRANCH crates/api/src/logs.rs:11281:56 False  [the false side fails the check, and its line ran]  matches!(spent, Ok(Walked::Stopped(at)) if at == len),
+(F) BRANCH crates/api/src/logs.rs:11293:57 False  [the false side fails the check, and its line ran]  matches!(walked, Ok(Walked::Stopped(at)) if at == first),
+(F) BRANCH crates/api/src/logs.rs:11302:59 False  [the false side fails the check, and its line ran]  assert!(matches!(torn, Ok(Walked::Stopped(at)) if at == len - 1));
+(F) BRANCH crates/api/src/logs.rs:11304:17 False  [the false side fails the check, and its line ran]  assert!(out.page.pointers.is_empty() && out.damage.is_empty());
+(F) BRANCH crates/api/src/logs.rs:11304:49 False  [the false side fails the check, and its line ran]  assert!(out.page.pointers.is_empty() && out.damage.is_empty());
+(F) BRANCH crates/api/src/logs.rs:11310:59 False  [the false side fails the check, and its line ran]  assert!(matches!(full, Ok(Walked::Stopped(at)) if at == len));
+(F) BRANCH crates/api/src/logs.rs:11465:13 False  [the false side fails the check, and its line ran]  probed.contains(&"day") && !probed.contains(&"span"),
+(F) BRANCH crates/api/src/logs.rs:11465:40 False  [the false side fails the check, and its line ran]  probed.contains(&"day") && !probed.contains(&"span"),
+(F) LINE crates/api/src/logs.rs:11479  [a message argument of the statement at 11476, which ran: evaluated only when it fails]  again["keyed"]
+(F) LINE crates/api/src/logs.rs:11537  [a message argument of the statement at 11533, which ran: evaluated only when it fails]  old["keyed"]
+(F) LINE crates/api/src/logs.rs:11676  [a message argument of the statement at 11672, which ran: evaluated only when it fails]  second["keyed"]
+(F) LINE crates/api/src/logs.rs:11741  [a message argument of the statement at 11737, which ran: evaluated only when it fails]  second["keyed"]
+(F) LINE crates/api/src/logs.rs:11748  [a message argument of the statement at 11745, which ran: evaluated only when it fails]  second["keyed"]["index"]
+(F) BRANCH crates/api/src/logs.rs:11894:17 False  [the false side fails the check, and its line ran]  assert!(read > 0 && read <= 1_000, "{read}");
+(F) BRANCH crates/api/src/logs.rs:11894:29 False  [the false side fails the check, and its line ran]  assert!(read > 0 && read <= 1_000, "{read}");
+(F) BRANCH crates/api/src/logs.rs:11922:20 False  [the false side fails the check, and its line ran]  if why.contains(&rolled.display().to_string())),
+(F) BRANCH crates/api/src/logs.rs:12117:13 False  [the false side fails the check, and its line ran]  why.contains("damaged.ndjson") && why.contains("undecodable lines"),
+(F) BRANCH crates/api/src/logs.rs:12117:47 False  [the false side fails the check, and its line ran]  why.contains("damaged.ndjson") && why.contains("undecodable lines"),
+(F) BRANCH crates/api/src/logs.rs:12201:40 False  [the false side fails the check, and its line ran]  ms > to || start < cut.at,
+(F) BRANCH crates/api/src/logs.rs:12227:13 False  [the false side fails the check, and its line ran]  exact > 0 && around > 0,
+(F) BRANCH crates/api/src/logs.rs:12227:26 False  [the false side fails the check, and its line ran]  exact > 0 && around > 0,
+(F) LINE crates/api/src/logs.rs:12287  [a message argument of the statement at 12284, which ran: evaluated only when it fails]  read_words(&indexed)
+(F) BRANCH crates/api/src/logs_cover_tests.rs:747:9 False  [the else of a let-else that panics, whose line ran]  let &[one, two, ..] = halves.as_slice() else {
+(F) LINE crates/api/src/logs_cover_tests.rs:748  [panic/unreachable line]  panic!("a run of options can write two directories: {halves:?}")
+(F) LINE crates/api/src/logs_cover_tests.rs:902  [a message argument of the statement at 899, which ran: evaluated only when it fails]  String::from_utf8_lossy(&reply)
+(F) BRANCH crates/api/src/logs_units_tests.rs:77:17 False  [the false side fails the check, and its line ran]  keys.contract.is_none() && keys.code.is_none() && keys.reason.is_none(),
+(F) BRANCH crates/api/src/logs_units_tests.rs:77:44 False  [the false side fails the check, and its line ran]  keys.contract.is_none() && keys.code.is_none() && keys.reason.is_none(),
+(F) BRANCH crates/api/src/logs_units_tests.rs:77:67 False  [the false side fails the check, and its line ran]  keys.contract.is_none() && keys.code.is_none() && keys.reason.is_none(),
+(F) BRANCH crates/api/src/logs_units_tests.rs:89:13 False  [the false side fails the check, and its line ran]  assert!(keys.month.is_none() && keys.code.is_none() && keys.contract.is_none());
+(F) BRANCH crates/api/src/logs_units_tests.rs:89:37 False  [the false side fails the check, and its line ran]  assert!(keys.month.is_none() && keys.code.is_none() && keys.contract.is_none());
+(F) BRANCH crates/api/src/logs_units_tests.rs:89:60 False  [the false side fails the check, and its line ran]  assert!(keys.month.is_none() && keys.code.is_none() && keys.contract.is_none());
+(F) BRANCH crates/api/src/logs_units_tests.rs:107:13 False  [the false side fails the check, and its line ran]  assert!(tail.records.is_empty() && tail.errors.is_empty());
+(F) BRANCH crates/api/src/logs_units_tests.rs:107:40 False  [the false side fails the check, and its line ran]  assert!(tail.records.is_empty() && tail.errors.is_empty());
+(F) BRANCH crates/api/src/logs_units_tests.rs:251:9 False  [the else of a let-else that panics, whose line ran]  let DirState::Unreadable(why) = state else {
+(F) LINE crates/api/src/logs_units_tests.rs:252  [panic/unreachable line]  panic!("a file is no log directory: {word}");
+(F) BRANCH crates/api/src/mastersrun.rs:1184:13 False  [the else of a let-else that panics, whose line ran]  let [record] = summary.as_slice() else {
+(F) LINE crates/api/src/mastersrun.rs:1185  [panic/unreachable line]  panic!("{mode}: one summary record: {summary:?}");
+(F) BRANCH crates/api/src/mastersrun.rs:1385:13 False  [the else of a let-else that panics, whose line ran]  let masters::Got::Refused {
+(F) LINE crates/api/src/mastersrun.rs:1389  [panic/unreachable line]  panic!("the primary attempt is a refusal: {tried:?}");
+(F) BRANCH crates/api/src/mastersrun.rs:1913:13 False  [the else of a let-else that panics, whose line ran]  let Landed::Refused(ref why) = landed else {
+(F) LINE crates/api/src/mastersrun.rs:1914  [panic/unreachable line]  panic!("nothing answered, so nothing can be written: {landed:?}");
+(F) BRANCH crates/api/src/mastersrun.rs:2193:13 False  [the false side fails the check, and its line ran]  credentialed.contains("Landed::Refused(why.clone())")
+(F) BRANCH crates/api/src/mastersrun.rs:2194:20 False  [the false side fails the check, and its line ran]  && credentialed.contains("Fetched::default()"),
+(F) BRANCH crates/api/src/mastersrun.rs:2488:17 False  [the else of a let-else that panics, whose line ran]  let Err(ref why) = refused else {
+(F) LINE crates/api/src/mastersrun.rs:2489  [panic/unreachable line]  panic!("{}: {refused:?}", folder.display());
+(F) BRANCH crates/api/src/month_change.rs:534:13 False  [the false side fails the check, and its line ran]  !can_be_rebased(Segment::Index, "NIFTY")
+(F) BRANCH crates/api/src/month_change.rs:535:20 False  [the false side fails the check, and its line ran]  && can_be_rebased(Segment::Cash, "RELIANCE")
+(F) BRANCH crates/api/src/month_change.rs:536:20 False  [the false side fails the check, and its line ran]  && can_be_rebased(Segment::Fno, "RELIANCE")
+(F) BRANCH crates/api/src/nse_identity.rs:490:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = absent.confirm(&merged, "RELIANCE") else {
+(F) LINE crates/api/src/nse_identity.rs:491  [panic/unreachable line]  panic!("an absent file refuses");
+(F) BRANCH crates/api/src/nse_identity.rs:503:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = confirmed else {
+(F) LINE crates/api/src/nse_identity.rs:504  [panic/unreachable line]  panic!("an unreadable file refuses");
+(F) BRANCH crates/api/src/nse_identity.rs:524:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::ZerodhaUndated(why)) = confirmed else {
+(F) LINE crates/api/src/nse_identity.rs:525  [panic/unreachable line]  panic!("an undated Zerodha dump refuses");
+(F) BRANCH crates/api/src/nse_identity.rs:532:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = confirmed else {
+(F) LINE crates/api/src/nse_identity.rs:533  [panic/unreachable line]  panic!("an oversized file refuses");
+(F) BRANCH crates/api/src/nse_identity.rs:541:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = confirmed else {
+(F) LINE crates/api/src/nse_identity.rs:542  [panic/unreachable line]  panic!("a file at the bound that is not the constituent file refuses");
+(F) LINE crates/api/src/ops_safety_tests.rs:82  [panic/unreachable line]  panic!("the store-read pool stayed full for two seconds");
+(F) BRANCH crates/api/src/ops_safety_tests.rs:265:9 False  [the false side fails the check, and its line ran]  drift.contains("1128 bytes") && drift.contains("1000"),
+(F) BRANCH crates/api/src/ops_safety_tests.rs:265:41 False  [the false side fails the check, and its line ran]  drift.contains("1128 bytes") && drift.contains("1000"),
+(F) BRANCH crates/api/src/ops_safety_tests.rs:518:29 False  [the false side fails the check, and its line ran]  !wrote.contains(READ_ONLY_ENV) && !wrote.contains(UNSTAMPED),
+(F) BRANCH crates/api/src/ops_safety_tests.rs:518:63 False  [the false side fails the check, and its line ran]  !wrote.contains(READ_ONLY_ENV) && !wrote.contains(UNSTAMPED),
+(F) BRANCH crates/api/src/ops_safety_tests.rs:547:13 False  [the false side fails the check, and its line ran]  assert!(why.contains(UNSTAMPED) && why.contains("POST"), "{why}");
+(F) BRANCH crates/api/src/ops_safety_tests.rs:547:40 False  [the false side fails the check, and its line ran]  assert!(why.contains(UNSTAMPED) && why.contains("POST"), "{why}");
+(F) LINE crates/api/src/ops_safety_tests.rs:618  [a message argument of the statement at 615, which ran: evaluated only when it fails]  most.len()
+(F) BRANCH crates/api/src/owed_tests.rs:249:9 False  [the false side fails the check, and its line ran]  evidence.contains("CML58560") && evidence.contains("CML60618"),
+(F) BRANCH crates/api/src/owed_tests.rs:249:42 False  [the false side fails the check, and its line ran]  evidence.contains("CML58560") && evidence.contains("CML60618"),
+(F) BRANCH crates/api/src/owed_tests.rs:372:25 False  [the false side fails the check, and its line ran]  .all(|word| word != "no-print" && word != "vendor-hole"),
+(F) BRANCH crates/api/src/owed_tests.rs:388:9 False  [the else of a let-else that panics, whose line ran]  let Some(top) = answer.as_object_mut() else {
+(F) LINE crates/api/src/owed_tests.rs:389  [panic/unreachable line]  panic!("not an object: {body}")
+(F) BRANCH crates/api/src/owed_tests.rs:393:13 False  [the else of a let-else that panics, whose line ran]  let Some(row) = month.as_object_mut() else {
+(F) LINE crates/api/src/owed_tests.rs:394  [panic/unreachable line]  panic!("a month row: {body}")
+(F) LINE crates/api/src/pool_table_tests.rs:750  [a message argument of the statement at 746, which ran: evaluated only when it fails]  named.pool().name()
+(F) LINE crates/api/src/pool_table_tests.rs:1151  [a message argument of the statement at 1148, which ran: evaluated only when it fails]  head_text(answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1181  [a message argument of the statement at 1178, which ran: evaluated only when it fails]  json.len()
+(F) LINE crates/api/src/pool_table_tests.rs:1238  [a message argument of the statement at 1235, which ran: evaluated only when it fails]  whole.len()
+(F) BRANCH crates/api/src/pool_table_tests.rs:1297:24 False  [the false side fails the check, and its line ran]  .all(|day| day["held"]["why"] == "being_written"
+(F) LINE crates/api/src/pool_table_tests.rs:1300  [a message argument of the statement at 1295, which ran: evaluated only when it fails]  body["days"]
+(F) LINE crates/api/src/pool_table_tests.rs:1307  [a message argument of the statement at 1303, which ran: evaluated only when it fails]  body["month_faults"]
+(F) BRANCH crates/api/src/pool_table_tests.rs:1331:17 False  [the false side fails the check, and its line ran]  !answer.contains("being written") && !answer.contains("\"unreadable\""),
+(F) BRANCH crates/api/src/pool_table_tests.rs:1331:54 False  [the false side fails the check, and its line ran]  !answer.contains("being written") && !answer.contains("\"unreadable\""),
+(F) LINE crates/api/src/pool_table_tests.rs:1333  [a message argument of the statement at 1330, which ran: evaluated only when it fails]  head_text(&answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1374  [a message argument of the statement at 1369, which ran: evaluated only when it fails]  body["source_faults"]
+(F) LINE crates/api/src/pool_table_tests.rs:1380  [a message argument of the statement at 1377, which ran: evaluated only when it fails]  body["days"]
+(F) LINE crates/api/src/pool_table_tests.rs:1464  [a message argument of the statement at 1461, which ran: evaluated only when it fails]  head_text(&answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1469  [a message argument of the statement at 1466, which ran: evaluated only when it fails]  head_text(&answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1544  [a message argument of the statement at 1540, which ran: evaluated only when it fails]  head_text(&answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1549  [a message argument of the statement at 1546, which ran: evaluated only when it fails]  head_text(&answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1575  [a message argument of the statement at 1571, which ran: evaluated only when it fails]  head_text(&answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1735  [a message argument of the statement at 1731, which ran: evaluated only when it fails]  head_text(answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1740  [a message argument of the statement at 1737, which ran: evaluated only when it fails]  head_text(answer)
+(F) LINE crates/api/src/pool_table_tests.rs:1839  [a message argument of the statement at 1836, which ran: evaluated only when it fails]  body.len()
+(F) LINE crates/api/src/pool_table_tests.rs:2085  [a message argument of the statement at 2082, which ran: evaluated only when it fails]  head_text(&answer)
+(F) BRANCH crates/api/src/pool_table_tests.rs:2104:13 False  [the false side fails the check, and its line ran]  say.contains("A pool's answered is work it ran to its end")
+(F) BRANCH crates/api/src/pool_table_tests.rs:2105:20 False  [the false side fails the check, and its line ran]  && say.contains("the two answered columns count different things"),
+(F) BRANCH crates/api/src/pool_table_tests.rs:2118:43 False  [the false side fails the check, and its line ran]  route.starts_with('/') || route == crate::detail::FRONT_END,
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_b.rs:210:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = feed.descriptor().transport else {
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:211  [panic/unreachable line]  panic!("{} is an HTTP feed", feed.display());
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:513  [panic/unreachable line]  panic!("no store rung, so nothing is probed")
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1435  [a message argument of the statement at 1432, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1440  [a message argument of the statement at 1437, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1445  [a message argument of the statement at 1442, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1471  [a message argument of the statement at 1468, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1479  [a message argument of the statement at 1473, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1511  [a message argument of the statement at 1508, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1560  [a message argument of the statement at 1557, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1569  [a message argument of the statement at 1566, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1577  [a message argument of the statement at 1574, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1585  [a message argument of the statement at 1582, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1614  [a message argument of the statement at 1611, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1657  [a message argument of the statement at 1654, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1662  [a message argument of the statement at 1659, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1684  [a message argument of the statement at 1678, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1717  [a message argument of the statement at 1711, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1760  [a message argument of the statement at 1757, which ran: evaluated only when it fails]  visible(&body)
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:2401  [a message argument of the statement at 2398, which ran: evaluated only when it fails]  visible(&body)
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_b.rs:2437:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = asked.feed.descriptor().transport else {
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:2438  [panic/unreachable line]  panic!("the premise: Zerodha is an HTTP feed");
+(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:2454  [a message argument of the statement at 2448, which ran: evaluated only when it fails]  visible(&body)
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:520:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Dhan.descriptor().transport
+(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:522  [panic/unreachable line]  panic!("Dhan is HTTP");
+(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1118  [a message argument of the statement at 1115, which ran: evaluated only when it fails]  started.elapsed()
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:1739:9 False  [the else of a let-else that panics, whose line ran]  let census::Census::Held { ref manifest } = census.state else {
+(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1740  [panic/unreachable line]  panic!("a recovered census still loads: {:?}", census.state.name());
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:2430:13 False  [the false side fails the check, and its line ran]  !why.contains(VENDOR_DOWN) && !why.contains(WIRE_REACHED),
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:2430:43 False  [the false side fails the check, and its line ran]  !why.contains(VENDOR_DOWN) && !why.contains(WIRE_REACHED),
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:3280:9 False  [the else of a let-else that panics, whose line ran]  let Err(refused) = refused else {
+(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:3281  [panic/unreachable line]  panic!("nothing landed before the refusal");
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:3365:13 False  [the else of a let-else that panics, whose line ran]  let Err(refused) = refused else {
+(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:3366  [panic/unreachable line]  panic!("nothing landed before the refusal");
+(F) LINE crates/api/src/server_cloud_mutant_tests_d.rs:103  [a message argument of the statement at 100, which ran: evaluated only when it fails]  answered.map(|schedule| schedule.is_some())
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_d.rs:158:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Dhan.descriptor().transport
+(F) LINE crates/api/src/server_cloud_mutant_tests_d.rs:160  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
+(F) BRANCH crates/api/src/server_cloud_mutant_tests_d.rs:677:9 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+(F) LINE crates/api/src/server_cloud_mutant_tests_d.rs:678  [panic/unreachable line]  panic!("HTTP descriptor");
+(F) LINE crates/api/src/strict_sweep_tests.rs:303  [a message argument of the statement at 300, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/strict_sweep_tests.rs:387  [panic/unreachable line]  panic!("the commit gate refuses before the configuration is read")
+(F) LINE crates/api/src/strict_sweep_tests.rs:493  [panic/unreachable line]  panic!("{name}={value} is refused before the configuration is read")
+(F) LINE crates/api/src/strict_sweep_tests.rs:538  [panic/unreachable line]  panic!("an invalid server setting is refused before the configuration is read")
+(F) LINE crates/api/src/sweeprun.rs:4571  [a message argument of the statement at 4568, which ran: evaluated only when it fails]  String::from_utf8_lossy(&result.stderr)
+(F) LINE crates/api/src/sweeprun.rs:4687  [a closure whose only work is to panic: the failing arm]  || panic!("the first admission found the slot busy"),
+(F) LINE crates/api/src/sweeprun.rs:4705  [panic/unreachable line]  panic!("a second admission prepared while the first was in flight")
+(F) BRANCH crates/api/src/sweeprun.rs:4722:17 False  [the false side fails the check, and its line ran]  assert!(installed.in_flight() && installed.attempt == 1);
+(F) BRANCH crates/api/src/sweeprun.rs:4722:42 False  [the false side fails the check, and its line ran]  assert!(installed.in_flight() && installed.attempt == 1);
+(F) BRANCH crates/api/src/sweeprun.rs:4771:17 False  [the false side fails the check, and its line ran]  !body.contains("sweep.lock()") && !body.contains(".sweep\n"),
+(F) BRANCH crates/api/src/sweeprun.rs:4771:51 False  [the false side fails the check, and its line ran]  !body.contains("sweep.lock()") && !body.contains(".sweep\n"),
+(F) LINE crates/api/src/sweeprun.rs:4820  [a message argument of the statement at 4817, which ran: evaluated only when it fails]  poll_text.len()
+(F) LINE crates/api/src/sweeprun.rs:5030  [a message argument of the statement at 5027, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:5102  [a message argument of the statement at 5099, which ran: evaluated only when it fails]  why.why()
+(F) BRANCH crates/api/src/sweeprun.rs:5223:38 False  [the false side fails the check, and its line ran]  .all(|(asked, name)| *asked != "screen_budget_ms"
+(F) LINE crates/api/src/sweeprun.rs:5236  [a message argument of the statement at 5233, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:5241  [a message argument of the statement at 5238, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:5445  [a message argument of the statement at 5441, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:5524  [a message argument of the statement at 5520, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:5571  [a message argument of the statement at 5567, which ran: evaluated only when it fails]  why.why()
+(F) BRANCH crates/api/src/sweeprun.rs:6532:24 False  [the false side fails the check, and its line ran]  || refusal.why().contains("No engine work was started"),
+(F) LINE crates/api/src/sweeprun.rs:6534  [a message argument of the statement at 6530, which ran: evaluated only when it fails]  refusal.why()
+(F) LINE crates/api/src/sweeprun.rs:6776  [a message argument of the statement at 6772, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:6782  [a message argument of the statement at 6778, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:6811  [a message argument of the statement at 6807, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:6881  [a message argument of the statement at 6878, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:6887  [a message argument of the statement at 6884, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:7030  [a message argument of the statement at 7026, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:7035  [a message argument of the statement at 7032, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:7069  [a message argument of the statement at 7065, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:7105  [a message argument of the statement at 7101, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:7141  [a message argument of the statement at 7138, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:7191  [a message argument of the statement at 7187, which ran: evaluated only when it fails]  why.why()
+(F) LINE crates/api/src/sweeprun.rs:7196  [a message argument of the statement at 7193, which ran: evaluated only when it fails]  why.why()
+(F) BRANCH crates/api/src/sweeprun.rs:7628:13 False  [the false side fails the check, and its line ran]  done.launch_clear && !done.uncertain && !done.in_flight,
+(F) BRANCH crates/api/src/sweeprun.rs:7628:34 False  [the false side fails the check, and its line ran]  done.launch_clear && !done.uncertain && !done.in_flight,
+(F) BRANCH crates/api/src/sweeprun.rs:7628:53 False  [the false side fails the check, and its line ran]  done.launch_clear && !done.uncertain && !done.in_flight,
+(F) BRANCH crates/api/src/sweeprun.rs:7642:13 False  [the false side fails the check, and its line ran]  running.in_flight && !running.launch_clear,
+(F) BRANCH crates/api/src/sweeprun.rs:7642:34 False  [the false side fails the check, and its line ran]  running.in_flight && !running.launch_clear,
+(F) BRANCH crates/api/src/sweeprun.rs:7653:17 False  [the false side fails the check, and its line ran]  assert!(lost.uncertain && !lost.launch_clear, "{}", lost.body);
+(F) BRANCH crates/api/src/sweeprun.rs:7653:35 False  [the false side fails the check, and its line ran]  assert!(lost.uncertain && !lost.launch_clear, "{}", lost.body);
+(F) BRANCH crates/api/src/sweeprun.rs:7722:17 False  [the false side fails the check, and its line ran]  assert!(clear.launch_clear && !clear.uncertain, "{}", clear.body);
+(F) BRANCH crates/api/src/sweeprun.rs:7722:39 False  [the false side fails the check, and its line ran]  assert!(clear.launch_clear && !clear.uncertain, "{}", clear.body);
+(F) BRANCH crates/api/src/sweeprun.rs:7811:13 False  [the false side fails the check, and its line ran]  why.starts_with(
+(F) BRANCH crates/api/src/sweeprun.rs:7813:18 False  [the false side fails the check, and its line ran]  ) && why.contains("so it is running or was stopped without logging one.")
+(F) BRANCH crates/api/src/sweeprun.rs:7814:20 False  [the false side fails the check, and its line ran]  && why.contains(
+(F) BRANCH crates/api/src/sweeprun_cover_tests.rs:470:13 False  [the else of a let-else that panics, whose line ran]  let Command::AuditAuditedRange { knobs, .. } = asked else {
+(F) LINE crates/api/src/sweeprun_cover_tests.rs:471  [panic/unreachable line]  panic!("{written}: the strict command")
+(H) BRANCH crates/api/src/feeds_route.rs:1498:13 True  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  && (from.origin != "generation" || to.origin != "generation")
+(H) BRANCH crates/api/src/feeds_route.rs:1511:8 True  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  if first > last {
+(H) LINE crates/api/src/feeds_route.rs:1512  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  return refuse(format!(
+(H) LINE crates/api/src/feeds_route.rs:1513  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  "the window in force begins {first} ({}) after it ends {last} ({}): refused, not \
+(H) LINE crates/api/src/feeds_route.rs:1514  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  served inverted",
+(H) LINE crates/api/src/feeds_route.rs:1515  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  from.source, to.source
+(H) LINE crates/api/src/feeds_route.rs:1516  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  ));
+(H) LINE crates/api/src/feeds_route.rs:2884  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let window = &row(&rows, "zerodha")["window"];
+(H) LINE crates/api/src/feeds_route.rs:2885  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["from"].is_null(), "{window}");
+(H) LINE crates/api/src/feeds_route.rs:2886  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["to"].is_null(), "{window}");
+(H) LINE crates/api/src/feeds_route.rs:2887  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(
+(H) LINE crates/api/src/feeds_route.rs:2888  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  window["why"]
+(H) LINE crates/api/src/feeds_route.rs:2889  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .as_str()
+(H) LINE crates/api/src/feeds_route.rs:2890  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .is_some_and(|why| why.contains("cannot be read")),
+(H) LINE crates/api/src/feeds_route.rs:2893  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["degraded"].is_string(), "{window}");
+(H) LINE crates/api/src/feeds_route.rs:2897  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let root = store_root("feeds-window-inverted");
+(H) LINE crates/api/src/feeds_route.rs:2898  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let mut reader = store::settings::Reader::new(&root);
+(H) LINE crates/api/src/feeds_route.rs:2899  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  store::settings::save(
+(H) LINE crates/api/src/feeds_route.rs:2900  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  &mut reader,
+(H) LINE crates/api/src/feeds_route.rs:2901  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  &store::settings::Change {
+(H) LINE crates/api/src/feeds_route.rs:2902  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  expected: 0,
+(H) LINE crates/api/src/feeds_route.rs:2903  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  set: vec![(store::settings::Key::WindowFrom, "2026-10-01".to_owned())],
+(H) LINE crates/api/src/feeds_route.rs:2904  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  unset: Vec::new(),
+(H) LINE crates/api/src/feeds_route.rs:2905  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  changed_by: "an older build".to_owned(),
+(H) LINE crates/api/src/feeds_route.rs:2906  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  reason: "narrow to October".to_owned(),
+(H) LINE crates/api/src/feeds_route.rs:2907  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  at_micros: 1_700_000_000_000_000,
+(H) LINE crates/api/src/feeds_route.rs:2908  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  },
+(H) LINE crates/api/src/feeds_route.rs:2909  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  |_| Ok(()),
+(H) LINE crates/api/src/feeds_route.rs:2911  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .expect("the store's own check passes one end");
+(H) LINE crates/api/src/feeds_route.rs:2912  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let rows = feeds_of("feeds-window-inverted", &root).await;
+(H) LINE crates/api/src/feeds_route.rs:2913  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let window = &row(&rows, "zerodha")["window"];
+(H) LINE crates/api/src/feeds_route.rs:2914  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["from"].is_null(), "{window}");
+(H) LINE crates/api/src/feeds_route.rs:2915  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(
+(H) LINE crates/api/src/feeds_route.rs:2916  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  window["why"]
+(H) LINE crates/api/src/feeds_route.rs:2917  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .as_str()
+(H) LINE crates/api/src/feeds_route.rs:2918  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .is_some_and(|why| why.contains("not served inverted")),
+(H) LINE crates/api/src/feeds_route.rs:2921  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["degraded"].is_null(), "{window}");
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1606  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(fault.contains("Permission denied"), "{fault}");
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1607  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  }
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2104  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert_eq!(run.total.bars_committed, 0);
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2105  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let fault = run
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2106  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .store_unavailable
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2107  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .as_deref()
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2108  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .expect("the breaker tripped");
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2109  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(fault.contains(".store-probe"), "{fault}");
+(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2110  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert_eq!(
 (U) LINE crates/api/src/autopilot.rs:319  [`Window::from()`/`to()` are Days, and `Day::year_month` cannot fail (Day's bounds are YearMonth's, pull/src/session.rs:132-136 and 425-432, store/src/path.rs:583-588)]  _ => String::new(),
 (U) BRANCH crates/api/src/autopilot.rs:958:21 False  [`day.succ()` refuses only 9999-12-31 (pull/src/session.rs:483-500), and this arm runs only when `day < to`; no Day is later than 9999-12-31 (MAX_YEAR), so succ never fails here]  let Ok(next) = day.succ() else {
 (U) LINE crates/api/src/autopilot.rs:959  [as autopilot.rs:958:21 False]  done = done.saturating_add(1);
@@ -103,13 +696,15 @@ and the GAP rows).
 (U) LINE crates/api/src/indexstopjson.rs:102  [Rows: the handler always runs Asked::parse (91-94), which caps limit at 256 (57), and window() returns at most limit rows (224-232). Row widths: every field is a bounded typed value. setting() is at most 7,233 bytes: 224 structure plus 17 values, including the Expression render of at most 5,757 bytes (MAX_INSTRUCTIONS 1,151 at vocab/src/expression.rs:15; at most 5 bytes per instruction, 399-461), an EVERY_RUNG timeframe, and 'NSE-' plus a symbol of at most 24 bytes (236-242). trade is about 810 bytes at most (243-245), event about 390 (246-248) and day about 420 (249-251). The envelope, including one selected setting and the constant policy (233-235), is about 9 KB at most. Maximum: 256 x 7,233 + 257 + 9,000, about 1.86 MB, which is below 8,388,608.]  refused(
 (U) LINE crates/api/src/indexstopjson.rs:104  [as crates/api/src/indexstopjson.rs:102]  "single-stop response exceeds byte limit; no prefix returned",
 (U) BRANCH crates/api/src/indexstoplaunch_metadata.rs:52:20 False  [`policy` is `booleanevidencejson::search_policy(..)` = `admission_projection::policy(..)`, which returns the object literal `json!({"digest":..,"values":rows})` (booleanadmission_projection.rs:76-134), so `as_object_mut()` is Some]  if let Some(fields) = policy.as_object_mut() {
-(U) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:215:13 False  [`cli::commit_stamp()` is `option_env!("BRUTEX_COMMIT")` (cli/src/lib.rs:3949-3953), fixed when the object is compiled; cli's build.rs stamps a clean tree, and the measured object (Route B's own checkout of a commit) is one, so the stamp is Some for every run of this object: the unstamped arm is reached only by a different object, a build of a dirty tree]  let Some(_stamp) = cli::commit_stamp() else {
-(U) LINE crates/api/src/indexstopqualificationjson_saved_tests.rs:216  [as indexstopqualificationjson_saved_tests.rs:215:13 False]  return assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
 (U) BRANCH crates/api/src/indexstopqualificationjson.rs:114:16 False  [This is the same arithmetic as line 117. Every page has at most 256 rows (72, 387-393), and each row is at most 28,978 bytes of typed or bounded fields. With the envelope, the maximum body is 7,422,805 bytes, which is below 8,388,608 (detail.rs:32). So the comparison is never false.]  if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
 (U) LINE crates/api/src/indexstopqualificationjson.rs:117  [The byte limit cannot be passed. (1) Row count: no page has more than 256 rows, because Asked::parse refuses a limit outside 1..=256 (indexstopqualificationjson.rs:72) and window() returns at most `limit` rows (387-393). (2) Field widths: every field is one of these: an integer string of at most 20 chars; a 64-hex digest (server.rs:37302-37308); a static word; or typed text with a hard bound. No string is copied from a saved file. The bounded text fields are: (a) the expression, which is Expression::to_string over at most MAX_INSTRUCTIONS = 1,151 instructions (vocab/src/expression.rs:15,149-152). A leaf is Bit(u16), at most 5 digits (124). NOT adds 3 bytes and AND/OR add 5 (render_program 399-461), so a valid tree renders to at most 5,755 bytes. (b) The timeframe, which is an EVERY_RUNG &'static str of at most 5 chars (cli/src/lib.rs:10213-10215; index_stop_store.rs:349-351). (c) The instrument, which is 'NSE-' plus a validated symbol of at most 24 bytes (runner/src/research_family.rs:153-182). (3) One settings row (setting(), 290-322) is at most 28,978 bytes: 77 structure + 44 (index, rank) + 2 x indexstopjson::setting at most 7,233 each (224 structure + at most 7,009 values including the 5,757-byte expression; indexstopjson.rs:236-242) + admission_projection::row at most 6,596 (103 + 188 + 44 checks at most 2,733 whose 44 reason names total 718 chars, runner/src/admission.rs:1852,1901-1947, + 44 evidence rows at most 3,572 whose field names total 843 chars, booleanadmission_projection.rs:11-75) + saved_record at most 7,795 (4 reason lists of 14 names totalling 417 chars, cli/src/index_consistency.rs:551-567; 4 summaries of 21 integers; index_consistency_projection.rs:48-113). (4) Total: 256 x 28,978 + 257 separators + an envelope of at most 4,180 (19 keys, 3 digests, and a 39-row policy of at most 3,091, booleanadmission_projection.rs:76-134) = at most 7,422,805 < 8,388,608 = MAX_RESPONSE_BYTES (detail.rs:32). Fold, day and week rows are each under 1 KB (384-386; index_consistency_projection.rs:180-199). So every OK body fits.]  refused(
 (U) LINE crates/api/src/indexstopqualificationjson.rs:119  [This is the same else-block as line 117. The proof there bounds every OK body at 7,422,805 bytes or less, which is below 8,388,608.]  "native qualification response exceeds byte limit; no prefix returned",
 (U) BRANCH crates/api/src/indexstopqualificationjson.rs:154:16 False  [budget is BooleanObservationBudget::load() (146). That is a pure function of the process variable BRUTEX_BOOLEAN_OBSERVATION_BYTES (boolean_observation_budget.rs:7-13; derived Eq on a u64). The only Cached ever stored is built at 176-184 from that same call's budget, and CACHE is a function-local static (145) that nothing else can write. So, with root and identity equal, the stored budget can differ only if the process environment changed between two requests. No code in crates/ calls std::env::set_var or remove_var. set_var is unsafe under edition 2024 (workspace edition = 2024), and the crate is #![forbid(unsafe_code)] (lib.rs:40); isolated.rs:10-12 says a test may not set its own environment. A child process has one fixed environment, so the cache it fills always holds that budget. No query, file or direct call supplies the budget.]  && value.budget == budget
 (U) LINE crates/api/src/indexstopqualificationjson.rs:317  [The ? can never return Err. (1) admission_projection::row errs only when !verdict.reconciles() (booleanadmission_projection.rs:12-15) or when evidence() errs (33). evidence() can err only if super::put meets a non-object (booleanevidencejson.rs:346-351), and every renderer it wraps returns a json!({..}) object literal (booleanadmission_projection.rs:36-55). (2) The verdict is row.projection.verdict() (315) of a ResearchAdmissionProjectionV1. Its fields are private (runner/src/research_admission_projection.rs:17-21), and its only constructor is AdmissionPolicyV1::evaluate_research_projection (47-57); the codec also goes through it (research_admission_projection_codec.rs:32-34). (3) That constructor sets verdict = evaluate(), which ends in AdmissionVerdictV1::from_parts (admission.rs:1194, 2045-2063). There, reasons is the union of the partitions and status is derived with exactly the precedence that reconciles() checks. (4) Each of the 44 checks inserts its own distinct bit (mask 1<<reason, 1950-1952) into at most one partition (2853-2985), so the partitions are disjoint. Therefore reconciles() (2103-2118) always holds.]  )?;
+(U) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:240:13 False  [`cli::commit_stamp()` is `option_env!("BRUTEX_COMMIT")` (cli/src/lib.rs:3949-3953), fixed when the object is compiled; cli's build.rs stamps a clean tree, and the measured object (Route B's own checkout of a commit) is one, so the stamp is Some for every run of this object: the unstamped arm is reached only by a different object, a build of a dirty tree]  let Some(_stamp) = cli::commit_stamp() else {
+(U) LINE crates/api/src/indexstopqualificationjson_saved_tests.rs:241  [as indexstopqualificationjson_saved_tests.rs:240:13 False]  return assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
+(U) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:565:13 False  [`cli::commit_stamp()` is `option_env!("BRUTEX_COMMIT")` (cli/src/lib.rs:3949-3953), fixed when the object is compiled; cli's build.rs stamps a clean tree, and the measured object (Route B's own checkout of a commit) is one, so the stamp is Some for every run of this object: the unstamped arm is reached only by a different object, a build of a dirty tree]  let Some(_stamp) = cli::commit_stamp() else {
+(U) LINE crates/api/src/indexstopqualificationjson_saved_tests.rs:566  [as indexstopqualificationjson_saved_tests.rs:565:13 False]  return assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
 (U) BRANCH crates/api/src/ingest.rs:1332:9 False  [Same proof as line 1334. Four, two and two ASCII digits always parse as u16 and u8 (1318-1329), so the tuple pattern always matches.]  let (Ok(year), Ok(month), Ok(day)) = (y.parse::<u16>(), m.parse::<u8>(), d.parse::<u8>())
 (U) LINE crates/api/src/ingest.rs:1334  [By line 1332, y, m and d are the three '-'-separated pieces (1318-1323), of lengths 4, 2 and 2 (1324), and every byte of the text is '-' or an ASCII digit (1329). So each piece is all digits. y is at most 9999, which fits u16; m and d are at most 99, which fits u8; and from_str accepts leading zeros. All three parses are Ok.]  return Err(bad());
 (U) BRANCH crates/api/src/ladder.rs:455:16 False  [`Day::year_month` cannot fail for any Day (Day's bounds are YearMonth's, pull/src/session.rs:132-136 and 425-432, store/src/path.rs:583-588)]  if let Ok(ym) = at.year_month() {
@@ -157,595 +752,4 @@ and the GAP rows).
 (U) BRANCH crates/api/src/sweeprun.rs:204:20 False  [`search` is a `booleanlaunch::Status`, whose `fields()` returns the object literal `json!({..})` (booleanlaunch.rs:60-61), so `as_object()` is Some]  && let Some(fields) = search.fields().as_object()
 (U) BRANCH crates/api/src/sweeprun.rs:212:20 False  [`search` is an `indexstoplaunch::Status`, whose `fields()` returns the object literal `json!({"schema_version":1,..})` (indexstoplaunch.rs:110-135), so `as_object_mut()` is Some]  if let Some(object) = fields.as_object_mut() {
 (U) LINE crates/api/src/sweeprun.rs:223  [as sweeprun.rs:212:20 False]  }
-(H) BRANCH crates/api/src/feeds_route.rs:1498:13 True  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  && (from.origin != "generation" || to.origin != "generation")
-(H) BRANCH crates/api/src/feeds_route.rs:1511:8 True  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  if first > last {
-(H) LINE crates/api/src/feeds_route.rs:1512  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  return refuse(format!(
-(H) LINE crates/api/src/feeds_route.rs:1513  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  "the window in force begins {first} ({}) after it ends {last} ({}): refused, not \
-(H) LINE crates/api/src/feeds_route.rs:1514  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  served inverted",
-(H) LINE crates/api/src/feeds_route.rs:1515  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  from.source, to.source
-(H) LINE crates/api/src/feeds_route.rs:1516  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  ));
-(H) LINE crates/api/src/feeds_route.rs:2884  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let window = &row(&rows, "zerodha")["window"];
-(H) LINE crates/api/src/feeds_route.rs:2885  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["from"].is_null(), "{window}");
-(H) LINE crates/api/src/feeds_route.rs:2886  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["to"].is_null(), "{window}");
-(H) LINE crates/api/src/feeds_route.rs:2887  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(
-(H) LINE crates/api/src/feeds_route.rs:2888  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  window["why"]
-(H) LINE crates/api/src/feeds_route.rs:2889  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .as_str()
-(H) LINE crates/api/src/feeds_route.rs:2890  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .is_some_and(|why| why.contains("cannot be read")),
-(H) LINE crates/api/src/feeds_route.rs:2893  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["degraded"].is_string(), "{window}");
-(H) LINE crates/api/src/feeds_route.rs:2897  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let root = store_root("feeds-window-inverted");
-(H) LINE crates/api/src/feeds_route.rs:2898  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let mut reader = store::settings::Reader::new(&root);
-(H) LINE crates/api/src/feeds_route.rs:2899  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  store::settings::save(
-(H) LINE crates/api/src/feeds_route.rs:2900  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  &mut reader,
-(H) LINE crates/api/src/feeds_route.rs:2901  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  &store::settings::Change {
-(H) LINE crates/api/src/feeds_route.rs:2902  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  expected: 0,
-(H) LINE crates/api/src/feeds_route.rs:2903  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  set: vec![(store::settings::Key::WindowFrom, "2026-10-01".to_owned())],
-(H) LINE crates/api/src/feeds_route.rs:2904  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  unset: Vec::new(),
-(H) LINE crates/api/src/feeds_route.rs:2905  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  changed_by: "an older build".to_owned(),
-(H) LINE crates/api/src/feeds_route.rs:2906  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  reason: "narrow to October".to_owned(),
-(H) LINE crates/api/src/feeds_route.rs:2907  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  at_micros: 1_700_000_000_000_000,
-(H) LINE crates/api/src/feeds_route.rs:2908  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  },
-(H) LINE crates/api/src/feeds_route.rs:2909  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  |_| Ok(()),
-(H) LINE crates/api/src/feeds_route.rs:2911  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .expect("the store's own check passes one end");
-(H) LINE crates/api/src/feeds_route.rs:2912  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let rows = feeds_of("feeds-window-inverted", &root).await;
-(H) LINE crates/api/src/feeds_route.rs:2913  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let window = &row(&rows, "zerodha")["window"];
-(H) LINE crates/api/src/feeds_route.rs:2914  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["from"].is_null(), "{window}");
-(H) LINE crates/api/src/feeds_route.rs:2915  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(
-(H) LINE crates/api/src/feeds_route.rs:2916  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  window["why"]
-(H) LINE crates/api/src/feeds_route.rs:2917  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .as_str()
-(H) LINE crates/api/src/feeds_route.rs:2918  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .is_some_and(|why| why.contains("not served inverted")),
-(H) LINE crates/api/src/feeds_route.rs:2921  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(window["degraded"].is_null(), "{window}");
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1591  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(fault.contains("Permission denied"), "{fault}");
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1592  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  }
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2089  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert_eq!(run.total.bars_committed, 0);
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2090  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  let fault = run
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2091  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .store_unavailable
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2092  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .as_deref()
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2093  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  .expect("the breaker tripped");
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2094  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert!(fault.contains(".store-probe"), "{fault}");
-(H) LINE crates/api/src/server_cloud_mutant_tests_c.rs:2095  [covered when its test runs as non-root: a root host red, proved; owed to the Mac's Route B]  assert_eq!(
-(F) BRANCH crates/api/src/autopilot.rs:4813:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
-(F) LINE crates/api/src/autopilot.rs:4814  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
-(F) BRANCH crates/api/src/autopilot.rs:4816:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::HistoryFloor::Rolling { years } = spec.history_floor else {
-(F) LINE crates/api/src/autopilot.rs:4817  [panic/unreachable line]  panic!("Dhan's floor is the rolling one");
-(F) BRANCH crates/api/src/autopilot.rs:4877:17 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
-(F) LINE crates/api/src/autopilot.rs:4878  [panic/unreachable line]  panic!("{} is driven, so it is HTTP", feed.display());
-(F) LINE crates/api/src/autopilot.rs:4883  [a message argument of the statement at 4880, which ran: evaluated only when it fails]  feed.display()
-(F) LINE crates/api/src/autopilot.rs:4888  [a message argument of the statement at 4885, which ran: evaluated only when it fails]  feed.display()
-(F) LINE crates/api/src/autopilot.rs:4893  [a message argument of the statement at 4890, which ran: evaluated only when it fails]  feed.display()
-(F) LINE crates/api/src/autopilot.rs:4905  [a message argument of the statement at 4902, which ran: evaluated only when it fails]  feed.display()
-(F) LINE crates/api/src/autopilot.rs:4915  [a message argument of the statement at 4912, which ran: evaluated only when it fails]  feed.display()
-(F) BRANCH crates/api/src/autopilot.rs:4942:45 False  [the false side fails the check, and its line ran]  !path_names_the_rung || spec.granularity_token(rung).is_some(),
-(F) LINE crates/api/src/autopilot.rs:4945  [a message argument of the statement at 4941, which ran: evaluated only when it fails]  feed.display()
-(F) BRANCH crates/api/src/autopilot.rs:5057:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = state.observe(&dead) else {
-(F) LINE crates/api/src/autopilot.rs:5058  [panic/unreachable line]  panic!("a same-value verdict must halt");
-(F) BRANCH crates/api/src/autopilot.rs:5142:13 False  [the else of a let-else that panics, whose line ran]  let Some(Next::Stall { reason }) = verdicts.last() else {
-(F) LINE crates/api/src/autopilot.rs:5143  [panic/unreachable line]  panic!("attempt {MAX_MONTH_ATTEMPTS} must stall, got {verdicts:?}");
-(F) LINE crates/api/src/autopilot.rs:5161  [a message argument of the statement at 5158, which ran: evaluated only when it fails]  status.json()
-(F) BRANCH crates/api/src/autopilot.rs:5312:26 False  [the false side fails the check, and its line ran]  .all(|f| f.halt_kind == Some(Halt::Census) && f.halted.is_some()),
-(F) BRANCH crates/api/src/autopilot.rs:5317:17 False  [the false side fails the check, and its line ran]  report.halted.contains(drift) && report.halted.contains("is not known"),
-(F) BRANCH crates/api/src/autopilot.rs:5317:50 False  [the false side fails the check, and its line ran]  report.halted.contains(drift) && report.halted.contains("is not known"),
-(F) BRANCH crates/api/src/autopilot.rs:5337:50 False  [the false side fails the check, and its line ran]  Census::Unreadable { reason, .. } if reason == "entry 41 fails its own checksum"
-(F) BRANCH crates/api/src/autopilot.rs:5394:13 False  [the else of a let-else that panics, whose line ran]  let Census::Unreadable { reason, .. } = &refused.state else {
-(F) LINE crates/api/src/autopilot.rs:5395  [panic/unreachable line]  panic!("a census whose migration receipt will not read is refused, never held");
-(F) BRANCH crates/api/src/autopilot.rs:5398:13 False  [the false side fails the check, and its line ran]  reason.contains("is not known")
-(F) BRANCH crates/api/src/autopilot.rs:5399:20 False  [the false side fails the check, and its line ran]  && reason.contains("MIGRATED")
-(F) BRANCH crates/api/src/autopilot.rs:5400:20 False  [the false side fails the check, and its line ran]  && reason.contains("cannot be read"),
-(F) LINE crates/api/src/autopilot.rs:5464  [a message argument of the statement at 5460, which ran: evaluated only when it fails]  action.slug()
-(F) BRANCH crates/api/src/autopilot.rs:5531:13 False  [the false side fails the check, and its line ran]  body.contains("the broker credential is dead")
-(F) BRANCH crates/api/src/autopilot.rs:5532:20 False  [the false side fails the check, and its line ran]  && body.contains("the store refused the same write twice"),
-(F) BRANCH crates/api/src/autopilot.rs:6041:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = state.observe(&full) else {
-(F) LINE crates/api/src/autopilot.rs:6042  [panic/unreachable line]  panic!("a repeated disk failure must halt");
-(F) LINE crates/api/src/autopilot.rs:6767  [a message argument of the statement at 6764, which ran: evaluated only when it fails]  phase.state()
-(F) BRANCH crates/api/src/autopilot.rs:7120:13 False  [the false side fails the check, and its line ran]  state.halted.is_none() && state.halt_kind.is_none(),
-(F) BRANCH crates/api/src/autopilot.rs:7120:39 False  [the false side fails the check, and its line ran]  state.halted.is_none() && state.halt_kind.is_none(),
-(F) BRANCH crates/api/src/autopilot.rs:7140:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = token.observe(&dead) else {
-(F) LINE crates/api/src/autopilot.rs:7141  [panic/unreachable line]  panic!("a same-value verdict must halt");
-(F) BRANCH crates/api/src/autopilot.rs:7190:17 False  [the else of a let-else that panics, whose line ran]  let Next::Stall { reason: said } = state.observe(&out) else {
-(F) LINE crates/api/src/autopilot.rs:7191  [panic/unreachable line]  panic!("{credential:?}: the bound stalls the month, it does not halt the feed");
-(F) BRANCH crates/api/src/autopilot.rs:7223:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { reason } = state.observe(&blocked) else {
-(F) LINE crates/api/src/autopilot.rs:7224  [panic/unreachable line]  panic!("an unusable configuration halts");
-(F) BRANCH crates/api/src/autopilot.rs:7292:26 False  [the false side fails the check, and its line ran]  .all(|f| f.halt_kind == Some(Halt::Census) && f.halted.is_some()),
-(F) BRANCH crates/api/src/autopilot.rs:7320:26 False  [the false side fails the check, and its line ran]  .all(|f| f.halted.is_none() && f.halt_kind.is_none()),
-(F) BRANCH crates/api/src/autopilot.rs:7326:26 False  [the false side fails the check, and its line ran]  .all(|r| r.halted.is_empty() && r.last_reason.contains("manifest loads again")),
-(F) LINE crates/api/src/autopilot.rs:7328  [a message argument of the statement at 7323, which ran: evaluated only when it fails]  reports.iter().map(|r| &r.last_reason).collect::<Vec<_>>()
-(F) BRANCH crates/api/src/autopilot.rs:7364:13 False  [the else of a let-else that panics, whose line ran]  let Due::Spent { saying } = store_due(None, 0) else {
-(F) LINE crates/api/src/autopilot.rs:7365  [panic/unreachable line]  panic!("an unarmed feed must not answer Now");
-(F) BRANCH crates/api/src/autopilot.rs:7388:17 False  [the else of a let-else that panics, whose line ran]  let Due::Now { made } = store_due(Some(&probe), now) else {
-(F) LINE crates/api/src/autopilot.rs:7389  [panic/unreachable line]  panic!("probe {expected} of {STORE_PROBES} must be due, at {now}");
-(F) BRANCH crates/api/src/autopilot.rs:7400:13 False  [the else of a let-else that panics, whose line ran]  let Due::Spent { saying } = store_due(Some(&probe), now.saturating_add(1_000_000)) else {
-(F) LINE crates/api/src/autopilot.rs:7401  [panic/unreachable line]  panic!("the {STORE_PROBES}-probe allowance must be spent, not renewed by time");
-(F) LINE crates/api/src/autopilot.rs:7443  [a message argument of the statement at 7440, which ran: evaluated only when it fails]  missing.display()
-(F) BRANCH crates/api/src/autopilot.rs:7575:13 False  [the false side fails the check, and its line ran]  why.contains("already holds the probe's name") && why.contains(STORE_PROBE_PREFIX),
-(F) BRANCH crates/api/src/autopilot.rs:7575:63 False  [the false side fails the check, and its line ran]  why.contains("already holds the probe's name") && why.contains(STORE_PROBE_PREFIX),
-(F) BRANCH crates/api/src/autopilot.rs:7632:13 False  [the else of a let-else that panics, whose line ran]  let Next::Halt { .. } = first.observe(&disk) else {
-(F) LINE crates/api/src/autopilot.rs:7633  [panic/unreachable line]  panic!("the same store refusal twice must halt");
-(F) BRANCH crates/api/src/autopilot.rs:7654:13 False  [the false side fails the check, and its line ran]  back.halted.is_none() && back.halt_kind.is_none() && back.probe.is_none(),
-(F) BRANCH crates/api/src/autopilot.rs:7654:38 False  [the false side fails the check, and its line ran]  back.halted.is_none() && back.halt_kind.is_none() && back.probe.is_none(),
-(F) BRANCH crates/api/src/autopilot.rs:7654:66 False  [the false side fails the check, and its line ran]  back.halted.is_none() && back.halt_kind.is_none() && back.probe.is_none(),
-(F) BRANCH crates/api/src/autopilot.rs:7729:17 False  [the false side fails the check, and its line ran]  saying.contains("2021-03") && saying.contains("being reconsidered"),
-(F) BRANCH crates/api/src/autopilot.rs:7729:47 False  [the false side fails the check, and its line ran]  saying.contains("2021-03") && saying.contains("being reconsidered"),
-(F) BRANCH crates/api/src/autopilot.rs:7849:13 False  [the else of a let-else that panics, whose line ran]  let Settled::Complete { instruments } = Settled::over(&one) else {
-(F) LINE crates/api/src/autopilot.rs:7850  [panic/unreachable line]  panic!("one tracked instrument is a universe");
-(F) BRANCH crates/api/src/autopilot.rs:7972:13 False  [the false side fails the check, and its line ran]  detail.contains("NOT COMPLETE") && detail.contains("NOTHING IS TRACKED"),
-(F) BRANCH crates/api/src/autopilot.rs:7972:48 False  [the false side fails the check, and its line ran]  detail.contains("NOT COMPLETE") && detail.contains("NOTHING IS TRACKED"),
-(F) LINE crates/api/src/autopilot.rs:8114  [a message argument of the statement at 8109, which ran: evaluated only when it fails]  kind.word()
-(F) BRANCH crates/api/src/autopilot.rs:8117:21 False  [the false side fails the check, and its line ran]  assert!(state.halted.is_none() && state.halt_kind.is_none());
-(F) BRANCH crates/api/src/autopilot.rs:8117:47 False  [the false side fails the check, and its line ran]  assert!(state.halted.is_none() && state.halt_kind.is_none());
-(F) BRANCH crates/api/src/autopilot.rs:8281:17 False  [the false side fails the check, and its line ran]  assert!(due > before && due <= before + 3, "{due} vs {before}");
-(F) BRANCH crates/api/src/autopilot.rs:8281:33 False  [the false side fails the check, and its line ran]  assert!(due > before && due <= before + 3, "{due} vs {before}");
-(F) LINE crates/api/src/autopilot.rs:8460  [a message argument of the statement at 8457, which ran: evaluated only when it fails]  site.autopilot.json()
-(F) LINE crates/api/src/autopilot.rs:8472  [a message argument of the statement at 8469, which ran: evaluated only when it fails]  site.autopilot.json()
-(F) BRANCH crates/api/src/autopilot.rs:8672:17 False  [the else of a let-else that panics, whose line ran]  let Some(&(_, flies, paused, why)) = CASES.iter().find(|(named, ..)| *named == case)
-(F) LINE crates/api/src/autopilot.rs:8674  [panic/unreachable line]  panic!("unknown case {case}");
-(F) LINE crates/api/src/autopilot.rs:8844  [a message argument of the statement at 8841, which ran: evaluated only when it fails]  reports[0].halted
-(F) BRANCH crates/api/src/autopilot.rs:8891:13 False  [the false side fails the check, and its line ran]  shown >= before && shown <= after,
-(F) BRANCH crates/api/src/autopilot.rs:8891:32 False  [the false side fails the check, and its line ran]  shown >= before && shown <= after,
-(F) LINE crates/api/src/autopilot.rs:8933  [a message argument of the statement at 8930, which ran: evaluated only when it fails]  site.autopilot.json()
-(F) LINE crates/api/src/autopilot.rs:9010  [a message argument of the statement at 9007, which ran: evaluated only when it fails]  site.autopilot.json()
-(F) BRANCH crates/api/src/autopilot.rs:9025:13 False  [the false side fails the check, and its line ran]  why.contains("did not complete. Attempt ") && why.contains("NO ROWS AT ALL"),
-(F) BRANCH crates/api/src/autopilot.rs:9025:59 False  [the false side fails the check, and its line ran]  why.contains("did not complete. Attempt ") && why.contains("NO ROWS AT ALL"),
-(F) BRANCH crates/api/src/autopilot.rs:9121:13 False  [the else of a let-else that panics, whose line ran]  let audit::Log::Held { records, .. } = journal.look() else {
-(F) LINE crates/api/src/autopilot.rs:9122  [panic/unreachable line]  panic!("the tick wrote its journal: {:?}", journal.look());
-(F) BRANCH crates/api/src/autopilot.rs:9143:13 False  [the false side fails the check, and its line ran]  whole.starts_with(&closed.note) && !closed.note.is_empty(),
-(F) BRANCH crates/api/src/autopilot.rs:9143:48 False  [the false side fails the check, and its line ran]  whole.starts_with(&closed.note) && !closed.note.is_empty(),
-(F) LINE crates/api/src/bars_export.rs:1183  [panic/unreachable line]  panic!("the pools stayed full");
-(F) BRANCH crates/api/src/bars_export.rs:1742:13 False  [the false side fails the check, and its line ran]  body.contains("export_not_whole") && body.contains("2025-06"),
-(F) BRANCH crates/api/src/bars_export.rs:1742:50 False  [the false side fails the check, and its line ran]  body.contains("export_not_whole") && body.contains("2025-06"),
-(F) BRANCH crates/api/src/bars_export.rs:1822:13 False  [the false side fails the check, and its line ran]  body.contains("\"being_written\":true") && body.contains("r3-10-export-writer"),
-(F) BRANCH crates/api/src/bars_export.rs:1822:56 False  [the false side fails the check, and its line ran]  body.contains("\"being_written\":true") && body.contains("r3-10-export-writer"),
-(F) LINE crates/api/src/bars_route.rs:1581  [a message argument of the statement at 1575, which ran: evaluated only when it fails]  &field[field.len() - 80..]
-(F) BRANCH crates/api/src/bars_route.rs:2028:25 False  [the else of a let-else that panics, whose line ran]  let Ok((status, body)) = got.as_ref() else {
-(F) LINE crates/api/src/bars_route.rs:2377  [panic/unreachable line]  panic!("the pool stayed full for two seconds");
-(F) LINE crates/api/src/bars_route.rs:2418  [panic/unreachable line]  panic!("the pool stayed full");
-(F) LINE crates/api/src/bars_route.rs:2446  [panic/unreachable line]  panic!("the pool stayed full");
-(F) BRANCH crates/api/src/bars_route.rs:2660:40 False  [the false side fails the check, and its line ran]  .is_some_and(|why| why.contains("not held") && why.contains("2024-01")),
-(F) BRANCH crates/api/src/bars_route.rs:2891:17 False  [the else of a let-else that panics, whose line ran]  let Err(why) = WindowAsk::parse(&format!("{base}&{bound}={text}")) else {
-(F) LINE crates/api/src/bars_route.rs:2892  [panic/unreachable line]  panic!("{bound}={text} was read");
-(F) LINE crates/api/src/bars_series.rs:1942  [a message argument of the statement at 1939, which ran: evaluated only when it fails]  memo.len(),
-(F) LINE crates/api/src/bars_series.rs:1943  [a message argument of the statement at 1939, which ran: evaluated only when it fails]  memo.turns()
-(F) BRANCH crates/api/src/bars_series.rs:2601:13 False  [the false side fails the check, and its line ran]  whole_s.keeps_seconds() && gapped_s.keeps_seconds(),
-(F) BRANCH crates/api/src/bars_series.rs:2601:40 False  [the false side fails the check, and its line ran]  whole_s.keeps_seconds() && gapped_s.keeps_seconds(),
-(F) LINE crates/api/src/bars_series.rs:2697  [a message argument of the statement at 2694, which ran: evaluated only when it fails]  memo.bytes()
-(F) LINE crates/api/src/bars_series.rs:2708  [a message argument of the statement at 2705, which ran: evaluated only when it fails]  memo.bytes()
-(F) LINE crates/api/src/bars_window_route_tests.rs:159  [panic/unreachable line]  panic!("the pool stayed full for two seconds");
-(F) BRANCH crates/api/src/bars_window_route_tests.rs:574:9 False  [the false side fails the check, and its line ran]  withheld[0].contains("`v`") && withheld[0].contains(&past.to_string()),
-(F) BRANCH crates/api/src/bars_window_route_tests.rs:574:40 False  [the false side fails the check, and its line ran]  withheld[0].contains("`v`") && withheld[0].contains(&past.to_string()),
-(F) BRANCH crates/api/src/bars_window_route_tests.rs:580:9 False  [the false side fails the check, and its line ran]  none.is_empty() && edge.contains("9007199254740991"),
-(F) BRANCH crates/api/src/bars_window_route_tests.rs:580:28 False  [the false side fails the check, and its line ran]  none.is_empty() && edge.contains("9007199254740991"),
-(F) LINE crates/api/src/bars_window_route_tests.rs:902  [a message argument of the statement at 899, which ran: evaluated only when it fails]  value(a),
-(F) LINE crates/api/src/bars_window_route_tests.rs:903  [a message argument of the statement at 899, which ran: evaluated only when it fails]  value(b)
-(F) BRANCH crates/api/src/bars_window_route_tests.rs:1263:24 False  [the false side fails the check, and its line ran]  .all(|row| !row.oi_applies && row.oichg_why == "not_a_derivative")
-(F) BRANCH crates/api/src/bars_window_route_tests.rs:2140:9 False  [the else of a let-else that panics, whose line ran]  let Some(note) = copied.iter().find(|note| note.starts_with(&copy)) else {
-(F) LINE crates/api/src/bars_window_route_tests.rs:2141  [panic/unreachable line]  panic!("{copied:?}");
-(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:165:13 False  [the false side fails the check, and its line ran]  why.contains("1610612736 bytes") && why.contains("BRUTEX_BOOLEAN_OBSERVATION_BYTES")
-(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:165:49 False  [the false side fails the check, and its line ran]  why.contains("1610612736 bytes") && why.contains("BRUTEX_BOOLEAN_OBSERVATION_BYTES")
-(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:167:17 False  [the false side fails the check, and its line ran]  assert!(why.contains(model.name()) && why.contains("no body prefix returned"));
-(F) BRANCH crates/api/src/booleanevidencejson_tests.rs:167:47 False  [the false side fails the check, and its line ran]  assert!(why.contains(model.name()) && why.contains("no body prefix returned"));
-(F) BRANCH crates/api/src/census_request_tests.rs:327:81 False  [the false side fails the check, and its line ran]  || matches!(located, Err(Unlocated::NotHeld(ref unreadable)) if unreadable.is_empty()),
-(F) BRANCH crates/api/src/census_request_tests.rs:1001:9 False  [the false side fails the check, and its line ran]  page.contains("NSE/CASH") && page.contains("NSE/INDEX"),
-(F) BRANCH crates/api/src/census_request_tests.rs:1001:38 False  [the false side fails the check, and its line ran]  page.contains("NSE/CASH") && page.contains("NSE/INDEX"),
-(F) BRANCH crates/api/src/census_request_tests.rs:1069:9 False  [the false side fails the check, and its line ran]  exchange.contains(r#""target":{"kind":"exchange"}"#)
-(F) BRANCH crates/api/src/census_request_tests.rs:1070:16 False  [the false side fails the check, and its line ran]  && exchange.contains(r#""derivedFrom":[]"#),
-(F) LINE crates/api/src/census_request_tests.rs:1225  [a message argument of the statement at 1221, which ran: evaluated only when it fails]  path.display()
-(F) BRANCH crates/api/src/census_request_tests.rs:1425:13 False  [the false side fails the check, and its line ran]  page.contains("DHAN · CASH · 2025-05") && page.contains("<b>1</b> bar(s)"),
-(F) BRANCH crates/api/src/census_request_tests.rs:1425:57 False  [the false side fails the check, and its line ran]  page.contains("DHAN · CASH · 2025-05") && page.contains("<b>1</b> bar(s)"),
-(F) LINE crates/api/src/census_request_tests.rs:1807  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
-(F) LINE crates/api/src/census_request_tests.rs:1820  [a message argument of the statement at 1817, which ran: evaluated only when it fails]  dhan.note()
-(F) BRANCH crates/api/src/census_request_tests.rs:1977:42 False  [the false side fails the check, and its line ran]  matches!(direct, Err(ref why) if why.kind() == std::io::ErrorKind::InvalidInput),
-(F) LINE crates/api/src/census_request_tests.rs:1986  [a message argument of the statement at 1983, which ran: evaluated only when it fails]  at_path.file_type()
-(F) BRANCH crates/api/src/census_request_tests.rs:2037:9 False  [the else of a let-else that panics, whose line ran]  let census::Census::Unreadable { fault, .. } = &state else {
-(F) LINE crates/api/src/census_request_tests.rs:2038  [panic/unreachable line]  panic!("`read_vendor` names an unreadable census: {state:?}");
-(F) BRANCH crates/api/src/census_request_tests.rs:2040:9 False  [the else of a let-else that panics, whose line ran]  let census::Fault::Io(kind) = *fault else {
-(F) LINE crates/api/src/census_request_tests.rs:2041  [panic/unreachable line]  panic!("`read_vendor` names an I/O fault: {state:?}");
-(F) BRANCH crates/api/src/census_request_tests.rs:2231:73 False  [the false side fails the check, and its line ran]  matches!(state, census::Census::Unreadable { fault, .. } if fault == from),
-(F) BRANCH crates/api/src/census_request_tests.rs:2340:9 False  [the else of a let-else that panics, whose line ran]  let Some(dhan) = one_off.get_mut(1) else {
-(F) LINE crates/api/src/census_request_tests.rs:2341  [panic/unreachable line]  panic!("five rows");
-(F) BRANCH crates/api/src/census_request_tests.rs:2419:21 False  [the else of a let-else that panics, whose line ran]  let Census::Unreadable { ref reason, fault } = after.state else {
-(F) LINE crates/api/src/census_request_tests.rs:2420  [panic/unreachable line]  panic!("{why}: served unreadable, as {:?}", after.state);
-(F) LINE crates/api/src/census_request_tests.rs:2680  [a message argument of the statement at 2676, which ran: evaluated only when it fails]  fixture.fresh_states()
-(F) BRANCH crates/api/src/census_request_tests.rs:2832:31 False  [the false side fails the check, and its line ran]  .all(|record| record.level == telemetry::Level::Warn
-(F) BRANCH crates/api/src/census_request_tests.rs:3066:9 False  [the false side fails the check, and its line ran]  report.contains(concat!("eprintln", "!"))
-(F) BRANCH crates/api/src/census_request_tests.rs:3067:16 False  [the false side fails the check, and its line ran]  && report.contains(".compare_exchange(false, true,"),
-(F) BRANCH crates/api/src/census_request_tests.rs:3167:13 False  [the false side fails the check, and its line ran]  body.contains("NIFTY") && body.contains("2025-05"),
-(F) BRANCH crates/api/src/census_request_tests.rs:3167:39 False  [the false side fails the check, and its line ran]  body.contains("NIFTY") && body.contains("2025-05"),
-(F) LINE crates/api/src/census_request_tests.rs:3243  [a message argument of the statement at 3240, which ran: evaluated only when it fails]  partial.calendar.map(|calendar| calendar.sessions())
-(F) BRANCH crates/api/src/census_request_tests.rs:3300:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
-(F) LINE crates/api/src/census_request_tests.rs:3301  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
-(F) BRANCH crates/api/src/census_request_tests.rs:3686:17 False  [the false side fails the check, and its line ran]  raced.starts_with("503 ")
-(F) BRANCH crates/api/src/census_request_tests.rs:3687:24 False  [the false side fails the check, and its line ran]  && raced.contains(r#""census":"unreadable""#)
-(F) BRANCH crates/api/src/census_request_tests.rs:3688:24 False  [the false side fails the check, and its line ran]  && raced.contains(CONTRADICTED_ABSENCE),
-(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1140:9 False  [the else of a let-else that panics, whose line ran]  let Some(PullUnread::Failed(failed)) = unread else {
-(F) LINE crates/api/src/dayflags_cover_tests.rs:1141  [panic/unreachable line]  panic!("a journal under a file is refused: {unread:?}");
-(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1197:9 False  [the else of a let-else that panics, whose line ran]  let Some(PullUnread::Failed(request)) = unread else {
-(F) LINE crates/api/src/dayflags_cover_tests.rs:1198  [panic/unreachable line]  panic!("a folder is refused on a request: {unread:?}");
-(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1305:13 False  [the else of a let-else that panics, whose line ran]  let Opened::Refused(why) = opened else {
-(F) LINE crates/api/src/dayflags_cover_tests.rs:1306  [panic/unreachable line]  panic!("{symbol:?}: a path the store cannot name is refused");
-(F) BRANCH crates/api/src/dayflags_cover_tests.rs:1335:9 False  [the else of a let-else that panics, whose line ran]  let Opened::Refused(why) = gone else {
-(F) LINE crates/api/src/dayflags_cover_tests.rs:1336  [panic/unreachable line]  panic!("a served revision that is gone is refused");
-(F) LINE crates/api/src/dayflags_filter_tests.rs:144  [a message argument of the statement at 139, which ran: evaluated only when it fails]  says(&record)
-(F) LINE crates/api/src/dayflags_filter_tests.rs:248  [a message argument of the statement at 243, which ran: evaluated only when it fails]  says(&bank)
-(F) LINE crates/api/src/dayflags_filter_tests.rs:435  [a message argument of the statement at 430, which ran: evaluated only when it fails]  says(&put)
-(F) LINE crates/api/src/dayflags_filter_tests.rs:595  [a message argument of the statement at 590, which ran: evaluated only when it fails]  says(&bank)
-(F) LINE crates/api/src/dayflags_filter_tests.rs:871  [a message argument of the statement at 866, which ran: evaluated only when it fails]  says(&abcapital)
-(F) BRANCH crates/api/src/dayflags.rs:6972:13 False  [the false side fails the check, and its line ran]  phases.contains(&"halted") && phases.contains(&"reopening_auction"),
-(F) BRANCH crates/api/src/dayflags.rs:6972:43 False  [the false side fails the check, and its line ran]  phases.contains(&"halted") && phases.contains(&"reopening_auction"),
-(F) LINE crates/api/src/dayflags.rs:7120  [a message argument of the statement at 7115, which ran: evaluated only when it fails]  none["lineage"]
-(F) LINE crates/api/src/dayflags.rs:8478  [a message argument of the statement at 8473, which ran: evaluated only when it fails]  says(muhurat)
-(F) LINE crates/api/src/dayflags.rs:8520  [a message argument of the statement at 8515, which ran: evaluated only when it fails]  says(nothing)
-(F) BRANCH crates/api/src/dayflags.rs:8556:58 False  [the false side fails the check, and its line ran]  matches!(first.via, Via::Walk { ref why } if why.contains("no index")),
-(F) BRANCH crates/api/src/dayflags.rs:8715:42 False  [the false side fails the check, and its line ran]  Via::Walk { ref why } if why.contains("1 of the index's entries cannot be read")
-(F) BRANCH crates/api/src/dayflags.rs:8787:42 False  [the false side fails the check, and its line ran]  Via::Walk { ref why } if why.contains("is not a refusal entry")
-(F) BRANCH crates/api/src/dayflags.rs:8788:24 False  [the false side fails the check, and its line ran]  && why.contains("ZZOIL.idx")
-(F) BRANCH crates/api/src/dayflags.rs:8847:42 False  [the false side fails the check, and its line ran]  Via::Walk { ref why } if why.contains("covers 4 records and the journal holds 2")
-(F) BRANCH crates/api/src/dayflags.rs:8936:13 False  [the else of a let-else that panics, whose line ran]  let Some(PullUnread::Warming { records, .. }) = unread else {
-(F) LINE crates/api/src/dayflags.rs:8937  [panic/unreachable line]  panic!("a request walked beside the start, or the journal is gone: {unread:?}");
-(F) LINE crates/api/src/dayflags.rs:8947  [a message argument of the statement at 8944, which ran: evaluated only when it fails]  got["sources"]
-(F) LINE crates/api/src/dayflags.rs:8959  [a message argument of the statement at 8950, which ran: evaluated only when it fails]  got["notes"]
-(F) BRANCH crates/api/src/dayflags.rs:9704:26 False  [the false side fails the check, and its line ran]  .all(|s| !s.starts_with("the import placed")
-(F) LINE crates/api/src/dayflags.rs:9862  [a message argument of the statement at 9859, which ran: evaluated only when it fails]  sampled_rule_held()
-(F) BRANCH crates/api/src/feeds_route.rs:1763:13 False  [the false side fails the check, and its line ran]  body.contains(r#""standing":"operator""#)
-(F) BRANCH crates/api/src/feeds_route.rs:1764:20 False  [the false side fails the check, and its line ran]  && body.contains(r#""standing":"vendor_doc""#),
-(F) BRANCH crates/api/src/feeds_route.rs:1786:13 False  [the false side fails the check, and its line ran]  oldest.starts_with("20") && oldest.contains('-'),
-(F) BRANCH crates/api/src/feeds_route.rs:1786:41 False  [the false side fails the check, and its line ran]  oldest.starts_with("20") && oldest.contains('-'),
-(F) BRANCH crates/api/src/feeds_route.rs:2011:13 False  [the false side fails the check, and its line ran]  fields.contains(r#""kind":"unknown""#) && fields.contains(r#""source":null"#),
-(F) BRANCH crates/api/src/feeds_route.rs:2011:55 False  [the false side fails the check, and its line ran]  fields.contains(r#""kind":"unknown""#) && fields.contains(r#""source":null"#),
-(F) BRANCH crates/api/src/feeds_route.rs:2233:13 False  [the false side fails the check, and its line ran]  !why.is_empty() && !why.contains("vendor-data"),
-(F) BRANCH crates/api/src/feeds_route.rs:2233:32 False  [the false side fails the check, and its line ran]  !why.is_empty() && !why.contains("vendor-data"),
-(F) BRANCH crates/api/src/feeds_route.rs:2434:17 False  [the false side fails the check, and its line ran]  feed["archive"].is_null() && feed["window"].is_null(),
-(F) BRANCH crates/api/src/feeds_route.rs:2434:46 False  [the false side fails the check, and its line ran]  feed["archive"].is_null() && feed["window"].is_null(),
-(F) BRANCH crates/api/src/feeds_route.rs:2452:13 False  [the false side fails the check, and its line ran]  tf.secs() > 60 && tf.secs() % 60 == 0 && *tf != store::path::Timeframe::DAY_1
-(F) BRANCH crates/api/src/feeds_route.rs:2452:31 False  [the false side fails the check, and its line ran]  tf.secs() > 60 && tf.secs() % 60 == 0 && *tf != store::path::Timeframe::DAY_1
-(F) BRANCH crates/api/src/feeds_route.rs:2487:17 False  [the false side fails the check, and its line ran]  assert!(!ready && why.contains("has no census row"), "{why}");
-(F) BRANCH crates/api/src/feeds_route.rs:2487:27 False  [the false side fails the check, and its line ran]  assert!(!ready && why.contains("has no census row"), "{why}");
-(F) BRANCH crates/api/src/feeds_route.rs:2775:13 False  [the false side fails the check, and its line ran]  why.contains("2099-01-01") && why.contains("2026-10-15"),
-(F) BRANCH crates/api/src/feeds_route.rs:2775:43 False  [the false side fails the check, and its line ran]  why.contains("2099-01-01") && why.contains("2026-10-15"),
-(F) BRANCH crates/api/src/feeds_route.rs:2829:13 False  [the false side fails the check, and its line ran]  source.contains("2099-01-01") && source.contains("passed over"),
-(F) BRANCH crates/api/src/feeds_route.rs:2829:46 False  [the false side fails the check, and its line ran]  source.contains("2099-01-01") && source.contains("passed over"),
-(F) LINE crates/api/src/feeds_route.rs:3215  [a message argument of the statement at 3211, which ran: evaluated only when it fails]  3 * reps
-(F) BRANCH crates/api/src/feeds_route.rs:3547:36 False  [the false side fails the check, and its line ran]  .is_some_and(|why| why.contains("cannot be read") && why.contains(hole)),
-(F) LINE crates/api/src/feeds_route.rs:3573  [a message argument of the statement at 3570, which ran: evaluated only when it fails]  feed.display()
-(F) BRANCH crates/api/src/feeds_route.rs:3577:42 False  [the false side fails the check, and its line ran]  feed.serves(rung) || feed.descriptor().history_row(rung).is_none(),
-(F) LINE crates/api/src/feeds_route.rs:3579  [a message argument of the statement at 3576, which ran: evaluated only when it fails]  feed.display(),
-(F) LINE crates/api/src/feeds_route.rs:3580  [a message argument of the statement at 3576, which ran: evaluated only when it fails]  rung.dir()
-(F) BRANCH crates/api/src/feeds_route.rs:3589:32 False  [the false side fails the check, and its line ran]  || spec.fno.by_token().is_some(),
-(F) LINE crates/api/src/feeds_route.rs:3591  [a message argument of the statement at 3586, which ran: evaluated only when it fails]  feed.display()
-(F) LINE crates/api/src/feeds_route.rs:3600  [a message argument of the statement at 3596, which ran: evaluated only when it fails]  feed.display()
-(F) LINE crates/api/src/feeds_route.rs:3608  [a message argument of the statement at 3605, which ran: evaluated only when it fails]  feed.display()
-(F) LINE crates/api/src/feeds_route.rs:3620  [a message argument of the statement at 3617, which ran: evaluated only when it fails]  target.as_str()
-(F) BRANCH crates/api/src/frontierjson.rs:1085:13 False  [the false side fails the check, and its line ran]  receipt < child && child < reconcile,
-(F) BRANCH crates/api/src/frontierjson.rs:1085:32 False  [the false side fails the check, and its line ran]  receipt < child && child < reconcile,
-(F) BRANCH crates/api/src/frontierjson.rs:1275:13 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":2"#) && !body.contains(r#""rank":1"#),
-(F) BRANCH crates/api/src/frontierjson.rs:1275:45 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":2"#) && !body.contains(r#""rank":1"#),
-(F) BRANCH crates/api/src/frontierjson.rs:1284:17 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":1"#) && body.contains(r#""rank":2"#),
-(F) BRANCH crates/api/src/frontierjson.rs:1284:49 False  [the false side fails the check, and its line ran]  body.contains(r#""rank":1"#) && body.contains(r#""rank":2"#),
-(F) LINE crates/api/src/frontierjson.rs:1620  [a message argument of the statement at 1616, which ran: evaluated only when it fails]  root.display()
-(F) BRANCH crates/api/src/frontierjson.rs:1623:17 False  [the false side fails the check, and its line ran]  body.contains(&format!("{why}. "))
-(F) BRANCH crates/api/src/frontierjson.rs:1624:24 False  [the false side fails the check, and its line ran]  && body.contains("could not be checked for absence: "),
-(F) LINE crates/api/src/frontierjson.rs:1626  [a message argument of the statement at 1622, which ran: evaluated only when it fails]  root.display()
-(F) LINE crates/api/src/gaps_route.rs:2636  [panic/unreachable line]  panic!("a reader gone first: no month is read")
-(F) BRANCH crates/api/src/gaps_route.rs:3161:13 False  [the false side fails the check, and its line ran]  three.contains(r#""months":3"#) && three.contains(r#""months_absent":2"#),
-(F) BRANCH crates/api/src/gaps_route.rs:3161:48 False  [the false side fails the check, and its line ran]  three.contains(r#""months":3"#) && three.contains(r#""months_absent":2"#),
-(F) BRANCH crates/api/src/gaps_route.rs:3179:13 False  [the false side fails the check, and its line ran]  one.contains(r#""months":1"#) && one.contains(r#""months_absent":0"#),
-(F) BRANCH crates/api/src/gaps_route.rs:3179:46 False  [the false side fails the check, and its line ran]  one.contains(r#""months":1"#) && one.contains(r#""months_absent":0"#),
-(F) BRANCH crates/api/src/gaps_route.rs:3203:13 False  [the false side fails the check, and its line ran]  typo.contains("YYYY-MM") && typo.contains("to"),
-(F) BRANCH crates/api/src/gaps_route.rs:3203:41 False  [the false side fails the check, and its line ran]  typo.contains("YYYY-MM") && typo.contains("to"),
-(F) BRANCH crates/api/src/gaps_route.rs:3241:13 False  [the false side fails the check, and its line ran]  three.contains(r#""source":"record""#) && three.contains(r#""voted_by":[]"#),
-(F) BRANCH crates/api/src/gaps_route.rs:3241:55 False  [the false side fails the check, and its line ran]  three.contains(r#""source":"record""#) && three.contains(r#""voted_by":[]"#),
-(F) BRANCH crates/api/src/gaps_route.rs:3475:13 False  [the false side fails the check, and its line ran]  reasons.contains("no-print") && reasons.contains("expired"),
-(F) BRANCH crates/api/src/gaps_route.rs:3475:45 False  [the false side fails the check, and its line ran]  reasons.contains("no-print") && reasons.contains("expired"),
-(F) BRANCH crates/api/src/gaps_route.rs:3657:37 False  [the false side fails the check, and its line ran]  .is_some_and(|from| from.contains("import journal") && from.contains("indices")),
-(F) BRANCH crates/api/src/gaps_route.rs:3666:28 False  [the false side fails the check, and its line ran]  .all(|run| run["reason"] == "not-imported" && run["minutes"] == 375),
-(F) BRANCH crates/api/src/gaps_route.rs:3742:37 False  [the false side fails the check, and its line ran]  .is_some_and(|from| from.contains("2099-01-01") && from.contains("passed over")),
-(F) BRANCH crates/api/src/gaps_route.rs:3797:21 False  [the false side fails the check, and its line ran]  assert!(reach.not_yet(day(16)) && !reach.not_imported(day(16)));
-(F) BRANCH crates/api/src/gaps_route.rs:3797:47 False  [the false side fails the check, and its line ran]  assert!(reach.not_yet(day(16)) && !reach.not_imported(day(16)));
-(F) BRANCH crates/api/src/gaps_route.rs:4014:13 False  [the false side fails the check, and its line ran]  why.contains("NSE/INDEX") && why.contains("NSE/CASH"),
-(F) BRANCH crates/api/src/gaps_route.rs:4014:42 False  [the false side fails the check, and its line ran]  why.contains("NSE/INDEX") && why.contains("NSE/CASH"),
-(F) LINE crates/api/src/gaps_route.rs:4463  [a message argument of the statement at 4459, which ran: evaluated only when it fails]  iso(*halt)
-(F) BRANCH crates/api/src/gaps_route.rs:4687:17 False  [the false side fails the check, and its line ran]  !faults.is_empty()
-(F) BRANCH crates/api/src/gaps_route.rs:4688:24 False  [the false side fails the check, and its line ran]  && !faults
-(F) BRANCH crates/api/src/gaps_route.rs:5026:59 False  [the false side fails the check, and its line ran]  pull::calendar::DayKind::Open(session) if session.expects(555)
-(F) BRANCH crates/api/src/gaps_route.rs:5296:13 False  [the false side fails the check, and its line ran]  body.contains(&crate::calendar_of::build::MAX_BUILDS.to_string())
-(F) BRANCH crates/api/src/gaps_route.rs:5297:20 False  [the false side fails the check, and its line ran]  && body.contains("calendar=record"),
-(F) BRANCH crates/api/src/gaps_route.rs:5470:17 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = answer else {
-(F) LINE crates/api/src/gaps_route.rs:5471  [panic/unreachable line]  panic!("a vote with no build behind it answered");
-(F) BRANCH crates/api/src/gaps_route.rs:5489:13 False  [the else of a let-else that panics, whose line ran]  let Joined::Lead(queued) = builds.votes.join(&key, Some(&now), None) else {
-(F) LINE crates/api/src/gaps_route.rs:5490  [panic/unreachable line]  panic!("the first join leads");
-(F) BRANCH crates/api/src/gaps_route.rs:5500:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = voted(&site, &asked).await else {
-(F) LINE crates/api/src/gaps_route.rs:5501  [panic/unreachable line]  panic!("a parked refusal is handed out as it is");
-(F) BRANCH crates/api/src/gaps_route.rs:5508:17 False  [the else of a let-else that panics, whose line ran]  let Joined::Lead(build) = builds.votes.join(&key, Some(&now), None) else {
-(F) LINE crates/api/src/gaps_route.rs:5509  [panic/unreachable line]  panic!("room for build {other}");
-(F) BRANCH crates/api/src/gaps_route.rs:5513:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = voted(&site, &asked).await else {
-(F) LINE crates/api/src/gaps_route.rs:5514  [panic/unreachable line]  panic!("a full build map admits no vote");
-(F) BRANCH crates/api/src/gaps_route.rs:5562:17 False  [the false side fails the check, and its line ran]  output.status.success() && stdout.contains("1 passed"),
-(F) BRANCH crates/api/src/gaps_route.rs:5562:44 False  [the false side fails the check, and its line ran]  output.status.success() && stdout.contains("1 passed"),
-(F) LINE crates/api/src/gaps_route.rs:5564  [a message argument of the statement at 5561, which ran: evaluated only when it fails]  String::from_utf8_lossy(&output.stderr)
-(F) BRANCH crates/api/src/gaps_route.rs:5623:17 False  [the else of a let-else that panics, whose line ran]  let Err((status, _, body)) = voted(&site, &asked).await else {
-(F) LINE crates/api/src/gaps_route.rs:5624  [panic/unreachable line]  panic!("a vote whose reading was not admitted answered");
-(F) LINE crates/api/src/http_admission_tests.rs:686  [a message argument of the statement at 683, which ran: evaluated only when it fails]  String::from_utf8_lossy(&output.stderr)
-(F) BRANCH crates/api/src/imports.rs:2088:17 False  [the false side fails the check, and its line ran]  assert!(why.contains("bogus") && why.contains("reasn"), "{why}");
-(F) BRANCH crates/api/src/imports.rs:2088:42 False  [the false side fails the check, and its line ran]  assert!(why.contains("bogus") && why.contains("reasn"), "{why}");
-(F) LINE crates/api/src/imports.rs:2563  [a message argument of the statement at 2559, which ran: evaluated only when it fails]  ids(&ends_inside)
-(F) BRANCH crates/api/src/indexstoplaunch_tests.rs:600:13 False  [the false side fails the check, and its line ran]  start.elapsed() <= std::time::Duration::from_secs(45)
-(F) BRANCH crates/api/src/indexstoplaunch_tests.rs:601:20 False  [the false side fails the check, and its line ran]  && std::fs::metadata(&log).unwrap().len() <= 1024 * 1024,
-(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:333:13 False  [the false side fails the check, and its line ran]  elsewhere.contains("Native qualification") && elsewhere.contains("another-root"),
-(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:333:59 False  [the false side fails the check, and its line ran]  elsewhere.contains("Native qualification") && elsewhere.contains("another-root"),
-(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:470:13 False  [the false side fails the check, and its line ran]  elsewhere.starts_with("original_context_refused: ") && elsewhere.contains("(os error 2)"),
-(F) BRANCH crates/api/src/indexstopqualificationjson_saved_tests.rs:470:68 False  [the false side fails the check, and its line ran]  elsewhere.starts_with("original_context_refused: ") && elsewhere.contains("(os error 2)"),
-(F) BRANCH crates/api/src/ingest_cover_tests.rs:118:13 False  [the else of a let-else that panics, whose line ran]  let Refusal::UnreadableRate { ref got } = refused else {
-(F) LINE crates/api/src/ingest_cover_tests.rs:119  [panic/unreachable line]  panic!("{typed}: {refused:?}");
-(F) BRANCH crates/api/src/ingest_cover_tests.rs:132:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::UnreadableRate { ref got } = refused else {
-(F) LINE crates/api/src/ingest_cover_tests.rs:133  [panic/unreachable line]  panic!("{refused:?}");
-(F) BRANCH crates/api/src/ingest_cover_tests.rs:165:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::ClockUnusable { .. } = refused else {
-(F) LINE crates/api/src/ingest_cover_tests.rs:166  [panic/unreachable line]  panic!("{refused:?}");
-(F) BRANCH crates/api/src/ingest_cover_tests.rs:180:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::ClockUnusable { .. } = named else {
-(F) LINE crates/api/src/ingest_cover_tests.rs:181  [panic/unreachable line]  panic!("{named:?}");
-(F) BRANCH crates/api/src/ingest_cover_tests.rs:188:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::ClockUnusable { .. } = first else {
-(F) LINE crates/api/src/ingest_cover_tests.rs:189  [panic/unreachable line]  panic!("{first:?}");
-(F) BRANCH crates/api/src/ingest_cover_tests.rs:231:9 False  [the else of a let-else that panics, whose line ran]  let Refusal::DateImpossible { field, ref got, .. } = zeros else {
-(F) LINE crates/api/src/ingest_cover_tests.rs:232  [panic/unreachable line]  panic!("{zeros:?}");
-(F) LINE crates/api/src/ingest.rs:2518  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
-(F) BRANCH crates/api/src/ingest.rs:2623:13 False  [the false side fails the check, and its line ran]  text.contains("2026-08-08") && text.contains("2026-08-07"),
-(F) BRANCH crates/api/src/ingest.rs:2623:44 False  [the false side fails the check, and its line ran]  text.contains("2026-08-08") && text.contains("2026-08-07"),
-(F) BRANCH crates/api/src/ingest.rs:2732:13 False  [the false side fails the check, and its line ran]  text.contains("expiry") && text.contains("2024-2-9"),
-(F) BRANCH crates/api/src/ingest.rs:2732:40 False  [the false side fails the check, and its line ran]  text.contains("expiry") && text.contains("2024-2-9"),
-(F) BRANCH crates/api/src/ingest.rs:2770:13 False  [the false side fails the check, and its line ran]  text.contains("2022-02-08") && text.contains("2022-01-08"),
-(F) BRANCH crates/api/src/ingest.rs:2770:44 False  [the false side fails the check, and its line ran]  text.contains("2022-02-08") && text.contains("2022-01-08"),
-(F) BRANCH crates/api/src/ingest.rs:2816:17 False  [the false side fails the check, and its line ran]  assert!(text.contains("3654") && text.contains("3653"), "{text}");
-(F) BRANCH crates/api/src/ingest.rs:2816:42 False  [the false side fails the check, and its line ran]  assert!(text.contains("3654") && text.contains("3653"), "{text}");
-(F) LINE crates/api/src/ingest.rs:2832  [a message argument of the statement at 2829, which ran: evaluated only when it fails]  target.slug(),
-(F) LINE crates/api/src/ingest.rs:2833  [a message argument of the statement at 2829, which ran: evaluated only when it fails]  target.note()
-(F) LINE crates/api/src/ingest.rs:2840  [a message argument of the statement at 2837, which ran: evaluated only when it fails]  target.slug(),
-(F) LINE crates/api/src/ingest.rs:2841  [a message argument of the statement at 2837, which ran: evaluated only when it fails]  target.note()
-(F) LINE crates/api/src/ingest.rs:2847  [a message argument of the statement at 2844, which ran: evaluated only when it fails]  target.slug(),
-(F) LINE crates/api/src/ingest.rs:2848  [a message argument of the statement at 2844, which ran: evaluated only when it fails]  target.note()
-(F) LINE crates/api/src/ingest.rs:3110  [a message argument of the statement at 3105, which ran: evaluated only when it fails]  target.slug()
-(F) LINE crates/api/src/ingest.rs:3145  [a message argument of the statement at 3142, which ran: evaluated only when it fails]  tier.slug()
-(F) LINE crates/api/src/ingest.rs:3190  [a message argument of the statement at 3183, which ran: evaluated only when it fails]  target.slug()
-(F) LINE crates/api/src/ingest.rs:3403  [a message argument of the statement at 3400, which ran: evaluated only when it fails]  target.slug()
-(F) BRANCH crates/api/src/ingest.rs:3910:21 False  [the false side fails the check, and its line ran]  assert!(text.contains(live) && text.contains("2026-08-07"), "{text}");
-(F) BRANCH crates/api/src/ingest.rs:3910:44 False  [the false side fails the check, and its line ran]  assert!(text.contains(live) && text.contains("2026-08-07"), "{text}");
-(F) LINE crates/api/src/ingest.rs:3928  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
-(F) LINE crates/api/src/ingest.rs:4584  [a message argument of the statement at 4580, which ran: evaluated only when it fails]  root.display()
-(F) BRANCH crates/api/src/ingest.rs:4941:13 False  [the false side fails the check, and its line ran]  idle["in_flight"].is_null() && idle["run_target"].is_null(),
-(F) BRANCH crates/api/src/ingest.rs:4941:44 False  [the false side fails the check, and its line ran]  idle["in_flight"].is_null() && idle["run_target"].is_null(),
-(F) LINE crates/api/src/ladder.rs:1077  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
-(F) LINE crates/api/src/ladder.rs:1092  [the no-match arm of the matches! that is the whole check (llvm-cov maps its _ => false to this line): the side that fails it]  matches!(
-(F) LINE crates/api/src/ladder.rs:1297  [a message argument of the statement at 1293, which ran: evaluated only when it fails]  tf.as_str()
-(F) LINE crates/api/src/ladder.rs:1310  [a message argument of the statement at 1307, which ran: evaluated only when it fails]  tf.as_str()
-(F) BRANCH crates/api/src/logs_cover_tests.rs:747:9 False  [the else of a let-else that panics, whose line ran]  let &[one, two, ..] = halves.as_slice() else {
-(F) LINE crates/api/src/logs_cover_tests.rs:748  [panic/unreachable line]  panic!("a run of options can write two directories: {halves:?}")
-(F) LINE crates/api/src/logs_cover_tests.rs:902  [a message argument of the statement at 899, which ran: evaluated only when it fails]  String::from_utf8_lossy(&reply)
-(F) BRANCH crates/api/src/logs_units_tests.rs:77:17 False  [the false side fails the check, and its line ran]  keys.contract.is_none() && keys.code.is_none() && keys.reason.is_none(),
-(F) BRANCH crates/api/src/logs_units_tests.rs:77:44 False  [the false side fails the check, and its line ran]  keys.contract.is_none() && keys.code.is_none() && keys.reason.is_none(),
-(F) BRANCH crates/api/src/logs_units_tests.rs:77:67 False  [the false side fails the check, and its line ran]  keys.contract.is_none() && keys.code.is_none() && keys.reason.is_none(),
-(F) BRANCH crates/api/src/logs_units_tests.rs:89:13 False  [the false side fails the check, and its line ran]  assert!(keys.month.is_none() && keys.code.is_none() && keys.contract.is_none());
-(F) BRANCH crates/api/src/logs_units_tests.rs:89:37 False  [the false side fails the check, and its line ran]  assert!(keys.month.is_none() && keys.code.is_none() && keys.contract.is_none());
-(F) BRANCH crates/api/src/logs_units_tests.rs:89:60 False  [the false side fails the check, and its line ran]  assert!(keys.month.is_none() && keys.code.is_none() && keys.contract.is_none());
-(F) BRANCH crates/api/src/logs_units_tests.rs:107:13 False  [the false side fails the check, and its line ran]  assert!(tail.records.is_empty() && tail.errors.is_empty());
-(F) BRANCH crates/api/src/logs_units_tests.rs:107:40 False  [the false side fails the check, and its line ran]  assert!(tail.records.is_empty() && tail.errors.is_empty());
-(F) BRANCH crates/api/src/logs_units_tests.rs:251:9 False  [the else of a let-else that panics, whose line ran]  let DirState::Unreadable(why) = state else {
-(F) LINE crates/api/src/logs_units_tests.rs:252  [panic/unreachable line]  panic!("a file is no log directory: {word}");
-(F) BRANCH crates/api/src/logs.rs:6746:17 False  [the false side fails the check, and its line ran]  assert!(with("cross-site") && with("same-site"));
-(F) BRANCH crates/api/src/logs.rs:6746:39 False  [the false side fails the check, and its line ran]  assert!(with("cross-site") && with("same-site"));
-(F) BRANCH crates/api/src/logs.rs:6747:17 False  [the false side fails the check, and its line ran]  assert!(!with("same-origin") && !with("none"));
-(F) BRANCH crates/api/src/logs.rs:6747:41 False  [the false side fails the check, and its line ran]  assert!(!with("same-origin") && !with("none"));
-(F) BRANCH crates/api/src/logs.rs:6890:13 False  [the false side fails the check, and its line ran]  json.contains(r#""hit_scan_cap":false"#) && json.contains(r#""malformed":0"#),
-(F) BRANCH crates/api/src/logs.rs:6890:57 False  [the false side fails the check, and its line ran]  json.contains(r#""hit_scan_cap":false"#) && json.contains(r#""malformed":0"#),
-(F) BRANCH crates/api/src/logs.rs:7203:13 False  [the false side fails the check, and its line ran]  all.contains("landed") && all.contains("did not land"),
-(F) BRANCH crates/api/src/logs.rs:7203:39 False  [the false side fails the check, and its line ran]  all.contains("landed") && all.contains("did not land"),
-(F) BRANCH crates/api/src/logs.rs:7328:13 False  [the false side fails the check, and its line ran]  plain.contains("BRUTEX_LOG_LEVEL=debug") && !plain.contains("the filters in force"),
-(F) BRANCH crates/api/src/logs.rs:7328:57 False  [the false side fails the check, and its line ran]  plain.contains("BRUTEX_LOG_LEVEL=debug") && !plain.contains("the filters in force"),
-(F) LINE crates/api/src/logs.rs:7371  [a message argument of the statement at 7367, which ran: evaluated only when it fails]  note_of(&after_restart)
-(F) LINE crates/api/src/logs.rs:7376  [a message argument of the statement at 7373, which ran: evaluated only when it fails]  note_of(&after_restart)
-(F) LINE crates/api/src/logs.rs:7385  [a message argument of the statement at 7382, which ran: evaluated only when it fails]  note_of(&same_process)
-(F) LINE crates/api/src/logs.rs:7395  [a message argument of the statement at 7392, which ran: evaluated only when it fails]  note_of(&rolled)
-(F) LINE crates/api/src/logs.rs:7403  [a message argument of the statement at 7400, which ran: evaluated only when it fails]  note_of(&none)
-(F) BRANCH crates/api/src/logs.rs:7442:13 False  [the false side fails the check, and its line ran]  page.contains("clock is held") && page.contains("3 event(s)"),
-(F) BRANCH crates/api/src/logs.rs:7442:47 False  [the false side fails the check, and its line ran]  page.contains("clock is held") && page.contains("3 event(s)"),
-(F) BRANCH crates/api/src/logs.rs:7448:13 False  [the false side fails the check, and its line ran]  json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
-(F) BRANCH crates/api/src/logs.rs:7448:51 False  [the false side fails the check, and its line ran]  json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
-(F) BRANCH crates/api/src/logs.rs:7525:13 False  [the false side fails the check, and its line ran]  page.contains("halt") && page.contains("2 roll(s) failed"),
-(F) BRANCH crates/api/src/logs.rs:7525:38 False  [the false side fails the check, and its line ran]  page.contains("halt") && page.contains("2 roll(s) failed"),
-(F) BRANCH crates/api/src/logs.rs:7542:13 False  [the false side fails the check, and its line ran]  none.contains("No sink") && none.contains("older run"),
-(F) BRANCH crates/api/src/logs.rs:7542:41 False  [the false side fails the check, and its line ran]  none.contains("No sink") && none.contains("older run"),
-(F) BRANCH crates/api/src/logs.rs:7864:13 False  [the false side fails the check, and its line ran]  both.contains("<code>/tmp/served</code>")
-(F) BRANCH crates/api/src/logs.rs:7865:20 False  [the false side fails the check, and its line ran]  && both.contains("<code>/tmp/served/cli</code>"),
-(F) BRANCH crates/api/src/logs.rs:8040:13 False  [the false side fails the check, and its line ran]  body.starts_with(r#"{"records":["#) && body.ends_with('}'),
-(F) BRANCH crates/api/src/logs.rs:8040:52 False  [the false side fails the check, and its line ran]  body.starts_with(r#"{"records":["#) && body.ends_with('}'),
-(F) BRANCH crates/api/src/logs.rs:8774:17 False  [the false side fails the check, and its line ran]  assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
-(F) BRANCH crates/api/src/logs.rs:8774:45 False  [the false side fails the check, and its line ran]  assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
-(F) LINE crates/api/src/logs.rs:9076  [a message argument of the statement at 9073, which ran: evaluated only when it fails]  dir.name()
-(F) LINE crates/api/src/logs.rs:9092  [a message argument of the statement at 9089, which ran: evaluated only when it fails]  kind.as_str(),
-(F) LINE crates/api/src/logs.rs:9100  [a message argument of the statement at 9095, which ran: evaluated only when it fails]  written.name()
-(F) LINE crates/api/src/logs.rs:9123  [a message argument of the statement at 9118, which ran: evaluated only when it fails]  dir.display()
-(F) BRANCH crates/api/src/logs.rs:9173:17 False  [the else of a let-else that panics, whose line ran]  let DirState::Unreadable(why) = state else {
-(F) LINE crates/api/src/logs.rs:9174  [panic/unreachable line]  panic!("{half} reads {state:?}, not unreadable");
-(F) BRANCH crates/api/src/logs.rs:9222:21 False  [the false side fails the check, and its line ran]  said.starts_with(&format!("{dir} unreadable: "))
-(F) BRANCH crates/api/src/logs.rs:9223:28 False  [the false side fails the check, and its line ran]  && said.contains("Permission denied"),
-(F) LINE crates/api/src/logs.rs:9371  [a message argument of the statement at 9368, which ran: evaluated only when it fails]  first.errors
-(F) BRANCH crates/api/src/logs.rs:9513:28 False  [the false side fails the check, and its line ran]  .all(|row| row["half"] == "gdfl/indices" && row["source"] == "audit"),
-(F) BRANCH crates/api/src/logs.rs:10061:17 False  [the false side fails the check, and its line ran]  got.ignored.contains(&(bad.0, bad.1.to_owned()))
-(F) BRANCH crates/api/src/logs.rs:10062:24 False  [the false side fails the check, and its line ran]  && got.ignored.contains(&(good, said.to_owned())),
-(F) LINE crates/api/src/logs.rs:10142  [a message argument of the statement at 10138, which ran: evaluated only when it fails]  got["keyed"]
-(F) LINE crates/api/src/logs.rs:10149  [a message argument of the statement at 10146, which ran: evaluated only when it fails]  got["keyed"]
-(F) LINE crates/api/src/logs.rs:10228  [a message argument of the statement at 10224, which ran: evaluated only when it fails]  got["keyed"]
-(F) LINE crates/api/src/logs.rs:10271  [a message argument of the statement at 10264, which ran: evaluated only when it fails]  none["keyed"]
-(F) BRANCH crates/api/src/logs.rs:10793:17 False  [the false side fails the check, and its line ran]  assert!(none["audit_stream"].is_null() && none["state_stream"].is_null());
-(F) BRANCH crates/api/src/logs.rs:10793:51 False  [the false side fails the check, and its line ran]  assert!(none["audit_stream"].is_null() && none["state_stream"].is_null());
-(F) LINE crates/api/src/logs.rs:10870  [a message argument of the statement at 10867, which ran: evaluated only when it fails]  held.bytes - read
-(F) LINE crates/api/src/logs.rs:10918  [a message argument of the statement at 10915, which ran: evaluated only when it fails]  now.unread("options")
-(F) LINE crates/api/src/logs.rs:11022  [a message argument of the statement at 11019, which ran: evaluated only when it fails]  held.malformed
-(F) BRANCH crates/api/src/logs.rs:11253:17 False  [the false side fails the check, and its line ran]  assert!(none.pointers.is_empty() && !more);
-(F) BRANCH crates/api/src/logs.rs:11253:45 False  [the false side fails the check, and its line ran]  assert!(none.pointers.is_empty() && !more);
-(F) BRANCH crates/api/src/logs.rs:11272:56 False  [the false side fails the check, and its line ran]  matches!(spent, Ok(Walked::Stopped(at)) if at == len),
-(F) BRANCH crates/api/src/logs.rs:11284:57 False  [the false side fails the check, and its line ran]  matches!(walked, Ok(Walked::Stopped(at)) if at == first),
-(F) BRANCH crates/api/src/logs.rs:11293:59 False  [the false side fails the check, and its line ran]  assert!(matches!(torn, Ok(Walked::Stopped(at)) if at == len - 1));
-(F) BRANCH crates/api/src/logs.rs:11295:17 False  [the false side fails the check, and its line ran]  assert!(out.page.pointers.is_empty() && out.damage.is_empty());
-(F) BRANCH crates/api/src/logs.rs:11295:49 False  [the false side fails the check, and its line ran]  assert!(out.page.pointers.is_empty() && out.damage.is_empty());
-(F) BRANCH crates/api/src/logs.rs:11301:59 False  [the false side fails the check, and its line ran]  assert!(matches!(full, Ok(Walked::Stopped(at)) if at == len));
-(F) BRANCH crates/api/src/logs.rs:11456:13 False  [the false side fails the check, and its line ran]  probed.contains(&"day") && !probed.contains(&"span"),
-(F) BRANCH crates/api/src/logs.rs:11456:40 False  [the false side fails the check, and its line ran]  probed.contains(&"day") && !probed.contains(&"span"),
-(F) LINE crates/api/src/logs.rs:11470  [a message argument of the statement at 11467, which ran: evaluated only when it fails]  again["keyed"]
-(F) LINE crates/api/src/logs.rs:11528  [a message argument of the statement at 11524, which ran: evaluated only when it fails]  old["keyed"]
-(F) LINE crates/api/src/logs.rs:11667  [a message argument of the statement at 11663, which ran: evaluated only when it fails]  second["keyed"]
-(F) LINE crates/api/src/logs.rs:11732  [a message argument of the statement at 11728, which ran: evaluated only when it fails]  second["keyed"]
-(F) LINE crates/api/src/logs.rs:11739  [a message argument of the statement at 11736, which ran: evaluated only when it fails]  second["keyed"]["index"]
-(F) BRANCH crates/api/src/logs.rs:11885:17 False  [the false side fails the check, and its line ran]  assert!(read > 0 && read <= 1_000, "{read}");
-(F) BRANCH crates/api/src/logs.rs:11885:29 False  [the false side fails the check, and its line ran]  assert!(read > 0 && read <= 1_000, "{read}");
-(F) BRANCH crates/api/src/logs.rs:11913:20 False  [the false side fails the check, and its line ran]  if why.contains(&rolled.display().to_string())),
-(F) BRANCH crates/api/src/logs.rs:12108:13 False  [the false side fails the check, and its line ran]  why.contains("damaged.ndjson") && why.contains("undecodable lines"),
-(F) BRANCH crates/api/src/logs.rs:12108:47 False  [the false side fails the check, and its line ran]  why.contains("damaged.ndjson") && why.contains("undecodable lines"),
-(F) BRANCH crates/api/src/logs.rs:12192:40 False  [the false side fails the check, and its line ran]  ms > to || start < cut.at,
-(F) BRANCH crates/api/src/logs.rs:12218:13 False  [the false side fails the check, and its line ran]  exact > 0 && around > 0,
-(F) BRANCH crates/api/src/logs.rs:12218:26 False  [the false side fails the check, and its line ran]  exact > 0 && around > 0,
-(F) LINE crates/api/src/logs.rs:12278  [a message argument of the statement at 12275, which ran: evaluated only when it fails]  read_words(&indexed)
-(F) BRANCH crates/api/src/mastersrun.rs:1184:13 False  [the else of a let-else that panics, whose line ran]  let [record] = summary.as_slice() else {
-(F) LINE crates/api/src/mastersrun.rs:1185  [panic/unreachable line]  panic!("{mode}: one summary record: {summary:?}");
-(F) BRANCH crates/api/src/mastersrun.rs:1385:13 False  [the else of a let-else that panics, whose line ran]  let masters::Got::Refused {
-(F) LINE crates/api/src/mastersrun.rs:1389  [panic/unreachable line]  panic!("the primary attempt is a refusal: {tried:?}");
-(F) BRANCH crates/api/src/mastersrun.rs:1913:13 False  [the else of a let-else that panics, whose line ran]  let Landed::Refused(ref why) = landed else {
-(F) LINE crates/api/src/mastersrun.rs:1914  [panic/unreachable line]  panic!("nothing answered, so nothing can be written: {landed:?}");
-(F) BRANCH crates/api/src/mastersrun.rs:2193:13 False  [the false side fails the check, and its line ran]  credentialed.contains("Landed::Refused(why.clone())")
-(F) BRANCH crates/api/src/mastersrun.rs:2194:20 False  [the false side fails the check, and its line ran]  && credentialed.contains("Fetched::default()"),
-(F) BRANCH crates/api/src/mastersrun.rs:2488:17 False  [the else of a let-else that panics, whose line ran]  let Err(ref why) = refused else {
-(F) LINE crates/api/src/mastersrun.rs:2489  [panic/unreachable line]  panic!("{}: {refused:?}", folder.display());
-(F) BRANCH crates/api/src/month_change.rs:534:13 False  [the false side fails the check, and its line ran]  !can_be_rebased(Segment::Index, "NIFTY")
-(F) BRANCH crates/api/src/month_change.rs:535:20 False  [the false side fails the check, and its line ran]  && can_be_rebased(Segment::Cash, "RELIANCE")
-(F) BRANCH crates/api/src/month_change.rs:536:20 False  [the false side fails the check, and its line ran]  && can_be_rebased(Segment::Fno, "RELIANCE")
-(F) BRANCH crates/api/src/nse_identity.rs:490:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = absent.confirm(&merged, "RELIANCE") else {
-(F) LINE crates/api/src/nse_identity.rs:491  [panic/unreachable line]  panic!("an absent file refuses");
-(F) BRANCH crates/api/src/nse_identity.rs:503:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = confirmed else {
-(F) LINE crates/api/src/nse_identity.rs:504  [panic/unreachable line]  panic!("an unreadable file refuses");
-(F) BRANCH crates/api/src/nse_identity.rs:524:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::ZerodhaUndated(why)) = confirmed else {
-(F) LINE crates/api/src/nse_identity.rs:525  [panic/unreachable line]  panic!("an undated Zerodha dump refuses");
-(F) BRANCH crates/api/src/nse_identity.rs:532:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = confirmed else {
-(F) LINE crates/api/src/nse_identity.rs:533  [panic/unreachable line]  panic!("an oversized file refuses");
-(F) BRANCH crates/api/src/nse_identity.rs:541:13 False  [the else of a let-else that panics, whose line ran]  let Err(Refusal::FileUnavailable(why)) = confirmed else {
-(F) LINE crates/api/src/nse_identity.rs:542  [panic/unreachable line]  panic!("a file at the bound that is not the constituent file refuses");
-(F) LINE crates/api/src/ops_safety_tests.rs:82  [panic/unreachable line]  panic!("the store-read pool stayed full for two seconds");
-(F) BRANCH crates/api/src/ops_safety_tests.rs:265:9 False  [the false side fails the check, and its line ran]  drift.contains("1128 bytes") && drift.contains("1000"),
-(F) BRANCH crates/api/src/ops_safety_tests.rs:265:41 False  [the false side fails the check, and its line ran]  drift.contains("1128 bytes") && drift.contains("1000"),
-(F) BRANCH crates/api/src/ops_safety_tests.rs:518:29 False  [the false side fails the check, and its line ran]  !wrote.contains(READ_ONLY_ENV) && !wrote.contains(UNSTAMPED),
-(F) BRANCH crates/api/src/ops_safety_tests.rs:518:63 False  [the false side fails the check, and its line ran]  !wrote.contains(READ_ONLY_ENV) && !wrote.contains(UNSTAMPED),
-(F) BRANCH crates/api/src/ops_safety_tests.rs:547:13 False  [the false side fails the check, and its line ran]  assert!(why.contains(UNSTAMPED) && why.contains("POST"), "{why}");
-(F) BRANCH crates/api/src/ops_safety_tests.rs:547:40 False  [the false side fails the check, and its line ran]  assert!(why.contains(UNSTAMPED) && why.contains("POST"), "{why}");
-(F) LINE crates/api/src/ops_safety_tests.rs:618  [a message argument of the statement at 615, which ran: evaluated only when it fails]  most.len()
-(F) BRANCH crates/api/src/owed_tests.rs:249:9 False  [the false side fails the check, and its line ran]  evidence.contains("CML58560") && evidence.contains("CML60618"),
-(F) BRANCH crates/api/src/owed_tests.rs:249:42 False  [the false side fails the check, and its line ran]  evidence.contains("CML58560") && evidence.contains("CML60618"),
-(F) BRANCH crates/api/src/owed_tests.rs:372:25 False  [the false side fails the check, and its line ran]  .all(|word| word != "no-print" && word != "vendor-hole"),
-(F) BRANCH crates/api/src/owed_tests.rs:388:9 False  [the else of a let-else that panics, whose line ran]  let Some(top) = answer.as_object_mut() else {
-(F) LINE crates/api/src/owed_tests.rs:389  [panic/unreachable line]  panic!("not an object: {body}")
-(F) BRANCH crates/api/src/owed_tests.rs:393:13 False  [the else of a let-else that panics, whose line ran]  let Some(row) = month.as_object_mut() else {
-(F) LINE crates/api/src/owed_tests.rs:394  [panic/unreachable line]  panic!("a month row: {body}")
-(F) LINE crates/api/src/pool_table_tests.rs:750  [a message argument of the statement at 746, which ran: evaluated only when it fails]  named.pool().name()
-(F) LINE crates/api/src/pool_table_tests.rs:1151  [a message argument of the statement at 1148, which ran: evaluated only when it fails]  head_text(answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1181  [a message argument of the statement at 1178, which ran: evaluated only when it fails]  json.len()
-(F) LINE crates/api/src/pool_table_tests.rs:1238  [a message argument of the statement at 1235, which ran: evaluated only when it fails]  whole.len()
-(F) BRANCH crates/api/src/pool_table_tests.rs:1297:24 False  [the false side fails the check, and its line ran]  .all(|day| day["held"]["why"] == "being_written"
-(F) LINE crates/api/src/pool_table_tests.rs:1300  [a message argument of the statement at 1295, which ran: evaluated only when it fails]  body["days"]
-(F) LINE crates/api/src/pool_table_tests.rs:1307  [a message argument of the statement at 1303, which ran: evaluated only when it fails]  body["month_faults"]
-(F) BRANCH crates/api/src/pool_table_tests.rs:1331:17 False  [the false side fails the check, and its line ran]  !answer.contains("being written") && !answer.contains("\"unreadable\""),
-(F) BRANCH crates/api/src/pool_table_tests.rs:1331:54 False  [the false side fails the check, and its line ran]  !answer.contains("being written") && !answer.contains("\"unreadable\""),
-(F) LINE crates/api/src/pool_table_tests.rs:1333  [a message argument of the statement at 1330, which ran: evaluated only when it fails]  head_text(&answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1374  [a message argument of the statement at 1369, which ran: evaluated only when it fails]  body["source_faults"]
-(F) LINE crates/api/src/pool_table_tests.rs:1380  [a message argument of the statement at 1377, which ran: evaluated only when it fails]  body["days"]
-(F) LINE crates/api/src/pool_table_tests.rs:1464  [a message argument of the statement at 1461, which ran: evaluated only when it fails]  head_text(&answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1469  [a message argument of the statement at 1466, which ran: evaluated only when it fails]  head_text(&answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1544  [a message argument of the statement at 1540, which ran: evaluated only when it fails]  head_text(&answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1549  [a message argument of the statement at 1546, which ran: evaluated only when it fails]  head_text(&answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1575  [a message argument of the statement at 1571, which ran: evaluated only when it fails]  head_text(&answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1735  [a message argument of the statement at 1731, which ran: evaluated only when it fails]  head_text(answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1740  [a message argument of the statement at 1737, which ran: evaluated only when it fails]  head_text(answer)
-(F) LINE crates/api/src/pool_table_tests.rs:1839  [a message argument of the statement at 1836, which ran: evaluated only when it fails]  body.len()
-(F) LINE crates/api/src/pool_table_tests.rs:2085  [a message argument of the statement at 2082, which ran: evaluated only when it fails]  head_text(&answer)
-(F) BRANCH crates/api/src/pool_table_tests.rs:2104:13 False  [the false side fails the check, and its line ran]  say.contains("A pool's answered is work it ran to its end")
-(F) BRANCH crates/api/src/pool_table_tests.rs:2105:20 False  [the false side fails the check, and its line ran]  && say.contains("the two answered columns count different things"),
-(F) BRANCH crates/api/src/pool_table_tests.rs:2118:43 False  [the false side fails the check, and its line ran]  route.starts_with('/') || route == crate::detail::FRONT_END,
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_b.rs:210:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = feed.descriptor().transport else {
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:211  [panic/unreachable line]  panic!("{} is an HTTP feed", feed.display());
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:513  [panic/unreachable line]  panic!("no store rung, so nothing is probed")
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1435  [a message argument of the statement at 1432, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1440  [a message argument of the statement at 1437, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1445  [a message argument of the statement at 1442, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1471  [a message argument of the statement at 1468, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1479  [a message argument of the statement at 1473, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1511  [a message argument of the statement at 1508, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1560  [a message argument of the statement at 1557, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1569  [a message argument of the statement at 1566, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1577  [a message argument of the statement at 1574, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1585  [a message argument of the statement at 1582, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1614  [a message argument of the statement at 1611, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1657  [a message argument of the statement at 1654, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1662  [a message argument of the statement at 1659, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1684  [a message argument of the statement at 1678, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1717  [a message argument of the statement at 1711, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:1760  [a message argument of the statement at 1757, which ran: evaluated only when it fails]  visible(&body)
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:2401  [a message argument of the statement at 2398, which ran: evaluated only when it fails]  visible(&body)
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_b.rs:2437:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = asked.feed.descriptor().transport else {
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:2438  [panic/unreachable line]  panic!("the premise: Zerodha is an HTTP feed");
-(F) LINE crates/api/src/server_cloud_mutant_tests_b.rs:2454  [a message argument of the statement at 2448, which ran: evaluated only when it fails]  visible(&body)
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:505:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Dhan.descriptor().transport
-(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:507  [panic/unreachable line]  panic!("Dhan is HTTP");
-(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1103  [a message argument of the statement at 1100, which ran: evaluated only when it fails]  started.elapsed()
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:1724:9 False  [the else of a let-else that panics, whose line ran]  let census::Census::Held { ref manifest } = census.state else {
-(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:1725  [panic/unreachable line]  panic!("a recovered census still loads: {:?}", census.state.name());
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:2415:13 False  [the false side fails the check, and its line ran]  !why.contains(VENDOR_DOWN) && !why.contains(WIRE_REACHED),
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:2415:43 False  [the false side fails the check, and its line ran]  !why.contains(VENDOR_DOWN) && !why.contains(WIRE_REACHED),
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:3230:9 False  [the else of a let-else that panics, whose line ran]  let Err(refused) = refused else {
-(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:3231  [panic/unreachable line]  panic!("nothing landed before the refusal");
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_c.rs:3315:13 False  [the else of a let-else that panics, whose line ran]  let Err(refused) = refused else {
-(F) LINE crates/api/src/server_cloud_mutant_tests_c.rs:3316  [panic/unreachable line]  panic!("nothing landed before the refusal");
-(F) LINE crates/api/src/server_cloud_mutant_tests_d.rs:103  [a message argument of the statement at 100, which ran: evaluated only when it fails]  answered.map(|schedule| schedule.is_some())
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_d.rs:158:9 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Dhan.descriptor().transport
-(F) LINE crates/api/src/server_cloud_mutant_tests_d.rs:160  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
-(F) BRANCH crates/api/src/server_cloud_mutant_tests_d.rs:677:9 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
-(F) LINE crates/api/src/server_cloud_mutant_tests_d.rs:678  [panic/unreachable line]  panic!("HTTP descriptor");
-(F) LINE crates/api/src/strict_sweep_tests.rs:303  [a message argument of the statement at 300, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/strict_sweep_tests.rs:387  [panic/unreachable line]  panic!("the commit gate refuses before the configuration is read")
-(F) LINE crates/api/src/strict_sweep_tests.rs:493  [panic/unreachable line]  panic!("{name}={value} is refused before the configuration is read")
-(F) LINE crates/api/src/strict_sweep_tests.rs:538  [panic/unreachable line]  panic!("an invalid server setting is refused before the configuration is read")
-(F) BRANCH crates/api/src/sweeprun_cover_tests.rs:470:13 False  [the else of a let-else that panics, whose line ran]  let Command::AuditAuditedRange { knobs, .. } = asked else {
-(F) LINE crates/api/src/sweeprun_cover_tests.rs:471  [panic/unreachable line]  panic!("{written}: the strict command")
-(F) LINE crates/api/src/sweeprun.rs:4571  [a message argument of the statement at 4568, which ran: evaluated only when it fails]  String::from_utf8_lossy(&result.stderr)
-(F) LINE crates/api/src/sweeprun.rs:4687  [a closure whose only work is to panic: the failing arm]  || panic!("the first admission found the slot busy"),
-(F) LINE crates/api/src/sweeprun.rs:4705  [panic/unreachable line]  panic!("a second admission prepared while the first was in flight")
-(F) BRANCH crates/api/src/sweeprun.rs:4722:17 False  [the false side fails the check, and its line ran]  assert!(installed.in_flight() && installed.attempt == 1);
-(F) BRANCH crates/api/src/sweeprun.rs:4722:42 False  [the false side fails the check, and its line ran]  assert!(installed.in_flight() && installed.attempt == 1);
-(F) BRANCH crates/api/src/sweeprun.rs:4771:17 False  [the false side fails the check, and its line ran]  !body.contains("sweep.lock()") && !body.contains(".sweep\n"),
-(F) BRANCH crates/api/src/sweeprun.rs:4771:51 False  [the false side fails the check, and its line ran]  !body.contains("sweep.lock()") && !body.contains(".sweep\n"),
-(F) LINE crates/api/src/sweeprun.rs:4820  [a message argument of the statement at 4817, which ran: evaluated only when it fails]  poll_text.len()
-(F) LINE crates/api/src/sweeprun.rs:5030  [a message argument of the statement at 5027, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:5102  [a message argument of the statement at 5099, which ran: evaluated only when it fails]  why.why()
-(F) BRANCH crates/api/src/sweeprun.rs:5223:38 False  [the false side fails the check, and its line ran]  .all(|(asked, name)| *asked != "screen_budget_ms"
-(F) LINE crates/api/src/sweeprun.rs:5236  [a message argument of the statement at 5233, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:5241  [a message argument of the statement at 5238, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:5445  [a message argument of the statement at 5441, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:5524  [a message argument of the statement at 5520, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:5571  [a message argument of the statement at 5567, which ran: evaluated only when it fails]  why.why()
-(F) BRANCH crates/api/src/sweeprun.rs:6532:24 False  [the false side fails the check, and its line ran]  || refusal.why().contains("No engine work was started"),
-(F) LINE crates/api/src/sweeprun.rs:6534  [a message argument of the statement at 6530, which ran: evaluated only when it fails]  refusal.why()
-(F) LINE crates/api/src/sweeprun.rs:6776  [a message argument of the statement at 6772, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:6782  [a message argument of the statement at 6778, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:6811  [a message argument of the statement at 6807, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:6881  [a message argument of the statement at 6878, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:6887  [a message argument of the statement at 6884, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:7030  [a message argument of the statement at 7026, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:7035  [a message argument of the statement at 7032, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:7069  [a message argument of the statement at 7065, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:7105  [a message argument of the statement at 7101, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:7141  [a message argument of the statement at 7138, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:7191  [a message argument of the statement at 7187, which ran: evaluated only when it fails]  why.why()
-(F) LINE crates/api/src/sweeprun.rs:7196  [a message argument of the statement at 7193, which ran: evaluated only when it fails]  why.why()
-(F) BRANCH crates/api/src/sweeprun.rs:7628:13 False  [the false side fails the check, and its line ran]  done.launch_clear && !done.uncertain && !done.in_flight,
-(F) BRANCH crates/api/src/sweeprun.rs:7628:34 False  [the false side fails the check, and its line ran]  done.launch_clear && !done.uncertain && !done.in_flight,
-(F) BRANCH crates/api/src/sweeprun.rs:7628:53 False  [the false side fails the check, and its line ran]  done.launch_clear && !done.uncertain && !done.in_flight,
-(F) BRANCH crates/api/src/sweeprun.rs:7642:13 False  [the false side fails the check, and its line ran]  running.in_flight && !running.launch_clear,
-(F) BRANCH crates/api/src/sweeprun.rs:7642:34 False  [the false side fails the check, and its line ran]  running.in_flight && !running.launch_clear,
-(F) BRANCH crates/api/src/sweeprun.rs:7653:17 False  [the false side fails the check, and its line ran]  assert!(lost.uncertain && !lost.launch_clear, "{}", lost.body);
-(F) BRANCH crates/api/src/sweeprun.rs:7653:35 False  [the false side fails the check, and its line ran]  assert!(lost.uncertain && !lost.launch_clear, "{}", lost.body);
-(F) BRANCH crates/api/src/sweeprun.rs:7722:17 False  [the false side fails the check, and its line ran]  assert!(clear.launch_clear && !clear.uncertain, "{}", clear.body);
-(F) BRANCH crates/api/src/sweeprun.rs:7722:39 False  [the false side fails the check, and its line ran]  assert!(clear.launch_clear && !clear.uncertain, "{}", clear.body);
-(F) BRANCH crates/api/src/sweeprun.rs:7811:13 False  [the false side fails the check, and its line ran]  why.starts_with(
-(F) BRANCH crates/api/src/sweeprun.rs:7813:18 False  [the false side fails the check, and its line ran]  ) && why.contains("so it is running or was stopped without logging one.")
-(F) BRANCH crates/api/src/sweeprun.rs:7814:20 False  [the false side fails the check, and its line ran]  && why.contains(
 `````

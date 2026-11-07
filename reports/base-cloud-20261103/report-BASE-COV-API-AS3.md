@@ -56,13 +56,13 @@ STATUS: IN PROGRESS
     any metric ("offered 7874, expected 7875, missing 1"), so a Refused verdict needs an execution the strict load
     admits and the runner still marks incomplete (`metrics::execution_complete`, or a day the calendar assessment
     counts unmeasured).
-- **NEXT 2 not reachable this way**: `indexstopcandlesjson.rs` 117 True, 118, 120 need a source page over 8 MiB.
-  Every source context the production writer seals takes its condition names from `vocab::table::TABLE`, its
+- **NEXT 2 not done**: `indexstopcandlesjson.rs` 117 True, 118, 120 need a source page over 8 MiB. No production
+  writer makes one: every source context it seals takes its condition names from `vocab::table::TABLE`, its
   expression from at most `vocab::expression::MAX_INSTRUCTIONS` (1,151) instructions, and its candles from a window
-  `Asked::parse` bounds below `detail::MAX_RESULT_ROWS` (4,096); its page stays under about 2 MB. The reader takes
-  the names from the saved image (`index_stop_source_context::selection`), so only a hand-sealed artifact chain
-  (context, link and catalog digests recomputed) could carry an 8 MiB name: owed to L-BCA-5 (its "only `cli`'s
-  private test fixtures can write"), not (U).
+  `Asked::parse` bounds below `detail::MAX_RESULT_ROWS` (4,096), so its page stays under about 2 MB. The reader takes
+  the names from the saved image (`index_stop_source_context::selection`), so a test reaches it only by re-sealing a
+  launch's context, link and catalog with the keyless digests the reader recomputes, by hand: the earlier plan in
+  its `gaps-AS3.txt.md` row stands, and the rows stay "reachable, not done" (not (U): a file reaches them).
 - **NEXT 4 tried, not landed**: the withdrawn Boolean evidence probe (`050fd625^`) run again in a local scratch tree
   with the forty-session window: the production launch writes its saved Boolean qualification about four minutes in
   at opt-level 3 (statistics, admission, OOS, qualification, index consistency all saved), then was still running at
@@ -76,15 +76,14 @@ STATUS: IN PROGRESS
 
 ## Why IN PROGRESS
 
-(Working note, continuation -5: Route B and the stable suite on `4a86f408` are running; until they land, the Gates
-and Coverage sections below and this paragraph still describe `26003a03`.)
-
 Every uncovered row of a G3 file is now (F), (U) with its proof, (H), or a GAP row that names what it is owed to,
-except 7 production rows still reachable from G3's own files and not driven this round (6 lines, 1 side), and the
-two saved-artifact renders the `-3` session had begun to reach through the production launch
-(`booleanevidencejson.rs` 184 lines 13 sides, `selectionv6json.rs` 9 lines 2 sides): L-BCA-5 names them, and their
-probes were lost with the helpers. NEXT names each with its way in. The stable gate run also found a test of
-`server_cloud_mutant_tests_c.rs` red since about 11:55 IST on 6 Nov whose cause is not found (Host reds, NEXT 0).
+except the rows still G3's to reach (`gaps-AS3.txt.md`, "reachable, not done" and the L-BCA-5 renders):
+`indexstopqualificationjson.rs` 235 and 237 (`rank`'s Admitted and Refused arms: the launches tried this round
+reach Rejected only), `indexstopcandlesjson.rs` 117 True, 118, 120 (a hand re-sealed source context), and the two
+saved-artifact renders `booleanevidencejson.rs` (184 lines 13 sides: the production launch writes its artifact but
+ran past 13 minutes at opt-level 3) and `selectionv6json.rs` (9 lines 2 sides: the public `cli::run` ledger-v6 verb,
+not tried). NEXT names each with its way in. Every gate is green on the code tip except the 13 host reds, each
+proved; the 8-extremes rule holds for every named file.
 
 ## What continuation -4 did (`7b6102cb`..`26003a03`, 6 Nov)
 
@@ -198,46 +197,53 @@ after it and the new asserts of 2 widened tests: trees `532b881e` and `a9118762`
 `4a86f408`, "0 passed; 4 failed"). The `-3` session's 13 are in its report (`red3`, `red4`), 11 of them new tests.
 93 + 4 + 1 + 11 + 2 = all 111 new tests, each red at the assertion its change aimed for.
 
-## Gates on the code tip `26003a03`
+## Gates on the code tip `4a86f408`
 
-- `cargo fmt --all --check`: clean.
-- `cargo clippy -p api --all-targets --locked -- -D warnings` (stable 1.97.1, `CARGO_TARGET_DIR=/var/tmp/as3/K3`):
-  clean, exit 0.
+- `cargo fmt --all --check`: clean (checked before every code commit of this continuation).
+- `cargo clippy -p api --all-targets --locked -- -D warnings` (stable 1.97.1, `CARGO_TARGET_DIR=/var/tmp/as3/K2`, on
+  the tree `4a86f408` commits): clean, exit 0. Its first run refused two rows of this continuation's own code (an
+  unused generator after the launch tests' refactor, and `similar_names`), fixed in `4a86f408`.
 - `cargo test -p api --locked --no-fail-fast -- --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held`
-  (stable 1.97.1, `CARGO_TARGET_DIR=/var/tmp/as3/K2`, TMPDIR a 1777 tmpfs folder, run 11:52-11:58 IST): exit 101,
-  passed 3185 failed 15 ignored 16 over 9 result lines: the lib target 3101 / 15 / 16 and every other target and the
-  doc tests green (the integration test `the_feed_list_stays_fast_while_32_clients_loop_each_route` passed this
-  time). The 15 are the 13 lib host reds below and two more, both below under "late reds".
-- The same tests under Route B (instrumented, nightly): `tests passed 3186 failed 14 ignored 16` (6 min). The 14
-  failures are host reds, below; none is a G3 test failing for a G3 reason.
+  (stable 1.97.1, `CARGO_TARGET_DIR=/var/tmp/as3/K2`, TMPDIR a 1777 tmpfs folder, a stamped build of the committed
+  tree): exit 101, passed 3189 failed 13 ignored 16 over 9 result lines: the lib target 3105 / 13 / 16; the main
+  target, the 6 integration targets (the load-bound `pool_load` among them) and the doc tests green. The 13 are the
+  host reds below (G3's three root reds and ten of other shards); no G3 test fails for a G3 reason.
+- The same tests under Route B (instrumented, nightly, opt-level 0): `tests passed 3189 failed 13 ignored 16` (7 min),
+  the same 13.
 - Benches: none run this round (no p50 or p99 to give). The feeds_route small-size wrapper runs in the suite with
   its ratio gate lifted.
-- Mutants: not run this round; each new test was shown red under a hand change instead.
+- Mutants: deferred (operator, 30 Oct): not run; each new test was shown red under a hand change instead.
 
 ## Coverage: Route B of record, whole:api
 
-The kit's `d3-route-b-cloud.sh`, unchanged, with `D3_W=/var/tmp/as3`, the pinned nightly and its own llvm tools:
-`d3-route-b-cloud.sh /var/tmp/as3/wt-final3 /var/tmp/as3/K1 /var/tmp/as3/P7 /var/tmp/as3/L7 <set> api -- --skip
+The kit's `d3-route-b-cloud.sh`, unchanged (sha256 checked against `MANIFEST.md`), with `D3_W=/var/tmp/as3`, the
+pinned nightly and its own llvm tools, on a clean worktree checked out at the code tip:
+`d3-route-b-cloud.sh /var/tmp/as3/wt-rb5 /var/tmp/as3/K1 /var/tmp/as3/P8 /var/tmp/as3/L8 <set> api -- --skip
 spot_json_is_refused_by_name_when_every_store_read_slot_is_held`. The set is the kit's
 `deep-BASE-COV-API-6ea46e59c074-set.txt` plus one `coverage <file> whole` line for each of the 8 files the branch
-added (whole:api names every file; the kit's set predates them). TMPDIR was a 1777 tmpfs folder and the profile
-folder was opened 1777 as the script made it, so the children `isolated::where_permission_binds` re-runs as uid
-65534 write their profiles (CLOUD.md item 10). Started 11:18:29 IST 6 Nov; build 2 min, tests 6 min, readout done
-11:47:13 IST; exit 3 for NOT PROVED: the 22 benches and `lib.rs` only (L-BCA-2).
+added (whole:api names every file; the kit's set predates them): 213 coverage lines. TMPDIR was a 1777 tmpfs folder,
+and the profile folder was made 1777 and the script run under `umask 0000`, so the children
+`isolated::where_permission_binds` re-runs as uid 65534 write their profiles (CLOUD.md item 10). Started 15:38:02 IST
+7 Nov; build 3 min (cold target), tests 7 min, readout done 16:04:29 IST; exit 3 for NOT PROVED: the 22 benches and
+`lib.rs` only (L-BCA-2). No test process ended by a signal.
 
-- Whole api (the 190 files read): lines 178980/182840 (3860 uncovered), branches 13015/15376 (2361 uncovered sides).
-- G3 (56 files): lines 63091/63794 (703 uncovered), branches 4719/5114 (395 uncovered sides). Classified strictly
+- Whole api (the 190 files read): lines 179147/183008 (3861 uncovered), branches 13021/15386 (2365 uncovered sides).
+- G3 (56 files): lines 63260/63962 (702 uncovered), branches 4726/5124 (398 uncovered sides). Classified strictly
   by recipe step 4:
-  - (F) 235 lines 310 sides; (U) 96 lines 51 sides, each with its proof; (H) 44 lines 2 sides (`fu-AS3.txt.md`);
-  - GAP 328 lines 32 sides (`gaps-AS3.txt.md`): in `#[ignore]`d tests 86 lines (L-BCA-3, the Mac); L-BCA-5 193 lines
+  - (F) 235 lines 312 sides; (U) 97 lines 52 sides, each with its proof; (H) 44 lines 2 sides (`fu-AS3.txt.md`);
+  - GAP 326 lines 32 sides (`gaps-AS3.txt.md`): in `#[ignore]`d tests 86 lines (L-BCA-3, the Mac); L-BCA-5 193 lines
     15 sides (`booleanevidencejson.rs` 184/13, `selectionv6json.rs` 9/2); L-BCA-6 18 lines 7 sides
     (`mastersrun.rs`); the host clock 18 lines 4 sides (`autopilot.rs`); a race 4 lines 4 sides (`dayflags.rs`
     3220, 3322, 3323; `indexstopcandlesjson.rs` 188-191; `bars_export.rs` 979); a failing medium or a cut append 3
-    lines 1 side (`imports.rs` 1342-1344, `optiongreeks.rs` 558); reachable and not done 6 lines 1 side
-    (`indexstopqualificationjson.rs` 235-237, `indexstopcandlesjson.rs` 117 True, 118, 120, `bars_export.rs` 974);
-    test code: none.
-- The (F) rows are classify.mjs's reading of recipe step 4 (each row carries its rule); 52 were read by hand against
-  the source. The (H) rows come from the three G3 root reds run as uid 65534 with the measured binary (below).
+    lines 1 side (`imports.rs` 1342-1344, `optiongreeks.rs` 558); reachable and not done 4 lines 1 side
+    (`indexstopqualificationjson.rs` 235, 237; `indexstopcandlesjson.rs` 117 True, 118, 120); test code: none.
+- Against `26003a03`: 2 production lines closed (`bars_export.rs` 974, `indexstopqualificationjson.rs` 236), and the
+  4 rows the new code added are (F) (2 sides of a new assert) or (U) (the new launch test's unstamped arm, the proof
+  the saved probe's carries). Every other row carried over through a line map from `git diff 26003a03 4a86f408`, its
+  source text checked (1,100 rows); two GAP reasons this round's evidence corrected were rewritten (235, 237).
+- The (H) rows: the three G3 root reds failed as root in this run and passed as uid 65534
+  (`setpriv --reuid=65534 --regid=65534 --clear-groups`) with this run's instrumented binary
+  (`api-bbc8861d417950e8`): `test result: ok. 1 passed` each.
 
 The `--skip`: `cloud_mutants_bars.rs` `spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (G2's file,
 unchanged from START) hangs on this host: it fills `detail::MAX_STORE_READ_CONCURRENT` holders behind a barrier the
@@ -258,10 +264,11 @@ Of the 111 new tests, all 111 name their extremes on an `Extremes:` line; of the
 
 - Root only, G3's three: `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`,
   `server::cloud_mutant_tests_c::a_store_that_takes_no_write_trips_the_store_breaker`,
-  `server::cloud_mutant_tests_c::a_store_whose_audit_dir_cannot_be_made_is_at_fault`. Each failed as root in the
-  Route B run and passed as uid 65534 (`setpriv --reuid=65534 --regid=65534 --clear-groups`) with the same
-  instrumented binary (`api-7b94fb89521800a1`, 6 Nov): `test result: ok. 1 passed` each, and they failed the same way as root in this round's Route B run. Their profiles, shown for every G3
-  file, make the rows only their later lines reach (H): covered there, owed to the Mac's Route B.
+  `server::cloud_mutant_tests_c::a_store_whose_audit_dir_cannot_be_made_is_at_fault`. Each failed as root in both
+  runs of this round and passed as uid 65534 (`setpriv --reuid=65534 --regid=65534 --clear-groups`) with this
+  round's instrumented binary (`api-bbc8861d417950e8`, 7 Nov; as with `api-7b94fb89521800a1` on 6 Nov):
+  `test result: ok. 1 passed` each. The rows only their later lines reach are (H): covered as non-root, owed to the
+  Mac's Route B.
 - 4-core hang: the G2 test above (skipped).
 - Failing as root here and not in G3's files (not proved by this session; other shards' and the Mac's):
   `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`,
@@ -339,22 +346,27 @@ Of the 111 new tests, all 111 name their extremes on an `Extremes:` line; of the
 1. `indexstopqualificationjson.rs` 235 and 237, `rank`'s Admitted and Refused arms, each a launch beside the two
    launch tests (`in_a_launch_child` takes the months; `launch_body_over` the windows):
    - Admitted (235): every check must pass with measured evidence. A policy file at the least the policy admits
-     still fails `worst_reward_risk` (the smallest win over the largest loss, against a floor the launch derives
-     from the risk) and `worst_trade_loss` (against the risk itself) on the generated minutes, so the minutes must
-     change: signal candles whose stops lose at most the risk and whose winning trades each gain several times it
+     still fails `worst_reward_risk` (the smallest win must be at least three times the largest loss: the operator's
+     own rule, which no policy file sets) and `worst_trade_loss` (the largest loss against the risk) on the generated
+     minutes, so the minutes must change: signal candles whose stops lose at most the risk and whose winning
+     trades each gain at least three times it
      (for example one strong one-way session pattern a day, the risk raised with `max_loss_points`).
    - Refused (237): an execution the strict load admits and `metrics::execution_complete` still refuses (an entry,
      path or closing refusal, an unreachable trade, an unaccepted minute) or a training day the calendar assessment
      counts unmeasured (a day whose pessimistic and optimistic readings disagree in sign). A missing minute does not
      do it: the calendar receipt refuses the month first.
-2. `booleanevidencejson.rs` (184 lines 13 sides): the withdrawn probe (`050fd625^`) with the forty-session window
+2. `indexstopcandlesjson.rs` 117 True, 118, 120: the hand re-seal its `gaps-AS3.txt.md` rows spell out (a launch's
+   source context with one referenced name made about 9 MiB long, then its context identity and receipt, the
+   BRISCL01 relation and the contextual catalog identity recomputed with the keyless digests the reader checks), in a
+   child with a large `BRUTEX_BOOLEAN_OBSERVATION_BYTES`.
+3. `booleanevidencejson.rs` (184 lines 13 sides): the withdrawn probe (`050fd625^`) with the forty-session window
    (March to June generated, April and May training) writes its saved Boolean qualification about four minutes in
    at opt-level 3 and was still running past 13 minutes; find a lighter launch (fewer bits, a lower node allowance,
    a shorter horizon, any draw count the Boolean statistics take from the environment) before it can be a suite test.
-3. `selectionv6json.rs` (9 lines 2 sides): `cli::run(["ledger-v6", VENDOR, FROM_Y, FROM_M, TO_Y, TO_M, SUPPORT_PPM,
+4. `selectionv6json.rs` (9 lines 2 sides): `cli::run(["ledger-v6", VENDOR, FROM_Y, FROM_M, TO_Y, TO_M, SUPPORT_PPM,
    MAX_POINTS, ROOT])` (public) over generated NIFTY and BANKNIFTY months at every rung it reads (the verb pairs the
    two indices per rung), then `render_page` over its root.
-4. Mutants stay deferred (operator, 30 Oct): not run.
+5. Mutants stay deferred (operator, 30 Oct): not run.
 
 ## Slips
 
