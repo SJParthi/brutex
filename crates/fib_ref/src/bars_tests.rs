@@ -190,3 +190,41 @@ fn minute_and_second_lookups() {
     assert_eq!(last_print_before(&secs, 21), Some(9));
     assert!(!secs[0].traded() && secs[1].traded());
 }
+
+#[test]
+fn the_clock_grid_starts_with_a_part_candle_to_the_first_multiple() {
+    use crate::model::CandleGrid;
+    let day: Vec<Minute> = (0..375).map(|k| m(k, 100, 101, 99, 100)).collect();
+    let closes = |tf: u32, g: CandleGrid| -> Vec<String> {
+        fold_on(&day, tf, g)
+            .iter()
+            .map(|c| hms(c.close_t))
+            .collect()
+    };
+    // the grids agree where 09:15 (minute 555 of the day) is on the clock grid
+    for tf in [1, 3, 5, 15] {
+        assert_eq!(fold_on(&day, tf, CandleGrid::Clock), fold(&day, tf), "{tf}");
+    }
+    let hours = [
+        "10:00:00", "11:00:00", "12:00:00", "13:00:00", "14:00:00", "15:00:00",
+    ];
+    let mut clock60: Vec<String> = hours.iter().map(|s| (*s).to_owned()).collect();
+    clock60.push("15:30:00".to_owned());
+    assert_eq!(closes(60, CandleGrid::Clock), clock60);
+    assert_eq!(
+        closes(60, CandleGrid::Session),
+        [
+            "10:15:00", "11:15:00", "12:15:00", "13:15:00", "14:15:00", "15:15:00", "15:30:00"
+        ]
+    );
+    // 555 is odd: the first two-minute clock candle is 09:15 alone
+    let c2 = fold_on(&day, 2, CandleGrid::Clock);
+    assert_eq!(
+        (c2[0].first_minute, c2[0].last_minute, hms(c2[0].close_t)),
+        (0, 0, "09:16:00".to_owned())
+    );
+    assert_eq!((c2.len(), fold(&day, 2).len()), (188, 188));
+    assert_eq!(closes(10, CandleGrid::Clock)[..2], ["09:20:00", "09:30:00"]);
+    assert_eq!(closes(30, CandleGrid::Clock)[0], "09:30:00");
+    assert_eq!(closes(30, CandleGrid::Session)[0], "09:45:00");
+}

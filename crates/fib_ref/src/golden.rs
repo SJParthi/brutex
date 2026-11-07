@@ -529,7 +529,7 @@ fn ladder_doc(id: &str, title: &str, seed: u64, minutes: &[Minute], tf: u32, r: 
     let mut d = Doc::new(id, "ladder", title, seed, r);
     d.inp("tf", &[("minutes", tf.to_string())]);
     put_minutes(&mut d, minutes);
-    let candles = fold(minutes, tf);
+    let candles = crate::bars::fold_on(minutes, tf, r.grid);
     put_candles(&mut d, &candles);
     let ladders = ladder::running(&candles, r.ties, r.taint);
     for (i, l) in ladders.iter().enumerate() {
@@ -687,6 +687,28 @@ fn ladder_docs() -> Vec<Doc> {
         &down,
         2,
         Readings::HEADLINE,
+    ));
+    // A04: a whole seeded session on 60-minute candles, labelled from 09:15
+    // (headline) or on the clock
+    let mut rng = SplitMix64::new(2_106);
+    let whole = random_minutes(&mut rng, 100_000, 5, 375, 0, 0, 6, 2);
+    out.push(ladder_doc(
+        "L017",
+        "a whole session on 60-minute candles labelled from 09:15 (A04 headline)",
+        2_106,
+        &whole,
+        60,
+        Readings::HEADLINE,
+    ));
+    let mut clock = Readings::HEADLINE;
+    clock.grid = crate::model::CandleGrid::Clock;
+    out.push(ladder_doc(
+        "L018",
+        "the same session labelled on the clock: 09:15-10:00 first (A04 other)",
+        2_106,
+        &whole,
+        60,
+        clock,
     ));
     out
 }
@@ -4671,7 +4693,8 @@ fn wf_docs() -> Vec<Doc> {
         h,
     ));
     vs.push((
-        "rule 5 before rule 6: twin 2 above, twin 3 missing reads PENDING".to_owned(),
+        "rule 5 before rule 6: twin 2 above, twin 3 missing reads PENDING (A20 headline)"
+            .to_owned(),
         VerdictIn {
             twins: [Some(below), Some(above), None],
             ..base.clone()
@@ -4711,9 +4734,19 @@ fn wf_docs() -> Vec<Doc> {
         VerdictIn {
             interim: true,
             luck: false,
-            ..base
+            ..base.clone()
         },
         h,
+    ));
+    let mut six = h;
+    six.rule_order = crate::model::RuleOrder::SixFirst;
+    vs.push((
+        "rule 6 before rule 5: the same twins as V009 read NO (A20 other)".to_owned(),
+        VerdictIn {
+            twins: [Some(below), Some(above), None],
+            ..base
+        },
+        six,
     ));
     for (k, (title, v, r)) in vs.into_iter().enumerate() {
         out.push(verdict_doc(&format!("V{:03}", k + 1), &title, &v, r));

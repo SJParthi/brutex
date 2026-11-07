@@ -348,12 +348,36 @@ pub enum InterimLine {
     NoCanPrint,
 }
 
+/// Where a timeframe's candle grid starts (A04): the spec gives a candle
+/// labelled t as [t, t + tf), closing at min(t + tf, session end), and no
+/// origin for the labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandleGrid {
+    /// Labels from the session's first minute, 09:15, 09:15 + tf, ... (headline).
+    Session,
+    /// Labels on the clock, multiples of tf minutes from midnight: the first
+    /// candle runs from 09:15 to the first such multiple.
+    Clock,
+}
+
+/// The verdict's rules 5 and 6 when both could speak (A20): twin seeds 2
+/// and 3 not all run, and one that ran at or above the headline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleOrder {
+    /// Rule 5 (fewer than three twins: PENDING) before rule 6 (headline).
+    FiveFirst,
+    /// Rule 6 (a twin 2 or 3 at or above: NO) before rule 5.
+    SixFirst,
+}
+
 /// Every reading this crate pins. `HEADLINE` holds the headline reading of
 /// each; a scenario that runs another prints it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Readings {
     /// A02.
     pub ties: ExtremeTies,
+    /// A04.
+    pub grid: CandleGrid,
     /// A03.
     pub taint: TaintScope,
     /// A01.
@@ -388,12 +412,15 @@ pub struct Readings {
     pub lock_end: LockEnd,
     /// A19.
     pub interim: InterimLine,
+    /// A20.
+    pub rule_order: RuleOrder,
 }
 
 impl Readings {
     /// The headline reading of every choice.
     pub const HEADLINE: Readings = Readings {
         ties: ExtremeTies::Strict,
+        grid: CandleGrid::Session,
         taint: TaintScope::AnyFolded,
         mover_sign: MoverSign::RankOnly,
         after_break: AfterBreak::UntilNewExtreme,
@@ -411,6 +438,7 @@ impl Readings {
         target_ladder: TargetLadder::AfterFold,
         lock_end: LockEnd::Inclusive,
         interim: InterimLine::AlwaysPending,
+        rule_order: RuleOrder::FiveFirst,
     };
 
     /// The non-headline readings, as `Axx=name` tokens, for a scenario's
@@ -426,6 +454,7 @@ impl Readings {
         push(self.mover_sign != h.mover_sign, "A01=signed_only");
         push(self.ties != h.ties, "A02=latest");
         push(self.taint != h.taint, "A03=extreme_candles");
+        push(self.grid != h.grid, "A04=clock");
         push(self.after_break != h.after_break, "A05=next_box");
         push(self.box_anchor != h.box_anchor, "A06=anchored");
         push(self.retouch != h.retouch, "A07=ignore");
@@ -444,6 +473,7 @@ impl Readings {
         push(self.target_ladder != h.target_ladder, "A17=judging");
         push(self.lock_end != h.lock_end, "A18=exclusive");
         push(self.interim != h.interim, "A19=no_can_print");
+        push(self.rule_order != h.rule_order, "A20=six_first");
         if out.is_empty() {
             "headline".to_owned()
         } else {

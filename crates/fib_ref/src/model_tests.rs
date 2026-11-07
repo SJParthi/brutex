@@ -33,6 +33,7 @@ fn readings_label_names_each_departure() {
     assert_eq!(r.label(), "A02=latest,A19=no_can_print");
     let all = Readings {
         ties: ExtremeTies::Latest,
+        grid: CandleGrid::Clock,
         taint: TaintScope::ExtremeCandles,
         mover_sign: MoverSign::SignedOnly,
         after_break: AfterBreak::NextBox,
@@ -50,8 +51,15 @@ fn readings_label_names_each_departure() {
         target_ladder: TargetLadder::Judging,
         lock_end: LockEnd::Exclusive,
         interim: InterimLine::NoCanPrint,
+        rule_order: RuleOrder::SixFirst,
     };
-    assert_eq!(all.label().split(',').count(), 18);
+    assert_eq!(
+        all.label(),
+        "A01=signed_only,A02=latest,A03=extreme_candles,A04=clock,A05=next_box,A06=anchored,\
+         A07=ignore,A08=arms,A09=exit_first,A10=rejected,A11=kept,A12=refused,A13=ceil,\
+         A14=out_of_curve,A15=literal,A16=min20,A17=judging,A18=exclusive,A19=no_can_print,\
+         A20=six_first"
+    );
 }
 
 #[test]

@@ -217,6 +217,10 @@ fn good_key() -> Key {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the seven rules and both readings, in order"
+)]
 fn the_verdict_rules_in_order() {
     let r = Readings::HEADLINE;
     let months: Vec<ChainMonth> = (0..82)
@@ -296,6 +300,19 @@ fn the_verdict_rules_in_order() {
     v.twins = [Some(below), Some(above), None];
     assert_eq!(
         verdict(&v, &r),
+        Verdict::Pending("fewer than three twin seeds have run")
+    );
+    // A20's other reading: rule 6 speaks first, the same twins say NO
+    let mut six = r;
+    six.rule_order = RuleOrder::SixFirst;
+    assert_eq!(
+        verdict(&v, &six),
+        Verdict::No("twin seed 2 or 3 at or above the headline")
+    );
+    // and with no twin 2 or 3 at or above, rule 5 still speaks under it
+    v.twins = [Some(below), Some(below), None];
+    assert_eq!(
+        verdict(&v, &six),
         Verdict::Pending("fewer than three twin seeds have run")
     );
     // interim: always pending, or a NO may print

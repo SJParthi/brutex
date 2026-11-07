@@ -22,7 +22,7 @@ use std::cmp::Ordering;
 
 use crate::account::dd_tenths;
 use crate::account::{BAR, DATA_CHARGE};
-use crate::model::{DataChargeAt, InterimLine, Readings};
+use crate::model::{DataChargeAt, InterimLine, Readings, RuleOrder};
 
 /// One trade of a series, as the ranking reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,7 +324,7 @@ pub struct VerdictIn {
 
 /// The verdict function, the only writer of line 2.
 pub fn verdict(v: &VerdictIn, r: &Readings) -> Verdict {
-    let core = verdict_core(v);
+    let core = verdict_core(v, r.rule_order);
     if !v.interim {
         return core;
     }
@@ -337,7 +337,7 @@ pub fn verdict(v: &VerdictIn, r: &Readings) -> Verdict {
     }
 }
 
-fn verdict_core(v: &VerdictIn) -> Verdict {
+fn verdict_core(v: &VerdictIn, order: RuleOrder) -> Verdict {
     let Some(months) = &v.months else {
         return Verdict::No("no headline");
     };
@@ -356,10 +356,14 @@ fn verdict_core(v: &VerdictIn) -> Verdict {
     {
         return Verdict::No("twin seed 1 at or above the headline");
     }
+    let six = v.twins[1..].iter().flatten().any(at_or_above);
+    if order == RuleOrder::SixFirst && six {
+        return Verdict::No("twin seed 2 or 3 at or above the headline");
+    }
     if v.twins.iter().flatten().filter(|t| t.whole).count() < 3 {
         return Verdict::Pending("fewer than three twin seeds have run");
     }
-    if v.twins[1..].iter().flatten().any(at_or_above) {
+    if six {
         return Verdict::No("twin seed 2 or 3 at or above the headline");
     }
     Verdict::Yes

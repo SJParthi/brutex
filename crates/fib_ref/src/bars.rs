@@ -169,14 +169,27 @@ impl Sec {
 /// A candle with no held minute at all carries the previous candle's close as
 /// a flat price (it is incomplete, so no decision reads it).
 pub fn fold(minutes: &[Minute], tf: u32) -> Vec<Candle> {
+    fold_on(minutes, tf, crate::model::CandleGrid::Session)
+}
+
+/// As [`fold`] on a chosen label grid (A04): `Session` labels candles from
+/// 09:15; `Clock` labels them at multiples of `tf` minutes from midnight,
+/// so the first candle runs from 09:15 to the first multiple after it.
+pub fn fold_on(minutes: &[Minute], tf: u32, grid: crate::model::CandleGrid) -> Vec<Candle> {
     let tf = tf.max(1);
+    // the first candle's length in minutes
+    let first_len = match grid {
+        crate::model::CandleGrid::Session => tf,
+        crate::model::CandleGrid::Clock => tf - (OPEN / 60) % tf,
+    };
     let n = u32::try_from(minutes.len()).unwrap_or(u32::MAX);
     let mut out = Vec::new();
     let mut prev_close: Option<i64> = None;
     let mut first = 0u32;
     let mut index = 0u32;
     while first < n {
-        let last = (first + tf - 1).min(374);
+        let len = if index == 0 { first_len } else { tf };
+        let last = (first + len - 1).min(374);
         if last >= n {
             break;
         }

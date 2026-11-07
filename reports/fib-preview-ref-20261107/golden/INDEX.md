@@ -2,7 +2,7 @@
 
 PREVIEW: an independent reference build on seeded synthetic data; not a result, says nothing about profit
 
-274 scenarios. Readings other than the headline are named (report section 4).
+277 scenarios. Readings other than the headline are named (report section 4).
 
 | Id | Kind | Readings | Outputs | Title |
 |---|---|---|---:|---|
@@ -37,6 +37,8 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | L014 | ladder | headline | 24 | a padded minute in which GDFL traded is a hole |
 | L015 | ladder | headline | 30 | a padded minute with no GDFL trade is held |
 | L016 | ladder | headline | 60 | a falling day: a Down leg and its extensions below the low |
+| L017 | ladder | headline | 21 | a whole session on 60-minute candles labelled from 09:15 (A04 headline) |
+| L018 | ladder | A04=clock | 21 | the same session labelled on the clock: 09:15-10:00 first (A04 other) |
 | E1-001 | e1 | headline | 35 | the operator's flag, K = 1, long: the break at candle 16 inside a seeded random day |
 | E1-002 | e1 | headline | 30 | the operator's flag, K = 2, long: the break at candle 17 inside a seeded random day |
 | E1-003 | e1 | headline | 33 | the operator's flag, K = 3, long: the break at candle 18 inside a seeded random day |
@@ -269,12 +271,13 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | V006 | verdict | headline | 3 | rule 4: a partial twin 1 at or above still says NO |
 | V007 | verdict | headline | 3 | rule 4: a partial twin 1 below clears nothing |
 | V008 | verdict | headline | 3 | rule 5: fewer than three twin seeds have run |
-| V009 | verdict | headline | 4 | rule 5 before rule 6: twin 2 above, twin 3 missing reads PENDING |
+| V009 | verdict | headline | 4 | rule 5 before rule 6: twin 2 above, twin 3 missing reads PENDING (A20 headline) |
 | V010 | verdict | headline | 5 | rule 6: twin seed 2 at or above |
 | V011 | verdict | headline | 5 | rule 7: YES |
 | V012 | verdict | headline | 5 | an interim never prints YES (A19 headline) |
 | V013 | verdict | A19=no_can_print | 5 | an interim's NO prints under A19's other reading |
 | V014 | verdict | headline | 5 | an interim's NO stays PENDING under A19's headline |
+| V015 | verdict | A20=six_first | 4 | rule 6 before rule 5: the same twins as V009 read NO (A20 other) |
 | X001 | e2e | headline | 14 | a flag day end to end, long, K = 2: every E1C signal walked alone on lanes XA, XB, XC, XD2, XD3, XG (no account) |
 | X002 | e2e | headline | 14 | one flag day end to end, short, K = 2 |
 | X003 | e2e | headline | 7 | one flag day end to end, long, K = 3 |

@@ -78,13 +78,15 @@ impl Row {
         }
         let first = self.points.first().map_or(0.0, |p| p.2);
         let last = self.points.last().map_or(0.0, |p| p.2);
+        let n_first = self.points.first().map_or(0, |p| p.0);
+        let n_last = self.points.last().map_or(0, |p| p.0);
         let tail_ok = last <= 1.5 * first;
         let spread_ok = self
             .points
             .iter()
             .all(|(_, p50, p99)| *p99 <= 3.0 * p50.max(1.0));
         println!(
-            "{} {:<34} verdict: {} (p99 10^7 / 10^3 = {:.2}; p99 <= 3 x p50 at every size: {}); {}",
+            "{} {:<34} verdict: {} (p99 n={} / n={} = {:.2}; p99 <= 3 x p50 at every size: {}); {}",
             self.id,
             self.what,
             if tail_ok && spread_ok {
@@ -92,6 +94,8 @@ impl Row {
             } else {
                 "NOT FLAT"
             },
+            n_last,
+            n_first,
             if first > 0.0 { last / first } else { 0.0 },
             if spread_ok { "yes" } else { "no" },
             self.o1
