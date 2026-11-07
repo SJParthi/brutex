@@ -814,6 +814,12 @@ each at its own assertion (`run_serves`' held child at its refusal check, the ca
 its `unreachable!` reader, the census test at its panicking reader, the calendar_of test at its
 let-else), restored with `git checkout` of the four files.
 
+Gate 23 by hand on `518b2355` (the step's `run:` script unchanged, the scanner and runtime tool
+built as before): exit 1 (BASE-REDS-1023's reds); its output equals `b0b3a034`'s line for line,
+so against f01d7a0e4 it differs in the one line `993 tracked source file(s)` there against `997`
+here, names no `api/src/sources_tests.rs` site (`grep -c sources_tests`: 0) and no site of this
+shard's.
+
 Route B whole:api on `518b2355`: running (started 20:50 IST, the same command and set file as
 above). Until its readout lands, `gaps-AS2.txt.md`, `fu-AS2.txt.md` and the FIX json are
 `b0b3a034`'s; the next reports-only commit replaces them with this tip's.
