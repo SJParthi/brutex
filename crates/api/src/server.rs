@@ -31528,6 +31528,359 @@ mod tests {
         );
     }
 
+    /// The child's proof of
+    /// [`the_futures_route_past_its_refusal_plans_pulls_and_names_its_plan`].
+    const FUTURES_ROUTE_PROOF: &str = "BRUTEX_AS2_FUTURES_ROUTE_PROOF";
+
+    /// One invented Kite future of `ZQIDX`, an underlying no vendor lists.
+    fn zqidx_future(token: u64, symbol: &str, expiry: &str) -> String {
+        format!(
+            "{token},{},{symbol},\"ZQIDX\",0,{expiry},0,0.05,75,FUT,NFO-FUT,NFO",
+            token / 256
+        )
+    }
+
+    /// A Zerodha futures request for `ZQIDX` over `from..=to`.
+    fn zqidx_futures(from: Day, to: Day, expiry: Option<Day>) -> ingest::FnoRequest {
+        ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("ZQIDX").expect("a symbol"),
+            series: ingest::Series::Futures,
+            expiry,
+            window: pull::session::Window::new(from, to).expect("a window"),
+            feed: pull::vendor::Feed::Zerodha,
+            granularity: pull::vendor::Granularity::Day1,
+            run: 0,
+            rate: None,
+            clamped_from: None,
+        }
+    }
+
+    /// The child of
+    /// [`the_futures_route_past_its_refusal_plans_pulls_and_names_its_plan`]:
+    /// `BRUTEX_MASTERS` names `masters`, and four walks run in order against a
+    /// loopback vendor that answers every candle request with two invented
+    /// day candles.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "four walks over one masters folder, in the order their state needs"
+    )]
+    fn futures_route_child(masters: &Path, proof: &Path) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("a loopback port");
+            let address = listener.local_addr().expect("its address");
+            let asked_urls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let seen = std::sync::Arc::clone(&asked_urls);
+            let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+                seen.lock().expect("the vendor's log").push(uri.to_string());
+                async {
+                    (
+                        axum::http::StatusCode::OK,
+                        "{\"status\":\"success\",\"data\":{\"candles\":[\
+                         [\"2026-01-05T00:00:00+0530\",100.5,101.0,99.25,100.75,1200,1000],\
+                         [\"2026-01-06T00:00:00+0530\",101.5,102.0,100.25,101.75,1300,1100]]}}",
+                    )
+                }
+            });
+            let vendor = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("the vendor serves");
+            });
+            let base: &'static str = Box::leak(format!("http://{address}").into_boxed_str());
+            let site = site("as2-futures-route", &masters_dir_for("as2-futures-route"));
+            let wire = loopback_zerodha(&site, base);
+            let march = std::time::UNIX_EPOCH + std::time::Duration::from_mins(29_551_950);
+            let april = std::time::UNIX_EPOCH + std::time::Duration::from_mins(29_596_590);
+            let window = (day(2026, 1, 1), day(2026, 2, 27));
+            let snapshots = masters.join(pull::master_snapshots::SNAPSHOT_DIR);
+
+            // (4) NO DATED SNAPSHOT AT ALL: the plan is refused, nothing sent.
+            let asked = zqidx_futures(window.0, window.1, None);
+            let (code, body) = futures_walk(&asked, day(2026, 3, 10), march, &site, &wire).await;
+            assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "(4)");
+            assert!(body.contains("no_snapshot"), "(4) {body}");
+
+            // ONE SNAPSHOT: January's contract, March's, both of ZQIDX.
+            let mut kite = String::from(pull::vendor::KITE_MASTER_HEADER);
+            for row in [
+                zqidx_future(8_000_001, "ZQIDX26JANFUT", "2026-01-27"),
+                zqidx_future(8_000_002, "ZQIDX26MARFUT", "2026-03-30"),
+            ] {
+                kite.push('\n');
+                kite.push_str(&row);
+            }
+            kite.push('\n');
+            let _wrote = pull::master_snapshots::snapshot(
+                &snapshots,
+                pull::master_snapshots::Kind::Kite,
+                day(2026, 1, 2),
+                "https://api.kite.trade/instruments",
+                kite.as_bytes(),
+            )
+            .expect("a snapshot");
+
+            // (5) A NAMED EXPIRY NO SNAPSHOT LISTS: refused by name.
+            let asked = zqidx_futures(window.0, window.1, Some(day(2026, 2, 24)));
+            let (code, body) = futures_walk(&asked, day(2026, 3, 10), march, &site, &wire).await;
+            assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "(5)");
+            assert!(
+                body.contains("expiring on 2026-02-24 inside the window"),
+                "(5) {body}"
+            );
+            assert!(
+                asked_urls.lock().expect("the vendor's log").is_empty(),
+                "(4)(5) no request was sent"
+            );
+
+            // (6) A WHOLE PLAN: two contracts and the continuous series, each
+            // asked once and landed, nothing refused, rebuilt or cut.
+            let asked = zqidx_futures(window.0, window.1, None);
+            let (code, body) = futures_walk(&asked, day(2026, 3, 10), march, &site, &wire).await;
+            assert_eq!(code, axum::http::StatusCode::OK, "(6) {body}");
+            assert_eq!(
+                futures_fact(&body, "Dated master snapshot").as_deref(),
+                Some("2026-01-02"),
+                "(6)"
+            );
+            assert_eq!(
+                futures_fact(&body, "Series asked").as_deref(),
+                Some("3"),
+                "(6)"
+            );
+            for absent in [
+                "Futures index rebuilt",
+                "Incomplete master-snapshot entries",
+                "Not asked",
+            ] {
+                assert_eq!(futures_fact(&body, absent), None, "(6) {absent}");
+            }
+            assert_eq!(
+                futures_fact(&body, "Bars written to the file").as_deref(),
+                Some("6"),
+                "(6) two bars under each of three series"
+            );
+            assert_eq!(asked_urls.lock().expect("the vendor's log").len(), 3, "(6)");
+
+            // (7)(8) THE INDEX'S FILE GONE AND A SNAPSHOT CUT BEFORE ITS
+            // RECEIPT, ASKED AFTER EVERY LISTED EXPIRY: the index is rebuilt,
+            // the cut entry named, the continuous series not asked, and the
+            // two contracts asked again find their bars already held.
+            let mut todo = vec![snapshots.join(pull::master_snapshots::first_listed::DIR)];
+            let mut gone = 0;
+            while let Some(dir) = todo.pop() {
+                for entry in std::fs::read_dir(&dir).expect("the index folder") {
+                    let path = entry.expect("an entry").path();
+                    if path.is_dir() {
+                        todo.push(path);
+                    } else if path.file_name().and_then(|name| name.to_str()) == Some("ZQIDX.idx") {
+                        std::fs::remove_file(&path).expect("the index file goes");
+                        gone += 1;
+                    }
+                }
+            }
+            assert_eq!(gone, 1, "(7) one index file of ZQIDX");
+            let cut = pull::master_snapshots::file_name(
+                pull::master_snapshots::Kind::Kite,
+                pull::master_snapshots::Stamp {
+                    day: day(2026, 1, 3),
+                    ordinal: 1,
+                },
+            );
+            std::fs::write(snapshots.join(&cut), b"a body cut before its receipt")
+                .expect("a cut entry");
+            let (code, body) = futures_walk(&asked, day(2026, 4, 10), april, &site, &wire).await;
+            assert_eq!(
+                code,
+                axum::http::StatusCode::BAD_GATEWAY,
+                "(8) a series not asked fails the pull"
+            );
+            let rebuilt = futures_fact(&body, "Futures index rebuilt").unwrap_or_default();
+            assert!(
+                rebuilt.contains("did not match its commit log") && rebuilt.contains("missing"),
+                "(7) {rebuilt}"
+            );
+            let incomplete =
+                futures_fact(&body, "Incomplete master-snapshot entries").unwrap_or_default();
+            assert!(incomplete.starts_with(&cut), "(8) {incomplete}");
+            let refused = futures_fact(&body, "Not asked").unwrap_or_default();
+            assert!(refused.contains("no_live_future"), "(8) {refused}");
+            assert_eq!(
+                futures_fact(&body, "Series asked").as_deref(),
+                Some("2"),
+                "(8)"
+            );
+            assert_eq!(
+                futures_fact(&body, "Bars written to the file").as_deref(),
+                Some("0"),
+                "(7) nothing new to write"
+            );
+            vendor.abort();
+            std::fs::write(proof, b"ran four walks").expect("the proof");
+        });
+    }
+
+    /// A masters folder for `name` whose instrument files list nothing: the
+    /// futures route reads its tokens from the dated snapshots only.
+    fn masters_dir_for(name: &str) -> PathBuf {
+        masters(name, None, None)
+    }
+
+    /// A Zerodha wire whose every request goes to `base` and never to the
+    /// vendor: the URLs are built from `Wire::spec`, so the loopback base is
+    /// set there and in the source alike, as `credential_law_tests` does.
+    fn loopback_zerodha(site: &Site, base: &'static str) -> Wire {
+        let pull::vendor::Transport::Http(shipped) =
+            pull::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP feed")
+        };
+        let spec = pull::vendor::HttpSpec {
+            base_url: base,
+            ..shipped
+        };
+        Wire {
+            source: pull::http::HttpSource::new(
+                spec,
+                pull::http::Credential::pair("as2-key".to_owned(), "as2-token".to_owned()),
+            )
+            .expect("a loopback source")
+            .sharing(shared_governor(site, pull::vendor::Feed::Zerodha)),
+            spec,
+            store_vendor: brutex_core::vendor::Vendor::Zerodha,
+        }
+    }
+
+    /// `fno_futures` over `wire`, as `fno_walk` hands it a futures ask once
+    /// the feed's transport has named its token route.
+    async fn futures_walk(
+        asked: &ingest::FnoRequest,
+        today: Day,
+        now: std::time::SystemTime,
+        site: &Site,
+        wire: &Wire,
+    ) -> (axum::http::StatusCode, String) {
+        let journal = site.journal();
+        let page = FnoPage {
+            asked,
+            now,
+            today,
+            journal: &journal,
+            broker: Broker::Refused,
+        };
+        let route = wire.spec.fno.by_token().expect("a token route");
+        fno_futures(&page, Vec::new(), asked, site, wire, route).await
+    }
+
+    /// **THE FUTURES ROUTE PAST ITS REFUSAL** (BASE-COV-API-AS2): a Zerodha
+    /// futures walk that `futures_refusal` admits reads today's settled day,
+    /// plans from the dated Kite snapshots under `BRUTEX_MASTERS`, narrows to
+    /// a named expiry, names on its receipt what the plan rebuilt, skipped and
+    /// refused, and asks the vendor once per series. `masters_dir` reads the
+    /// process environment, so the planned walks run in a child of their own
+    /// (`crate::isolated`), which proves itself by a file.
+    ///
+    /// Extremes: 9 (6 single, 2 combined, 1 out of the box): (1) a clock in
+    /// the first month of the epoch has no settled day before it, a 500 before
+    /// any plan; (2) a named expiry whose plan keeps no ask but a refusal is
+    /// answered with the refusal, not refused; (3) an expiry that keeps
+    /// neither is refused by name; (4) no dated snapshot at all is a 503,
+    /// nothing sent; (5) a named expiry no snapshot lists is a 503 by name,
+    /// nothing sent; (6) a whole plan asks each of three series once and
+    /// writes two bars under each, naming nothing rebuilt, cut or refused;
+    /// (7) combined: the index's file gone AND the walk asked again, so the
+    /// index is rebuilt and the bars are already held; (8) combined: a
+    /// snapshot cut before its receipt AND a day after every listed expiry,
+    /// so the cut entry is named and the continuous series is not asked;
+    /// (9) out of the box: an underlying no vendor lists, `ZQIDX`, planned
+    /// only from its dated snapshots.
+    #[test]
+    fn the_futures_route_past_its_refusal_plans_pulls_and_names_its_plan() {
+        if let Some(proof) = std::env::var_os(FUTURES_ROUTE_PROOF) {
+            let masters = std::env::var_os("BRUTEX_MASTERS").expect("the child's masters");
+            futures_route_child(Path::new(&masters), Path::new(&proof));
+            return;
+        }
+        // (1) THE EPOCH'S FIRST MONTH: no day before it was settled.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let site = site("as2-futures-epoch", &masters_dir_for("as2-futures-epoch"));
+        let wire = loopback_zerodha(&site, "http://127.0.0.1:0");
+        let asked = zqidx_futures(day(1970, 1, 1), day(1970, 1, 2), None);
+        let (code, body) = runtime.block_on(futures_walk(
+            &asked,
+            day(1970, 1, 5),
+            std::time::UNIX_EPOCH + std::time::Duration::from_hours(96),
+            &site,
+            &wire,
+        ));
+        assert_eq!(code, axum::http::StatusCode::INTERNAL_SERVER_ERROR, "(1)");
+        assert!(
+            body.contains("NOT STARTED") && body.contains("clock names no usable date"),
+            "(1) {body}"
+        );
+        // (2)(3) THE NAMED EXPIRY, ASKED OF A PLAN DIRECTLY.
+        let window =
+            pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 31)).expect("a window");
+        let plan = pull::fnowork::FuturesPlan {
+            underlying: "ZQIDX".to_owned(),
+            newest: pull::master_snapshots::Stamp {
+                day: day(2026, 1, 2),
+                ordinal: 1,
+            },
+            asks: vec![pull::fnowork::FuturesAsk {
+                token: 8_000_001,
+                series: pull::fnowork::FuturesSeries::Continuous,
+                window,
+            }],
+            refused: vec!["token_reused: ZQIDX 2026-01-27 future".to_owned()],
+            rebuilt: None,
+            incomplete: Vec::new(),
+        };
+        let kept = narrowed_to_expiry(
+            plan.clone(),
+            &zqidx_futures(day(2026, 1, 1), day(2026, 1, 31), Some(day(2026, 1, 27))),
+        )
+        .expect("(2) a refusal is an answer");
+        assert!(kept.asks.is_empty(), "(2)");
+        assert_eq!(kept.refused, plan.refused, "(2)");
+        let why = narrowed_to_expiry(
+            pull::fnowork::FuturesPlan {
+                refused: Vec::new(),
+                ..plan
+            },
+            &zqidx_futures(day(2026, 1, 1), day(2026, 1, 31), Some(day(2026, 1, 27))),
+        )
+        .expect_err("(3) neither an ask nor a refusal");
+        assert!(why.contains("expiring on 2026-01-27"), "(3) {why}");
+        // (4)-(9) IN A CHILD WHOSE `BRUTEX_MASTERS` IS A SCRATCH FOLDER.
+        let folder = crate::scratch::path("as2-futures-route");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("a scratch folder");
+        let proof = folder.join("proof");
+        let snapshots = folder.join("masters");
+        std::fs::create_dir_all(&snapshots).expect("a masters folder");
+        let _out = crate::isolated::rerun(
+            "server::tests::the_futures_route_past_its_refusal_plans_pulls_and_names_its_plan",
+            &[
+                (FUTURES_ROUTE_PROOF, proof.as_os_str()),
+                ("BRUTEX_MASTERS", snapshots.as_os_str()),
+            ],
+        );
+        assert_eq!(
+            std::fs::read(&proof).ok().as_deref(),
+            Some(&b"ran four walks"[..]),
+            "the child ran its walks"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     /// R4-28 repair 4 (D-7190): nothing to file is `Empty` and says so; a
     /// series that stopped, or rows that do not balance, are `Failed`.
     #[test]
