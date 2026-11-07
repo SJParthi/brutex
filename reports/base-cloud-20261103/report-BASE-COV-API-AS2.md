@@ -895,6 +895,20 @@ NOT PROVED files (L-BCA-2).
   `2dc1534d`: exit 1, its output equal to `518b2355`'s line for line (the one-line difference from
   f01d7a0e4, no `sources_tests.rs` site, no site of this shard's).
 
+### The census warm asked where it stands (`619a9b4e`)
+
+The no-thread child gains case (13), now 13 extremes (8 / 2 / 3): the census warm, called
+directly in that child, warms the feed whose own thread is refused on the calling thread, and
+every row `start` listed settles (ready or failed). It reaches `census_cache.rs` 1199, the last
+thread-start row of that file. fmt rc 0 and clippy rc 0 (1.97.1) on `619a9b4e`; the filtered
+instrumented run `dev-nt2`: `1 passed`, 1199 read covered, the test's own uncovered sides still
+only its asserts' (F). Red round 9: `census_cache.rs` 1199 skipping the refused feed (`Err(_) =>
+{}`): `test result: FAILED. 0 passed; 1 failed`, the child at its own case (13), restored with
+`git checkout`.
+
+Route B whole:api on `619a9b4e`: running (started 22:10 IST); until its readout lands the lists
+and the FIX json are `2dc1534d`'s.
+
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
 - **D-8662 (draft): how G2's test-code GAP rows are closed, and the lists the landing gate
@@ -983,8 +997,7 @@ spawning-arm test's shape; the port taken by binding `:0` first); (2) `calendar_
 and 827:35 T, a bar file with one record rewritten to repeat its neighbour's minute or to sit
 before 1970, its block's checksum recomputed with `store::block::seal` (`Bar::image` writes the
 record); (3) `server.rs` 6632-6633, a journal that takes a run's open and close and refuses a
-member's note, in a uid-65534 child where the mode bits bind; (4) `census_cache.rs` 1199, by
-calling `warm` directly in the no-thread child of `2dc1534d`; (5) the two indexstopvix tests for
+member's note, in a uid-65534 child where the mode bits bind; (4) the two indexstopvix tests for
 G1's `indexstopvix_projection_tests.rs` (G1 or ASA). Then Route B whole:api on the code tip
 again, the lists, and the FIX json. The rows named as host, race, clock, build or real-host rows
 stay named (20935 is reached only by a load whose thread panics; 20979-20986 by an unstamped
