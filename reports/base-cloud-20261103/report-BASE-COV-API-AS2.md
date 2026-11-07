@@ -573,12 +573,71 @@ for a stretch with `start > end`, each reachable only by a direct call no reques
 `emitted.rs` (G1's) still lists `api.speed`'s "the minute thread did not start" as unreachable,
 which `a_minute_thread_that_cannot_start_is_said_and_the_table_still_counts` now reaches.
 
-NEXT (session -5): a red round for every new test (hand changes proposed by a helper, applied in
-the main tree with every test committed, restored by `git checkout`); the rest of server.rs's
-production rows (5825-5826, 6632, 9884, `pull_run` 10093-10130, 10594, 11549, 11928 (reached by
-no HTTP feed: a (U) candidate), 11993, 12949, 13019, 14661, 14899, 15926, 37592; the start-up rows
-20830-21092); the helpers' drafts for the small files and for the test-code rows; Route B
-whole:api on the code tip; the lists; the FIX json.
+### More server.rs rows (after the helpers' batches)
+
+| test | extremes | rows (`b3d5321c` numbering) |
+|---|---|---|
+| `a_pull_run_whose_ledger_gives_no_id_starts_nothing_and_a_zerodha_leg_names_its_kind` (one site and store per case) | 10 (7 / 2 / 1) | 10093:19 T, 10097, 10122-10130 |
+| `fno_boundary_tests.rs` `a_named_walk_whose_landing_is_refused_asks_for_no_contract` | 10 (7 / 2 / 1) | 14661 |
+| `the_bars_route_refuses_a_name_it_cannot_locate_rather_than_guessing_index`: one case more (a located series asked for a contract no store can name) | (an existing test) | pins the premise of the (U) proof of 15926 |
+| `a_muhurat_row_in_a_cash_body_is_skipped_not_a_refusal_of_the_body`: one case more (2026-11-08, sourced as traded with no recorded window) | (an existing test) | pins the premise of the (U) proofs of 5825-5826 |
+
+More rows proved (U) (proofs in `fu-AS2.txt.md` at the final readout): 5825 and 5826
+(`Window::verdict` reads the measured calendar, whose five unsized Muhurats all have recorded
+windows, and `NSE_CASH_SESSIONS` is verified from the epoch on); 6075:12 T (the function already
+returned for any non-ISIN policy with a vendor other than Zerodha); 6614 (every non-blocked run is
+`BrokerRun::opened`, whose ledger always has a source); 9884-9890 (`store_vendor` is `Some`);
+11549:9 F, 11550-11551 and 12949 (`Day::year_month` is `Ok` for every `Day`); 11928:8 T, 11929-11935
+(the only HTTP feeds are Dhan, Groww and Zerodha; Dhan and Zerodha return earlier and Groww's
+access serves); 13019:13 F, 13020-13025 (the loop's head already ran the same
+`IstMoment::from_epoch_secs` inside `Window::verdict`); 15926 (`locate_series` refuses a malformed
+contract first, and `contract_param` is a pure function of the query); 37592:13 F, 37593 (the vocab
+loop runs `0..COUNT` and `COUNT` is `TABLE.len()`).
+
+Rows named and left (not (U), not reachable by a test here): 10113:9 F, 10114-10118 (another press
+replacing the slot between the claim and the id: a race window); 10594-10597 and 14899-14902 (the
+handler's own `SystemTime::now()` before 1970 or past 9999: the machine's clock); 11993 (a
+successful Groww name walk: `chain::month` takes the feed's own descriptor, so it ends at the
+vendor's real host, the seam decision L-BCA-6 already names); 6632-6633 (a recovery run whose
+journal takes the close and refuses a member's note: not built here). 6855:68 F reads the wall clock
+(`finished_day_only`): taken by a run on a settled day or after the close, as a Saturday run is.
+
+### Test-code rows (D-8662), from a helper's draft, applied and run here
+
+`server.rs` `mod head_deadline_tests` (drain fails by name on a socket still held and returns only
+the text, as all 25 callers asserted the close; one-expression shutdown futures; drips bounded by a
+count; the oversized head's three refusals as one expression), eighteen more `server.rs` sites
+(`.filter().any()`, alternatives as one `.any()`, the zombie check as one read, a panicking leg as
+one expression, the minute caps judged before the loop, the vocab digest as one serde call, one
+census probe for both censuses, a message name captured inline), `calendar_record_tests.rs` (a
+calendar withheld inside its span: the input the helper's `Unmeasured` arm needs; a guard no day
+could take is a pinned premise), `calendar_route_tests.rs` (`settled` asks first under the held
+census, so every host meets "building"), `quarantine_route_tests.rs` and `tests/cloud_mutants_bars.rs`
+and `dayflags_rules_tests.rs` and `store_wire.rs` (seeded retry loops, `filter().any()`, a range
+`contains`, let-else lines that carry their `else`, never-called builders on the line of the call
+that refuses, patterns compared whole). No check is weakened. `run_serves_until_the_signal_and_exits_zero`
+(29 lines, 12 sides of host-decided paths: re-run in four children, one per store state) is drafted and
+not applied.
+
+Whole lib suite after these (`dev-full1`, instrumented, G3's 4-core hang skipped): `3101 passed; 14
+failed; 16 ignored`: the 13 reds of this shard's baseline (other shards' files, the five slow-reader
+host reds) and `server::stop_tests::a_stop_during_a_slow_load_ends_within_the_stop_bound` (G1's file,
+"7.11530448s" against `STOP_BOUND` 6 s under the run's load: L-BCA-4's stop bound).
+
+### Red rounds 4 and 5 (every test this continuation added, and each added case)
+
+Round 4: 67 hand changes in production code (a helper proposed one per test, each traced to that
+test's own assertion; the one that edited G1's `census.rs` was replaced by a change in G2's own
+re-read loop), applied in the main tree with every test committed, the instrumented build, `cargo
+test -p api --lib --locked -- --exact <the 67>`: `test result: FAILED. 0 passed; 67 failed`, every
+panic in test code at a test's own assertion (seven of them children, whose parents fail in
+`crate::isolated::rerun`). Restored with `git checkout -- crates/`. Round 5, the four additions after
+round 4's list: `0 passed; 4 failed` (the `/pull/run` kind read as Dhan's; the landing refusal's
+status; the contract refusal's words; an after-close minute kept), each at its own assertion, restored.
+
+NEXT (session -5): the small files' draft (booleanjson, booleancampaignjson, scrub_route,
+indexstopvixjson, operation_audit, master, topjson, verify, constituents); a red round for those
+tests; then Route B whole:api on the code tip, the lists and the FIX json.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
