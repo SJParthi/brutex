@@ -1,6 +1,24 @@
 STATUS: IN PROGRESS
 
-# BASE-COV-API-AS1 (shard G1 of `SHARDS.md`), BASE-COV-API repair round 3, 5-6 Nov 2026
+# BASE-COV-API-AS1 (shard G1 of `SHARDS.md`), BASE-COV-API repair round 3, 5-7 Nov 2026
+
+## The third continuation, in progress (token `BASE-COV-API-AS1-20261105-4`, 7 Nov 2026)
+
+Took the branch at `53d7eec7` (owner file `9bfdb6a0`); test code only so far, pushed after each step. The
+sections below this one are the second continuation's report, unchanged, until this continuation's Route B run
+replaces its figures.
+- `1e71e821`: six tests, each 8 / 2 / 1 extremes on its `Extremes:` line, red 6 of 6 under six hand behaviour
+  changes at once (reverted, `git status` empty): `audit_json::commit_tests::no_epoch_that_stats_..`
+  (`audit_json.rs` 1075, 1300, 1068:27 False, 1297:20 False), `detail::cover_tests::a_refused_refresh_keeps_..`
+  (1669:20 False, the race held open by publishing from inside the refresh), `indexmap::tests::a_name_of_nothing_..`
+  (119:38, 282:54, 497:28 False; 592:16 False to be (U): the slot table is `Vendor::ALL.len()` long and every
+  vendor's place is asserted), `credential_law::cover_tests::each_dead_value_..` (418:28, 419:28 False, a new cover
+  module declared at the end of `credential_law.rs`), `page_report_route::tests::a_report_in_a_process_with_no_log_..`
+  (169:28 False, 172, a child with no log), `backtest::tests::a_ledger_is_appendable_only_..` (927:40 False).
+
+NEXT: batch 2 (`chain.rs` 696-708, 819/1006, 837-843, 1205; `pullrun.rs` 1725, 2092, 4004/4044/4049; `facets.rs`
+794, 818-825), then `bars.rs`' merge-plan arms, then `recovery.rs`; then Route B whole:api on the code tip and the
+lists, report and json.
 
 TOKEN `BASE-COV-API-AS1-20261105-3` (the second continuation; the first session's was `BASE-COV-API-AS1-20261105-1`,
 the first continuation's `BASE-COV-API-AS1-20261105-2`); branch `cloud/cov-api-as1-20261105`, cut from the kit
