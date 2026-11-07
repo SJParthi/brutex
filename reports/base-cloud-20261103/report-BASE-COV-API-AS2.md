@@ -721,9 +721,10 @@ as in `dev-full1`). Every test this shard added or changed passed. `ROUTE-B DONE
     14899-14902, the machine's clock before 1970 or past 9999; 11993, the Groww name walk that
     ends at the vendor's real host (D-8663 item 1); 18229:43 T and 18323-18329, the slow-reader
     paths that the five head-deadline host reds reach on the Mac; 20811-20815 and 20856-20861, a
-    bound listener whose address or kept port the host refuses; 20935, 20979:24 T, 20980,
-    20982:20 T, 20983-20986, 21052, 21066:24 T, 21067, 21072:24 T and 21073, the serve start-up
-    lines of an unstamped build, a flying autopilot, an opened browser and warm-ups that fail),
+    bound listener whose address or kept port the host refuses; 20935, a start-up load whose
+    thread panicked; 20979:24 T, 20980, 20982:20 T, 20983-20986, 21052, 21066:24 T, 21067,
+    21072:24 T and 21073, the serve start-up lines of an unstamped build, a flying autopilot, an
+    opened browser and warm-ups that fail),
     `census_cache.rs` 33/6 (a warm thread the host does not start, 642-653 and 1009-1012; a warm
     thread that panicked, 1209-1212; a reply channel gone, 1132-1141; a refresh that cannot spawn,
     1199; the two races, 918:16 F and 1287-1303), `indexstopvixjson.rs` 6/3 (105-112 and 151:16 F:
@@ -768,6 +769,54 @@ the file now). The other files' new tests are in the tables above (`sources_day_
 `speed_tests.rs` 5, 11 or 12 cases each).
 
 Gate 23 on `b0b3a034`: as "Gate 23 by hand (session -5)" above (this measurement changed no code).
+
+### After that measurement: the new tests' own rows, and `run_serves` in four children (`518b2355`)
+
+The 16 lines and 12 sides of test code the measurement named in this continuation's own tests,
+each in a D-8662 form, no check weakened:
+
+- `census_cache.rs`: `settled` asks "rows listed, and every one settled" as one condition
+  (`rows.first().is_some_and(..)`; `start` lists every row before it returns, so "none listed
+  yet" was a side no run met); `until_row` takes `found.filter(ready)`; the landing wait of (7)
+  and the first pass of (1)/(9) compare one pair each (freshness and rows held; state and
+  entries); the reader of case (8)'s hit panics on the call's own line ("a hit reads nothing"),
+  where a counter closure no case calls stood; (11)'s link that names itself is read by
+  `expect_err`; (6) sets GDFL's slot by index (the module allows indexing).
+- `calendar_of.rs`: the follower thread says it holds the flight's lock before the landing is
+  made, and the landing must take that lock, so the follower is always waiting when it lands (no
+  thread order decides whether its wait runs); the answered landing is read by a one-line
+  let-else that panics.
+- `calendar_route_tests.rs`: the corrupting byte flip is one `map`; the malformed questions'
+  census reader is `unreachable!` on the call's own line (it replaces a counter asserted zero, so
+  a read now fails at the read); the word a case must not say is an `Option`, checked only where
+  a case names one; GDFL's slot set by index. `calendar_route.rs`: the let-else carries its
+  `else` on its line.
+- `bars_sort.rs`: the slices are named by `Debug`, one form for every kind, so no arm waits on a
+  kind the case does not make. `speed_tests.rs`: the boundary wait is arithmetic
+  (`u64::from(boundary - at < 2_000)`), so the wall clock decides an instant and no path.
+  `server.rs`: the loopback vendor is spawned as `axum::serve(..).into_future()`, leaving no
+  closing line of a task that never ends; `loopback_zerodha`'s let-else carries its `else`.
+
+`run_serves_until_the_signal_and_exits_zero` (29 lines, 9 sides the host decided) re-runs itself
+in four children, each handed one store state by `BRUTEX_STORE` and `BRUTEX_MASTERS`, none
+`BRUTEX_AUTOPILOT`: a store root that is not there, a store whose lock this process holds, and a
+free store over masters that agree and over masters with a vendor missing. Each child asserts
+its path as before and writes the path it took ("absent", "held", "served 0", "served 3"); the
+parent reads all four.
+
+fmt rc 0 and clippy rc 0 (1.97.1) on `518b2355`; filtered instrumented runs `dev-rs1` (`47
+passed`), `dev-rs2` (`1 passed`) and `dev-rs3` (`1 passed`), every restructured row read covered
+or (F). Red round 7, four hand changes in production code with the restructures committed: the
+held store's refusal reworded ("already serving the store"), `calendar_json_reading` reading
+the census before it parses the question, `census_now_kept` taking a matching stamp as a miss,
+and `Landing::drop` landing an answer as abandoned: `test result: FAILED. 0 passed; 4 failed`,
+each at its own assertion (`run_serves`' held child at its refusal check, the calendar test at
+its `unreachable!` reader, the census test at its panicking reader, the calendar_of test at its
+let-else), restored with `git checkout` of the four files.
+
+Route B whole:api on `518b2355`: running (started 20:50 IST, the same command and set file as
+above). Until its readout lands, `gaps-AS2.txt.md`, `fu-AS2.txt.md` and the FIX json are
+`b0b3a034`'s; the next reports-only commit replaces them with this tip's.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
@@ -850,13 +899,16 @@ Gate 23 on `b0b3a034`: as "Gate 23 by hand (session -5)" above (this measurement
   whichever side the Mac's run takes, the other stays the wall clock's. The spawning-arm child
   links the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
 
-NEXT: (1) the 16 lines and 12 sides of test code this continuation's own new tests left (named
-under "Final measurement (session -5)"), closed by D-8662's forms; (2)
-`run_serves_until_the_signal_and_exits_zero`'s 29 lines and 9 sides, by the drafted form of four
-children, one per store state; (3) the production rows left that a test can reach: `server.rs`
-6632-6633 (a recovery journal that refuses a member's note) and the serve start-up lines
-20935-21073 (a serve in a child per state: an unstamped build's gate, a flying autopilot, a
-warm-up that fails), `calendar_of.rs` 551:32 F and 827:35 T (a hand-crafted bar file, its checksum
-block recomputed); (4) the two indexstopvix tests for G1's `indexstopvix_projection_tests.rs` (G1
-or ASA); then Route B whole:api on the code tip again, the lists, and the FIX json. The rows named
-as host, race, clock or real-host rows stay named; the Mac's items above stay the Mac's.
+NEXT: the production rows left that a test could still reach, each a new test with its own
+`Extremes:` line: (1) `server.rs` 21052, a serve on a non-zero port in a child whose `PATH` is a
+scratch folder holding a link to the system's `true` and whose `BRUTEX_NO_OPEN` is unset (the
+spawning-arm test's shape; the port taken by binding `:0` first); (2) `calendar_of.rs` 551:32 F
+and 827:35 T, a bar file with one record rewritten to repeat its neighbour's minute or to sit
+before 1970, its block's checksum recomputed with `store::block::seal` (`Bar::image` writes the
+record); (3) `server.rs` 6632-6633, a journal that takes a run's open and close and refuses a
+member's note, in a uid-65534 child where the mode bits bind; (4) the two indexstopvix tests for
+G1's `indexstopvix_projection_tests.rs` (G1 or ASA). Then Route B whole:api on the code tip
+again, the lists, and the FIX json. The rows named as host, race, clock, build or real-host rows
+stay named (20935 is reached only by a load whose thread panics; 20979-20986 by an unstamped
+build or a flying autopilot, which would pull after its grace; master.rs 356-361 by a regular
+master that grows past 256 MiB during one read); the Mac's items above stay the Mac's.
