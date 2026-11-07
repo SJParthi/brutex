@@ -2655,7 +2655,7 @@ fn gate_docs() -> Vec<Doc> {
             5 * LAKH,
             25 * LAKH / 10,
         ][usize::try_from(rng.below(5)).unwrap_or(0)];
-        let date = Date::from_days(
+        let mut date = Date::from_days(
             rng.range(
                 Date {
                     y: 2018,
@@ -2671,6 +2671,10 @@ fn gate_docs() -> Vec<Doc> {
                 .days(),
             ),
         );
+        // a decision is on a weekday: a weekend draw moves to the Monday after
+        while date.weekday() >= 5 {
+            date = Date::from_days(date.days() + 1);
+        }
         out.push(gate_doc(
             &format!("G{:03}", 15 + k),
             &format!("seeded gate case {}, {}", k + 1, side.name()),
@@ -3626,7 +3630,7 @@ fn charge_docs() -> Vec<Doc> {
     for k in 0..6u64 {
         let seed = 8_200 + k;
         let mut rng = SplitMix64::new(seed);
-        let date = Date::from_days(
+        let mut date = Date::from_days(
             rng.range(
                 Date {
                     y: 2018,
@@ -3642,6 +3646,10 @@ fn charge_docs() -> Vec<Doc> {
                 .days(),
             ),
         );
+        // a trade is on a weekday: a weekend draw moves to the Monday after
+        while date.weekday() >= 5 {
+            date = Date::from_days(date.days() + 1);
+        }
         let px = rng.range(2_000, 500_000);
         let qty = (15 * LAKH / px).max(1);
         let fills = |rng: &mut SplitMix64, q: i64, p: i64| -> Vec<(i64, i64)> {
@@ -3895,7 +3903,9 @@ fn account_docs() -> Vec<Doc> {
     );
     let mut month = Vec::new();
     let mut id = 0;
-    for d in 1..=25u32 {
+    // the weekdays of July 2026 (23 of them), five trades on each
+    let weekdays = (1..=31u32).filter(|&d| Date { y: 2026, m: 7, d }.weekday() < 5);
+    for d in weekdays {
         for k in 0..5u32 {
             month.push(sig(
                 id,

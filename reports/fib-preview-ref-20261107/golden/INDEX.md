@@ -221,15 +221,15 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | C030 | charges | A15=literal | 9 | the same trade, every listed state: Himachal Pradesh's Rs 50 (A15 other) |
 | C031 | charges | headline | 9 | a Rs 15 lakh round trip on 2019-06-03 above Rs 16.67 lakh of turnover: Tamil Nadu |
 | C038 | charges | headline | 6 | an entry closed whole by the broker's 15:10 square-off: its brokerage and Rs 20 + GST on top |
-| C032 | charges | headline | 6 | seeded multi-fill trade 1 on 2020-05-30 |
+| C032 | charges | headline | 6 | seeded multi-fill trade 1 on 2020-06-01 |
 | C033 | charges | headline | 6 | seeded multi-fill trade 2 on 2026-07-24 |
 | C034 | charges | headline | 6 | seeded multi-fill trade 3 on 2023-10-16 |
 | C035 | charges | headline | 6 | seeded multi-fill trade 4 on 2022-07-29 |
-| C036 | charges | headline | 6 | seeded multi-fill trade 5 on 2023-11-26 |
-| C037 | charges | headline | 6 | seeded multi-fill trade 6 on 2021-05-01 |
+| C036 | charges | headline | 6 | seeded multi-fill trade 5 on 2023-11-27 |
+| C037 | charges | headline | 6 | seeded multi-fill trade 6 on 2021-05-03 |
 | A001 | account | headline | 14 | the 6th and 7th trades of a day: day cap |
 | A002 | account | headline | 16 | the same signals under ceiling B: ten a day at Rs 10 lakh |
-| A003 | account | headline | 227 | the 101st trade of a calendar month: month cap |
+| A003 | account | headline | 217 | the 101st trade of a calendar month: month cap |
 | A004 | account | headline | 6 | one position per stock (while_open) and N = 1's slot, inclusive lock (A18 headline) |
 | A005 | account | A18=exclusive | 7 | the same, free in the last fill's second (A18 other) |
 | A006 | account | headline | 11 | the margin check on Rs 13 lakh: one step down does not fit (margin_cap) |
