@@ -5139,6 +5139,31 @@ pub fn write_all(dir: &Path) -> std::io::Result<usize> {
     Ok(files.len() + 1)
 }
 
+/// The golden writer, whole, for `src/bin/fib_ref_golden.rs`: the first
+/// argument after the program's name is the directory. Returns the exit
+/// code: 0 written, 1 refused by the file system (named on `err`), 2 no
+/// directory named (the usage on `err`).
+pub fn writer_main(
+    args: &[std::ffi::OsString],
+    out: &mut dyn std::io::Write,
+    err: &mut dyn std::io::Write,
+) -> u8 {
+    let Some(dir) = args.get(1).map(std::path::PathBuf::from) else {
+        let _ = writeln!(err, "usage: fib_ref_golden <directory>");
+        return 2;
+    };
+    match write_all(&dir) {
+        Ok(n) => {
+            let _ = writeln!(out, "wrote {n} files into {}", dir.display());
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(err, "writing {}: {e}", dir.display());
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "golden_tests.rs"]
 mod tests;

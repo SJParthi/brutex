@@ -177,9 +177,10 @@ impl Ladder {
         prices.sort_unstable();
         prices.dedup();
         let at = prices.iter().position(|&p| p == level)?;
-        let m = usize::try_from(m).ok()?;
+        // a count no index can reach finds no rung either way
+        let m = usize::try_from(m).unwrap_or(usize::MAX);
         if up {
-            prices.get(at.checked_add(m)?).copied()
+            prices.get(at.saturating_add(m)).copied()
         } else {
             at.checked_sub(m).and_then(|i| prices.get(i).copied())
         }

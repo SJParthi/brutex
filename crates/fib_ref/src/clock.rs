@@ -49,14 +49,13 @@ pub fn hms(t: u32) -> String {
 
 /// Parses `HH:MM:SS` or `HH:MM` into seconds of the day.
 pub fn parse_hms(s: &str) -> Option<u32> {
-    let mut parts = s.split(':');
-    let h: u32 = parts.next()?.parse().ok()?;
-    let m: u32 = parts.next()?.parse().ok()?;
-    let sec: u32 = match parts.next() {
-        Some(p) => p.parse().ok()?,
-        None => 0,
-    };
-    if parts.next().is_some() || h > 23 || m > 59 || sec > 59 {
+    let (h, rest) = s.split_once(':')?;
+    // a fourth part leaves a colon in the seconds, which then fail to parse
+    let (m, sec) = rest.split_once(':').unwrap_or((rest, "0"));
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    let sec: u32 = sec.parse().ok()?;
+    if h > 23 || m > 59 || sec > 59 {
         return None;
     }
     Some(h * 3600 + m * 60 + sec)
@@ -131,14 +130,10 @@ impl Date {
 
     /// Parses `YYYY-MM-DD`.
     pub fn parse(s: &str) -> Option<Date> {
-        let mut parts = s.split('-');
-        let y: i32 = parts.next()?.parse().ok()?;
-        let m: u32 = parts.next()?.parse().ok()?;
-        let d: u32 = parts.next()?.parse().ok()?;
-        if parts.next().is_some() {
-            return None;
-        }
-        Date::new(y, m, d)
+        let (y, rest) = s.split_once('-')?;
+        // a fourth part leaves a dash in the day, which then fails to parse
+        let (m, d) = rest.split_once('-')?;
+        Date::new(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?)
     }
 }
 

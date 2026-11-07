@@ -456,7 +456,7 @@ impl Readings {
 /// or `None` when that minute has no price of its own.
 pub fn r1_at(minutes: &[Minute], t: u32) -> Option<(i64, i64)> {
     let m = last_minute_closed_by(t)?;
-    minutes.get(usize::try_from(m).ok()?)?.r1()
+    minutes.get(usize::try_from(m).unwrap_or(usize::MAX))?.r1()
 }
 
 /// Rounding of a mapped level to the measured raw step.

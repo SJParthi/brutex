@@ -42,3 +42,74 @@ fn rendering_is_byte_identical_on_a_second_run() {
     assert_eq!(a, b);
     assert!(manifest(&a).contains("FORMAT.md"));
 }
+
+#[test]
+fn write_all_writes_every_file_and_the_manifest_and_refuses_a_bad_path() {
+    let dir = std::env::temp_dir().join(format!("fib_ref_write_all_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let n = write_all(&dir).expect("a fresh scratch directory is writable");
+    let files = files();
+    assert_eq!(n, files.len() + 1);
+    for (name, text) in &files {
+        let back = std::fs::read_to_string(dir.join(name)).expect("written");
+        assert_eq!(&back, text, "{name}");
+    }
+    let back = std::fs::read_to_string(dir.join("MANIFEST.md")).expect("written");
+    assert_eq!(back, manifest(&files));
+    // out of the box: a directory below a regular file cannot be made
+    assert!(write_all(&dir.join("FORMAT.md").join("below")).is_err());
+    std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's own");
+}
+
+#[test]
+fn the_writer_names_its_usage_writes_and_refuses_by_exit_code() {
+    use std::ffi::OsString;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = writer_main(&[OsString::from("fib_ref_golden")], &mut out, &mut err);
+    assert_eq!(code, 2);
+    assert!(out.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&err),
+        "usage: fib_ref_golden <directory>\n"
+    );
+    // no argument at all, not even the program's name
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(writer_main(&[], &mut out, &mut err), 2);
+    let dir = std::env::temp_dir().join(format!("fib_ref_writer_main_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let args = [
+        OsString::from("fib_ref_golden"),
+        dir.clone().into_os_string(),
+    ];
+    assert_eq!(writer_main(&args, &mut out, &mut err), 0);
+    assert!(err.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&out),
+        format!("wrote {} files into {}\n", files().len() + 1, dir.display())
+    );
+    // a directory below a regular file: refused, named, exit 1
+    let bad = dir.join("INDEX.md").join("below");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let args = [
+        OsString::from("fib_ref_golden"),
+        bad.clone().into_os_string(),
+    ];
+    assert_eq!(writer_main(&args, &mut out, &mut err), 1);
+    assert!(out.is_empty());
+    assert!(String::from_utf8_lossy(&err).starts_with(&format!("writing {}: ", bad.display())));
+    std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's own");
+}
+
+#[test]
+fn write_all_refuses_when_a_file_it_writes_is_a_directory() {
+    // a directory where a scenario file goes, then where the manifest goes
+    for blocker in ["FORMAT.md", "MANIFEST.md"] {
+        let dir =
+            std::env::temp_dir().join(format!("fib_ref_blocked_{}_{blocker}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(blocker)).expect("a scratch directory");
+        assert!(write_all(&dir).is_err(), "{blocker}");
+        std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's own");
+    }
+}

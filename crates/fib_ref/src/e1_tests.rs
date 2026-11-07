@@ -550,6 +550,29 @@ fn e1s_scope_rules_a_hole_a_consumed_box_an_anchored_box_and_a_failed_box() {
 }
 
 #[test]
+fn e1s_a_box_taller_than_the_height_cap_never_arms() {
+    let day = flag_day();
+    let secs = secs_with(6, 8, 10_185, &[(6 * 60 + 20, 10_200)]);
+    let top = vec![true; 8];
+    let r = Readings::HEADLINE;
+    // the box 10,165..10,195 is 30 paise of a 250-paise leg: 120,000 ppm
+    let tall = E1Params {
+        max_height_ppm: Some(100_000),
+        ..seed(Side::Long, 2)
+    };
+    assert!(e1s_run(&day, &secs, &top, &tall, &r).is_empty());
+    let fits = E1Params {
+        max_height_ppm: Some(140_000),
+        ..seed(Side::Long, 2)
+    };
+    let ev = e1s_run(&day, &secs, &top, &fits, &r);
+    assert_eq!(
+        ev.iter().map(|e| (e.candle, e.status)).collect::<Vec<_>>(),
+        vec![(5, Status::Ok)]
+    );
+}
+
+#[test]
 fn e1c_a_hole_after_a_consumed_scope_writes_no_void() {
     let mut day = flag_day();
     day.push(minute(8, 10_225, 10_228, 10_215, 10_220));

@@ -1,23 +1,15 @@
 //! Writes every FIB-PREVIEW-REF golden scenario, `FORMAT.md`, `INDEX.md`
 //! and `MANIFEST.md` into the directory named by the first argument.
-//! PREVIEW: seeded synthetic data only; not a result.
+//! PREVIEW: seeded synthetic data only; not a result. The behaviour is
+//! `fib_ref::golden::writer_main`, unit-tested there.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let Some(dir) = std::env::args_os().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: fib_ref_golden <directory>");
-        return ExitCode::from(2);
-    };
-    match fib_ref::golden::write_all(&dir) {
-        Ok(n) => {
-            println!("wrote {n} files into {}", dir.display());
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("writing {}: {e}", dir.display());
-            ExitCode::FAILURE
-        }
-    }
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    ExitCode::from(fib_ref::golden::writer_main(
+        &args,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    ))
 }

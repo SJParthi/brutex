@@ -41,6 +41,8 @@ fn parse_hms_accepts_two_forms_and_refuses_the_rest() {
     assert_eq!(parse_hms("09:bb"), None);
     assert_eq!(parse_hms("09:15:xx"), None);
     assert_eq!(parse_hms(""), None);
+    assert_eq!(parse_hms("09:15:"), None);
+    assert_eq!(parse_hms("09::00"), None);
 }
 
 #[test]
@@ -91,6 +93,8 @@ fn month_index_weekday_iso_and_parse() {
     assert_eq!(d.iso(), "2026-11-07");
     assert_eq!(Date::parse("2026-11-07"), Some(d));
     assert_eq!(Date::parse("2026-11"), None);
+    assert_eq!(Date::parse("20261107"), None);
+    assert_eq!(Date::parse("2026-11-"), None);
     assert_eq!(Date::parse("2026-11-07-01"), None);
     assert_eq!(Date::parse("2026-02-30"), None);
     assert_eq!(Date::parse("x-1-1"), None);
