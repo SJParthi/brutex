@@ -1,12 +1,12 @@
 # gaps-AS2.txt.md
 
-Source: this shard's Route B whole:api readout of tip `2dc1534d` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
+Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
 
 `````text
-BASE-COV-API-AS2 (repair round 3, shard G2), Route B on tip 2dc1534d8cdfaff34a6509339ac425da49037913, whole:api (the kit's set file deep-BASE-COV-API-6ea46e59c074-set.txt, 205 coverage files), host Linux x86_64, root, 4 cores; test api rc=101 END 2026-11-07 21:40:31 IST (6 min); tests passed 3196 failed 15 ignored 16
+BASE-COV-API-AS2 (repair round 3, shard G2), Route B on tip 1fbb5ad66048cdf9899448c4b9bc3c53833c2ce5, whole:api (the kit's set file deep-BASE-COV-API-6ea46e59c074-set.txt, 205 coverage files), host Linux x86_64, root, 4 cores; test api rc=101 END 2026-11-07 22:51:33 IST (7 min); tests passed 3195 failed 16 ignored 16
 NOT PROVED lines of the run: 23 files, every one of them crates/api/benches/** or crates/api/src/lib.rs (no object holds them: L-BCA-2)
-TOTAL (whole api, this host) lines 180310/184501 (4191 uncovered), branches 12952/15484 (2532 uncovered sides)
-G2 (58 files of SHARDS.md's G2) lines 70407/71390 (983 uncovered), branches 4763/5496 (733 uncovered sides): (F) 174 lines 549 sides; (U) 123 lines 90 sides; GAP 686 lines 94 sides (production 525 lines 75 sides; test code 51 lines 7 sides; inside #[ignore]d tests 110 lines 12 sides)
+TOTAL (whole api, this host) lines 180320/184518 (4198 uncovered), branches 12946/15482 (2536 uncovered sides)
+G2 (58 files of SHARDS.md's G2) lines 70425/71407 (982 uncovered), branches 4761/5494 (733 uncovered sides): (F) 174 lines 549 sides; (U) 123 lines 90 sides; GAP 685 lines 94 sides (production 524 lines 75 sides; test code 51 lines 7 sides; inside #[ignore]d tests 110 lines 12 sides)
 Classes: a row whose line the predecessor's lists (tip b3d5321c) classed keeps that class, its line mapped through git diff; (U) rows carry their proof (fu-AS2.txt); every other row was classed by recipe v4 step 4 (test code only: a panic/unreachable line, a message argument of an assert whose statement ran, the false side of an && operand inside an assert whose line ran, the false arm of a matches! inside an assert whose statement ran (as the previous lists read the same rows), the else of a let-else that panics whose line ran) and read by hand in session -5. Other groups' files were measured in the same run and are their shards' to list.
 per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/server.rs: lines 19298/19596, branches 1243/1466; GAP 190/20
@@ -20,7 +20,7 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/booleanqualification_projection_tests.rs: lines 71/71, branches 0/0; GAP 0/0
   crates/api/src/bars_sort.rs: lines 3791/3813, branches 447/488; GAP 5/2
   crates/api/src/bars_sort_tests.rs: lines 1263/1266, branches 73/112; GAP 0/0
-  crates/api/src/census_cache.rs: lines 1791/1836, branches 169/194; GAP 18/3
+  crates/api/src/census_cache.rs: lines 1799/1843, branches 169/194; GAP 17/3
   crates/api/src/calendar_of.rs: lines 1999/2038, branches 118/136; GAP 34/6
   crates/api/src/calendar_route.rs: lines 876/879, branches 96/100; GAP 1/0
   crates/api/src/calendar_route_tests.rs: lines 1167/1169, branches 33/60; GAP 0/0
@@ -48,7 +48,7 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/booleancampaignjson_tests.rs: lines 564/564, branches 10/10; GAP 0/0
   crates/api/src/recovery_control.rs: lines 386/386, branches 26/26; GAP 0/0
   crates/api/src/indexstopvixjson.rs: lines 271/278, branches 22/26; GAP 6/3
-  crates/api/src/head_deadline_body_tests.rs: lines 634/694, branches 35/60; GAP 51/7
+  crates/api/src/head_deadline_body_tests.rs: lines 635/694, branches 35/60; GAP 51/7
   crates/api/src/render.rs: lines 2654/2661, branches 245/278; GAP 1/1
   crates/api/tests/logs_r3_24.rs: lines 240/241, branches 10/10; GAP 0/0
   crates/api/src/verify.rs: lines 356/360, branches 29/30; GAP 0/0
@@ -57,7 +57,7 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/instruments_route.rs: lines 824/824, branches 48/64; GAP 0/0
   crates/api/src/fault_log.rs: lines 403/403, branches 39/40; GAP 0/0
   crates/api/src/server_cloud_mutant_tests_e.rs: lines 585/587, branches 11/12; GAP 0/0
-  crates/api/tests/cloud_mutants_bars.rs: lines 1779/1781, branches 16/28; GAP 0/0
+  crates/api/tests/cloud_mutants_bars.rs: lines 1788/1791, branches 14/26; GAP 0/0
   crates/api/src/constituents.rs: lines 932/932, branches 55/62; GAP 0/0
   crates/api/src/boolean_observation_budget.rs: lines 79/79, branches 17/22; GAP 0/0
   crates/api/src/fno_boundary_tests.rs: lines 1295/1297, branches 28/32; GAP 0/0
@@ -241,7 +241,6 @@ GAP ignored BRANCH crates/api/src/calendar_of.rs:2561:13 False  let Some(home) =
 GAP ignored BRANCH crates/api/src/calendar_of.rs:2575:24 True  if let Ok(ym) = YearMonth::new(year, month) {
 GAP ignored BRANCH crates/api/src/calendar_of.rs:2575:24 False  if let Ok(ym) = YearMonth::new(year, month) {
 GAP prod LINE crates/api/src/calendar_route.rs:1312  Err(_) => Err("the pull journal's walk at start unwound".to_owned()),
-GAP prod LINE crates/api/src/census_cache.rs:1199  Err(_) => warm_one(site, vendors, feed),
 GAP prod LINE crates/api/src/census_cache.rs:1210  // A WARM THAT PANICKED leaves its rows as they were (`warming`,
 GAP prod LINE crates/api/src/census_cache.rs:1211  // or the last state it reached), and readers read for themselves.
 GAP prod LINE crates/api/src/census_cache.rs:1212  warn_line!("a census warm thread panicked; its caches are read by their first request");

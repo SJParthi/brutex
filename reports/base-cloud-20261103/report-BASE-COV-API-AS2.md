@@ -928,8 +928,38 @@ the test's only uncovered row the message argument `*started` of its bounded wai
 (F). It restructures an existing test whose assertions it keeps, so it has no red round of its
 own.
 
-Route B whole:api on `1fbb5ad6`: running (started 22:41 IST); until its readout lands the lists
-and the FIX json are `2dc1534d`'s.
+### Measurement: Route B whole:api on `1fbb5ad6`, the code tip (7 Nov, 22:41-23:10 IST)
+
+The same command and set file, the scratch worktree moved to `1fbb5ad6` (clean): build rc 0 in
+2 min (170 artifacts, 148 reused); `== test api rc=101 END 2026-11-07 22:51:33 IST (7 min); tests
+passed 3195 failed 16 ignored 16`; lib `test result: FAILED. 3111 passed; 15 failed; 16 ignored;
+0 measured; 1 filtered out; finished in 267.88s`. The 16 reds: the baseline's 14; G1's stop-bound
+test under the run's load ("the whole stop, signal to end, is inside STOP_BOUND 6s:
+6.550778085s": L-BCA-4); and G3's
+`server::cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused`
+(`server_cloud_mutant_tests_c.rs:2466`: `left: "BANKNIFTY: the broker did not answer with a
+window. This was"`, `right: "no instrument in the universe could be reached"`), new in this
+session's runs. The lib code of `1fbb5ad6` is `619a9b4e`'s byte for byte (the commit touched
+only `tests/cloud_mutants_bars.rs`, another test binary), and that test passed in the 518b2355,
+2dc1534d and 619a9b4e runs, so what its autopilot tick met changed with the hour or the load, not
+with this shard's code: G3's (AS3) or ASA's to read. Every test this shard added or changed passed.
+`ROUTE-B DONE 2026-11-07 23:09:47 IST WITH NOT PROVED lines above`, the same 23 NOT PROVED files
+(L-BCA-2).
+
+- Whole api, this host: lines 180,320/184,518 (4,198 uncovered), branches 12,946/15,482 (2,536
+  uncovered sides).
+- G2: lines 70,425/71,407 (982 uncovered), branches 4,761/5,494 (733 uncovered sides): (F) 174
+  lines 549 sides; (U) 123 lines 90 sides; GAP 685 lines 94 sides (production 524 lines 75
+  sides; test code 51 lines 7 sides, every one `head_deadline_body_tests.rs`' behind the five
+  host reds; inside `#[ignore]`d tests 110 lines 12 sides).
+- Against `619a9b4e`: `tests/cloud_mutants_bars.rs` 332:16 F and 335-336 are gone (the new form's
+  one (F), the message argument `*started`, is listed); `speed.rs` 585:16 T and 586, the
+  two-thread insert race named since the final measurement, were met by `619a9b4e`'s run and not
+  by this one, so production reads 524/75 here against 523/74 there: a race's row, as named.
+  Against this shard's previous final (`b3d5321c`): production 950/269 to 524/75, test code
+  118/74 to 51/7, (U) 56/35 to 123/90. **The bar is not met** for G2.
+- Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, rewritten from this readout. Gate 23 by hand on
+  `1fbb5ad6`: exit 1, its output equal to `518b2355`'s line for line.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
@@ -990,6 +1020,10 @@ and the FIX json are `2dc1534d`'s.
   failed once here under load (7.1 s against 6 s: L-BCA-4). (5) Two tests the helper drafted for
   `indexstopvixjson.rs` 105-108 and 151:16 F belong in `indexstopvix_projection_tests.rs`, G1's
   file by `SHARDS.md`: G1 or ASA lands them (the draft is reproducible from this report's rows).
+  (6) G3's `server::cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused`
+  failed once, in the `1fbb5ad6` run, over lib code identical to `619a9b4e`'s where it passed (the
+  tick's note named BANKNIFTY's missing broker window instead of "no instrument in the universe
+  could be reached"): G3's or ASA's to read, as an input the hour or the load decides.
 
 ## NEEDS THE MAC
 

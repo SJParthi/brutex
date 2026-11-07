@@ -1,9 +1,9 @@
 # fu-AS2.txt.md
 
-Source: this shard's Route B whole:api readout of tip `2dc1534d` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
+Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
 
 `````text
-(F)/(U) list of BASE-COV-API-AS2 (repair round 3, shard G2), tip 2dc1534d8cdfaff34a6509339ac425da49037913, whole:api, Route B (see gaps-AS2.txt for the run).
+(F)/(U) list of BASE-COV-API-AS2 (repair round 3, shard G2), tip 1fbb5ad66048cdf9899448c4b9bc3c53833c2ce5, whole:api, Route B (see gaps-AS2.txt for the run).
 (F) = the failing side of an assert!/assert_eq!/assert_ne!/panic!/unreachable! whose statement ran, in test code (recipe v4 step 4), as repair r2 read it.
 (U) = unreachable on every target, aarch64-apple-darwin included: the proof from the code is in brackets on each row.
 (F) 174 lines 549 sides; (U) 123 lines 90 sides.
@@ -162,8 +162,8 @@ Source: this shard's Route B whole:api readout of tip `2dc1534d` (`d3-route-b-cl
 (F) BRANCH crates/api/src/census_cache.rs:3582:13 False  [the else of a let-else that panics, whose line ran]  let ManifestStamp::Partitioned(stamp) = vendor_stamp(&root, Vendor::Gdfl) else {
 (F) BRANCH crates/api/src/census_cache.rs:3593:22 False  [the false side fails the check, and its line ran]  ] if kind == looped
 (F) BRANCH crates/api/src/census_cache.rs:3647:13 False  [the else of a let-else that panics, whose line ran]  let ManifestStamp::Partitioned(moved) = vendor_stamp(&root, Vendor::Gdfl) else {
-(F) BRANCH crates/api/src/census_cache.rs:3854:17 False  [the false side fails the check, and its line ran]  reason.starts_with("the background re-read could not be started (")
-(F) BRANCH crates/api/src/census_cache.rs:3855:24 False  [the false side fails the check, and its line ran]  && reason.ends_with("); readers read it themselves"),
+(F) BRANCH crates/api/src/census_cache.rs:3856:17 False  [the false side fails the check, and its line ran]  reason.starts_with("the background re-read could not be started (")
+(F) BRANCH crates/api/src/census_cache.rs:3857:24 False  [the false side fails the check, and its line ran]  && reason.ends_with("); readers read it themselves"),
 (F) LINE crates/api/src/census_tail_tests.rs:109  [panic/unreachable line]  panic!("not held: {}", census.note());
 (F) LINE crates/api/src/census_tail_tests.rs:497  [panic/unreachable line]  panic!("served past its capacity: {}", over.note());
 (F) BRANCH crates/api/src/census_tail_tests.rs:108:9 False  [the else of a let-else that panics, whose line ran]  let Census::Held { ref manifest } = census.state else {
@@ -258,7 +258,6 @@ Source: this shard's Route B whole:api readout of tip `2dc1534d` (`d3-route-b-cl
 (F) BRANCH crates/api/src/fno_boundary_tests.rs:226:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = self.asked.feed.descriptor().transport else {
 (F) BRANCH crates/api/src/fno_boundary_tests.rs:1492:9 False  [the false side fails the check, and its line ran]  body.contains("<th>Contracts discovered</th><td>3</td>")
 (F) BRANCH crates/api/src/fno_boundary_tests.rs:1493:16 False  [the false side fails the check, and its line ran]  && body.contains("<th>Contracts asked for</th><td>3</td>"),
-(F) LINE crates/api/src/head_deadline_body_tests.rs:167  [failing arm of the statement at 164, which ran]  String::from_utf8_lossy(&got)
 (F) LINE crates/api/src/head_deadline_body_tests.rs:197  [panic/unreachable line]  panic!("no byte for 10 s after {} of {want}", have.len());
 (F) LINE crates/api/src/head_deadline_body_tests.rs:218  [panic/unreachable line]  panic!("held past {limit:?}; {} byte(s) came", got.len());
 (F) LINE crates/api/src/head_deadline_body_tests.rs:239  [failing arm of the statement at 232, which ran]  String::from_utf8_lossy(&got)
@@ -716,20 +715,21 @@ Source: this shard's Route B whole:api readout of tip `2dc1534d` (`d3-route-b-cl
 (F) LINE crates/api/src/verify.rs:516  [panic/unreachable line]  panic!("a recovered counter still loads: {:?}", dhan.state.name());
 (F) LINE crates/api/src/verify.rs:690  [failing arm of the statement at 687, which ran]  first.say()
 (F) BRANCH crates/api/src/verify.rs:515:13 False  [the else of a let-else that panics, whose line ran]  let Census::Held { ref manifest } = dhan.state else {
-(F) LINE crates/api/tests/cloud_mutants_bars.rs:504  [panic/unreachable line]  panic!("February is owed: {gated:?}");
-(F) LINE crates/api/tests/cloud_mutants_bars.rs:615  [panic/unreachable line]  panic!("every month is owed: {gated:?}");
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:503:13 False  [the else of a let-else that panics, whose line ran]  let Gate::RungFirst { owed, .. } = &gated else {
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:614:13 False  [the else of a let-else that panics, whose line ran]  let Gate::RungFirst { needs, owed, .. } = &gated else {
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:950:13 False  [the false side fails the check, and its line ran]  none.starts_with("too_many_series") && none.contains("0 were named"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:950:52 False  [the false side fails the check, and its line ran]  none.starts_with("too_many_series") && none.contains("0 were named"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2121:13 False  [the false side fails the check, and its line ran]  unopened[0].contains("2025-04") && unopened[0].contains("none of its 2 kept rows"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2121:48 False  [the false side fails the check, and its line ran]  unopened[0].contains("2025-04") && unopened[0].contains("none of its 2 kept rows"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2125:13 False  [the false side fails the check, and its line ran]  unopened[1].contains("2025-05") && unopened[1].contains("none of its 2 kept rows"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2125:48 False  [the false side fails the check, and its line ran]  unopened[1].contains("2025-05") && unopened[1].contains("none of its 2 kept rows"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2359:13 False  [the false side fails the check, and its line ran]  got.faults[1].starts_with("2025-06: ") && got.faults[1].contains("not a regular file"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2359:55 False  [the false side fails the check, and its line ran]  got.faults[1].starts_with("2025-06: ") && got.faults[1].contains("not a regular file"),
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2654:13 False  [the false side fails the check, and its line ran]  why.contains(&format!("{} is not a regular file", srt.display()))
-(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2655:20 False  [the false side fails the check, and its line ran]  && why.starts_with("NSE-INDEX-NIFTY 2025-05: 3 rows read: "),
+(F) LINE crates/api/tests/cloud_mutants_bars.rs:351  [failing arm of the statement at 348, which ran]  *started
+(F) LINE crates/api/tests/cloud_mutants_bars.rs:522  [panic/unreachable line]  panic!("February is owed: {gated:?}");
+(F) LINE crates/api/tests/cloud_mutants_bars.rs:633  [panic/unreachable line]  panic!("every month is owed: {gated:?}");
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:521:13 False  [the else of a let-else that panics, whose line ran]  let Gate::RungFirst { owed, .. } = &gated else {
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:632:13 False  [the else of a let-else that panics, whose line ran]  let Gate::RungFirst { needs, owed, .. } = &gated else {
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:968:13 False  [the false side fails the check, and its line ran]  none.starts_with("too_many_series") && none.contains("0 were named"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:968:52 False  [the false side fails the check, and its line ran]  none.starts_with("too_many_series") && none.contains("0 were named"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2139:13 False  [the false side fails the check, and its line ran]  unopened[0].contains("2025-04") && unopened[0].contains("none of its 2 kept rows"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2139:48 False  [the false side fails the check, and its line ran]  unopened[0].contains("2025-04") && unopened[0].contains("none of its 2 kept rows"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2143:13 False  [the false side fails the check, and its line ran]  unopened[1].contains("2025-05") && unopened[1].contains("none of its 2 kept rows"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2143:48 False  [the false side fails the check, and its line ran]  unopened[1].contains("2025-05") && unopened[1].contains("none of its 2 kept rows"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2377:13 False  [the false side fails the check, and its line ran]  got.faults[1].starts_with("2025-06: ") && got.faults[1].contains("not a regular file"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2377:55 False  [the false side fails the check, and its line ran]  got.faults[1].starts_with("2025-06: ") && got.faults[1].contains("not a regular file"),
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2672:13 False  [the false side fails the check, and its line ran]  why.contains(&format!("{} is not a regular file", srt.display()))
+(F) BRANCH crates/api/tests/cloud_mutants_bars.rs:2673:20 False  [the false side fails the check, and its line ran]  && why.starts_with("NSE-INDEX-NIFTY 2025-05: 3 rows read: "),
 (F) LINE crates/api/tests/logs_r3_24.rs:351  [panic/unreachable line]  panic!("{query}: no end in 200 pages, {} line(s) read", seqs.len());
 (U) LINE crates/api/src/bars_sort.rs:518  [run_at ranges over 0..plan.runs.len() fixed at the loop's start, and nothing in the body shrinks plan.runs (view reads slots and key and writes only Slot::file/failed, bars_series.rs:1647-1710): get(run_at) is Some]  continue;
 (U) LINE crates/api/src/bars_sort.rs:1291  [array ranges over 0..self.runs.len(); the body calls only RunArray::group on the element, which cannot change the Vec's length]  continue;
