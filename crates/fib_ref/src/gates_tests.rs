@@ -179,3 +179,28 @@ fn map_gate_floors_a_long_and_ceils_a_short() {
     );
     assert_eq!(s_stop(1, 0), Ok(1_000_000)); // REF read as at least one paisa
 }
+
+#[test]
+fn the_at_least_k_clause_reads_thousandths_and_passes_refusals_through() {
+    assert_eq!(rr_at_least(Ok(2_000), 2), Status::Ok);
+    assert_eq!(rr_at_least(Ok(1_999), 2), Status::RrBand);
+    assert_eq!(rr_at_least(Ok(4_999), 5), Status::RrBand);
+    assert_eq!(rr_at_least(Ok(5_000), 5), Status::Ok);
+    assert_eq!(rr_at_least(Ok(-420), 2), Status::RrBand);
+    assert_eq!(
+        rr_at_least(Err(Status::SnNoQuantity), 3),
+        Status::SnNoQuantity
+    );
+    assert_eq!(
+        rr_at_least(Err(Status::SRrNoTarget), 2),
+        Status::SRrNoTarget
+    );
+    // a target twice the stop, less Rs 0.38 of charges on 10 shares:
+    // floor(1000 x 1,962 / 1,038) = 1,890 thousandths, below 2
+    assert_eq!(s_rr_net(100, Some(200), 10, 38), Ok(1_890));
+    assert_eq!(
+        rr_at_least(s_rr_net(100, Some(200), 10, 38), 2),
+        Status::RrBand
+    );
+    assert_eq!(rr_at_least(s_rr_net(100, Some(200), 10, 0), 2), Status::Ok);
+}

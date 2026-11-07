@@ -1879,6 +1879,49 @@ fn e2_docs() -> Vec<Doc> {
             Readings::HEADLINE,
         ),
     );
+    // S42 at the session's end: flat bars inside the coming leg, then the
+    // touch script; the return closes at 15:07:00 (342 bars) or 15:08:00 (343)
+    for (filler, seed, what) in [
+        (342usize, 4_050, "closes at 15:07:00: allowed"),
+        (343, 4_051, "closes at 15:08:00: after_last_entry"),
+    ] {
+        let mut script = vec![(40, 40, 40, 40); filler];
+        script.extend(base.iter().copied());
+        let day = touch_day(seed, 1, Side::Long, &script, false);
+        next(
+            &mut out,
+            e2_doc(
+                "",
+                &format!("E2C at the session's end, the return {what} (S42)"),
+                seed,
+                &day,
+                1,
+                &top_all(&day),
+                &e2_params(Side::Long),
+                Readings::HEADLINE,
+            ),
+        );
+    }
+    // the second reading under the clause = 1: no arming before a passed
+    // bounce, so no record (the kit refuses that record, no_pattern_extreme)
+    let one = touch_day(4_052, 1, Side::Long, &base, true);
+    next(
+        &mut out,
+        e2_doc(
+            "",
+            "E2S under the clause = 1: no arming for the first touch, later armings refused (report: no_pattern_extreme)",
+            4_052,
+            &one,
+            1,
+            &top_all(&one),
+            &E2Params {
+                reading: Reading::Second,
+                clause: TouchClause::Eq(1),
+                ..e2_params(Side::Long)
+            },
+            Readings::HEADLINE,
+        ),
+    );
     out
 }
 
@@ -2277,6 +2320,55 @@ fn e3_docs() -> Vec<Doc> {
             OPEN + 3_600,
         ),
     );
+    // S42: a five-minute range, flat inside it all day, then a close above
+    // it at 15:07:00 (minute 351) or 15:08:00 (minute 352)
+    for (at, seed, what) in [
+        (351u32, 5_110, "closes at 15:07:00: allowed"),
+        (352, 5_111, "closes at 15:08:00: after_last_entry"),
+    ] {
+        let ms = late_orb_minutes(at);
+        next(
+            &mut out,
+            e3_doc(
+                "",
+                &format!("E3C, the first break of ORB 5 {what} (S42)"),
+                seed,
+                &ms,
+                &[],
+                1,
+                &e3_params(Side::Long, 5),
+                Readings::HEADLINE,
+            ),
+        );
+    }
+    out
+}
+
+/// A day whose first five minutes span 99,900 .. 100,100, flat at 100,000
+/// after them, with one close above the range at minute `at` and the day
+/// ending two minutes later.
+fn late_orb_minutes(at: u32) -> Vec<Minute> {
+    let bar = |m: u32, o: i64, h: i64, l: i64, c: i64| Minute {
+        m,
+        o,
+        h,
+        l,
+        c,
+        v: 100,
+        held: true,
+        padded: false,
+        g: Some(c),
+    };
+    let mut out = vec![
+        bar(0, 100_000, 100_100, 99_950, 100_050),
+        bar(1, 100_050, 100_080, 99_900, 99_950),
+        bar(2, 99_950, 100_020, 99_920, 100_000),
+        bar(3, 100_000, 100_060, 99_980, 100_040),
+        bar(4, 100_040, 100_050, 99_990, 100_000),
+    ];
+    out.extend((5..at).map(|m| bar(m, 100_000, 100_010, 99_990, 100_000)));
+    out.push(bar(at, 100_000, 100_160, 99_995, 100_150));
+    out.extend((at + 1..at + 3).map(|m| bar(m, 100_150, 100_160, 100_140, 100_150)));
     out
 }
 
@@ -2341,6 +2433,26 @@ fn gate_doc(
             ),
         ],
     );
+    for k in [2u32, 3, 5] {
+        d.out(
+            "gate.clause",
+            &[
+                ("rr_at_least", k.to_string()),
+                (
+                    "official",
+                    gates::rr_at_least(gates::s_rr_net(ds, dt, qty, p), k)
+                        .name()
+                        .to_owned(),
+                ),
+                (
+                    "worst",
+                    gates::rr_at_least(gates::s_rr_net(ds, dt, qty, w), k)
+                        .name()
+                        .to_owned(),
+                ),
+            ],
+        );
+    }
     d
 }
 

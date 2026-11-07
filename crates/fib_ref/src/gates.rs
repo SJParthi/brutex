@@ -98,6 +98,18 @@ pub fn s_rr_net(
     ))
 }
 
+/// The clause "S-RR at least k" (PREVIEW-SPEC 24.1: the labelled seeds 2, 3
+/// and 5) on an S-RR in thousandths: `Ok` at or above `1000 k`, `rr_band`
+/// below it; a refused S-RR (`s_rr_no_target`, `sn_no_quantity`,
+/// `sn_stop_through_at_decision`) fails it under its own name.
+pub fn rr_at_least(s_rr: Result<i128, Status>, k: u32) -> Status {
+    match s_rr {
+        Ok(v) if v >= 1000 * i128::from(k) => Status::Ok,
+        Ok(_) => Status::RrBand,
+        Err(e) => e,
+    }
+}
+
 /// The planned quantity `floor(amount / REF)`.
 pub fn planned_qty(amount: i64, ref_px: i64) -> i128 {
     floor_div(i128::from(amount), i128::from(ref_px.max(1)))

@@ -2,7 +2,7 @@
 
 PREVIEW: an independent reference build on seeded synthetic data; not a result, says nothing about profit
 
-277 scenarios. Readings other than the headline are named (report section 4).
+282 scenarios. Readings other than the headline are named (report section 4).
 
 | Id | Kind | Readings | Outputs | Title |
 |---|---|---|---:|---|
@@ -100,6 +100,9 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | E2-026 | e2 | headline | 45 | E2S armed at the bounce, triggered by a GDFL second, short |
 | E2-027 | e2 | headline | 45 | E2S with GDFL seconds missing until the return candle |
 | E2-028 | e2 | headline | 41 | E2S with no GDFL price in R1's minute: no_trigger_ratio |
+| E2-029 | e2 | headline | 731 | E2C at the session's end, the return closes at 15:07:00: allowed (S42) |
+| E2-030 | e2 | headline | 733 | E2C at the session's end, the return closes at 15:08:00: after_last_entry (S42) |
+| E2-031 | e2 | headline | 45 | E2S under the clause = 1: no arming for the first touch, later armings refused (report: no_pattern_extreme) |
 | E3-001 | e3 | headline | 36 | ORB 1 minutes on 1 minute candles, close reading, long |
 | E3-002 | e3 | headline | 37 | ORB 2 minutes on 1 minute candles, close reading, short |
 | E3-003 | e3 | headline | 38 | ORB 3 minutes on 1 minute candles, close reading, long |
@@ -120,32 +123,34 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | E3-018 | e3 | headline | 31 | E3S with GDFL seconds only from 09:35 |
 | E3-019 | e3 | headline | 21 | the range's only minute is missing: orb_tainted, with no price at all |
 | E3-020 | e3 | headline | 36 | E3S with the GDFL data start at 10:15: every arming refused by name, no_fill_data_window |
-| G001 | gate | headline | 1 | SNIPER.md 1.2 long, normal |
-| G002 | gate | headline | 1 | SNIPER.md 1.2 short, normal |
-| G003 | gate | headline | 1 | SNIPER.md 1.2 long, second reading, through: sn_stop_through_at_decision |
-| G004 | gate | headline | 1 | SNIPER.md 1.2 long, target behind |
-| G005 | gate | headline | 1 | SNIPER.md 1.2 long, tiny stop, offset 0 |
-| G006 | gate | headline | 1 | SNIPER.md 1.2 long, exactly 2 |
-| G007 | gate | headline | 1 | 24.13: charges decide, passes nothing |
-| G008 | gate | headline | 1 | 24.13: reward below charges (floor, not truncation) |
-| G009 | gate | headline | 1 | 24.13: the same record at a smaller amount |
-| G010 | gate | headline | 1 | 24.13: the normal vector |
-| G011 | gate | headline | 1 | 24.13: target behind, a real negative value |
-| G012 | gate | headline | 1 | 24.13: a wide stop |
-| G013 | gate | headline | 1 | XG, XH, XI have no price at T: s_rr_no_target (S-STOP still runs) |
-| G014 | gate | headline | 1 | REF above the amount: sn_no_quantity |
-| G015 | gate | headline | 1 | seeded gate case 1, long |
-| G016 | gate | headline | 1 | seeded gate case 2, short |
-| G017 | gate | headline | 1 | seeded gate case 3, long |
-| G018 | gate | headline | 1 | seeded gate case 4, short |
-| G019 | gate | headline | 1 | seeded gate case 5, long |
-| G020 | gate | headline | 1 | seeded gate case 6, short |
-| G021 | gate | headline | 1 | seeded gate case 7, long |
-| G022 | gate | headline | 1 | seeded gate case 8, short |
-| G023 | gate | headline | 1 | seeded gate case 9, long |
-| G024 | gate | headline | 1 | seeded gate case 10, short |
-| G025 | gate | headline | 1 | seeded gate case 11, long |
-| G026 | gate | headline | 1 | seeded gate case 12, short |
+| E3-021 | e3 | headline | 357 | E3C, the first break of ORB 5 closes at 15:07:00: allowed (S42) |
+| E3-022 | e3 | headline | 358 | E3C, the first break of ORB 5 closes at 15:08:00: after_last_entry (S42) |
+| G001 | gate | headline | 4 | SNIPER.md 1.2 long, normal |
+| G002 | gate | headline | 4 | SNIPER.md 1.2 short, normal |
+| G003 | gate | headline | 4 | SNIPER.md 1.2 long, second reading, through: sn_stop_through_at_decision |
+| G004 | gate | headline | 4 | SNIPER.md 1.2 long, target behind |
+| G005 | gate | headline | 4 | SNIPER.md 1.2 long, tiny stop, offset 0 |
+| G006 | gate | headline | 4 | SNIPER.md 1.2 long, exactly 2 |
+| G007 | gate | headline | 4 | 24.13: charges decide, passes nothing |
+| G008 | gate | headline | 4 | 24.13: reward below charges (floor, not truncation) |
+| G009 | gate | headline | 4 | 24.13: the same record at a smaller amount |
+| G010 | gate | headline | 4 | 24.13: the normal vector |
+| G011 | gate | headline | 4 | 24.13: target behind, a real negative value |
+| G012 | gate | headline | 4 | 24.13: a wide stop |
+| G013 | gate | headline | 4 | XG, XH, XI have no price at T: s_rr_no_target (S-STOP still runs) |
+| G014 | gate | headline | 4 | REF above the amount: sn_no_quantity |
+| G015 | gate | headline | 4 | seeded gate case 1, long |
+| G016 | gate | headline | 4 | seeded gate case 2, short |
+| G017 | gate | headline | 4 | seeded gate case 3, long |
+| G018 | gate | headline | 4 | seeded gate case 4, short |
+| G019 | gate | headline | 4 | seeded gate case 5, long |
+| G020 | gate | headline | 4 | seeded gate case 6, short |
+| G021 | gate | headline | 4 | seeded gate case 7, long |
+| G022 | gate | headline | 4 | seeded gate case 8, short |
+| G023 | gate | headline | 4 | seeded gate case 9, long |
+| G024 | gate | headline | 4 | seeded gate case 10, short |
+| G025 | gate | headline | 4 | seeded gate case 11, long |
+| G026 | gate | headline | 4 | seeded gate case 12, short |
 | W001 | walk | headline | 11 | 14 s latency, 10% of each second's volume, a second with no trade, worst prints, a target |
 | W002 | walk | headline | 9 | a stop and a target in one second: the stop |
 | W003 | walk | headline | 9 | a stop and a target in one second, short: the stop |
