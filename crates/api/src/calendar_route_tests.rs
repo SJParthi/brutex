@@ -1116,9 +1116,7 @@ fn damage_record(
     let mut byte = [0_u8; 1];
     file.seek(SeekFrom::Start(at)).expect("seek");
     file.read_exact(&mut byte).expect("read");
-    if let Some(one) = byte.first_mut() {
-        *one ^= 0x5A;
-    }
+    byte = byte.map(|one| one ^ 0x5A);
     file.seek(SeekFrom::Start(at)).expect("seek");
     file.write_all(&byte).expect("write");
 }
@@ -1560,39 +1558,36 @@ fn the_reading_refuses_a_malformed_question_itself_and_keeps_nothing_its_stamp_c
     let uri = |query: &str| -> axum::http::Uri {
         format!("/calendar.json?{query}").parse().expect("uri")
     };
-    let asked = std::cell::Cell::new(0_u32);
+    // (5): a malformed question reads no census, so its reader is unreachable
+    // and fails the test if it is ever asked.
     for (query, says, not) in [
         // (1)
-        ("feed=nobody", "nobody", ""),
+        ("feed=nobody", "nobody", None),
         // (2)
-        ("feed=gdfl&rung=7min", "7min", ""),
+        ("feed=gdfl&rung=7min", "7min", None),
         // (3)
-        ("feed=gdfl&rung=1s&timeframe=1min", "two rungs", ""),
+        ("feed=gdfl&rung=1s&timeframe=1min", "two rungs", None),
         // (4)
-        ("feed=gdfl&timeframe=7min", "7min\\\" is not a rung", ""),
+        ("feed=gdfl&timeframe=7min", "7min\\\" is not a rung", None),
         // (10)
-        ("feed=nobody&rung=7min", "nobody", "7min"),
+        ("feed=nobody&rung=7min", "nobody", Some("7min")),
     ] {
-        let (status, _, body) = calendar_json_reading(&fixture.site, &uri(query), |site| {
-            asked.set(asked.get() + 1);
-            census_now_stamped(site)
-        });
+        let (status, _, body) =
+            calendar_json_reading(&fixture.site, &uri(query), |_| unreachable!("(5) {query}"));
         assert_eq!(
             status,
             axum::http::StatusCode::BAD_REQUEST,
             "{query}: {body}"
         );
         assert!(body.contains(says), "{query}: {body}");
-        assert!(not.is_empty() || !body.contains(not), "{query}: {body}");
+        if let Some(not) = not {
+            assert!(!body.contains(not), "{query}: {body}");
+        }
     }
-    // (5)
-    assert_eq!(asked.get(), 0, "no census is read for a malformed question");
     // (11)
     let unvouched = |site: &Site| {
         let (mut stamps, now) = census_now_stamped(site);
-        if let Some(at) = stamps.manifests.get_mut(Vendor::Gdfl as usize) {
-            *at = ManifestStamp::Missing;
-        }
+        stamps.manifests[Vendor::Gdfl as usize] = ManifestStamp::Missing;
         (stamps, now)
     };
     let (status, _, body) = calendar_json_reading(&fixture.site, &uri("feed=gdfl"), unvouched);

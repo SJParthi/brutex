@@ -4748,18 +4748,12 @@ mod cloud_mutant_tests {
             run: 0,
             row: 1,
         };
+        // Named by `Debug`, one form for every kind of slice, so no arm waits
+        // on a kind this case does not make.
         let named = |slices: Vec<(super::Slice, u64)>| -> Vec<String> {
             slices
                 .into_iter()
-                .map(|(slice, len)| match slice {
-                    super::Slice::Run { array, lo, hi } => {
-                        format!("run {array} {lo}..{hi} ({len})")
-                    }
-                    super::Slice::Time { array, lo, hi } => {
-                        format!("time {array} {lo}..{hi} ({len})")
-                    }
-                    super::Slice::Kept { lo, hi } => format!("kept {lo}..{hi} ({len})"),
-                })
+                .map(|(slice, len)| format!("{slice:?} ({len})"))
                 .collect()
         };
         let timed = super::Arrays {
@@ -4770,7 +4764,10 @@ mod cloud_mutant_tests {
         };
         assert_eq!(
             named(timed.null_slices()),
-            ["time 1 0..3 (3)", "kept 1..2 (1)"],
+            [
+                "Time { array: 1, lo: 0, hi: 3 } (3)",
+                "Kept { lo: 1, hi: 2 } (1)"
+            ],
             "(1) (2) (3)"
         );
         let mut plans: Vec<super::SeriesPlan> = Vec::new();

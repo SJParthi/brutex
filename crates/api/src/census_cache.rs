@@ -2561,11 +2561,12 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
         loop {
             let rows = warmth(site);
-            if !rows.is_empty()
-                && rows
-                    .iter()
+            // ONE CONDITION, NO OPERAND A RUN CANNOT TAKE: `start` lists its
+            // rows before it returns, so "none listed yet" is never met.
+            if rows.first().is_some_and(|_| {
+                rows.iter()
                     .all(|row| matches!(row.state, WarmState::Ready | WarmState::Failed))
-            {
+            }) {
                 return rows;
             }
             assert!(
@@ -2601,9 +2602,7 @@ mod tests {
                 .iter()
                 .find(|row| row.name == name && row.vendor == vendor)
                 .cloned();
-            if let Some(row) = found
-                && ready(&row)
-            {
+            if let Some(row) = found.filter(|row| ready(row)) {
                 return row;
             }
             assert!(
@@ -2820,11 +2819,8 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
         let (landed_stamps, landed) = loop {
             let (stamps, now) = vendor_census(&site, Vendor::Gdfl);
-            if now.freshness() == Freshness::Current
-                && now
-                    .census()
-                    .is_some_and(|row| row.rows_of(&key) == RowsOf::Held(375))
-            {
+            let held = now.census().map(|row| row.rows_of(&key));
+            if (now.freshness(), held) == (Freshness::Current, Some(RowsOf::Held(375))) {
                 break (stamps, now);
             }
             assert!(
@@ -3176,10 +3172,7 @@ mod tests {
         );
         assert_eq!(kept(), Some(taken.clone()));
         // (8)
-        let (hit, _) = census_now_kept(&site, manifest_stamps, |root| {
-            reads.set(reads.get() + 1);
-            (census::read_all(root), None)
-        });
+        let (hit, _) = census_now_kept(&site, manifest_stamps, |_| panic!("a hit reads nothing"));
         assert_eq!(hit, taken);
         assert_eq!(reads.get(), 1, "a hit reads nothing");
     }
@@ -3256,7 +3249,7 @@ mod tests {
         );
         // (1), (9)
         let first = until_row(&vendors, CENSUS, Vendor::Gdfl, |row| {
-            row.state == WarmState::Ready && row.entries == Some(2)
+            (row.state, row.entries) == (WarmState::Ready, Some(2))
         });
         assert_eq!(first.reason, None);
         // (2), (11)
@@ -3581,12 +3574,10 @@ mod tests {
         std::fs::create_dir_all(&cash).expect("an empty CASH partition");
         // (11)
         std::os::unix::fs::symlink("INDEX", &index).expect("a link that names itself");
-        let Err(looped) = std::fs::metadata(&index)
+        let looped = std::fs::metadata(&index)
             .map(drop)
-            .map_err(|why| why.kind())
-        else {
-            panic!("a link to itself resolved");
-        };
+            .expect_err("a link to itself resolved")
+            .kind();
         assert_ne!(looped, std::io::ErrorKind::NotFound);
         let ManifestStamp::Partitioned(stamp) = vendor_stamp(&root, Vendor::Gdfl) else {
             panic!("a vendor directory is stamped by its partitions");
@@ -3629,9 +3620,7 @@ mod tests {
         );
         // (6)
         let mut manifests = vec![ManifestStamp::Missing; Vendor::ALL.len()];
-        if let Some(at) = manifests.get_mut(Vendor::Gdfl as usize) {
-            *at = ManifestStamp::Partitioned(stamp);
-        }
+        manifests[Vendor::Gdfl as usize] = ManifestStamp::Partitioned(stamp);
         let stamps = CensusStamps {
             manifests,
             root_is_dir: true,

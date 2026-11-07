@@ -29814,9 +29814,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The child's proof of [`run_serves_until_the_signal_and_exits_zero`]:
+    /// the file each child writes the path it took into.
+    const SERVE_PROOF: &str = "BRUTEX_AS2_SERVE_PROOF";
+
     /// The whole path through `run`, and the first event that path writes.
     ///
-    /// # Why it takes the shared sink FIRST, on its first line
+    /// # Why its child takes the shared sink FIRST, on its first line
     ///
     /// `run_in` installs a sink of its own, over the SERVED log directory —
     /// `BRUTEX_LOG_DIR`, or the operator's real store root — at the floor
@@ -29824,8 +29828,8 @@ mod tests {
     /// global a race: whichever of `run_in` and [`crate::emitted::sink`] got
     /// there first decided both the directory every other test reads and the
     /// floor every other test's events have to clear, and at the default `Info`
-    /// floor a `Debug` site writes nothing at all. Taking the shared sink here,
-    /// before `run` is entered, is what makes the binary deterministic —
+    /// floor a `Debug` site writes nothing at all. Taking the shared sink
+    /// first, before `run` is entered, is what makes the binary deterministic —
     /// `run_in`'s install is then refused, which is the refusal working, and it
     /// prints the reason in the banner rather than swallowing it.
     ///
@@ -29839,51 +29843,107 @@ mod tests {
     /// The site already checks its own `Emitted` — `if !first.is_written()` —
     /// but with no sink installed that check passes vacuously, which is exactly
     /// the state `crates/api/src/emitted.rs` was written to end.
+    ///
+    /// # Every store state, on every host (BASE-COV-API-AS2)
+    ///
+    /// `run` reads its store root and its masters from the environment, so the
+    /// path a serve took here used to be the host's: a fresh runner has no
+    /// store, a developer's is held by the server they keep running, a third
+    /// host's is free, and on each host the other paths were lines no run
+    /// reached. The test re-runs itself in four children, each handed one
+    /// state by `BRUTEX_STORE` and `BRUTEX_MASTERS`, none of them
+    /// `BRUTEX_AUTOPILOT`: a store root that is not there, a store whose lock
+    /// this process holds, and a free store over masters that agree and over
+    /// masters with a vendor missing. Each child asserts its path and writes
+    /// the path it took; the parent reads all four, so every path is asserted
+    /// on every host.
     #[tokio::test]
     async fn run_serves_until_the_signal_and_exits_zero() {
+        if let Some(proof) = std::env::var_os(SERVE_PROOF) {
+            serve_as_handed(Path::new(&proof)).await;
+            return;
+        }
+        let folder = crate::scratch::path("as2-serve-states");
+        let _ = std::fs::remove_dir_all(&folder);
+        let held = folder.join("held");
+        let free = folder.join("free");
+        let short = folder.join("short");
+        for root in [&held, &free, &short] {
+            std::fs::create_dir_all(root).expect("a store root of its own");
+        }
+        let agree = agreeing("as2-serve-agree");
+        let missing = masters(
+            "as2-serve-missing",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            None,
+        );
+        // THE OTHER INSTANCE, stood in as the second-server test stands it: a
+        // lock this process holds on a handle of its own while the children
+        // run, released through the guard, never by close (D-0693).
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(held.join(SERVE_LOCK))
+                .expect("the lock file"),
+            held.join(SERVE_LOCK),
+        )
+        .expect("nothing else holds it");
+        let proof = folder.join("proof");
+        for (root, read_from, took) in [
+            (folder.join("absent"), &agree, "absent".to_owned()),
+            (held, &agree, "held".to_owned()),
+            (free, &agree, format!("served {OK}")),
+            (short, &missing, format!("served {DEGRADED}")),
+        ] {
+            let _ = std::fs::remove_file(&proof);
+            let _out = crate::isolated::rerun_unsetting(
+                "server::tests::run_serves_until_the_signal_and_exits_zero",
+                &[
+                    (SERVE_PROOF, proof.as_os_str()),
+                    ("BRUTEX_STORE", root.as_os_str()),
+                    ("BRUTEX_MASTERS", read_from.as_os_str()),
+                ],
+                &[autopilot::AUTOPILOT_ENV],
+            );
+            assert_eq!(
+                std::fs::read_to_string(&proof).ok().as_deref(),
+                Some(took.as_str()),
+                "the child handed {} took its own path",
+                root.display()
+            );
+        }
+        drop(squatter);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// [`run_serves_until_the_signal_and_exits_zero`] in its child: `run` over
+    /// the store root and the masters this process's environment names,
+    /// asserted on the path that state takes, and the path written to `proof`
+    /// for the parent to read.
+    async fn serve_as_handed(proof: &Path) {
         let _shared = crate::emitted::sink();
         let from = crate::emitted::mark();
         // The server binds an ephemeral port, accepts nothing, and stops --
         // which is the whole path through `run` minus the waiting.
         //
         // THE EXIT CODE IS THE UNIVERSE'S OWN VERDICT, not a constant. `run`
-        // reads the masters directory of whatever machine this suite is on:
-        // this developer's holds a real pair of vendor masters that disagree,
-        // and CI's fixtures are clean. A hardcoded `OK` here asserted the
-        // machine rather than the code, and `stopped_over` — the reason a
-        // degraded serve no longer exits 0 — would have made this test's
-        // failure look like its own defect. The expectation is computed from
-        // the same `report` D-0026 gave the `report` command.
+        // reads the masters directory its environment names -- here the
+        // parent's fixture -- and the expectation is computed from the same
+        // `report` D-0026 gave the `report` command, so a degraded serve is
+        // asserted DEGRADED and a clean one OK.
         //
-        // AND THE STORE HAS A VERDICT TOO, which is the other half of the same
-        // argument. `run` refuses a store another server already holds, and the
-        // developer this suite runs for keeps one serving from an IDE all day —
-        // so the assertion below read `left: 1, right: 3` on his machine for a
-        // reason that was entirely correct behaviour. The store root cannot be
-        // redirected from here: it comes from `BRUTEX_STORE`, `set_var` is
-        // `unsafe` under edition 2024, this crate forbids `unsafe`, and mutating
-        // it would race every other test in this binary. So the expectation
-        // takes the environment as it finds it, exactly as it already does for
-        // the masters, and BOTH branches assert something.
-        // AND "THE STORE HAS A VERDICT TOO" HAD ONLY HALF OF ITS OWN ARGUMENT.
+        // AND THE STORE HAS A VERDICT TOO. `run` refuses a store another server
+        // already holds, and refuses a store root that is not there; both
+        // refusals are paths below, and both assert.
         //
-        // The paragraph above is right that a serve can refuse on the store
-        // rather than the masters, and it handled exactly one way that happens:
-        // another instance holding the lock, which is the state this developer's
-        // machine is in all day. A fresh CI runner is in the OTHER state — there
-        // is no `~/.brutex/store` at all — and `take_serve_lock` refuses that
-        // just as loudly. The expectation below is computed from the masters
-        // alone, so on a runner with clean fixtures and no store it asserted
-        // DEGRADED against a refusal and read `left: 1, right: 3`.
-        //
-        // That is the same class of defect the masters paragraph describes: an
-        // assertion about the machine wearing an assertion about the code. Both
-        // store refusals are now branches, and both assert.
         // ON DISK, NOT RESOLVED. `store_dir` answers "what path is configured",
         // which succeeds for a path that is not there -- it is
-        // `take_serve_lock` that stats it. Asking the resolver instead of the
-        // filesystem is why the first version of this branch never fired on the
-        // very runner it was written for.
+        // `take_serve_lock` that stats it.
         let root = store_dir().ok().filter(|root| root.is_dir());
         let Some(root) = root else {
             assert_eq!(
@@ -29894,13 +29954,16 @@ mod tests {
             let refused =
                 crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
             assert!(
-                refused.iter().any(|record| {
-                    record.level == telemetry::Level::Error
-                        && crate::emitted::says(record, "why", "does not exist or cannot be read")
-                }),
+                refused
+                    .iter()
+                    .filter(|record| record.level == telemetry::Level::Error)
+                    .any(|record| {
+                        crate::emitted::says(record, "why", "does not exist or cannot be read")
+                    }),
                 "and the refusal names the ABSENT store rather than a second server \
                  that was never running: {refused:?}"
             );
+            std::fs::write(proof, "absent").expect("the proof");
             return;
         };
         // A probe that ACQUIRES the real lock releases it through the guard's
@@ -29925,12 +29988,17 @@ mod tests {
             let refused =
                 crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
             assert!(
-                refused.iter().any(|record| {
-                    record.level == telemetry::Level::Error
-                        && crate::emitted::says(record, "why", "already serving this store")
-                }),
+                refused
+                    .iter()
+                    .filter(|record| record.level == telemetry::Level::Error)
+                    .any(|record| crate::emitted::says(
+                        record,
+                        "why",
+                        "already serving this store"
+                    )),
                 "and the refusal is in the file as well as on the terminal: {refused:?}"
             );
+            std::fs::write(proof, "held").expect("the proof");
             return;
         }
 
@@ -29961,6 +30029,7 @@ mod tests {
             "a reader arriving afterwards must be able to tell whether this \
              process was serving a front end and whether it was flying: {mine:?}"
         );
+        std::fs::write(proof, format!("served {expected}")).expect("the proof");
     }
 
     /// **THE STOCK WIDTH IS REACHABLE, AND THE UNDERLYING'S TYPE CHOOSES IT.**
@@ -31920,9 +31989,7 @@ mod tests {
                     )
                 }
             });
-            let vendor = tokio::spawn(async move {
-                axum::serve(listener, app).await.expect("the vendor serves");
-            });
+            let vendor = tokio::spawn(axum::serve(listener, app).into_future());
             let base: &'static str = Box::leak(format!("http://{address}").into_boxed_str());
             let site = site("as2-futures-route", &masters_dir_for("as2-futures-route"));
             let wire = loopback_zerodha(&site, base);
@@ -32066,9 +32133,8 @@ mod tests {
     /// vendor: the URLs are built from `Wire::spec`, so the loopback base is
     /// set there and in the source alike, as `credential_law_tests` does.
     fn loopback_zerodha(site: &Site, base: &'static str) -> Wire {
-        let pull::vendor::Transport::Http(shipped) =
-            pull::vendor::Feed::Zerodha.descriptor().transport
-        else {
+        let transport = pull::vendor::Feed::Zerodha.descriptor().transport;
+        let pull::vendor::Transport::Http(shipped) = transport else {
             panic!("Zerodha is an HTTP feed")
         };
         let spec = pull::vendor::HttpSpec {

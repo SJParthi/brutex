@@ -1348,8 +1348,8 @@ mod tests {
     #[test]
     fn a_question_no_uri_can_spell_is_refused_and_a_dropped_queue_abandons_its_builds() {
         // (1), (11)
-        let Err((status, headers, body)) = question(&(Vendor::Gdfl, None, "NIFTY 50".to_owned()))
-        else {
+        let asked = question(&(Vendor::Gdfl, None, "NIFTY 50".to_owned()));
+        let Err((status, headers, body)) = asked else {
             panic!("a space is no URI character");
         };
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);

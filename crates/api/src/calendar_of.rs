@@ -2465,10 +2465,15 @@ pub(crate) mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key.clone(), Arc::clone(&flight));
-        // (1), (3)
+        // (1), (3): the follower says it holds the flight's lock before the
+        // landing is made, and the landing must take that lock, so the
+        // follower is always waiting when it lands: no thread order decides
+        // whether the wait runs.
+        let (holding, held) = std::sync::mpsc::channel::<()>();
         let woken = std::thread::scope(|scope| {
             let follower = scope.spawn(|| {
                 let mut landed = flight.landed.lock().unwrap_or_else(PoisonError::into_inner);
+                holding.send(()).expect("the test waits for the follower");
                 while matches!(*landed, Landed::Deriving) {
                     landed = flight
                         .ready
@@ -2477,6 +2482,7 @@ pub(crate) mod tests {
                 }
                 matches!(*landed, Landed::Abandoned)
             });
+            held.recv().expect("the follower holds the flight's lock");
             drop(Landing {
                 cache: &cache,
                 key: None,
@@ -2505,11 +2511,14 @@ pub(crate) mod tests {
                 unopened: Vec::new(),
             }),
         });
-        let answered = match &*flight.landed.lock().unwrap_or_else(PoisonError::into_inner) {
-            Landed::Answered(derived) => Some(Arc::clone(&derived.calendar)),
-            Landed::Deriving | Landed::Abandoned => None,
+        let answered = {
+            let landed = flight.landed.lock().unwrap_or_else(PoisonError::into_inner);
+            let Landed::Answered(derived) = &*landed else {
+                panic!("a landing with an answer lands answered")
+            };
+            Arc::clone(&derived.calendar)
         };
-        assert!(answered.is_some_and(|held| Arc::ptr_eq(&held, &calendar)));
+        assert!(Arc::ptr_eq(&answered, &calendar));
         assert!(
             cache
                 .flights

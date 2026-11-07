@@ -1513,11 +1513,9 @@ fn the_minute_thread_writes_nothing_while_no_table_is_made() {
             .expect("the thread starts");
         let at = heard.recv().expect("the thread announced its start");
         let boundary = (at / MINUTE_MS + 1) * MINUTE_MS;
-        let woken = if boundary - at < 2_000 {
-            boundary + MINUTE_MS
-        } else {
-            boundary
-        };
+        // A start within 2 s of a boundary waits for the one after it: as
+        // arithmetic, so the wall clock decides the instant and no path.
+        let woken = boundary + MINUTE_MS * u64::from(boundary - at < 2_000);
         while now_ms() < woken + 2_000 {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
