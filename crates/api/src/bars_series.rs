@@ -2732,6 +2732,46 @@ mod tod_index_tests {
         assert_eq!(memo.get(&99), None);
         assert_eq!(memo.get(&14), Some(14), "and turns nothing out for itself");
     }
+
+    /// **A KEY PUT AGAIN REPLACES ITS VALUE AND ITS WEIGHT, NEVER COUNTED
+    /// TWICE** (BASE-COV-API-AS3, D-8664). Two readers that both missed one
+    /// month both put its index; the second put of a key the young generation
+    /// holds takes the first one's weight out before it adds its own, so the
+    /// memo weighs the newest value alone and spends no turn on a key it
+    /// already holds. Only two requests racing on one uncached month reached
+    /// that arm before, so Route B saw it in one run and not the next.
+    ///
+    /// Extremes: singles — a key put again at the same weight (the bytes
+    /// unchanged), heavier (they grow by the difference only), lighter (they
+    /// shrink by it), no turn spent on any of them; combinations — a re-put
+    /// that lands exactly on the young half's edge at once (the old weight
+    /// out first, so no turn: counted twice it would pass the half); out of
+    /// the box — a value heavier than half the budget put over a held key,
+    /// refused before it touches the one held.
+    #[test]
+    fn a_key_put_again_replaces_its_value_and_its_weight() {
+        let memo: Weighed<u64, &str> = Weighed::new(1_000);
+        memo.put(1, "first", 100);
+        memo.put(1, "again", 100);
+        assert_eq!(memo.get(&1), Some("again"));
+        assert_eq!(memo.bytes(), 100, "the first weight out, not counted twice");
+        memo.put(1, "heavier", 300);
+        assert_eq!(memo.bytes(), 300, "grown by the difference");
+        memo.put(1, "lighter", 50);
+        assert_eq!(memo.bytes(), 50, "shrunk by the difference");
+        assert_eq!(memo.turns(), 0, "no turn spent on a key already held");
+        // AT THE YOUNG HALF'S EDGE: 50 + 450 is the half exactly.
+        memo.put(2, "two", 450);
+        assert_eq!(memo.bytes(), 500);
+        memo.put(2, "two again", 450);
+        assert_eq!(memo.turns(), 0, "the re-put at the edge turns nothing");
+        assert_eq!(memo.bytes(), 500);
+        assert_eq!(memo.get(&2), Some("two again"));
+        // OUT OF THE BOX: too heavy to hold, over a key that is held.
+        memo.put(2, "too heavy", 600);
+        assert_eq!(memo.get(&2), Some("two again"), "the held value stays");
+        assert_eq!(memo.bytes(), 500);
+    }
 }
 
 /// Tests written for lines and branches a cloud mutation and coverage pass
