@@ -906,7 +906,29 @@ only its asserts' (F). Red round 9: `census_cache.rs` 1199 skipping the refused 
 {}`): `test result: FAILED. 0 passed; 1 failed`, the child at its own case (13), restored with
 `git checkout`.
 
-Route B whole:api on `619a9b4e`: running (started 22:08 IST); until its readout lands the lists
+Route B whole:api on `619a9b4e` (22:08-22:36 IST, the same command and set file): `== test api
+rc=101 END 2026-11-07 22:17:46 IST (6 min); tests passed 3197 failed 14 ignored 16`, exactly the
+baseline's 14 reds; G2 lines 70,414/71,397, branches 4,763/5,496: (F) 174/549, (U) 123/90, GAP
+686/94 (production 523/74, 1199 and its neighbours closed; test code 53/8; inside `#[ignore]`d
+tests 110/12). The test-code count rose by 2 lines and 1 side that no earlier run left:
+`tests/cloud_mutants_bars.rs` 332:16 F and 335-336, the poll loop of
+`spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (G2's file, session -3's
+59d66729), whose first probe this run found already refused, so its sleep never ran: a side the
+host's timing decided. Its lists were not committed; `1fbb5ad6` closes that row first.
+
+### The full-pool test waits on its holders, not a poll (`1fbb5ad6`)
+
+The holders count themselves under a lock and wake the test, which waits with a one-minute bound
+until every admitted holder (this host's slots) has started, then sends one probe that must be
+refused; the later checks are unchanged (`full`, the admitted and refused counts, the holders that
+ran their body, the `429` and its `Retry-After`). D-8662's form: no side a host's timing decides,
+no check weakened. fmt rc 0 and clippy rc 0 (1.97.1) on `1fbb5ad6`; the filtered instrumented run
+`dev-cm1` (`cargo test -p api --test cloud_mutants_bars -- spot_json_is_refused...`): `1 passed`,
+the test's only uncovered row the message argument `*started` of its bounded wait's assert, an
+(F). It restructures an existing test whose assertions it keeps, so it has no red round of its
+own.
+
+Route B whole:api on `1fbb5ad6`: running (started 22:41 IST); until its readout lands the lists
 and the FIX json are `2dc1534d`'s.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
