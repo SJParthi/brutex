@@ -7,20 +7,20 @@ code tip; this file is written in a later commit that touches only `reports/`.
 {
   "name": "BASE-COV-API-AS3",
   "branch": "cloud/cov-api-as3-20261105",
-  "head": "4a86f4085b6ec5d0303b5e4de5a0a99801c868fe",
+  "head": "98908e7773e8f4d1d81a3cf9a6a2ac9f9a73884b",
   "committed": true,
   "findings": [
     {
       "id": "G3 GAP rows of base-cov-api-gaps-r2.txt.md (shard G3, whole:api)",
       "status": "partial",
-      "how": "Route B of record on 4a86f408: G3's 56 files (the 48 SHARDS.md gives G3 and 8 new test files) lines 63260/63962 (702 uncovered), branches 4726/5124 (398 sides). (F) 235 lines 312 sides; (U) 97 lines 52 sides, each with its proof; (H) 44 lines 2 sides; GAP 326 lines 32 sides: #[ignore]d tests 86 lines (L-BCA-3, the Mac), L-BCA-5 193/15 (booleanevidencejson 184/13: the production launch writes its artifact but ran past 13 minutes at opt-level 3; selectionv6json 9/2: the public cli::run ledger-v6 verb, not tried), L-BCA-6 18/7 (mastersrun), the host clock 18/4 (autopilot), races 4/4, a failing medium 3/1, reachable and not done 4/1 (indexstopqualificationjson 235 and 237, indexstopcandlesjson 117 True/118/120), test code 0. Continuation -5 closed bars_export 974 and indexstopqualificationjson 236.",
-      "evidence": "reports/base-cloud-20261103/gaps-AS3.txt.md; reports/base-cloud-20261103/fu-AS3.txt.md; Route B log /var/tmp/as3/routeb5.log (this host)"
+      "how": "Route B of record on 98908e77: G3's 56 files (the 48 SHARDS.md gives G3 and 8 new test files) lines 63366/64070 (704 uncovered), branches 4736/5136 (400 sides). (F) 235 lines 312 sides; (U) 100 lines 54 sides, each with its proof; (H) 44 lines 2 sides; GAP 325 lines 32 sides: #[ignore]d tests 86 lines (L-BCA-3, the Mac), L-BCA-5 193/15 (booleanevidencejson 184/13: the production launch writes its artifact but ran past 13 minutes at opt-level 3; selectionv6json 9/2: the public cli::run ledger-v6 verb, not tried), L-BCA-6 18/7 (mastersrun), the host clock 18/4 (autopilot), races 4/4, a failing medium 3/1, reachable and not done 3/1 (indexstopqualificationjson 237, indexstopcandlesjson 117 True/118/120), test code 0. Continuation -5 closed bars_export 974 and indexstopqualificationjson 235 and 236.",
+      "evidence": "reports/base-cloud-20261103/gaps-AS3.txt.md; reports/base-cloud-20261103/fu-AS3.txt.md; Route B log /var/tmp/as3/routeb7.log (this host)"
     },
     {
       "id": "continuation -4's NEXT 1-3 (reachable production rows)",
       "status": "partial",
-      "how": "bars_export.rs 974 by an_end_read_that_cannot_open_its_month_refuses_the_export_by_name (a header zeroed in place with its stamp kept, so only the descending end read opens the damaged month); indexstopqualificationjson.rs 236 by a_forty_session_training_window_is_measured_whole_and_ranked_rejected (a second production launch: April and May training, every value measured, every setting Rejected). Not reached: 235 (a permissive policy file still fails worst_reward_risk, the operator's fixed 3:1 rule, and worst_trade_loss on the generated minutes), 237 (a missing minute is refused by the calendar receipt before any metric), indexstopcandlesjson 117-120 (only a hand re-sealed source context reaches a page over 8 MiB).",
-      "evidence": "commits 8b311fdc, 042384a3, 4a86f408; red-AS3.txt.md run red5; gaps-AS3.txt.md rows for 235, 237 and 117-120"
+      "how": "bars_export.rs 974 by an_end_read_that_cannot_open_its_month_refuses_the_export_by_name; indexstopqualificationjson.rs 236 by a_forty_session_training_window_is_measured_whole_and_ranked_rejected; 235 by a_setting_that_passes_every_check_is_ranked_admitted (generated months that rise through every session, the 09:16 minute dipping past the stop on seven sessions of both windows, an admission policy at its floors: the long setting of the bullish bar passes every check and is ranked Admitted). Not reached: 237 (three routes ruled out by measurement: a missing minute is refused by the calendar receipt; a day whose readings straddle is a zero day, not unmeasured; an unmeasured calendar day exists only outside the measured window), indexstopcandlesjson 117-120 (only a hand re-sealed source context reaches a page over 8 MiB).",
+      "evidence": "commits 8b311fdc, 042384a3, 4a86f408, f0c9b20f; red-AS3.txt.md runs red5 and red6; gaps-AS3.txt.md rows for 237 and 117-120"
     },
     {
       "id": "verify r3 item (3): bars_series.rs a_summary_that_does_not_describe_its_file_is_refused_field_by_field (9 / 1 / 0)",
@@ -43,25 +43,25 @@ code tip; this file is written in a later commit that touches only `reports/`.
     {
       "id": "each new test red under a hand change",
       "status": "fixed",
-      "how": "all 111 new tests: 93 in red run 1, 4 in red run 2 (with the new asserts of 2 widened tests), 1 in red run 3, 11 in the -3 session's red3/red4, 2 in red5 (with the new asserts of the autopilot tick test and the feeds_route wrapper); every hand change in a local commit never pushed",
+      "how": "all 113 new tests: 93 in red run 1, 4 in red run 2 (with the new asserts of 2 widened tests), 1 in red run 3, 11 in the -3 session's red3/red4, 2 in red5 (with the new asserts of the autopilot tick test and the feeds_route wrapper), 1 in red6 (with the Rejected launch test again after its launch moved into the shared child half), 1 in red7; every hand change in a local commit never pushed",
       "evidence": "reports/base-cloud-20261103/red-AS3.txt.md; the -3 session report at 44a0a656"
     },
     {
       "id": "G3's test code had GAP rows",
       "status": "fixed",
-      "how": "none at the tip: the rows the new code added are (F) (two sides of a new assert) or (U) (the new launch test's unstamped arm)",
+      "how": "none at the tip: the rows the new code added are (F) (two sides of a new assert) or (U) (the launch tests' unstamped arms)",
       "evidence": "gaps-AS3.txt.md: test code 0 lines 0 sides"
     },
     {
       "id": "(U) rows each with a proof from the code",
       "status": "fixed",
-      "how": "149 rows (97 lines, 52 sides), each with its proof beside it; none rests on hard to reach, needs a fault or never happens",
+      "how": "154 rows (100 lines, 54 sides), each with its proof beside it; none rests on hard to reach, needs a fault or never happens",
       "evidence": "reports/base-cloud-20261103/fu-AS3.txt.md"
     },
     {
       "id": "root host reds in G3 files (3)",
       "status": "needs_operator",
-      "how": "each fails as root in both runs of this round and passes as uid 65534 with this round's instrumented binary (api-bbc8861d417950e8); the rows only their later lines reach are (H), owed to the Mac",
+      "how": "each fails as root in every run of this round and passes as uid 65534 with the final instrumented binary (api-bbc8861d417950e8, built at 98908e77); the rows only their later lines reach are (H), owed to the Mac",
       "evidence": "server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted; server::cloud_mutant_tests_c::a_store_that_takes_no_write_trips_the_store_breaker; server::cloud_mutant_tests_c::a_store_whose_audit_dir_cannot_be_made_is_at_fault"
     },
     {
@@ -99,6 +99,12 @@ code tip; this file is written in a later commit that touches only `reports/`.
       "status": "deferred (operator 30 Oct)",
       "how": "not run; each new test shown red under a hand change instead",
       "evidence": "red-AS3.txt.md"
+    },
+    {
+      "id": "a coverage row that moved between runs: bars_series.rs 387 True and 388 (Weighed memo re-put)",
+      "status": "fixed",
+      "how": "covered at 4a86f408 and not at f0c9b20f with the same code: only two readers racing to fill one month's time-of-day index reached the re-put of a held key; a_key_put_again_replaces_its_value_and_its_weight drives it directly (red7), covered at 98908e77",
+      "evidence": "commit 98908e77; Route B logs /var/tmp/as3/routeb6.log and routeb7.log (this host)"
     }
   ],
   "files_changed": [
@@ -152,21 +158,21 @@ code tip; this file is written in a later commit that touches only `reports/`.
   ],
   "files_outside_ownership": [],
   "gates": {
-    "fmt": "cargo fmt --all --check rc 0 at 4a86f408",
-    "clippy": "cargo clippy -p api --all-targets --locked -- -D warnings rc 0 at 4a86f408 (stable 1.97.1)",
-    "tests": "cargo test -p api --locked --no-fail-fast -- --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held rc 101 at 4a86f408 (stable 1.97.1, a stamped build of the committed tree): 3189 passed, 13 failed, 16 ignored (9 result lines; lib 3105 / 13 / 16, every other target and the doc tests green); the 13 are host reds (report): G3's three root reds and ten of other shards",
-    "route_b_tests": "the same tests under Route B (nightly, instrumented, opt-level 0) at 4a86f408: 3189 passed, 13 failed (the same host reds), 16 ignored",
+    "fmt": "cargo fmt --all --check rc 0 at 98908e77",
+    "clippy": "cargo clippy -p api --all-targets --locked -- -D warnings rc 0 at 98908e77 (stable 1.97.1)",
+    "tests": "cargo test -p api --locked --no-fail-fast -- --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held rc 101 at 98908e77 (stable 1.97.1, a stamped build of the committed tree): 3191 passed, 13 failed, 16 ignored (9 result lines; lib 3107 / 13 / 16, every other target and the doc tests green); the 13 are host reds (report): G3's three root reds and ten of other shards",
+    "route_b_tests": "the same tests under Route B (nightly, instrumented, opt-level 0) at 98908e77: 3190 passed, 14 failed (the same 13 host reds and G1's load-bound pool_load test, green in the stable runs), 16 ignored",
     "web_build": "not applicable (web/ unchanged)",
     "web_test": "not applicable (web/ unchanged)"
   },
   "p50_p99": [
     "no bench run this round: no p50 or p99 to give",
-    "D3 coverage api Route B: 26 min (15:38-16:04 IST 7 Nov; build 3 min on a cold target, tests 7 min, readout 16 min), this host"
+    "D3 coverage api Route B of record: 32 min (20:51-21:23 IST 7 Nov; build 3 min, tests 7 min, readout 22 min), this host"
   ],
-  "coverage": "Route B (the kit's d3-route-b-cloud.sh unchanged; rustc 1.99.0-nightly 1a98b1e13 2026-08-07, llvm-cov and llvm-profdata LLVM 23.1.0-rust-1.99.0-nightly), reading whole:api, set = the kit's deep-BASE-COV-API-6ea46e59c074-set.txt plus one coverage line for each of the 8 files the branch added, a clean worktree at 4a86f408, tests run with --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held (a G2 test that hangs on a 4-core host): whole api lines 179147/183008, branches 13021/15386 (190 files read); G3 lines 63260/63962 (702 uncovered), branches 4726/5124 (398 uncovered sides), classified in gaps-AS3.txt.md and fu-AS3.txt.md. NOT PROVED: the 22 benches and lib.rs only (L-BCA-2). This host's figures, the builder's: the Mac re-measures.",
+  "coverage": "Route B (the kit's d3-route-b-cloud.sh unchanged; rustc 1.99.0-nightly 1a98b1e13 2026-08-07, llvm-cov and llvm-profdata LLVM 23.1.0-rust-1.99.0-nightly), reading whole:api, set = the kit's deep-BASE-COV-API-6ea46e59c074-set.txt plus one coverage line for each of the 8 files the branch added, a clean worktree at 98908e77, tests run with --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held (a G2 test that hangs on a 4-core host): whole api lines 179253/183116, branches 13032/15398 (190 files read); G3 lines 63366/64070 (704 uncovered), branches 4736/5136 (400 uncovered sides), classified in gaps-AS3.txt.md and fu-AS3.txt.md. NOT PROVED: the 22 benches and lib.rs only (L-BCA-2). This host's figures, the builder's: the Mac re-measures.",
   "mutants": "deferred (operator 30 Oct): not run; each new test shown red under a hand change instead (red-AS3.txt.md)",
   "store_writes_needed": [],
-  "notes": "STATUS: IN PROGRESS. The bar is not met for G3: rows still G3's to reach are indexstopqualificationjson 235 and 237 (rank's Admitted and Refused arms; this round's launches reach Rejected only), indexstopcandlesjson 117 True/118/120 (a hand re-sealed source context), booleanevidencejson 184/13 (the production Boolean launch writes its artifact but ran past 13 minutes at opt-level 3) and selectionv6json 9/2 (the public cli::run ledger-v6 verb, not tried): report NEXT 1-4. Every other uncovered G3 row is (F), (U) with its proof, (H) or owed outside (L-BCA-3, L-BCA-6, the host clock, races, a failing medium). Continuation -5 found and fixed both reds of 6 Nov (each the test's own, neither a host red) and put an Extremes: line on every new test. No production behaviour changed: outside test modules and test files the diff from START adds only #[cfg(test)] module declarations, doc comments and the test-only indexstopcandlesjson::render_at. Follow-up for the operator (not changed: production behaviour): the same damaged month is refused 400 bad_query by bars_export's end read and 500 export_not_whole by its first page. Host: a fresh cloud container, 4 cores, root; TMPDIR and the profile folder 1777 so the uid 65534 children write their profiles. Slips: the -3 session's (a shell command named the Py-language's interpreter, twice, and once in its helper b's shell); continuation -5 once (a discarded interpreter version check at the head of a scratch-tree edit command, which also used perl for that one-line edit); nothing written to any tracked file by either.",
+  "notes": "STATUS: IN PROGRESS. The bar is not met for G3: rows still G3's to reach are indexstopqualificationjson 237 (rank's Refused arm; this round's launches reach Unmeasured, Rejected and Admitted), indexstopcandlesjson 117 True/118/120 (a hand re-sealed source context), booleanevidencejson 184/13 (the production Boolean launch writes its artifact but ran past 13 minutes at opt-level 3) and selectionv6json 9/2 (the public cli::run ledger-v6 verb, not tried): report NEXT 1-4. Every other uncovered G3 row is (F), (U) with its proof, (H) or owed outside (L-BCA-3, L-BCA-6, the host clock, races, a failing medium). Continuation -5 found and fixed both reds of 6 Nov (each the test's own, neither a host red) and put an Extremes: line on every new test. No production behaviour changed: outside test modules and test files the diff from START adds only #[cfg(test)] module declarations, doc comments and the test-only indexstopcandlesjson::render_at. Follow-up for the operator (not changed: production behaviour): the same damaged month is refused 400 bad_query by bars_export's end read and 500 export_not_whole by its first page. Host: a fresh cloud container, 4 cores, root; TMPDIR and the profile folder 1777 so the uid 65534 children write their profiles. Slips: the -3 session's (a shell command named the Py-language's interpreter, twice, and once in its helper b's shell); continuation -5 once (a discarded interpreter version check at the head of a scratch-tree edit command, which also used perl for that one-line edit); nothing written to any tracked file by either.",
   "held": false
 }
 ```
