@@ -1,0 +1,50 @@
+[package]
+name = "fib_ref"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
+publish = false
+description = "PREVIEW: an independent reference build of the Fibonacci preview's written rules, on seeded synthetic data only; not a result and says nothing about profit"
+
+# A WORKSPACE OF ITS OWN, on purpose. This crate is a reference build written
+# from the FIB-PREVIEW kit's words for one cloud session; it is not part of the
+# engine. Joining the root workspace would change the root's measured member
+# set, its documented graph and the tests that pin both, which is a change to
+# the repository's law that this session has no mandate to make. As its own
+# workspace root it builds, tests and benches alone, with no dependency at all,
+# and `cargo build --workspace` at the root never sees it.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fib_ref_golden"
+path = "src/bin/fib_ref_golden.rs"
+
+[[bench]]
+name = "ratio"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# o, h, l, c, v and the kit's own one-letter names (T, L, R, n, m, t) are the
+# domain's words; longer names would read worse against the spec.
+many_single_char_names = "allow"
+# Pure functions everywhere: marking each one is noise, not safety.
+must_use_candidate = "allow"
+# `walk::WalkOut` inside `walk` reads better than an unqualified `Out`.
+module_name_repetitions = "allow"
+
+[profile.release]
+overflow-checks = true
+
+[profile.bench]
+overflow-checks = true
