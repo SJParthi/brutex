@@ -18,11 +18,13 @@
 //!   box high; T = its close. **E1S**: armed at each close where a box
 //!   exists, the first GDFL second from that close + 14 s to the next close
 //!   whose printed high exceeds the R1-mapped box high; T = that second + 1.
+//! * **Last entry (S42)**: a decision after 15:07:59, the dial's outer bound,
+//!   refuses by name (`after_last_entry`), as in E2 and E3.
 //! * **Stop** the box low minus the offset; **targets** T1 the session high
 //!   known at T plus the offset, T2 1.272 and T3 1.618 of the target ladder.
 
 use crate::bars::{Candle, Minute, Sec, first_at_or_after};
-use crate::clock::{CANDLE_END, LAMBDA};
+use crate::clock::{CANDLE_END, LAMBDA, LAST_ENTRY};
 use crate::ladder::{Ladder, R1272, R1618, running};
 use crate::model::{
     AfterBreak, BoxAnchor, Readings, Side, Status, TargetLadder, Toward, map_level, r1_at,
@@ -268,6 +270,8 @@ pub fn e1c(candles: &[Candle], top: &[bool], p: &E1Params, r: &Readings) -> Vec<
                     Status::Colour
                 } else if !top.get(ix).copied().unwrap_or(false) {
                     Status::NotInTopN
+                } else if c.close_t > LAST_ENTRY {
+                    Status::AfterLastEntry
                 } else {
                     Status::Ok
                 };
@@ -449,6 +453,8 @@ pub fn e1s(
             Status::Colour
         } else if !top.get(ix).copied().unwrap_or(false) {
             Status::NotInTopN
+        } else if hit.t + 1 > LAST_ENTRY {
+            Status::AfterLastEntry
         } else {
             Status::Ok
         };

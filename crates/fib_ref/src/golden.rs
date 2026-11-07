@@ -1212,6 +1212,30 @@ fn e1_docs() -> Vec<Doc> {
             Readings::HEADLINE,
         ),
     );
+    // S42 at the session's end: flat minutes, then the flag; the break
+    // candle closes at 15:07:00 (346 flat minutes) or at 15:08:00 (347)
+    for (filler, seed, what) in [
+        (346usize, 3_420, "closes at 15:07:00: allowed"),
+        (347, 3_421, "closes at 15:08:00: after_last_entry"),
+    ] {
+        let mut script = vec![(0, 1, -1, 0); filler];
+        script.extend(flag_script(2));
+        let day = build_day(seed, 1, Side::Long, 0, &script, 8, false);
+        let top = top_all(&day);
+        next(
+            &mut out,
+            e1_doc(
+                "",
+                &format!("E1C, the flag at the session's end, the break {what} (S42)"),
+                seed,
+                &day,
+                1,
+                &top,
+                &e1_params(Side::Long, 2),
+                Readings::HEADLINE,
+            ),
+        );
+    }
     out
 }
 

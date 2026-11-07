@@ -2,7 +2,7 @@
 
 PREVIEW: an independent reference build on seeded synthetic data; not a result, says nothing about profit
 
-272 scenarios. Readings other than the headline are named (report section 4).
+274 scenarios. Readings other than the headline are named (report section 4).
 
 | Id | Kind | Readings | Outputs | Title |
 |---|---|---|---:|---|
@@ -68,6 +68,8 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | E1-029 | e1 | headline | 26 | E1S, the first second beyond the box, K = 2, long |
 | E1-030 | e1 | headline | 27 | E1S, the first second beyond the box, K = 3, short |
 | E1-031 | e1 | headline | 26 | E1S with no GDFL price in R1's minute: no_trigger_ratio |
+| E1-032 | e1 | headline | 364 | E1C, the flag at the session's end, the break closes at 15:07:00: allowed (S42) |
+| E1-033 | e1 | headline | 365 | E1C, the flag at the session's end, the break closes at 15:08:00: after_last_entry (S42) |
 | E2-001 | e2 | headline | 47 | the second touch of 0.786, close reading, long |
 | E2-002 | e2 | headline | 47 | the second touch of 0.786, close reading, short |
 | E2-003 | e2 | headline | 47 | touch clause = 1, the baseline |

@@ -603,3 +603,56 @@ fn e1c_a_hole_after_a_consumed_scope_writes_no_void() {
         1
     );
 }
+
+/// The operator's flag moved to the session's end: `filler` flat minutes at
+/// a lower high first, so the box ends at minute `filler + 5` and the break
+/// candle is minute `filler + 6`.
+fn late_flag_day(filler: u32) -> Vec<Minute> {
+    let mut day: Vec<Minute> = (0..filler)
+        .map(|m| minute(m, 9_990, 10_000, 9_950, 9_995))
+        .collect();
+    day.extend(flag_day().into_iter().map(|x| Minute {
+        m: x.m + filler,
+        ..x
+    }));
+    day
+}
+
+#[test]
+fn s42_e1c_refuses_a_break_closing_after_15_07_59_on_both_sides() {
+    let r = Readings::HEADLINE;
+    // the break closes at 15:07:00 (filler 345) or at 15:08:00 (filler 346)
+    for (filler, want) in [(345, Status::Ok), (346, Status::AfterLastEntry)] {
+        let day = late_flag_day(filler);
+        let top = vec![true; day.len()];
+        let at = filler + 6;
+        for (side, minutes) in [(Side::Long, day.clone()), (Side::Short, mirror_day(&day))] {
+            let ev = e1c(&fold(&minutes, 1), &top, &seed(side, 2), &r);
+            let hit = ev.iter().find(|e| e.candle == at).map(|e| (e.t, e.status));
+            assert_eq!(hit, Some((OPEN + 60 * (at + 1), want)), "{filler} {side:?}");
+        }
+    }
+    assert_eq!(hms(OPEN + 60 * 353), "15:08:00");
+}
+
+#[test]
+fn s42_e1s_refuses_a_trigger_deciding_after_15_07_59() {
+    let r = Readings::HEADLINE;
+    let p = seed(Side::Long, 2);
+    // armed at minute 351's close, 15:07:00; a print beyond at 15:07:58
+    // decides at 15:07:59 (allowed), one at 15:07:59 decides at 15:08:00
+    let day = late_flag_day(346);
+    let top = vec![true; day.len()];
+    for (offset, want) in [(58, Status::Ok), (59, Status::AfterLastEntry)] {
+        let secs = secs_with(352, 354, 10_185, &[(352 * 60 + offset, 10_200)]);
+        let ev = e1s_run(&day, &secs, &top, &p, &r);
+        let hits: Vec<_> = ev
+            .iter()
+            .filter(|e| e.t.is_some())
+            .map(|e| (e.candle, e.armed_at, e.t, e.status))
+            .collect();
+        let decided = OPEN + 352 * 60 + offset + 1;
+        assert_eq!(hits, vec![(351, OPEN + 352 * 60, Some(decided), want)]);
+    }
+    assert_eq!(hms(crate::clock::LAST_ENTRY), "15:07:59");
+}
