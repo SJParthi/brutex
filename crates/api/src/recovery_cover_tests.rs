@@ -1459,8 +1459,8 @@ fn recoverable() -> Vec<&'static str> {
 /// the audited shape's first (refused: outside the shape); and, at once, a
 /// shape over every day the calendar of record measures with no minute
 /// stored (refused: the shape itself is cut at its gap bound), and a plan
-/// one window under its bound beside a seal one window over (the plan
-/// answered, the seal refused); out of the box, a minute stored on the
+/// just under its bound (476 legs, 99,960 windows: answered) beside a seal
+/// one window over it (refused); out of the box, a minute stored on the
 /// Sunday before an audited Monday (outside the shape, never a conflict
 /// counted).
 #[test]
@@ -1747,18 +1747,17 @@ fn a_successor_is_prepared_only_over_a_missing_predecessor_and_activated_only_on
 /// over one whose first activation cannot stage its pointer (a folder where
 /// the staging file goes); `seeded` with no new scope over a plan on disk
 /// with no seal. Extremes: a start while a pull owns the run slot (`409`,
-/// not started); the slot left as that pull holds it; a start whose
-/// activation cannot stage its pointer (`503`, not started, the reason
-/// named); the run left finished and blocked by that reason; no pointer
-/// published by it (`active.bin` absent); a plan journal without a seal
-/// asked to be seeded with no new windows (refused: not durably seeded);
-/// the same plan with its seal (seeded); a start asked twice after the
-/// staging folder is gone (the first starts); and, at once, a start whose
-/// run slot is free but whose staging fails after the plan was written (the
-/// plan kept, the pointer never linked), and an unsealed plan asked to be
-/// seeded on a store whose recovery folder already exists (refused, the
-/// folder untouched); out of the box, a staging folder holding a file of
-/// its own.
+/// not started); its refusal naming the owner (a pull owns the slot); the
+/// slot left as that pull holds it; a start whose activation cannot stage
+/// its pointer (`503`, not started, the reason named); the run left
+/// finished and blocked by that reason; no pointer published by it
+/// (`active.bin` absent); a plan journal without a seal asked to be seeded
+/// with no new windows (refused: not durably seeded); the same plan with
+/// its seal (seeded); and, at once, one start answered `503` with its plan
+/// kept, its run blocked and no pointer linked, and an unsealed plan asked
+/// to be seeded on a store whose recovery folder already exists (refused,
+/// the folder untouched); out of the box, a staging folder holding a file
+/// of its own (left as it was).
 #[tokio::test]
 async fn a_start_refused_a_slot_or_an_activation_says_so_and_a_plan_never_sealed_is_never_seeded() {
     let day = on(2026, 7, 1);
@@ -1810,6 +1809,9 @@ async fn a_start_refused_a_slot_or_an_activation_says_so_and_a_plan_never_sealed
     assert!(finished.starts_with("Recovery BLOCKED: "), "{finished}");
     assert!(finished.contains(&why), "{finished}");
     assert!(!active_path(&stage_site).exists(), "no pointer was linked");
+    let staged = Window::new(day, day).expect("a day");
+    let planned = scope_identity(&[record(canonical("NIFTY", "1min", staged, "scan"))]);
+    assert!(plan_path(&stage_site, planned).exists(), "the plan kept");
     assert!(staging.join("held").exists(), "the folder untouched");
     let _ = std::fs::remove_dir_all(&stage_root);
 
@@ -1849,16 +1851,16 @@ const FULL_POOL_CHILD: &str = "BRUTEX_RECOVERY_FULL_POOL_CHILD";
 /// missing or is a folder; `page` in a child of this test binary whose
 /// store-read pool is crowded (the child is alone, so no other test is
 /// starved), proved by the file its parent reads. Extremes: no pointer at
-/// all (nothing in flight, nothing resumed); a pointer to a plan that is
-/// gone, at the boot check (the missing plan named); the same at resume
-/// (named the same); a pointer to a plan that is a folder, at the boot check
-/// (refused, never called missing); the same at resume (refused); the page
-/// with the pool full (the journal not read, the pool's bound said); the
-/// page's run state still shown beside it (no run yet); the folder left as
-/// it was; and, at once, a folder plan asked at the boot check and at resume
-/// in turn (both refused the same way), and the full-pool page over a store
-/// with no recovery history at all (the pool's refusal said, not the
-/// history's); out of the box, a resume whose driver is never reached
+/// the boot check (nothing in flight); no pointer at resume (nothing
+/// resumed); a pointer to a plan that is gone, at the boot check (the
+/// missing plan named); the same at resume (named the same); a pointer to a
+/// plan that is a folder, at the boot check (refused, never called
+/// missing); the same at resume (refused); the page with the pool full (the
+/// journal not read, the pool's bound said); the folder left as it was;
+/// and, at once, a folder plan asked at the boot check and at resume in
+/// turn (both refused, neither called missing), and the full-pool page over
+/// a store with no recovery history at all (the pool's refusal said, not
+/// the history's); out of the box, a resume whose driver is never reached
 /// (refused before any work).
 #[tokio::test]
 async fn a_pointer_to_a_plan_that_is_gone_or_no_file_is_refused_and_a_page_under_a_full_pool_says_so()

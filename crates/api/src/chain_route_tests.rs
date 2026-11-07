@@ -1290,6 +1290,10 @@ fn month_file(
 /// the changed byte is the record's open interest, a field no answer here
 /// reads (refused all the same: the checksum covers every byte).
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "an option month and a spot month, each asked on both sides of its damage"
+)]
 fn a_month_that_opens_and_will_not_read_is_a_named_fault_for_a_first_stamp_and_for_the_spot() {
     // AN OPTION MONTH OF 150 BARS: BLOCKS 0 AND 1 ARE WHOLE, 146-149 ITS TAIL.
     let root = crate::scratch::path("chain-damaged-block");
@@ -1310,8 +1314,14 @@ fn a_month_that_opens_and_will_not_read_is_a_named_fault_for_a_first_stamp_and_f
         timeframe: Timeframe::SECOND_1,
     };
     let expiry = Expiry::new(2018, 11, 29).expect("an expiry");
+    // READ AS AN ARRAY, never a lazy `&&` whose second side only a failing
+    // assertion reaches (D-8661 item 8).
     let named = |faults: &[String], file: &std::path::Path| {
-        faults.len() == 1 && faults[0].starts_with(&format!("{}: ", file.display()))
+        let prefix = format!("{}: ", file.display());
+        [
+            faults.len() == 1,
+            faults.iter().all(|fault| fault.starts_with(&prefix)),
+        ] == [true, true]
     };
     let mut faults = Vec::new();
     assert_eq!(
