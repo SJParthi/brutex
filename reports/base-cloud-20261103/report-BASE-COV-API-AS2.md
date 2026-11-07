@@ -906,7 +906,7 @@ only its asserts' (F). Red round 9: `census_cache.rs` 1199 skipping the refused 
 {}`): `test result: FAILED. 0 passed; 1 failed`, the child at its own case (13), restored with
 `git checkout`.
 
-Route B whole:api on `619a9b4e`: running (started 22:10 IST); until its readout lands the lists
+Route B whole:api on `619a9b4e`: running (started 22:08 IST); until its readout lands the lists
 and the FIX json are `2dc1534d`'s.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
@@ -993,10 +993,14 @@ and the FIX json are `2dc1534d`'s.
 NEXT: the production rows left that a test could still reach, each a new test with its own
 `Extremes:` line: (1) `server.rs` 21052, a serve on a non-zero port in a child whose `PATH` is a
 scratch folder holding a link to the system's `true` and whose `BRUTEX_NO_OPEN` is unset (the
-spawning-arm test's shape; the port taken by binding `:0` first); (2) `calendar_of.rs` 551:32 F
-and 827:35 T, a bar file with one record rewritten to repeat its neighbour's minute or to sit
-before 1970, its block's checksum recomputed with `store::block::seal` (`Bar::image` writes the
-record); (3) `server.rs` 6632-6633, a journal that takes a run's open and close and refuses a
+spawning-arm test's shape; the port taken by binding `:0` first, a race a reviewer may refuse);
+(2) `calendar_of.rs` 827:35 T and 551:32 F, a bar file written legally by `write_bars_for` and
+then one record rewritten: a minute bar restamped 30 s past its neighbour (the same minute, off
+the grid, which the writer refuses and the reader reads) for `read_minute_spans`, and a daily
+bar restamped before 1970 IST for `derive`; each block's checksum recomputed with
+`store::block::seal` over `Layout::covered_byte_range` and written at `block * 4` of the month's
+`FileKind::Checksums` file, as `crates/store/src/file_fault_tests.rs` does (about line 725);
+(3) `server.rs` 6632-6633, a journal that takes a run's open and close and refuses a
 member's note, in a uid-65534 child where the mode bits bind; (4) the two indexstopvix tests for
 G1's `indexstopvix_projection_tests.rs` (G1 or ASA). Then Route B whole:api on the code tip
 again, the lists, and the FIX json. The rows named as host, race, clock, build or real-host rows
