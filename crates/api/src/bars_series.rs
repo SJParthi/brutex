@@ -2048,6 +2048,14 @@ mod generation_tests {
     /// read is refused (not "absent"), and an index's life ends at the
     /// descriptor's archive end exactly as on a store with no journal: a
     /// refusal never moves the owed span either way.
+    ///
+    /// Extremes: singles — a file where the journal's folder belongs (the read
+    /// refused, never read as absent), an index whose held months stop years
+    /// before the descriptor's archive end (its owed end is that archive end,
+    /// not its newest held month); combinations — none of its own; out of the
+    /// box — none of its own. This file's 8-extremes count is carried by
+    /// `a_summary_that_does_not_describe_its_file_is_refused_field_by_field`
+    /// (11 / 3 / 2).
     #[test]
     fn a_journal_that_cannot_be_read_moves_no_index_life() {
         let held = months(&["2019-01", "2019-03"]);
@@ -2633,6 +2641,16 @@ mod tod_index_tests {
     /// month; `TodDay::of` handed a unit past the span its first and last units
     /// make (an order its callers never hand it) counts the unit and holds no
     /// bit for it, so a unit below it is still ranked.
+    ///
+    /// Extremes: singles — a stamp a microsecond before the month's first
+    /// instant (31 December), the month's first instant itself (1 January,
+    /// midnight), the instant a whole held day ends (375 rows), a unit past
+    /// the span its first and last units make (200, in a word no span holds),
+    /// a query at the second word's first unit (64: the first word's rank
+    /// alone); combinations — a unit past the span handed between two held
+    /// units, counted and holding no bit, at once; the span's last unit and a
+    /// query one past it (101: units 3 and 100) at once; out of the box —
+    /// units handed out of order, which no caller hands `TodDay::of`.
     #[test]
     fn an_instant_before_the_month_and_a_unit_past_the_span_answer_nothing() {
         let (summary, held) = folded(&minutes_of(&[2, 3], 375, &[]), Timeframe::MINUTE_1);

@@ -2976,16 +2976,34 @@ mod tests {
 
     /// The bench's own path at 20, 30 and 40 keys and two samples a round,
     /// its growth ratio lifted: a walk per scale, no more, and the span's
-    /// last day hold at any size (BASE-COV-API, D-7344). Its extremes are
-    /// [`the_held_span_answers_at_every_edge_of_its_census`]'s, which runs
-    /// this same path at the sizes where its answer turns.
+    /// last day hold at any size (BASE-COV-API, D-7344); then the same path
+    /// at the small sizes where its answer moves, and with its scales handed
+    /// largest first (BASE-COV-API-AS3, verify r3 item 3 for this file,
+    /// D-8665). [`the_held_span_answers_at_every_edge_of_its_census`] runs
+    /// the edges this wrapper does not: one key, one sample a round, and the
+    /// census shapes the bench never builds.
     ///
-    /// Extremes: the span's last day at the day cycle's top (20 keys) and
-    /// past it (30 and 40 keys wrap and keep it), asserted before and after
-    /// six one-key appends a scale; one walk a scale at every size.
+    /// Extremes (each asserted by `held_span_growth`: every scale's last day
+    /// before and after its six one-key appends, one walk a scale): singles —
+    /// the day cycle's top (20 keys: 2020-09-20), past it (30 keys wrap and
+    /// keep it), twice past it (40 keys), appends that cannot move the last
+    /// day (at 20, 30 and 40 keys), a census of two keys (2020-09-02), appends
+    /// that move the last day (two keys to 2020-09-08), appends that cross the
+    /// top (15 keys to 21: 2020-09-20), one walk a scale at every size;
+    /// combinations — the smallest census here with appends that move its
+    /// last day at once, one key below the top (19) with appends that cross
+    /// it at once; out of the box — the scales handed largest first (40, 30,
+    /// 20 keys), an order the bench never runs, each scale still its own
+    /// census with its own one walk.
     #[test]
     fn the_held_span_bench_runs_at_a_small_size() {
         held_span_growth("small", [20, 30, 40], 2, u128::MAX);
+        held_span_growth("small-moving", [2, 15, 19], 2, u128::MAX);
+        held_span_growth("small-down", [40, 30, 20], 2, u128::MAX);
+        assert_eq!(last_day_of(2), "2020-09-02", "two keys");
+        assert_eq!(last_day_of(2 + 6), "2020-09-08", "appends move it");
+        assert_eq!(last_day_of(15 + 6), "2020-09-20", "appends cross the top");
+        assert_eq!(last_day_of(19 + 6), "2020-09-20", "and stay there");
     }
 
     /// A GDFL census of `keys` NIFTY option months of September 2020 in

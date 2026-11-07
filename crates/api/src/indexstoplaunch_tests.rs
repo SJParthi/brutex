@@ -943,6 +943,15 @@ fn a_foreign_command_and_a_count_of_no_or_too_many_digits_are_refused_before_any
 
 /// THE CONFIGURATION PREVIEW DOOR answers JSON with its refusal when nothing
 /// is configured, never an empty or plain answer.
+///
+/// Extremes: singles — a preview asking one bound (`max_loss_points=5`) with
+/// every environment bound unset, the first unset bound in the launch's order
+/// (batch programs) named with the variable that sets it, an answer that is
+/// still a 200 JSON body carrying its refusal and the bound it was asked;
+/// combinations — none of its own; out of the box — none of its own. This
+/// file's 8-extremes count is carried by
+/// `a_preview_past_its_observation_records_or_store_bounds_names_each_one`
+/// (6 / 2 / 1) and the launch's parse tests.
 #[tokio::test]
 async fn the_configuration_preview_door_answers_json_when_nothing_is_configured() {
     let root = Scratch::new();

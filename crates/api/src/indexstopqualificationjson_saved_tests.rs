@@ -157,6 +157,20 @@ async fn page(query: &str) -> (StatusCode, Value) {
 /// **A SAVED QUALIFICATION IS SERVED BY EVERY PAGE THAT READS IT.** Run in a
 /// child, since every bound comes from the environment and the launch is
 /// process-wide.
+///
+/// Extremes: singles — a build with no commit stamp (a 503 before any
+/// launch), a page one row in (offset 1, limit 1), a setting one past the
+/// saved extent on the fold page and on the day page, an offset one past the
+/// extent, a pin that is not the saved completion, an identity nothing saved,
+/// a ranking given no budget and one its admitted bytes already fill, a trade
+/// past the saved record, a source query that names a trade, a candle query
+/// with no context; combinations — a saved body changed under the kept reader
+/// (refused as stale) and restored (served again by a fresh open) at once,
+/// the later source asked under the first source's pin at once, a source body
+/// changed under the kept candle reader and restored at once; out of the box
+/// — the same identity asked under another root (the kept reader dropped and
+/// that root's open refused by name), the same source and pin asked under
+/// another root through the candle reader (refused by its code).
 #[test]
 #[expect(
     clippy::too_many_lines,
