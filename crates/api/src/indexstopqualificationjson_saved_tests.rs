@@ -27,13 +27,9 @@ const CHILD_PATH: &str = concat!(
     "::a_saved_qualification_is_served_by_every_page_that_reads_it"
 );
 
-/// Generated NIFTY minutes and days of April to June 2025 under `zerodha`,
-/// every open session of the shared calendar, written by the store's writer.
-fn generated_nifty(root: &Path) {
-    generated_nifty_months(root, &[4, 5, 6]);
-}
-
-/// [`generated_nifty`] over the months of 2025 named in `months`.
+/// Generated NIFTY minutes and days of the months of 2025 named in `months`
+/// under `zerodha`, every open session of the shared calendar, written by the
+/// store's writer.
 fn generated_nifty_months(root: &Path, months: &[u8]) {
     let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
     let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
@@ -594,14 +590,14 @@ fn a_forty_session_training_window_is_measured_whole_and_ranked_rejected() {
             "{settings}"
         );
         for row in settings["rows"].as_array().expect("rows") {
-            let states: Vec<&str> = row["institutional"]["checks"]
+            let check_states: Vec<&str> = row["institutional"]["checks"]
                 .as_array()
                 .expect("checks")
                 .iter()
                 .map(|check| check["state"].as_str().expect("a state"))
                 .collect();
-            assert!(!states.contains(&"unmeasured"), "{row}");
-            assert!(states.contains(&"failed"), "{row}");
+            assert!(!check_states.contains(&"unmeasured"), "{row}");
+            assert!(check_states.contains(&"failed"), "{row}");
         }
     });
 }
