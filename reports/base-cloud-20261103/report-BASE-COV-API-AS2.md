@@ -867,8 +867,33 @@ refused inside `warm`, which only the started warm thread calls; the same child 
 `warm` directly), 1209-1212 (a warm thread that panicked), 918:16 F and 1287-1303 (races),
 calendar_route.rs 1312 (a journal walk that unwound).
 
-Route B whole:api on `2dc1534d`: running (started 21:31 IST); until its readout lands the lists
-and the FIX json are `518b2355`'s.
+### Measurement: Route B whole:api on `2dc1534d`, the code tip (7 Nov, 21:31-21:59 IST)
+
+The same command and set file, the scratch worktree moved to `2dc1534d` (clean, red round 8
+restored): build rc 0 in 2 min (170 artifacts, 148 reused); `== test api rc=101 END 2026-11-07
+21:40:31 IST (6 min); tests passed 3196 failed 15 ignored 16`; lib `test result: FAILED. 3112
+passed; 14 failed; 16 ignored; 0 measured; 1 filtered out; finished in 256.89s`. The 15 reds are
+the baseline's 14 and G1's stop-bound test under the run's load again ("the whole stop, signal
+to end, is inside STOP_BOUND 6s: 6.646991691s": L-BCA-4). Every test this shard added or
+changed passed. `ROUTE-B DONE 2026-11-07 21:59:17 IST WITH NOT PROVED lines above`, the same 23
+NOT PROVED files (L-BCA-2).
+
+- Whole api, this host: lines 180,310/184,501 (4,191 uncovered), branches 12,952/15,484 (2,532
+  uncovered sides).
+- G2: lines 70,407/71,390 (983 uncovered), branches 4,763/5,496 (733 uncovered sides): (F) 174
+  lines 549 sides; (U) 123 lines 90 sides; GAP 686 lines 94 sides (production 525 lines 75
+  sides; test code 51 lines 7 sides, all behind the five host reds; inside `#[ignore]`d tests
+  110 lines 12 sides).
+- Against `518b2355`: production 541/78 to 525/75, the 19 rows the new test targets and no
+  other; the two rows new to this readout are its (6) assert's two (F) sides. Against this
+  shard's previous final (`b3d5321c`): production 950/269 to 525/75, test code 118/74 to 51/7,
+  (U) 56/35 to 123/90. **The bar is not met** for G2.
+- Production left, by kind: the 389 lines and 28 sides an L-BCA-5 or L-BCA-6 tag names; the 50
+  lines and 20 sides D-8663's draft names as L-BCA-5's; and 86 lines, 27 sides each named under
+  the final measurement above, less the four thread starts this test reaches.
+- Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, rewritten from this readout. Gate 23 by hand on
+  `2dc1534d`: exit 1, its output equal to `518b2355`'s line for line (the one-line difference from
+  f01d7a0e4, no `sources_tests.rs` site, no site of this shard's).
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 

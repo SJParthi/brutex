@@ -1,12 +1,12 @@
 # fu-AS2.txt.md
 
-Source: this shard's Route B whole:api readout of tip `518b2355` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
+Source: this shard's Route B whole:api readout of tip `2dc1534d` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
 
 `````text
-(F)/(U) list of BASE-COV-API-AS2 (repair round 3, shard G2), tip 518b2355880557d1f24b4330b236a0416ef168c9, whole:api, Route B (see gaps-AS2.txt for the run).
+(F)/(U) list of BASE-COV-API-AS2 (repair round 3, shard G2), tip 2dc1534d8cdfaff34a6509339ac425da49037913, whole:api, Route B (see gaps-AS2.txt for the run).
 (F) = the failing side of an assert!/assert_eq!/assert_ne!/panic!/unreachable! whose statement ran, in test code (recipe v4 step 4), as repair r2 read it.
 (U) = unreachable on every target, aarch64-apple-darwin included: the proof from the code is in brackets on each row.
-(F) 174 lines 547 sides; (U) 123 lines 90 sides.
+(F) 174 lines 549 sides; (U) 123 lines 90 sides.
 
 (F) LINE crates/api/src/bars_sort.rs:2934  [failing arm of the statement at 2931, which ran]  shared.bytes()
 (F) BRANCH crates/api/src/bars_sort.rs:3822:13 False  [the false side fails the check, and its line ran]  why.contains("; index them with: cli srt-build ") && why.ends_with("2031-02 2031-02"),
@@ -162,6 +162,8 @@ Source: this shard's Route B whole:api readout of tip `518b2355` (`d3-route-b-cl
 (F) BRANCH crates/api/src/census_cache.rs:3582:13 False  [the else of a let-else that panics, whose line ran]  let ManifestStamp::Partitioned(stamp) = vendor_stamp(&root, Vendor::Gdfl) else {
 (F) BRANCH crates/api/src/census_cache.rs:3593:22 False  [the false side fails the check, and its line ran]  ] if kind == looped
 (F) BRANCH crates/api/src/census_cache.rs:3647:13 False  [the else of a let-else that panics, whose line ran]  let ManifestStamp::Partitioned(moved) = vendor_stamp(&root, Vendor::Gdfl) else {
+(F) BRANCH crates/api/src/census_cache.rs:3854:17 False  [the false side fails the check, and its line ran]  reason.starts_with("the background re-read could not be started (")
+(F) BRANCH crates/api/src/census_cache.rs:3855:24 False  [the false side fails the check, and its line ran]  && reason.ends_with("); readers read it themselves"),
 (F) LINE crates/api/src/census_tail_tests.rs:109  [panic/unreachable line]  panic!("not held: {}", census.note());
 (F) LINE crates/api/src/census_tail_tests.rs:497  [panic/unreachable line]  panic!("served past its capacity: {}", over.note());
 (F) BRANCH crates/api/src/census_tail_tests.rs:108:9 False  [the else of a let-else that panics, whose line ran]  let Census::Held { ref manifest } = census.state else {
