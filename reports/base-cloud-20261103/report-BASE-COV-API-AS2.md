@@ -820,9 +820,31 @@ so against f01d7a0e4 it differs in the one line `993 tracked source file(s)` the
 here, names no `api/src/sources_tests.rs` site (`grep -c sources_tests`: 0) and no site of this
 shard's.
 
-Route B whole:api on `518b2355`: running (started 20:50 IST, the same command and set file as
-above). Until its readout lands, `gaps-AS2.txt.md`, `fu-AS2.txt.md` and the FIX json are
-`b0b3a034`'s; the next reports-only commit replaces them with this tip's.
+### Measurement: Route B whole:api on `518b2355`, the code tip (7 Nov, 20:50-21:19 IST)
+
+The same command and set file as the final measurement above, on the scratch worktree moved to
+`518b2355` (clean, red round 7 restored): build rc 0 in 2 min (170 artifacts, 148 reused); `==
+test api rc=101 END 2026-11-07 21:00:32 IST (7 min); tests passed 3196 failed 14 ignored 16`;
+lib `test result: FAILED. 3112 passed; 13 failed; 16 ignored; 0 measured; 1 filtered out;
+finished in 275.58s`. The 14 reds are exactly the baseline's 14 (the eight lib tests of other
+shards' files, G2's five head-deadline host reds, `tests/pool_load.rs`'s load test); G1's
+stop-bound test passed this time. Every test this shard added or changed passed. `ROUTE-B DONE
+2026-11-07 21:18:55 IST WITH NOT PROVED lines above`, the same 23 NOT PROVED files (L-BCA-2).
+
+- Whole api, this host: lines 180,230/184,429 (4,199 uncovered), branches 12,942/15,478 (2,536
+  uncovered sides).
+- G2: lines 70,319/71,318 (999 uncovered), branches 4,756/5,490 (734 uncovered sides): (F) 174
+  lines 547 sides; (U) 123 lines 90 sides; GAP 702 lines 97 sides (production 541 lines 78
+  sides; test code 51 lines 7 sides; inside `#[ignore]`d tests 110 lines 12 sides).
+- Against `b0b3a034`: test code 96/28 to 51/7, and the 51/7 left are all
+  `head_deadline_body_tests.rs`' (the five host reds stop before them: the Mac's); production
+  541/78 and inside `#[ignore]`d tests 110/12 unchanged, the same rows by kind as listed under the
+  final measurement above; (F) 173/545 to 174/547. The five rows new to this readout are all (F):
+  the message argument `root.display()` of `run_serves`' parent assert, and the panic lines and
+  untaken elses of the one-line let-elses in `calendar_of.rs`, `calendar_route.rs` and
+  `loopback_zerodha`. **The bar is not met** for G2: the production rows named above remain.
+- Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, rewritten from this readout by the same
+  classifier.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 

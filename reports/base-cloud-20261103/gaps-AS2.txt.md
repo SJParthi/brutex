@@ -1,15 +1,15 @@
 # gaps-AS2.txt.md
 
-Source: this shard's Route B whole:api readout of tip `b0b3a034` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
+Source: this shard's Route B whole:api readout of tip `518b2355` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
 
 `````text
-BASE-COV-API-AS2 (repair round 3, shard G2), Route B on tip b0b3a034cbee945e99d426918546cba074e69e77, whole:api (the kit's set file deep-BASE-COV-API-6ea46e59c074-set.txt, 205 coverage files), host Linux x86_64, root, 4 cores; test api rc=101 END 2026-11-07 19:50:39 IST (6 min); tests passed 3195 failed 15 ignored 16
+BASE-COV-API-AS2 (repair round 3, shard G2), Route B on tip 518b2355880557d1f24b4330b236a0416ef168c9, whole:api (the kit's set file deep-BASE-COV-API-6ea46e59c074-set.txt, 205 coverage files), host Linux x86_64, root, 4 cores; test api rc=101 END 2026-11-07 21:00:32 IST (7 min); tests passed 3196 failed 14 ignored 16
 NOT PROVED lines of the run: 23 files, every one of them crates/api/benches/** or crates/api/src/lib.rs (no object holds them: L-BCA-2)
-TOTAL (whole api, this host) lines 180141/184389 (4248 uncovered), branches 12948/15498 (2550 uncovered sides)
-G2 (58 files of SHARDS.md's G2) lines 70235/71278 (1043 uncovered), branches 4757/5510 (753 uncovered sides): (F) 173 lines 545 sides; (U) 123 lines 90 sides; GAP 747 lines 118 sides (production 541 lines 78 sides; test code 96 lines 28 sides; inside #[ignore]d tests 110 lines 12 sides)
+TOTAL (whole api, this host) lines 180230/184429 (4199 uncovered), branches 12942/15478 (2536 uncovered sides)
+G2 (58 files of SHARDS.md's G2) lines 70319/71318 (999 uncovered), branches 4756/5490 (734 uncovered sides): (F) 174 lines 547 sides; (U) 123 lines 90 sides; GAP 702 lines 97 sides (production 541 lines 78 sides; test code 51 lines 7 sides; inside #[ignore]d tests 110 lines 12 sides)
 Classes: a row whose line the predecessor's lists (tip b3d5321c) classed keeps that class, its line mapped through git diff; (U) rows carry their proof (fu-AS2.txt); every other row was classed by recipe v4 step 4 (test code only: a panic/unreachable line, a message argument of an assert whose statement ran, the false side of an && operand inside an assert whose line ran, the false arm of a matches! inside an assert whose statement ran (as the previous lists read the same rows), the else of a let-else that panics whose line ran) and read by hand in session -5. Other groups' files were measured in the same run and are their shards' to list.
 per file (lines a/b, branches c/d; GAP lines/sides):
-  crates/api/src/server.rs: lines 19213/19540, branches 1235/1468; GAP 220/30
+  crates/api/src/server.rs: lines 19298/19596, branches 1243/1466; GAP 190/20
   crates/api/src/indexstoprankingjson.rs: lines 308/502, branches 24/48; GAP 194/21
   crates/api/src/sources.rs: lines 2759/2766, branches 532/542; GAP 0/0
   crates/api/src/sources_day_truth_tests.rs: lines 596/596, branches 7/10; GAP 0/0
@@ -18,12 +18,12 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/provenance_tests.rs: lines 2204/2210, branches 28/50; GAP 0/0
   crates/api/src/booleanqualification_projection.rs: lines 44/143, branches 6/12; GAP 99/6
   crates/api/src/booleanqualification_projection_tests.rs: lines 71/71, branches 0/0; GAP 0/0
-  crates/api/src/bars_sort.rs: lines 3795/3819, branches 447/488; GAP 7/2
+  crates/api/src/bars_sort.rs: lines 3791/3813, branches 447/488; GAP 5/2
   crates/api/src/bars_sort_tests.rs: lines 1263/1266, branches 73/112; GAP 0/0
-  crates/api/src/census_cache.rs: lines 1708/1772, branches 168/200; GAP 36/12
-  crates/api/src/calendar_of.rs: lines 1989/2033, branches 117/134; GAP 40/6
-  crates/api/src/calendar_route.rs: lines 874/878, branches 96/100; GAP 2/1
-  crates/api/src/calendar_route_tests.rs: lines 1170/1175, branches 36/66; GAP 3/3
+  crates/api/src/census_cache.rs: lines 1704/1764, branches 162/188; GAP 33/6
+  crates/api/src/calendar_of.rs: lines 1999/2038, branches 118/136; GAP 34/6
+  crates/api/src/calendar_route.rs: lines 875/879, branches 96/100; GAP 2/0
+  crates/api/src/calendar_route_tests.rs: lines 1167/1169, branches 33/60; GAP 0/0
   crates/api/src/booleanlaunch.rs: lines 376/393, branches 85/88; GAP 17/2
   crates/api/src/booleanlaunch_tests.rs: lines 711/711, branches 18/22; GAP 0/0
   crates/api/src/expressionsearchjson.rs: lines 148/181, branches 18/36; GAP 33/18
@@ -32,7 +32,7 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/operation_audit.rs: lines 223/223, branches 45/46; GAP 0/0
   crates/api/src/operation_audit_tests.rs: lines 781/782, branches 6/8; GAP 0/0
   crates/api/src/speed.rs: lines 551/557, branches 76/82; GAP 4/2
-  crates/api/src/speed_tests.rs: lines 1003/1005, branches 42/72; GAP 1/1
+  crates/api/src/speed_tests.rs: lines 1002/1003, branches 41/70; GAP 0/0
   crates/api/src/dayflags_rules.rs: lines 940/941, branches 186/188; GAP 1/1
   crates/api/src/dayflags_rules_tests.rs: lines 3663/3712, branches 52/78; GAP 18/0
   crates/api/src/trades.rs: lines 1061/1073, branches 40/46; GAP 0/0
@@ -74,8 +74,6 @@ GAP prod LINE crates/api/src/bars_sort.rs:2145  continue;
 GAP prod LINE crates/api/src/bars_sort.rs:2388  Err(why) => {
 GAP prod LINE crates/api/src/bars_sort.rs:2389  faults.push_once(why);
 GAP prod LINE crates/api/src/bars_sort.rs:2390  continue;
-GAP test LINE crates/api/src/bars_sort.rs:4755  super::Slice::Run { array, lo, hi } => {
-GAP test LINE crates/api/src/bars_sort.rs:4756  format!("run {array} {lo}..{hi} ({len})")
 GAP prod BRANCH crates/api/src/bars_sort.rs:2074:13 False  let Ok(series) = u32::try_from(cut.series) else {
 GAP prod BRANCH crates/api/src/bars_sort.rs:2144:13 False  let Ok(series) = u32::try_from(cut.series) else {
 GAP prod LINE crates/api/src/booleanlaunch.rs:277  status.observe(next)?;
@@ -202,61 +200,48 @@ GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:21:8 True  [L-
 GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:21:8 False  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  if rows.len() != observations.len() {
 GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:124:24 True  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  let folds = if let Some(folds) = &row.folds {
 GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:124:24 False  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  let folds = if let Some(folds) = &row.folds {
-GAP test LINE crates/api/src/calendar_of.rs:2473  landed = flight
-GAP test LINE crates/api/src/calendar_of.rs:2474  .ready
-GAP test LINE crates/api/src/calendar_of.rs:2475  .wait(landed)
-GAP test LINE crates/api/src/calendar_of.rs:2476  .unwrap_or_else(PoisonError::into_inner);
-GAP test LINE crates/api/src/calendar_of.rs:2477  }
-GAP test LINE crates/api/src/calendar_of.rs:2510  Landed::Deriving | Landed::Abandoned => None,
-GAP ignored LINE crates/api/src/calendar_of.rs:2551  fn it_reproduces_the_operators_store() {
-GAP ignored LINE crates/api/src/calendar_of.rs:2552  let Some(home) = std::env::var_os("HOME") else {
-GAP ignored LINE crates/api/src/calendar_of.rs:2553  panic!("no HOME");
-GAP ignored LINE crates/api/src/calendar_of.rs:2555  let root = std::path::PathBuf::from(home).join(".brutex/store");
-GAP ignored LINE crates/api/src/calendar_of.rs:2556  assert!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2557  root.join("bars").is_dir(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2560  root.display()
-GAP ignored LINE crates/api/src/calendar_of.rs:2563  let mut months = Vec::new();
-GAP ignored LINE crates/api/src/calendar_of.rs:2564  for year in 2019..=2026_u16 {
-GAP ignored LINE crates/api/src/calendar_of.rs:2565  for month in 1..=12_u8 {
-GAP ignored LINE crates/api/src/calendar_of.rs:2566  if let Ok(ym) = YearMonth::new(year, month) {
-GAP ignored LINE crates/api/src/calendar_of.rs:2567  months.push(ym);
-GAP ignored LINE crates/api/src/calendar_of.rs:2568  }
-GAP ignored LINE crates/api/src/calendar_of.rs:2572  let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
-GAP ignored LINE crates/api/src/calendar_of.rs:2574  println!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2576  cal.span(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2577  cal.sessions(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2580  report.unreadable.len()
-GAP ignored LINE crates/api/src/calendar_of.rs:2583  assert_eq!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2584  cal.sessions(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2590  let mut owed = 0_u32;
-GAP ignored LINE crates/api/src/calendar_of.rs:2591  let mut unmeasured = 0_u32;
-GAP ignored LINE crates/api/src/calendar_of.rs:2592  for day in cal.first_day()..=cal.last_day() {
-GAP ignored LINE crates/api/src/calendar_of.rs:2593  match cal.expected_bars(day) {
-GAP ignored LINE crates/api/src/calendar_of.rs:2594  Some(n) => owed = owed.saturating_add(u32::from(n)),
-GAP ignored LINE crates/api/src/calendar_of.rs:2596  if matches!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2597  cal.kind_of(day),
-GAP ignored LINE crates/api/src/calendar_of.rs:2599  ) {
-GAP ignored LINE crates/api/src/calendar_of.rs:2600  unmeasured = unmeasured.saturating_add(1);
-GAP ignored LINE crates/api/src/calendar_of.rs:2601  }
-GAP ignored LINE crates/api/src/calendar_of.rs:2605  assert_eq!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2610  println!("minute bars owed: {owed}");
-GAP ignored LINE crates/api/src/calendar_of.rs:2611  assert_eq!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2617  }
+GAP ignored LINE crates/api/src/calendar_of.rs:2560  fn it_reproduces_the_operators_store() {
+GAP ignored LINE crates/api/src/calendar_of.rs:2561  let Some(home) = std::env::var_os("HOME") else {
+GAP ignored LINE crates/api/src/calendar_of.rs:2562  panic!("no HOME");
+GAP ignored LINE crates/api/src/calendar_of.rs:2564  let root = std::path::PathBuf::from(home).join(".brutex/store");
+GAP ignored LINE crates/api/src/calendar_of.rs:2565  assert!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2566  root.join("bars").is_dir(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2569  root.display()
+GAP ignored LINE crates/api/src/calendar_of.rs:2572  let mut months = Vec::new();
+GAP ignored LINE crates/api/src/calendar_of.rs:2573  for year in 2019..=2026_u16 {
+GAP ignored LINE crates/api/src/calendar_of.rs:2574  for month in 1..=12_u8 {
+GAP ignored LINE crates/api/src/calendar_of.rs:2575  if let Ok(ym) = YearMonth::new(year, month) {
+GAP ignored LINE crates/api/src/calendar_of.rs:2576  months.push(ym);
+GAP ignored LINE crates/api/src/calendar_of.rs:2577  }
+GAP ignored LINE crates/api/src/calendar_of.rs:2581  let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+GAP ignored LINE crates/api/src/calendar_of.rs:2583  println!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2585  cal.span(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2586  cal.sessions(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2589  report.unreadable.len()
+GAP ignored LINE crates/api/src/calendar_of.rs:2592  assert_eq!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2593  cal.sessions(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2599  let mut owed = 0_u32;
+GAP ignored LINE crates/api/src/calendar_of.rs:2600  let mut unmeasured = 0_u32;
+GAP ignored LINE crates/api/src/calendar_of.rs:2601  for day in cal.first_day()..=cal.last_day() {
+GAP ignored LINE crates/api/src/calendar_of.rs:2602  match cal.expected_bars(day) {
+GAP ignored LINE crates/api/src/calendar_of.rs:2603  Some(n) => owed = owed.saturating_add(u32::from(n)),
+GAP ignored LINE crates/api/src/calendar_of.rs:2605  if matches!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2606  cal.kind_of(day),
+GAP ignored LINE crates/api/src/calendar_of.rs:2608  ) {
+GAP ignored LINE crates/api/src/calendar_of.rs:2609  unmeasured = unmeasured.saturating_add(1);
+GAP ignored LINE crates/api/src/calendar_of.rs:2610  }
+GAP ignored LINE crates/api/src/calendar_of.rs:2614  assert_eq!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2619  println!("minute bars owed: {owed}");
+GAP ignored LINE crates/api/src/calendar_of.rs:2620  assert_eq!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2626  }
 GAP prod BRANCH crates/api/src/calendar_of.rs:551:32 False  if let Some(civil) = day_month(day) {
 GAP prod BRANCH crates/api/src/calendar_of.rs:827:35 True  Some(last) if last.1 == minute => {}
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2552:13 True  let Some(home) = std::env::var_os("HOME") else {
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2552:13 False  let Some(home) = std::env::var_os("HOME") else {
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2566:24 True  if let Ok(ym) = YearMonth::new(year, month) {
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2566:24 False  if let Ok(ym) = YearMonth::new(year, month) {
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2561:13 True  let Some(home) = std::env::var_os("HOME") else {
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2561:13 False  let Some(home) = std::env::var_os("HOME") else {
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2575:24 True  if let Ok(ym) = YearMonth::new(year, month) {
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2575:24 False  if let Ok(ym) = YearMonth::new(year, month) {
 GAP prod LINE crates/api/src/calendar_route.rs:1312  Err(_) => Err("the pull journal's walk at start unwound".to_owned()),
 GAP prod LINE crates/api/src/calendar_route.rs:1314  Err(why) => Err(format!("the pull journal's walk could not start: {why}")),
-GAP test BRANCH crates/api/src/calendar_route.rs:1351:13 False  let Err((status, headers, body)) = question(&(Vendor::Gdfl, None, "NIFTY 50".to_owned()))
-GAP test LINE crates/api/src/calendar_route_tests.rs:1577  asked.set(asked.get() + 1);
-GAP test LINE crates/api/src/calendar_route_tests.rs:1578  census_now_stamped(site)
-GAP test LINE crates/api/src/calendar_route_tests.rs:1579  });
-GAP test BRANCH crates/api/src/calendar_route_tests.rs:1119:12 False  if let Some(one) = byte.first_mut() {
-GAP test BRANCH crates/api/src/calendar_route_tests.rs:1586:35 False  assert!(not.is_empty() || !body.contains(not), "{query}: {body}");
-GAP test BRANCH crates/api/src/calendar_route_tests.rs:1593:16 False  if let Some(at) = stamps.manifests.get_mut(Vendor::Gdfl as usize) {
 GAP prod LINE crates/api/src/census_cache.rs:643  cell.refreshing.store(false, Ordering::Release);
 GAP prod LINE crates/api/src/census_cache.rs:644  note_warmth(
 GAP prod LINE crates/api/src/census_cache.rs:645  vendors,
@@ -290,21 +275,12 @@ GAP prod LINE crates/api/src/census_cache.rs:1300  behind.join(", ")
 GAP prod LINE crates/api/src/census_cache.rs:1301  )),
 GAP prod LINE crates/api/src/census_cache.rs:1302  );
 GAP prod LINE crates/api/src/census_cache.rs:1303  }
-GAP test LINE crates/api/src/census_cache.rs:3180  reads.set(reads.get() + 1);
-GAP test LINE crates/api/src/census_cache.rs:3181  (census::read_all(root), None)
-GAP test LINE crates/api/src/census_cache.rs:3182  });
 GAP prod BRANCH crates/api/src/census_cache.rs:642:12 True  if let Err(why) = spawned {
 GAP prod BRANCH crates/api/src/census_cache.rs:918:16 False  if let Some(row) = rows
 GAP prod BRANCH crates/api/src/census_cache.rs:1009:8 True  if spawned.is_err() {
 GAP prod BRANCH crates/api/src/census_cache.rs:1141:12 False  if let Some(sender) = sender {
 GAP prod BRANCH crates/api/src/census_cache.rs:1209:12 True  if handle.join().is_err() {
 GAP prod BRANCH crates/api/src/census_cache.rs:1287:8 False  if behind.is_empty() {
-GAP test BRANCH crates/api/src/census_cache.rs:2564:16 False  if !rows.is_empty()
-GAP test BRANCH crates/api/src/census_cache.rs:2604:20 False  if let Some(row) = found
-GAP test BRANCH crates/api/src/census_cache.rs:2824:20 False  && now
-GAP test BRANCH crates/api/src/census_cache.rs:3259:13 False  row.state == WarmState::Ready && row.entries == Some(2)
-GAP test BRANCH crates/api/src/census_cache.rs:3584:13 False  let Err(looped) = std::fs::metadata(&index)
-GAP test BRANCH crates/api/src/census_cache.rs:3632:16 False  if let Some(at) = manifests.get_mut(Vendor::Gdfl as usize) {
 GAP prod LINE crates/api/src/dayflags_rules.rs:320  return Ok(kept);
 GAP prod BRANCH crates/api/src/dayflags_rules.rs:319:16 True  if let Some(kept) = flags().get(&key) {
 GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:2715  fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
@@ -798,97 +774,67 @@ GAP ignored LINE crates/api/src/server.rs:22400  why.starts_with(WITHHELD_BY_ORD
 GAP ignored LINE crates/api/src/server.rs:22404  println!(
 GAP ignored LINE crates/api/src/server.rs:22407  why.chars().take(150).collect::<String>()
 GAP ignored LINE crates/api/src/server.rs:22411  }
-GAP test LINE crates/api/src/server.rs:29908  let lock_path = root.join("serve.lock");
-GAP test LINE crates/api/src/server.rs:29909  let busy = std::fs::OpenOptions::new()
-GAP test LINE crates/api/src/server.rs:29910  .read(true)
-GAP test LINE crates/api/src/server.rs:29911  .write(true)
-GAP test LINE crates/api/src/server.rs:29912  .open(&lock_path)
-GAP test LINE crates/api/src/server.rs:29913  .is_ok_and(|file| store::flock::Flock::try_lock(file, lock_path.clone()).is_err());
-GAP test LINE crates/api/src/server.rs:29914  if busy {
-GAP test LINE crates/api/src/server.rs:29920  assert_eq!(
-GAP test LINE crates/api/src/server.rs:29921  run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
-GAP test LINE crates/api/src/server.rs:29925  let refused =
-GAP test LINE crates/api/src/server.rs:29926  crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
-GAP test LINE crates/api/src/server.rs:29927  assert!(
-GAP test LINE crates/api/src/server.rs:29928  refused.iter().any(|record| {
-GAP test LINE crates/api/src/server.rs:29929  record.level == telemetry::Level::Error
-GAP test LINE crates/api/src/server.rs:29930  && crate::emitted::says(record, "why", "already serving this store")
-GAP test LINE crates/api/src/server.rs:29931  }),
-GAP test LINE crates/api/src/server.rs:29934  return;
-GAP test LINE crates/api/src/server.rs:29935  }
-GAP test LINE crates/api/src/server.rs:29937  let expected =
-GAP test LINE crates/api/src/server.rs:29938  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
-GAP test LINE crates/api/src/server.rs:29944  assert_eq!(
-GAP test LINE crates/api/src/server.rs:29945  run(&argv(&["serve", "127.0.0.1:0"]), after_the_load(&root)).await,
-GAP test LINE crates/api/src/server.rs:29950  let listening = crate::emitted::landed(from, "api.serve", "listening");
-GAP test LINE crates/api/src/server.rs:29951  let mine = listening
-GAP test LINE crates/api/src/server.rs:29952  .iter()
-GAP test LINE crates/api/src/server.rs:29953  .find(|record| crate::emitted::says(record, "addr", "127.0.0.1:"))
-GAP test LINE crates/api/src/server.rs:29954  .expect("the process's own configuration is the first thing it writes");
-GAP test LINE crates/api/src/server.rs:29955  assert_eq!(mine.level, telemetry::Level::Info);
-GAP test LINE crates/api/src/server.rs:29959  assert!(
-GAP test LINE crates/api/src/server.rs:31925  });
-GAP prod LINE crates/api/src/server.rs:37505  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let feed = vendor.as_str().to_owned();
-GAP prod LINE crates/api/src/server.rs:37521  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let owned = {
-GAP prod LINE crates/api/src/server.rs:37522  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let held = site.universe();
-GAP prod LINE crates/api/src/server.rs:37523  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  resolved_master_rows(&held.read.merged, vendor)
-GAP prod LINE crates/api/src/server.rs:37525  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let master: Vec<pull::universe::VendorInstrument<'_>> = owned
-GAP prod LINE crates/api/src/server.rs:37526  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .iter()
-GAP prod LINE crates/api/src/server.rs:37527  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .map(|(id, symbol, isin)| pull::universe::VendorInstrument {
-GAP prod LINE crates/api/src/server.rs:37528  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  vendor_id: id,
-GAP prod LINE crates/api/src/server.rs:37529  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  trading_symbol: symbol,
-GAP prod LINE crates/api/src/server.rs:37530  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  isin,
-GAP prod LINE crates/api/src/server.rs:37531  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  })
-GAP prod LINE crates/api/src/server.rs:37532  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .collect();
-GAP prod LINE crates/api/src/server.rs:37534  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let source = match pull::resolve::HttpDocuments::new() {
-GAP prod LINE crates/api/src/server.rs:37535  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(client) => client,
-GAP prod LINE crates/api/src/server.rs:37536  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
-GAP prod LINE crates/api/src/server.rs:37537  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
-GAP prod LINE crates/api/src/server.rs:37538  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
-GAP prod LINE crates/api/src/server.rs:37539  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
-GAP prod LINE crates/api/src/server.rs:37540  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(r#"{{"ok":false,"why":{}}}"#, render::json_string(&why)),
-GAP prod LINE crates/api/src/server.rs:37541  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
-GAP prod LINE crates/api/src/server.rs:37547  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let today = match crate::ingest::today_ist() {
-GAP prod LINE crates/api/src/server.rs:37548  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(day) => day,
-GAP prod LINE crates/api/src/server.rs:37549  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
-GAP prod LINE crates/api/src/server.rs:37550  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
-GAP prod LINE crates/api/src/server.rs:37551  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
-GAP prod LINE crates/api/src/server.rs:37552  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
-GAP prod LINE crates/api/src/server.rs:37553  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(
-GAP prod LINE crates/api/src/server.rs:37554  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  r#"{{"ok":false,"why":{}}}"#,
-GAP prod LINE crates/api/src/server.rs:37555  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  render::json_string(&why.to_string())
-GAP prod LINE crates/api/src/server.rs:37556  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  ),
-GAP prod LINE crates/api/src/server.rs:37557  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
-GAP prod LINE crates/api/src/server.rs:37561  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let snap = pull::resolve::crawl(
-GAP prod LINE crates/api/src/server.rs:37562  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &source,
-GAP prod LINE crates/api/src/server.rs:37563  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  INDEX_HOST,
-GAP prod LINE crates/api/src/server.rs:37564  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  today,
-GAP prod LINE crates/api/src/server.rs:37565  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &feed,
-GAP prod LINE crates/api/src/server.rs:37566  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // ASKED OF THE VENDOR, NOT ASSUMED -- and this line used to assume.
-GAP prod LINE crates/api/src/server.rs:37567  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
-GAP prod LINE crates/api/src/server.rs:37568  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // It was the literal `JoinKey::Isin`, under a comment reading "EVERY
-GAP prod LINE crates/api/src/server.rs:37569  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for the
-GAP prod LINE crates/api/src/server.rs:37570  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // one that does not, and asking the descriptor rather than assuming is
-GAP prod LINE crates/api/src/server.rs:37571  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // what keeps that true when it lands." **It landed on 14 Aug 2026.**
-GAP prod LINE crates/api/src/server.rs:37572  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha's master has twelve columns and none is an ISIN, so this
-GAP prod LINE crates/api/src/server.rs:37573  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // literal joined its rows on an EMPTY field -- and `universe::resolve`
-GAP prod LINE crates/api/src/server.rs:37574  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // skips an empty key deliberately, so nothing would have errored. Every
-GAP prod LINE crates/api/src/server.rs:37575  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha instrument would have landed in `Verdict::Lacks`, which reads
-GAP prod LINE crates/api/src/server.rs:37576  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // exactly like a vendor that lists nothing.
-GAP prod LINE crates/api/src/server.rs:37577  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
-GAP prod LINE crates/api/src/server.rs:37578  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // `JoinKey::for_vendor` derives it from `master_columns().isin`, which
-GAP prod LINE crates/api/src/server.rs:37579  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // already spells Zerodha's as empty, so there is no second table to
-GAP prod LINE crates/api/src/server.rs:37580  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // fall behind the first.
-GAP prod LINE crates/api/src/server.rs:37581  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  pull::universe::JoinKey::for_vendor(vendor),
-GAP prod LINE crates/api/src/server.rs:37582  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &master,
-GAP prod LINE crates/api/src/server.rs:37583  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
-GAP prod LINE crates/api/src/server.rs:37584  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .await;
-GAP prod LINE crates/api/src/server.rs:37586  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let verdict = snap.admits_publication(None);
-GAP prod LINE crates/api/src/server.rs:37587  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  (
-GAP prod LINE crates/api/src/server.rs:37588  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::OK,
-GAP prod LINE crates/api/src/server.rs:37589  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
-GAP prod LINE crates/api/src/server.rs:37590  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  universe_snapshot_json(&snap, &verdict),
-GAP prod LINE crates/api/src/server.rs:37591  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
+GAP prod LINE crates/api/src/server.rs:37571  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let feed = vendor.as_str().to_owned();
+GAP prod LINE crates/api/src/server.rs:37587  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let owned = {
+GAP prod LINE crates/api/src/server.rs:37588  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let held = site.universe();
+GAP prod LINE crates/api/src/server.rs:37589  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  resolved_master_rows(&held.read.merged, vendor)
+GAP prod LINE crates/api/src/server.rs:37591  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let master: Vec<pull::universe::VendorInstrument<'_>> = owned
+GAP prod LINE crates/api/src/server.rs:37592  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .iter()
+GAP prod LINE crates/api/src/server.rs:37593  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .map(|(id, symbol, isin)| pull::universe::VendorInstrument {
+GAP prod LINE crates/api/src/server.rs:37594  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  vendor_id: id,
+GAP prod LINE crates/api/src/server.rs:37595  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  trading_symbol: symbol,
+GAP prod LINE crates/api/src/server.rs:37596  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  isin,
+GAP prod LINE crates/api/src/server.rs:37597  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  })
+GAP prod LINE crates/api/src/server.rs:37598  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .collect();
+GAP prod LINE crates/api/src/server.rs:37600  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let source = match pull::resolve::HttpDocuments::new() {
+GAP prod LINE crates/api/src/server.rs:37601  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(client) => client,
+GAP prod LINE crates/api/src/server.rs:37602  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
+GAP prod LINE crates/api/src/server.rs:37603  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
+GAP prod LINE crates/api/src/server.rs:37604  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
+GAP prod LINE crates/api/src/server.rs:37605  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
+GAP prod LINE crates/api/src/server.rs:37606  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(r#"{{"ok":false,"why":{}}}"#, render::json_string(&why)),
+GAP prod LINE crates/api/src/server.rs:37607  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
+GAP prod LINE crates/api/src/server.rs:37613  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let today = match crate::ingest::today_ist() {
+GAP prod LINE crates/api/src/server.rs:37614  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(day) => day,
+GAP prod LINE crates/api/src/server.rs:37615  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
+GAP prod LINE crates/api/src/server.rs:37616  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
+GAP prod LINE crates/api/src/server.rs:37617  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
+GAP prod LINE crates/api/src/server.rs:37618  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
+GAP prod LINE crates/api/src/server.rs:37619  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(
+GAP prod LINE crates/api/src/server.rs:37620  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  r#"{{"ok":false,"why":{}}}"#,
+GAP prod LINE crates/api/src/server.rs:37621  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  render::json_string(&why.to_string())
+GAP prod LINE crates/api/src/server.rs:37622  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  ),
+GAP prod LINE crates/api/src/server.rs:37623  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
+GAP prod LINE crates/api/src/server.rs:37627  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let snap = pull::resolve::crawl(
+GAP prod LINE crates/api/src/server.rs:37628  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &source,
+GAP prod LINE crates/api/src/server.rs:37629  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  INDEX_HOST,
+GAP prod LINE crates/api/src/server.rs:37630  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  today,
+GAP prod LINE crates/api/src/server.rs:37631  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &feed,
+GAP prod LINE crates/api/src/server.rs:37632  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // ASKED OF THE VENDOR, NOT ASSUMED -- and this line used to assume.
+GAP prod LINE crates/api/src/server.rs:37633  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
+GAP prod LINE crates/api/src/server.rs:37634  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // It was the literal `JoinKey::Isin`, under a comment reading "EVERY
+GAP prod LINE crates/api/src/server.rs:37635  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for the
+GAP prod LINE crates/api/src/server.rs:37636  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // one that does not, and asking the descriptor rather than assuming is
+GAP prod LINE crates/api/src/server.rs:37637  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // what keeps that true when it lands." **It landed on 14 Aug 2026.**
+GAP prod LINE crates/api/src/server.rs:37638  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha's master has twelve columns and none is an ISIN, so this
+GAP prod LINE crates/api/src/server.rs:37639  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // literal joined its rows on an EMPTY field -- and `universe::resolve`
+GAP prod LINE crates/api/src/server.rs:37640  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // skips an empty key deliberately, so nothing would have errored. Every
+GAP prod LINE crates/api/src/server.rs:37641  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha instrument would have landed in `Verdict::Lacks`, which reads
+GAP prod LINE crates/api/src/server.rs:37642  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // exactly like a vendor that lists nothing.
+GAP prod LINE crates/api/src/server.rs:37643  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
+GAP prod LINE crates/api/src/server.rs:37644  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // `JoinKey::for_vendor` derives it from `master_columns().isin`, which
+GAP prod LINE crates/api/src/server.rs:37645  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // already spells Zerodha's as empty, so there is no second table to
+GAP prod LINE crates/api/src/server.rs:37646  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // fall behind the first.
+GAP prod LINE crates/api/src/server.rs:37647  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  pull::universe::JoinKey::for_vendor(vendor),
+GAP prod LINE crates/api/src/server.rs:37648  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &master,
+GAP prod LINE crates/api/src/server.rs:37649  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
+GAP prod LINE crates/api/src/server.rs:37650  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .await;
+GAP prod LINE crates/api/src/server.rs:37652  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let verdict = snap.admits_publication(None);
+GAP prod LINE crates/api/src/server.rs:37653  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  (
+GAP prod LINE crates/api/src/server.rs:37654  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::OK,
+GAP prod LINE crates/api/src/server.rs:37655  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
+GAP prod LINE crates/api/src/server.rs:37656  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  universe_snapshot_json(&snap, &verdict),
+GAP prod LINE crates/api/src/server.rs:37657  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
 GAP prod BRANCH crates/api/src/server.rs:6434:12 True  if out.store_unavailable.is_some() {
 GAP prod BRANCH crates/api/src/server.rs:6632:12 True  if let Some(why) = run.ledger.refused.clone() {
 GAP prod BRANCH crates/api/src/server.rs:6855:68 True  if asked.window.to() > today || (asked.window.to() == today && !closed) {
@@ -908,25 +854,13 @@ GAP ignored BRANCH crates/api/src/server.rs:22400:21 True  why.starts_with(WITHH
 GAP ignored BRANCH crates/api/src/server.rs:22400:21 False  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
 GAP ignored BRANCH crates/api/src/server.rs:22400:59 True  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
 GAP ignored BRANCH crates/api/src/server.rs:22400:59 False  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
-GAP test BRANCH crates/api/src/server.rs:29888:13 True  let Some(root) = root else {
-GAP test BRANCH crates/api/src/server.rs:29914:12 True  if busy {
-GAP test BRANCH crates/api/src/server.rs:29914:12 False  if busy {
-GAP test BRANCH crates/api/src/server.rs:29929:21 True  record.level == telemetry::Level::Error
-GAP test BRANCH crates/api/src/server.rs:29929:21 False  record.level == telemetry::Level::Error
-GAP test BRANCH crates/api/src/server.rs:29938:51 True  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
-GAP test BRANCH crates/api/src/server.rs:29938:51 False  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
-GAP test BRANCH crates/api/src/server.rs:29960:13 True  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-GAP test BRANCH crates/api/src/server.rs:29960:50 True  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-GAP test BRANCH crates/api/src/server.rs:32069:13 False  let pull::vendor::Transport::Http(shipped) =
-GAP prod BRANCH crates/api/src/server.rs:37488:9 True  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let Some(vendor) = named else {
+GAP prod BRANCH crates/api/src/server.rs:37554:9 True  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let Some(vendor) = named else {
 GAP prod LINE crates/api/src/speed.rs:586  return Handle(Arc::clone(row));
 GAP prod LINE crates/api/src/speed.rs:888  Ok::<(), std::io::Error>(())
 GAP prod LINE crates/api/src/speed.rs:896  }
 GAP prod LINE crates/api/src/speed.rs:897  })
 GAP prod BRANCH crates/api/src/speed.rs:585:16 True  if let Some(row) = rows.by_name.get(name) {
 GAP prod BRANCH crates/api/src/speed.rs:894:24 False  if term.recv().await.is_none() {
-GAP test LINE crates/api/src/speed_tests.rs:1517  boundary + MINUTE_MS
-GAP test BRANCH crates/api/src/speed_tests.rs:1516:24 True  let woken = if boundary - at < 2_000 {
 GAP prod LINE crates/api/src/topjson.rs:180  return Ok(cli::render_top_record(
 GAP prod LINE crates/api/src/topjson.rs:181  &row,
 GAP prod LINE crates/api/src/topjson.rs:182  &[],
