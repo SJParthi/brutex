@@ -24423,6 +24423,175 @@ mod tests {
         assert!(none.is_none());
     }
 
+    /// A `/pull/run` body of one leg per `(feed, form)`, each leg percent-encoded
+    /// as `legs_from` reads it.
+    fn run_body(legs: &[(&str, &str)]) -> String {
+        let enc = |raw: &str| -> String {
+            raw.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                        char::from(b).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        };
+        legs.iter()
+            .map(|(feed, form)| {
+                format!(
+                    "leg={}",
+                    enc(&format!("/pull/spot|{feed}|1day|as2|{}", enc(form)))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    /// The runs ledger's newest entry, its fields as written: id, mode, kind.
+    fn newest_run_entry(root: &Path) -> Vec<String> {
+        let ledger = std::fs::read(root.join(pull::gdfl_run::ledger::LEDGER)).unwrap();
+        let text = String::from_utf8_lossy(&ledger).into_owned();
+        let last = text.lines().rfind(|line| !line.trim().is_empty()).unwrap();
+        last.split_whitespace().take(3).map(str::to_owned).collect()
+    }
+
+    /// **A RUN THAT TAKES NO ID STARTS NOTHING, AND A ZERODHA LEG NAMES ITS
+    /// KIND** (BASE-COV-API-AS2): `/pull/run` claims the slot, then takes a run
+    /// id from the store's runs ledger under the kind its legs make: a run with
+    /// a Zerodha leg is `zerodha`, any other `-`. A ledger that gives no id
+    /// (two bad records at its tail) answers `503` naming the fault, leaves the
+    /// slot finished rather than running, and asks no vendor. Each case has a
+    /// site and a store of its own, so no background run refuses another.
+    ///
+    /// Extremes: 10 (7 single, 2 combined, 1 out of the box): (1) a damaged
+    /// ledger is a `503` naming `runs_ledger_damaged`; (2) and saying the run
+    /// took no id and asked no vendor; (3) the slot it claimed is left
+    /// finished, not running; (4) so the next press is admitted to the ledger
+    /// and refused the same way, never `409`; (5) one Zerodha leg is accepted,
+    /// `202`, and its ledger entry is a `pull` run of kind `zerodha`; (6) one
+    /// Dhan leg's entry is of kind `-`; (7) each accepted run is the ledger's
+    /// newest entry; combined: (8) a Dhan leg AND a Zerodha leg in one run is
+    /// of kind `zerodha`; (9) a damaged ledger AND a Zerodha leg is still the
+    /// `503`, whatever kind it would have had; out of the box: (10) a Zerodha
+    /// leg last of 29 Dhan legs (30 legs, the most a run takes) still makes
+    /// the run `zerodha`.
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "four sites, each case in the order its Extremes line names it"
+    )]
+    async fn a_pull_run_whose_ledger_gives_no_id_starts_nothing_and_a_zerodha_leg_names_its_kind() {
+        let dhan = "target=swept&vendor=dhan&granularity=1day&from=2026-08-03&to=2026-08-05";
+        let kite = "target=swept&vendor=zerodha&granularity=1day&from=2026-08-03&to=2026-08-05";
+        let accepted = |name: &str, legs: &[(&str, &str)]| {
+            let dir = masters(name, None, None);
+            let site: Loaded = std::sync::Arc::new(site(name, &dir));
+            let body = run_body(legs);
+            (site, body)
+        };
+        // (5), (7)
+        let (one_kite, body) = accepted("as2-run-kite", &[("zerodha", kite)]);
+        let (code, _, json) = pull_run(axum::extract::State(Loaded::clone(&one_kite)), body).await;
+        assert_eq!(code, axum::http::StatusCode::ACCEPTED, "(5) {json}");
+        assert_eq!(json, "{\"started\":true,\"legs\":1}", "(5)");
+        let entry = newest_run_entry(&one_kite.store_root);
+        assert_eq!(entry[1..], ["pull", "zerodha"], "(5) {entry:?}");
+        let id = one_kite
+            .run
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|progress| progress.run_id);
+        assert_eq!(
+            id.map(|id| id.to_string()).as_deref(),
+            Some(entry[0].as_str()),
+            "(7)"
+        );
+        // (6)
+        let (one_dhan, body) = accepted("as2-run-dhan", &[("dhan", dhan)]);
+        let (code, _, json) = pull_run(axum::extract::State(Loaded::clone(&one_dhan)), body).await;
+        assert_eq!(code, axum::http::StatusCode::ACCEPTED, "(6) {json}");
+        assert_eq!(
+            newest_run_entry(&one_dhan.store_root)[1..],
+            ["pull", "-"],
+            "(6)"
+        );
+        // (8)
+        let (both, body) = accepted("as2-run-both", &[("dhan", dhan), ("zerodha", kite)]);
+        let (code, _, json) = pull_run(axum::extract::State(Loaded::clone(&both)), body).await;
+        assert_eq!(code, axum::http::StatusCode::ACCEPTED, "(8) {json}");
+        assert_eq!(
+            newest_run_entry(&both.store_root)[1..],
+            ["pull", "zerodha"],
+            "(8)"
+        );
+        // (10)
+        let mut many: Vec<(&str, &str)> = vec![("dhan", dhan); 29];
+        many.push(("zerodha", kite));
+        let (last, body) = accepted("as2-run-thirty", &many);
+        let (code, _, json) = pull_run(axum::extract::State(Loaded::clone(&last)), body).await;
+        assert_eq!(code, axum::http::StatusCode::ACCEPTED, "(10) {json}");
+        assert_eq!(json, "{\"started\":true,\"legs\":30}", "(10)");
+        assert_eq!(
+            newest_run_entry(&last.store_root)[1..],
+            ["pull", "zerodha"],
+            "(10)"
+        );
+        // (1)-(4), (9): A LEDGER THAT GIVES NO ID: two bad records at its tail.
+        let (broken, body) = accepted("as2-run-broken", &[("zerodha", kite)]);
+        for _ in 0..2 {
+            drop(
+                crate::pullrun::open_landing(
+                    &broken.store_root,
+                    Vendor::Groww,
+                    pull::ingest::landing_run::Mode::Spot,
+                    0,
+                    1,
+                )
+                .unwrap(),
+            );
+        }
+        let path = broken.store_root.join(pull::gdfl_run::ledger::LEDGER);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let len = bytes.len();
+        bytes[len - 10] ^= 1;
+        bytes[len - 138] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        for press in 1..=2 {
+            let (code, _, json) =
+                pull_run(axum::extract::State(Loaded::clone(&broken)), body.clone()).await;
+            assert_eq!(
+                code,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "(1)(9) press {press}: {json}"
+            );
+            assert!(
+                json.contains("runs_ledger_damaged"),
+                "(1) press {press}: {json}"
+            );
+            assert!(
+                json.contains("the run took no id, so it did not start and no vendor was asked"),
+                "(2) press {press}: {json}"
+            );
+            let held = broken.run.lock().unwrap();
+            let progress = held.as_ref().unwrap();
+            assert!(!progress.running(), "(3)(4) press {press}");
+            assert!(
+                progress
+                    .finished
+                    .as_deref()
+                    .is_some_and(|why| why.contains("runs_ledger_damaged")),
+                "(3) press {press}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "(1) nothing was appended"
+        );
+    }
+
     /// IA-10c repair 2 (the second agent's follow-up; D-6263): ONE REFUSAL,
     /// ONE STATUS, ON EVERY LANDING DOOR. While a `cli zerodha-repair
     /// --from-store` holds the vendor's landing claim, a `/pull/fno` walk is
@@ -29236,6 +29405,20 @@ mod tests {
             status,
             axum::http::StatusCode::NOT_FOUND,
             "a located series with no such month is NOT FOUND, not BAD REQUEST"
+        );
+
+        // A SERIES ASKED FOR A CONTRACT NO STORE CAN NAME is refused by the
+        // contract's own words where it is located, so the contract read after
+        // the locating step never meets a refusal (BASE-COV-API-AS2).
+        let (status, body) = bars_html(
+            &site,
+            "symbol=ADANIENT&vendor=dhan&month=2026-01&exchange=NSE&segment=CASH\
+             &contract=2026-07-28-ce",
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("is not a contract segment this store can name"),
+            "{body}"
         );
     }
 

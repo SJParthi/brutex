@@ -1450,3 +1450,90 @@ async fn named_pricing_receipt_matches_the_greek_file_commit_or_its_refusal() {
         assert_eq!(transport.seen.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
+
+/// **A NAMED WALK WHOSE LANDING IS REFUSED ASKS FOR NO CONTRACT, AND SAYS WHY**
+/// (BASE-COV-API-AS2): `fno_report` opens its landing only once discovery has
+/// named the contracts it wants, and a landing `fno_landing` refuses ends the
+/// walk there: another holder of the vendor's landing claim is a `409` naming
+/// it, a runs ledger that gives no id a `503` naming the fault. Each is one
+/// NOT STARTED record, and no bar file is written or changed.
+///
+/// Extremes: 10 (7 single, 2 combined, 1 out of the box): (1) a claim another
+/// process holds is a `409` naming `run_busy`; (2) and its holder; (3) the
+/// record is NOT STARTED, its note the refusal; (4) the receipt still counts
+/// the contracts discovered and asked for; (5) no bar file appears; (6) a
+/// runs ledger with two bad records at its tail is a `503` naming
+/// `runs_ledger_damaged`; (7) its record is NOT STARTED too. Combined: (8) one
+/// contract already held AND the claim held: still the `409`, the held file's
+/// bytes unchanged; (9) the damaged ledger AND three contracts asked: the
+/// `503`, nothing written. Out of the box: (10) a holder whose words carry a
+/// quote and an ampersand is named escaped, never as markup.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "two refusals, each over the fixture's own store, in the order the Extremes line names them"
+)]
+async fn a_named_walk_whose_landing_is_refused_asks_for_no_contract() {
+    use pull::gdfl_run::locks::Hold;
+    // (1)-(5), (10)
+    let fixture = Fixture::new(3);
+    let holder = "cli pid 9 run 9 (zerodha-repair \"ZZ&IDX\")";
+    let claim =
+        pull::ingest::landing_run::claim(&fixture.root, Vendor::Groww, Hold::Exclusive, holder)
+            .expect("the claim is free");
+    let (status, body, record) = fixture.report().await;
+    assert_eq!(status, StatusCode::CONFLICT, "(1) {body}");
+    assert!(body.contains("run_busy"), "(1) {body}");
+    assert!(body.contains(&render::escape(holder)), "(2)(10) {body}");
+    assert!(!body.contains(holder), "(10) never as markup");
+    assert_eq!(record.outcome, audit::Outcome::NotStarted, "(3)");
+    assert!(record.note.starts_with("run_busy"), "(3) {}", record.note);
+    assert!(
+        body.contains("<th>Contracts discovered</th><td>3</td>")
+            && body.contains("<th>Contracts asked for</th><td>3</td>"),
+        "(4) {body}"
+    );
+    assert!(
+        !fixture.root.join("bars").exists(),
+        "(5) no bar file was written"
+    );
+    // (8)
+    let mut held = Fixture::new(3);
+    held.hold_prefix(1);
+    let claim_held =
+        pull::ingest::landing_run::claim(&held.root, Vendor::Groww, Hold::Exclusive, holder)
+            .expect("the claim is free");
+    let (status, body, record) = held.report().await;
+    assert_eq!(status, StatusCode::CONFLICT, "(8) {body}");
+    assert_eq!(record.outcome, audit::Outcome::NotStarted, "(8)");
+    drop(claim_held);
+    drop(claim);
+    // (6), (7), (9): A LEDGER THAT GIVES NO ID: two bad records at its tail.
+    let broken = Fixture::new(3);
+    for _ in 0..2 {
+        drop(
+            crate::pullrun::open_landing(
+                &broken.root,
+                Vendor::Groww,
+                pull::ingest::landing_run::Mode::Spot,
+                0,
+                1,
+            )
+            .expect("an id from a healthy ledger"),
+        );
+    }
+    let path = broken.root.join(pull::gdfl_run::ledger::LEDGER);
+    let mut bytes = fs::read(&path).expect("the ledger");
+    let len = bytes.len();
+    bytes[len - 10] ^= 1;
+    bytes[len - 138] ^= 1;
+    fs::write(&path, &bytes).expect("two bad records");
+    let (status, body, record) = broken.report().await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "(6) {body}");
+    assert!(body.contains("runs_ledger_damaged"), "(6) {body}");
+    assert_eq!(record.outcome, audit::Outcome::NotStarted, "(7)");
+    assert!(
+        !broken.root.join("bars").exists(),
+        "(9) no bar file was written"
+    );
+}
