@@ -20463,7 +20463,10 @@ pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 /// dev-dependency, or a tool" `CLAUDE.md` §2 forbids: nothing in the workspace
 /// names it, `cargo build`, `cargo test` and `cargo clippy` never reach it (no
 /// test calls [`open_in_browser`]; the tests drive [`open_unless_suppressed`]
-/// only on its suppressed arm, and a `:0` listener never opens), the URL it is
+/// on its suppressed arm, and on its spawning arm only in a child whose `PATH`
+/// is one scratch folder holding no handler or a link to the system's `true`
+/// or `false`, so the operator's handler is never resolved; and a `:0`
+/// listener never opens), the URL it is
 /// handed is this server's own `http://` loopback address and never operator
 /// text, and [`NO_OPEN_ENV`] turns it off. A spawn failure is printed, never
 /// swallowed.
@@ -21900,6 +21903,22 @@ mod tests {
         std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let refused = refused.expect("a directory that refuses a write is a fault");
         assert!(refused.contains(".store-probe"), "{refused}");
+
+        // A ROOT THAT REFUSES A NEW FOLDER: `audit/` cannot be made, and the
+        // fault names the folder and the refusal (BASE-COV-API-AS2).
+        let shut = crate::scratch::path("store-fault-probe-shut");
+        let _ = std::fs::remove_dir_all(&shut);
+        std::fs::create_dir_all(&shut).expect("mkdir");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let unmade = store_fault(&shut);
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let unmade = unmade.expect("a root that refuses audit/ is a fault");
+        assert!(
+            unmade.contains("store-fault-probe-shut/audit: ")
+                && unmade.contains("Permission denied"),
+            "{unmade}"
+        );
+        assert!(!shut.join("audit").exists(), "nothing was made");
 
         let file = crate::scratch::path("store-fault-probe-file");
         let _ = std::fs::remove_dir_all(&file);
@@ -24410,7 +24429,12 @@ mod tests {
     /// refused `409` naming the holder, as a `/pull/spot` request is, where
     /// it answered `503`; a runs ledger that gives no id (two bad records at
     /// its tail) answers `503` on both doors. Nothing is asked of a vendor.
+    /// A repair request, between the two, opens its landing as a repair run.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one runs ledger walked through its holder, its modes and its damage, in order"
+    )]
     fn a_landing_refused_by_another_holder_answers_409_on_every_door() {
         use pull::gdfl_run::locks::Hold;
         let (site, spot) = readiness_fixture("ia10c-409", "INE002A01018");
@@ -24465,6 +24489,25 @@ mod tests {
         assert_eq!(code, axum::http::StatusCode::CONFLICT, "{why}");
         assert!(why.starts_with("run_busy") && why.contains(holder), "{why}");
         drop(cli);
+        // A REPAIR REQUEST OPENS ITS LANDING AS A REPAIR RUN (BASE-COV-API-AS2):
+        // the runs ledger names the run `pull-repair`, an ordinary pull's `pull-spot`.
+        let path = site.store_root.join(pull::gdfl_run::ledger::LEDGER);
+        for (repair, word) in [
+            (Some("a hole the census named"), "pull-repair"),
+            (None, "pull-spot"),
+        ] {
+            let asked = ingest::SpotRequest {
+                repair: repair.map(str::to_owned),
+                ..spot.clone()
+            };
+            let (opened, _claimed) = open_spot_landing(&asked, &site, 1).unwrap();
+            let run = opened.unwrap().hook.run();
+            let ledger = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+            assert!(
+                ledger.contains(&format!("{run} {word} ")),
+                "{word}: {ledger}"
+            );
+        }
         // A LEDGER THAT GIVES NO ID: two bad records at its tail.
         for _ in 0..2 {
             drop(
@@ -28378,6 +28421,112 @@ mod tests {
                 .is_err(),
             "presence suppresses, whatever the value"
         );
+    }
+
+    /// The child's proof of
+    /// [`the_spawning_arm_names_a_missing_handler_and_leaves_a_started_one_to_its_reaper`].
+    const OPENER_PROOF: &str = "BRUTEX_AS2_OPENER_PROOF";
+
+    /// **THE SPAWNING ARM, WITH NO BROWSER AND NO SCRIPT** (BASE-COV-API-AS2):
+    /// `open_unless_suppressed` resolves its handler through `PATH`, so a
+    /// child whose `PATH` is one scratch folder of its own reaches the real
+    /// handler never: the folder holds no handler, then a handler that is
+    /// not executable, then one whose link dangles, and last a link to the
+    /// system's `true` (or `false`), a binary that opens nothing. A handler
+    /// that starts is handed to its reaper and the call answers at once,
+    /// whatever the handler later exits with.
+    ///
+    /// Extremes: 10 (7 single, 2 combined, 1 out of the box): (1) no handler
+    /// on `PATH` is refused by the handler's own name, not found; (2) a
+    /// handler file with no execute bit is refused, permission denied; (3) a
+    /// handler link that dangles is refused, not found; (4) a handler that
+    /// exits 0 answers `Ok`; (5) a handler that exits 1 still answers `Ok`,
+    /// its status left to the reaper; (6) an empty URL is still handed over;
+    /// (7) a URL of spaces, quotes and a newline is one argument, `Ok`;
+    /// (8) combined: the variable set AND a handler on `PATH` is refused by
+    /// the variable, nothing spawned; (9) combined: a non-UTF-8 value of the
+    /// variable AND no handler on `PATH` is still the variable's refusal;
+    /// (10) out of the box: a 64 KiB URL is handed over whole, `Ok`.
+    #[cfg(unix)]
+    #[test]
+    fn the_spawning_arm_names_a_missing_handler_and_leaves_a_started_one_to_its_reaper() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let (program, _) = browser_handler(CURRENT_BROWSER_HOST);
+        if let Some(proof) = std::env::var_os(OPENER_PROOF) {
+            let path = std::env::var_os("PATH").expect("the child's PATH");
+            let folder = Path::new(&path);
+            let handler = folder.join(program);
+            let url = "http://127.0.0.1:8080/";
+            let missing = open_unless_suppressed(url, None).expect_err("(1) nothing to start");
+            assert!(
+                missing.starts_with(&format!("{program}: ")) && missing.contains("No such file"),
+                "(1) {missing}"
+            );
+            let not_suppressed =
+                open_unless_suppressed(url, Some(std::ffi::OsStr::from_bytes(b"\xff\xfe")))
+                    .expect_err("(9) the variable wins");
+            assert!(not_suppressed.ends_with(" is set"), "(9) {not_suppressed}");
+            std::fs::write(&handler, b"not a program").expect("a plain file");
+            std::fs::set_permissions(&handler, std::fs::Permissions::from_mode(0o644))
+                .expect("its mode");
+            let shut = open_unless_suppressed(url, None).expect_err("(2) not executable");
+            assert!(shut.contains("Permission denied"), "(2) {shut}");
+            std::fs::remove_file(&handler).expect("the plain file goes");
+            std::os::unix::fs::symlink(folder.join("nowhere"), &handler).expect("a dangling link");
+            let dangling = open_unless_suppressed(url, None).expect_err("(3) dangling");
+            assert!(dangling.contains("No such file"), "(3) {dangling}");
+            std::fs::remove_file(&handler).expect("the dangling link goes");
+            let exits = |name: &str| {
+                ["/usr/bin", "/bin"]
+                    .into_iter()
+                    .map(|dir| Path::new(dir).join(name))
+                    .find(|candidate| candidate.is_file())
+                    .expect("the system's own true and false")
+            };
+            std::os::unix::fs::symlink(exits("true"), &handler).expect("a handler that exits 0");
+            assert_eq!(open_unless_suppressed(url, None), Ok(()), "(4)");
+            assert_eq!(open_unless_suppressed("", None), Ok(()), "(6)");
+            assert_eq!(
+                open_unless_suppressed("http://127.0.0.1:8080/a b \"c\"\nd", None),
+                Ok(()),
+                "(7)"
+            );
+            assert_eq!(
+                open_unless_suppressed(
+                    &format!("http://127.0.0.1:8080/{}", "z".repeat(65_536)),
+                    None
+                ),
+                Ok(()),
+                "(10)"
+            );
+            let suppressed = open_unless_suppressed(url, Some(std::ffi::OsStr::new("1")))
+                .expect_err("(8) the variable wins");
+            assert_eq!(suppressed, format!("{NO_OPEN_ENV} is set"), "(8)");
+            std::fs::remove_file(&handler).expect("the true link goes");
+            std::os::unix::fs::symlink(exits("false"), &handler).expect("a handler that exits 1");
+            assert_eq!(open_unless_suppressed(url, None), Ok(()), "(5)");
+            std::fs::write(&proof, b"ran").expect("the proof");
+            return;
+        }
+        let folder = crate::scratch::path("as2-opener");
+        let _ = std::fs::remove_dir_all(&folder);
+        let handlers = folder.join("path");
+        std::fs::create_dir_all(&handlers).expect("a PATH of its own");
+        let proof = folder.join("proof");
+        let _out = crate::isolated::rerun(
+            "server::tests::the_spawning_arm_names_a_missing_handler_and_leaves_a_started_one_to_its_reaper",
+            &[
+                (OPENER_PROOF, proof.as_os_str()),
+                ("PATH", handlers.as_os_str()),
+            ],
+        );
+        assert_eq!(
+            std::fs::read(&proof).ok().as_deref(),
+            Some(&b"ran"[..]),
+            "the child ran its cases"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// The Windows row is the regression proof: the URL is appended later as
