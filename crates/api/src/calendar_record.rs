@@ -868,21 +868,36 @@ pub fn answer(
     );
     let Some((from, to)) = span else {
         let names: Vec<&str> = holders.iter().map(|r| r.name.as_str()).collect();
+        let series = if names.is_empty() {
+            "the series asked".to_owned()
+        } else {
+            names.join(" or ")
+        };
+        // A MONTH THAT WOULD NOT READ IS NEVER "NO BAR" (BASE-COV-API-AS2):
+        // with no span left only because a month could not be read, the
+        // reason says which months, rather than that the feed holds none.
+        let reason = if unreadable.is_empty() {
+            format!(
+                "{} holds no {} bar for {series}: there is no span to give a calendar for",
+                asked.feed,
+                asked.rung.as_str(),
+            )
+        } else {
+            format!(
+                "{} holds no readable {} bar for {series}: {} month(s) could not be read ({}), \
+                 so there is no span to give a calendar for",
+                asked.feed,
+                asked.rung.as_str(),
+                unreadable.len(),
+                unreadable.join("; "),
+            )
+        };
         return withheld(
             asked.feed,
             Some(asked.rung),
             asked.target,
             asked.generation,
-            &format!(
-                "{} holds no {} bar for {}: there is no span to give a calendar for",
-                asked.feed,
-                asked.rung.as_str(),
-                if names.is_empty() {
-                    "the series asked".to_owned()
-                } else {
-                    names.join(" or ")
-                },
-            ),
+            &reason,
         );
     };
     let (days, observed, weekends) = statuses(from, to, attest);

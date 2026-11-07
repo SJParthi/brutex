@@ -1070,3 +1070,682 @@ async fn the_record_span_widens_or_marks_and_a_rung_named_twice_alike_is_one() {
     );
     assert!(refused.get("days").is_none(), "never widened: {refused}");
 }
+
+// ══ BASE-COV-API-AS2, shard G2: the warm's queue, the build map, a month that
+// opened and would not be looked up, the record span's raw bodies ════════════
+
+/// Flips one byte inside record `index` of `feed`'s `NSE/INDEX/<symbol>` file
+/// at `rung` for `month`, so its checksum block no longer verifies: every
+/// record of that block then refuses to read, and the file still opens (as
+/// `calendar_of::tests::corrupt_record` does for NIFTY).
+fn damage_record(
+    root: &std::path::Path,
+    feed: Vendor,
+    symbol: &str,
+    rung: Timeframe,
+    month: YearMonth,
+    index: u64,
+) {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let path = StorePath::new(PathParts {
+        vendor: feed,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol,
+        contract: None,
+        timeframe: rung,
+        month,
+        file: FileKind::Bars,
+    })
+    .expect("a legal path")
+    .to_path_buf(root);
+    let at = store::format::HEADER_LEN + index * store::format::RECORD_STRIDE + 9;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("the bar file exists");
+    let mut byte = [0_u8; 1];
+    file.seek(SeekFrom::Start(at)).expect("seek");
+    file.read_exact(&mut byte).expect("read");
+    if let Some(one) = byte.first_mut() {
+        *one ^= 0x5A;
+    }
+    file.seek(SeekFrom::Start(at)).expect("seek");
+    file.write_all(&byte).expect("write");
+}
+
+/// One daily bar per day of `days` (one month) for `symbol` on BSE's index
+/// segment, under Zerodha, and its census entry, stamped as `Fixture::census`
+/// stamps one.
+fn bse_daily(fixture: &Fixture, symbol: &str, days: &[i64]) {
+    let stamps: Vec<i64> = days.iter().map(|day| at(*day, 0)).collect();
+    let first = stamps.first().copied().expect("at least one day");
+    let last = stamps.last().copied().unwrap_or(first);
+    let day = Day::from_days(
+        u32::try_from((first / 1_000_000 + 19_800).div_euclid(86_400)).expect("a day"),
+    )
+    .expect("a civil day");
+    let month = YearMonth::new(day.year(), day.month()).expect("a month");
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Zerodha,
+        exchange: "BSE",
+        segment: "INDEX",
+        symbol,
+        contract: None,
+        timeframe: Timeframe::DAY_1,
+        month,
+        file: FileKind::Bars,
+    })
+    .expect("a legal path");
+    let hash = brutex_core::universe::fnv1a(symbol).to_le_bytes();
+    let symbol_id = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
+    let mut file =
+        store::file::BarFile::open_or_create(&fixture.root, path, symbol_id).expect("a bar file");
+    let rows: Vec<store::format::Bar> = stamps
+        .iter()
+        .map(|&ts_micros| store::format::Bar {
+            ts_micros,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        })
+        .collect();
+    file.append(&rows).expect("legal daily bars");
+    let held = file.records();
+    drop(file);
+    let census = manifest_path(&fixture.root, Vendor::Zerodha);
+    let mut manifest =
+        Manifest::open_image(Vendor::Zerodha, &fs::read(&census).expect("the census"))
+            .expect("read");
+    manifest
+        .record(Entry {
+            key: EntryKey {
+                contract: None,
+                exchange: Exchange::Bse,
+                segment: Segment::Index,
+                symbol: Symbol::new(symbol).expect("symbol"),
+                timeframe: Timeframe::DAY_1,
+                month,
+            },
+            rows: held,
+            first_ts_micros: first,
+            last_ts_micros: last,
+        })
+        .expect("one more month");
+    fs::write(&census, manifest.image()).expect("publish the census");
+    fixture.stamps.set(fixture.stamps.get() + 1);
+    fs::File::options()
+        .write(true)
+        .open(&census)
+        .expect("the census just published")
+        .set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000)
+                + std::time::Duration::from_mins(fixture.stamps.get()),
+        )
+        .expect("a filesystem that carries modified times");
+}
+
+/// **THE START-UP WARM QUEUES A KEY ONCE HOWEVER OFTEN ITS FEED IS GIVEN,
+/// COUNTS EVERY ANSWER THAT IS NOT A 200, AND NAMES A PULL JOURNAL IT COULD NOT
+/// WALK** (BASE-COV-API-AS2; DB-N19).
+///
+/// Extremes: (1) GDFL given twice: its three first answers are queued once,
+/// three built, not six; (2) each, over a census that will not decode, is a
+/// refusal, and all three are counted; (3) none is counted unqueued; (4) none
+/// is kept or confirmed; (5) no build is left in flight; (6) the journal's walk
+/// is refused naming the journal's path; (7) the feeds warmed are listed as
+/// given; (8) the next request is refused the same way, naming the census.
+/// Combined: (9) a feed given twice AND a census that will not decode: three
+/// refusals, never six; (10) a journal that cannot be walked AND three refused
+/// builds: each is reported and neither hides the other. Out of the box:
+/// (11) a regular file where the journal's folder belongs.
+#[tokio::test]
+async fn the_start_up_warm_queues_a_key_once_counts_refusals_and_names_an_unwalked_journal() {
+    let fixture = Fixture::new("as2-calendar-warm-refusals");
+    let census = manifest_path(&fixture.root, Vendor::Gdfl);
+    fs::create_dir_all(census.parent().expect("manifest parent")).expect("manifest directory");
+    fs::write(&census, b"not a census").expect("a census that will not decode");
+    // (11)
+    let _ = fs::remove_dir_all(fixture.root.join("audit"));
+    fs::write(
+        fixture.root.join("audit"),
+        b"a file where the journal's folder belongs",
+    )
+    .expect("a file at audit/");
+    let warmed = calendar_route::warm(&fixture.site, &[Vendor::Gdfl, Vendor::Gdfl]);
+    // (7)
+    assert_eq!(warmed.feeds, [Vendor::Gdfl, Vendor::Gdfl]);
+    // (1), (2), (3), (9)
+    assert_eq!(
+        (warmed.built, warmed.refused, warmed.unqueued),
+        (3, 3, 0),
+        "{warmed:?}"
+    );
+    // (6), (10)
+    assert!(
+        warmed
+            .journal
+            .as_ref()
+            .is_err_and(|why| why.contains("pull.journal")),
+        "{:?}",
+        warmed.journal
+    );
+    let builds = &fixture.site.calendars.builds;
+    // (5)
+    assert_eq!(builds.in_flight(), 0);
+    // (4)
+    assert_eq!(builds.confirmed_answers(), 0);
+    assert_eq!(fixture.site.calendars.kept_answers(), 0);
+    // (8)
+    let (status, refused) = fixture.get("feed=gdfl").await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{refused}"
+    );
+    assert_eq!(refused["census"], "unreadable", "{refused}");
+}
+
+/// **A BUILD THAT HAS COUNTED PART OF WHAT IT OWES SAYS HOW FAR IT HAS GOT,
+/// AND ONE THAT OWES NOTHING YET SAYS IT IS READING THE CENSUS**
+/// (BASE-COV-API-AS2; DB-N19).
+///
+/// The build is led by the test, entered under the feed's stamp and told what
+/// it owes and has counted on this thread, exactly as `Evidence::read` tells
+/// it: nothing finishes it, so every request finds it running.
+///
+/// Extremes: (1) a running build is answered `202`; (2) phase `counting`;
+/// (3) by a request; (4) one of three months counted is said in words; (5) and
+/// as numbers; (6) the reading's time is given; (7) no day is claimed; (8) every
+/// owed month counted and the build unfinished: three of three, still `202`.
+/// Combined: (9) the symbol asked in lower case AND the same running build: the
+/// same progress; (10) the build finished after every request was told to come
+/// back: the next request is handed its answer. Out of the box: (11) a month
+/// counted before any is owed: "it is reading the census", never "1 of 0".
+#[tokio::test]
+#[allow(clippy::panic, reason = "a map that will not lead fails the test")]
+async fn a_build_that_has_counted_part_of_its_months_says_how_far_it_has_got() {
+    use crate::calendar_of::build::{Joined, counted, owe};
+    let fixture = Fixture::new("as2-calendar-counting");
+    fixture.served(crate::calendar_of::build::REQUEST_WAIT);
+    let builds = &fixture.site.calendars.builds;
+    let key = (Vendor::Gdfl, None, "NIFTY".to_owned());
+    let now = calendar_route::feed_stamps(&fixture.root, Vendor::Gdfl);
+    let Joined::Lead(build) = builds.join(&key, Some(&now)) else {
+        panic!("an empty map is led");
+    };
+    // (11)
+    {
+        let _entered = build.enter(Some(now.clone()));
+        counted();
+    }
+    let (status, early) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{early}");
+    assert_eq!(early["months_counted"], 1, "{early}");
+    assert_eq!(early["months_owed"], 0, "{early}");
+    assert!(
+        early["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("it is reading the census")),
+        "{early}"
+    );
+    {
+        let _entered = build.enter(Some(now.clone()));
+        owe(3);
+    }
+    let (status, part) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    // (1)
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{part}");
+    // (2), (3)
+    assert_eq!(part["status"], "building");
+    assert_eq!(part["phase"], "counting");
+    assert_eq!(part["by"], "request");
+    // (4)
+    assert!(
+        part["reason"].as_str().is_some_and(|why| {
+            why.contains("it has counted 1 of the 3 month file(s) it reads so far")
+        }),
+        "{part}"
+    );
+    // (5)
+    assert_eq!(part["months_counted"], 1);
+    assert_eq!(part["months_owed"], 3);
+    // (6)
+    assert!(part["reading_ms"].is_u64(), "{part}");
+    // (7)
+    assert!(part.get("days").is_none(), "no day is claimed");
+    assert_eq!(part["retry_after_ms"], 250);
+    // (8)
+    {
+        let _entered = build.enter(Some(now.clone()));
+        counted();
+        counted();
+    }
+    let (status, whole) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{whole}");
+    assert!(
+        whole["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("it has counted 3 of the 3")),
+        "{whole}"
+    );
+    // (9)
+    let (status, lower) = fixture.get("feed=gdfl&symbol=nifty").await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{lower}");
+    assert_eq!(lower["months_counted"], whole["months_counted"]);
+    assert_eq!(lower["symbol"], "NIFTY");
+    // (10)
+    builds.finish(
+        &key,
+        &build,
+        crate::calendar_of::KeptAnswer {
+            status: 200,
+            body: r#"{"status":"ok","from":"the test's build"}"#.to_owned(),
+        },
+    );
+    let (status, parked) = fixture.get("feed=gdfl&symbol=NIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{parked}");
+    assert_eq!(parked["from"], "the test's build");
+}
+
+/// **A MONTH THAT OPENS AND WILL NOT BE LOOKED UP IS NAMED, AND THE ANSWER IS
+/// BUILT FROM WHAT DID READ** (BASE-COV-API-AS2; D-3336, D-0695).
+///
+/// Extremes: (1) one reference's month opens and will not be looked up: the
+/// exchange answer is still `ok`, from the other; (2) the month is named with
+/// its series, month and the day whose lookup failed; (3) that series is still
+/// among those the answer was derived from; (4) its month count is not
+/// remembered, the healthy one is; (5) the answer is kept and handed again byte
+/// for byte; (6) the days are the record's; (7) nothing is unopened: no `503`;
+/// (8) asked for the damaged series alone: withheld, never a calendar of no
+/// sessions, and the reason names the month that would not read rather than
+/// saying the feed holds no bar. Combined: (9) the damaged series asked by name AND the healthy
+/// reference attesting: still withheld, the holder decides the span; (10) the
+/// rung named explicitly AND the same damage: a new key, read again, named
+/// again. Out of the box: (11) one flipped byte in the first record makes every
+/// lookup in the month refuse, since its checksum block holds every record.
+#[tokio::test]
+async fn a_month_that_opens_and_will_not_be_looked_up_is_named_and_the_rest_is_answered() {
+    let fixture = Fixture::new("as2-calendar-unreadable-month");
+    let (fri, tue) = (epoch(2022, 3, 4), epoch(2022, 3, 8));
+    let stamps: Vec<i64> = [fri, tue]
+        .iter()
+        .flat_map(|day| (0..30).map(move |second| at(*day, second)))
+        .collect();
+    for symbol in ["NIFTY", "BANKNIFTY"] {
+        fixture.series(
+            Vendor::Gdfl,
+            Segment::Index,
+            symbol,
+            Timeframe::SECOND_1,
+            &stamps,
+        );
+    }
+    let month = YearMonth::new(2022, 3).expect("a month");
+    // (11)
+    damage_record(
+        &fixture.root,
+        Vendor::Gdfl,
+        "BANKNIFTY",
+        Timeframe::SECOND_1,
+        month,
+        0,
+    );
+    let (status, answer) = fixture.get("feed=gdfl").await;
+    // (1), (7)
+    assert_eq!(status, axum::http::StatusCode::OK, "{answer}");
+    assert_eq!(answer["status"], "ok", "{answer}");
+    // (2)
+    let unreadable = answer["unreadable"].as_array().expect("a list");
+    assert_eq!(unreadable.len(), 1, "{answer}");
+    let named = unreadable[0].as_str().expect("a sentence");
+    assert!(
+        named.starts_with(&format!(
+            "BANKNIFTY: {month}: the lookup for day {} failed: ",
+            epoch(2022, 3, 1)
+        )),
+        "{named}"
+    );
+    // (3)
+    assert_eq!(names(&answer["derivedFrom"]), ["BANKNIFTY", "NIFTY"]);
+    // (6)
+    assert_eq!(answer["days"], "R..RR");
+    // (4)
+    assert_eq!(fixture.site.calendars.remembered_months(), 1);
+    // (5)
+    assert_eq!(fixture.site.calendars.kept_answers(), 1);
+    let (_, again) = fixture.get("feed=gdfl").await;
+    assert_eq!(again, answer);
+    // (10)
+    let (status, explicit) = fixture.get("feed=gdfl&rung=1s").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{explicit}");
+    assert_eq!(explicit["unreadable"], answer["unreadable"]);
+    assert_eq!(explicit["rungAsked"], true);
+    // (8), (9)
+    let (status, alone) = fixture.get("feed=gdfl&symbol=BANKNIFTY").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{alone}");
+    assert_eq!(alone["status"], "withheld", "{alone}");
+    assert_eq!(alone["days"], "", "never a list that reads as no sessions");
+    let why = alone["reason"].as_str().unwrap_or_default();
+    assert!(why.contains("BANKNIFTY"), "{alone}");
+    // (8) THE READ FAILURE IS SAID, NEVER "NO BAR": the month that would not
+    // read is named in the reason.
+    assert!(
+        why.contains("holds no readable 1s bar for BANKNIFTY: 1 month(s) could not be read (")
+            && why.contains("BANKNIFTY: 2022-03: the lookup for day "),
+        "{alone}"
+    );
+    assert!(!why.contains("holds no 1s bar"), "{alone}");
+}
+
+/// **THE RECORD SPAN ANSWERS A KEPT BODY IT CANNOT READ AS AN OBJECT
+/// UNCHANGED, AND MARKS ONE IT CAN** (BASE-COV-API-AS2; DB-B42).
+///
+/// Every body the route builds is an object; a kept answer is handed out as
+/// kept, so the bodies below are confirmed directly, under the feed's stamp.
+///
+/// Extremes: (1) a JSON array, status `200`: unchanged; (2) a body no JSON
+/// parser reads, status `503`: unchanged; (3) a bare JSON string: unchanged;
+/// (4) JSON `null`: unchanged; (5) the status stays as kept; (6) the content
+/// type is JSON's; (7) `span=held` over the array: unchanged too; (8) an object
+/// with status ok and no days: marked as not widened, never widened. Combined:
+/// (9) `span=record` AND a rung asked AND an array body: unchanged; (10) a
+/// `200` array: the widening refused AND the marking refused. Out of the box:
+/// (11) an empty body.
+#[tokio::test]
+async fn the_record_span_answers_a_kept_body_it_cannot_read_as_an_object_unchanged() {
+    let fixture = Fixture::new("as2-calendar-record-raw-bodies");
+    let builds = &fixture.site.calendars.builds;
+    let now = calendar_route::feed_stamps(&fixture.root, Vendor::Gdfl);
+    for (symbol, rung, status, body) in [
+        ("", None, 200, "[1,2]"),
+        ("NIFTY", None, 503, "not json"),
+        ("BANKNIFTY", None, 200, "\"ok\""),
+        ("NULL", None, 200, "null"),
+        ("EMPTY", None, 200, ""),
+        ("", Some(Timeframe::SECOND_1), 200, "[3]"),
+        ("OBJECT", None, 200, r#"{"status":"ok"}"#),
+    ] {
+        builds.confirm(
+            (Vendor::Gdfl, rung, symbol.to_owned()),
+            now.clone(),
+            std::sync::Arc::new(crate::calendar_of::KeptAnswer {
+                status,
+                body: body.to_owned(),
+            }),
+        );
+    }
+    let ask = |query: &str| {
+        let uri: axum::http::Uri = format!("/calendar.json?{query}").parse().expect("uri");
+        calendar_json(axum::extract::State(Loaded::clone(&fixture.site)), uri)
+    };
+    for (query, status, body) in [
+        // (1), (10)
+        ("feed=gdfl&span=record", 200, "[1,2]"),
+        // (2), (5)
+        ("feed=gdfl&symbol=NIFTY&span=record", 503, "not json"),
+        // (3)
+        ("feed=gdfl&symbol=BANKNIFTY&span=record", 200, "\"ok\""),
+        // (4)
+        ("feed=gdfl&symbol=NULL&span=record", 200, "null"),
+        // (11)
+        ("feed=gdfl&symbol=EMPTY&span=record", 200, ""),
+        // (9)
+        ("feed=gdfl&rung=1s&span=record", 200, "[3]"),
+        // (7)
+        ("feed=gdfl&span=held", 200, "[1,2]"),
+    ] {
+        let (answered, headers, said) = ask(query).await;
+        assert_eq!(answered.as_u16(), status, "{query}");
+        assert_eq!(said, body, "{query}: answered as kept");
+        // (6)
+        assert_eq!(headers[0].1, "application/json; charset=utf-8", "{query}");
+    }
+    // (8)
+    let (_, _, marked) = ask("feed=gdfl&symbol=OBJECT&span=record").await;
+    let marked: Value = serde_json::from_str(&marked).expect("JSON");
+    assert_eq!(marked["span"], "held", "{marked}");
+    assert!(
+        marked["spanNote"]
+            .as_str()
+            .is_some_and(|note| note.contains("this one is \"ok\"")),
+        "{marked}"
+    );
+    assert!(marked.get("days").is_none(), "never widened: {marked}");
+}
+
+/// **THE READING REFUSES A MALFORMED QUESTION BEFORE IT READS THE CENSUS, AND
+/// KEEPS NOTHING ITS FEED'S STAMP CANNOT VOUCH FOR** (BASE-COV-API-AS2; D-0695,
+/// D-3336).
+///
+/// Extremes: (1) a feed nobody names is refused, naming it; (2) a rung no
+/// directory holds is refused, naming it; (3) two rungs named are refused;
+/// (4) a rung no directory holds, spelled as `timeframe`, is refused the same
+/// way (a question with no feed is not malformed: it asks the default feed);
+/// (5) the census is read for none of
+/// them; (6) a held census with no reference index is answered withheld,
+/// naming both; (7) under a stamp that found no manifest it is not kept;
+/// (8) and not confirmed. Combined: (9) the same reading under its own stamps
+/// is kept AND confirmed, byte for byte the same body; (10) a feed nobody names
+/// AND a bad rung: the feed is refused first. Out of the box: (11) a stamp that
+/// says "no manifest" under a census that read one: a first manifest installed
+/// inside the read.
+#[test]
+fn the_reading_refuses_a_malformed_question_itself_and_keeps_nothing_its_stamp_cannot_vouch_for() {
+    let fixture = Fixture::new("as2-calendar-reading-direct");
+    let day = epoch(2025, 5, 2);
+    fixture.census(
+        Vendor::Gdfl,
+        Segment::Cash,
+        "RELIANCE",
+        Timeframe::DAY_1,
+        YearMonth::new(2025, 5).expect("a month"),
+        1,
+        at(day, 0),
+        at(day, 0),
+    );
+    let uri = |query: &str| -> axum::http::Uri {
+        format!("/calendar.json?{query}").parse().expect("uri")
+    };
+    let asked = std::cell::Cell::new(0_u32);
+    for (query, says, not) in [
+        // (1)
+        ("feed=nobody", "nobody", ""),
+        // (2)
+        ("feed=gdfl&rung=7min", "7min", ""),
+        // (3)
+        ("feed=gdfl&rung=1s&timeframe=1min", "two rungs", ""),
+        // (4)
+        ("feed=gdfl&timeframe=7min", "7min\\\" is not a rung", ""),
+        // (10)
+        ("feed=nobody&rung=7min", "nobody", "7min"),
+    ] {
+        let (status, _, body) = calendar_json_reading(&fixture.site, &uri(query), |site| {
+            asked.set(asked.get() + 1);
+            census_now_stamped(site)
+        });
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{query}: {body}"
+        );
+        assert!(body.contains(says), "{query}: {body}");
+        assert!(not.is_empty() || !body.contains(not), "{query}: {body}");
+    }
+    // (5)
+    assert_eq!(asked.get(), 0, "no census is read for a malformed question");
+    // (11)
+    let unvouched = |site: &Site| {
+        let (mut stamps, now) = census_now_stamped(site);
+        if let Some(at) = stamps.manifests.get_mut(Vendor::Gdfl as usize) {
+            *at = ManifestStamp::Missing;
+        }
+        (stamps, now)
+    };
+    let (status, _, body) = calendar_json_reading(&fixture.site, &uri("feed=gdfl"), unvouched);
+    // (6)
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(parsed["status"], "withheld", "{parsed}");
+    assert!(
+        parsed["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("holds neither NIFTY nor BANKNIFTY")),
+        "{parsed}"
+    );
+    // (7)
+    assert_eq!(fixture.site.calendars.kept_answers(), 0);
+    // (8)
+    assert_eq!(fixture.site.calendars.builds.confirmed_answers(), 0);
+    // (9)
+    let (status, _, vouched) =
+        calendar_json_reading(&fixture.site, &uri("feed=gdfl"), census_now_stamped);
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(vouched, body);
+    assert_eq!(fixture.site.calendars.kept_answers(), 1);
+    assert_eq!(fixture.site.calendars.builds.confirmed_answers(), 1);
+}
+
+/// **A BSE SERIES ASKED BY NAME IS ITS OWN CALENDAR AND NO REFERENCE, AND A
+/// REFERENCE THAT DOES NOT HOLD THE CHOSEN RUNG ATTESTS NOTHING**
+/// (BASE-COV-API-AS2; D-3336).
+///
+/// Extremes: (1) the exchange's default rung is the daily one NIFTY holds;
+/// (2) BANKNIFTY, held only in minutes, attests nothing at it; (3) and holds
+/// nothing of the answer; (4) asked at `1min` the roles swap: BANKNIFTY holds;
+/// (5) the daily NIFTY attests nothing at `1min`; (6) a BSE series asked by
+/// name is the target, under its own exchange; (7) it is held by itself;
+/// (8) it is attested by the NSE reference holding its rung, never by itself.
+/// Combined: (9) a BSE series AND a reference without its rung: derived from
+/// NIFTY alone; (10) the BSE series asked at a rung it does not hold: withheld,
+/// naming the rung. Out of the box: (11) the BSE-only name asked in lower case
+/// is the same answer.
+#[tokio::test]
+async fn a_bse_series_is_its_own_calendar_and_a_reference_without_the_rung_attests_nothing() {
+    let fixture = Fixture::new("as2-calendar-rungs-and-bse");
+    let (fri, mon) = (epoch(2025, 5, 2), epoch(2025, 5, 5));
+    fixture.daily(Vendor::Zerodha, Segment::Index, "NIFTY", &[fri, mon]);
+    fixture.series(
+        Vendor::Zerodha,
+        Segment::Index,
+        "BANKNIFTY",
+        Timeframe::MINUTE_1,
+        &[at(fri, 0)],
+    );
+    let (status, exchange) = fixture.get("feed=zerodha").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{exchange}");
+    // (1)
+    assert_eq!(exchange["rung"], "1day", "{exchange}");
+    assert_eq!(exchange["days"], "R..R", "{exchange}");
+    // (2), (3)
+    assert_eq!(names(&exchange["derivedFrom"]), ["NIFTY"]);
+    assert_eq!(names(&exchange["heldBy"]), ["NIFTY"]);
+    let (status, minute) = fixture.get("feed=zerodha&rung=1min").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{minute}");
+    // (4), (5)
+    assert_eq!(names(&minute["heldBy"]), ["BANKNIFTY"]);
+    assert_eq!(names(&minute["derivedFrom"]), ["BANKNIFTY"]);
+    bse_daily(&fixture, "SENSEX", &[fri]);
+    let (status, sensex) = fixture.get("feed=zerodha&symbol=SENSEX").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{sensex}");
+    // (6)
+    assert_eq!(sensex["target"]["exchange"], "BSE", "{sensex}");
+    assert_eq!(sensex["target"]["segment"], "INDEX");
+    assert_eq!(sensex["target"]["symbol"], "SENSEX");
+    assert_eq!(sensex["rung"], "1day");
+    // (7)
+    assert_eq!(names(&sensex["heldBy"]), ["SENSEX"]);
+    // (8), (9)
+    assert_eq!(names(&sensex["derivedFrom"]), ["NIFTY"]);
+    assert_eq!(sensex["days"], "R");
+    // (10)
+    let (status, unheld) = fixture.get("feed=zerodha&symbol=SENSEX&rung=1min").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{unheld}");
+    assert_eq!(unheld["status"], "withheld", "{unheld}");
+    assert!(
+        unheld["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("1min") && why.contains("SENSEX")),
+        "{unheld}"
+    );
+    // (11)
+    let (_, lower) = fixture.get("feed=zerodha&symbol=sensex").await;
+    assert_eq!(lower, sensex);
+}
+
+/// **A FULL BUILD MAP UNQUEUES THE START-UP WARM'S ANSWERS AND ANSWERS A
+/// REQUEST `429`, UNTIL A BUILD FINISHES** (BASE-COV-API-AS2; DB-N19).
+///
+/// Extremes: (1) with the map full, one more start-up build is refused;
+/// (2) each of the warm's three first answers is counted unqueued; (3) the warm
+/// builds nothing; (4) it still reads the census and walks the journal;
+/// (5) a request finds no room: `429`; (6) the refusal names the bound;
+/// (7) and asks for a retry; (8) a finished build makes room: the next request
+/// is answered `200`. Combined: (9) a full map AND a feed with no census:
+/// `429`, never the absent census's withheld answer; (10) a full map AND the
+/// warm: an unqueued answer is no refusal. Out of the box: (11) the map filled
+/// by builds of a feed no operator is offered, under names no census holds.
+#[tokio::test]
+async fn a_full_build_map_unqueues_the_warm_and_answers_a_request_429() {
+    use crate::calendar_of::build::MAX_BUILDS;
+    let fixture = Fixture::new("as2-calendar-full-map");
+    let builds = &fixture.site.calendars.builds;
+    // (11)
+    let held: Vec<(
+        crate::calendar_of::AnswerKey,
+        std::sync::Arc<crate::calendar_of::build::Build>,
+    )> = (0..MAX_BUILDS)
+        .map(|n| {
+            let key = (Vendor::Dhan, None, format!("HELD{n}"));
+            let build = builds.queue_at_start(&key).expect("room for it");
+            (key, build)
+        })
+        .collect();
+    // (1)
+    assert_eq!(builds.in_flight(), MAX_BUILDS);
+    assert!(
+        builds
+            .queue_at_start(&(Vendor::Dhan, None, "ONEMORE".to_owned()))
+            .is_none()
+    );
+    // (2), (3), (10)
+    let warmed = calendar_route::warm(&fixture.site, &[Vendor::Gdfl]);
+    assert_eq!(
+        (warmed.built, warmed.unqueued, warmed.refused),
+        (0, 3, 0),
+        "{warmed:?}"
+    );
+    // (4)
+    assert_eq!(warmed.journal, Ok((0, 0)));
+    // (5), (9)
+    let (status, full) = fixture.get("feed=gdfl").await;
+    assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{full}");
+    // (6), (7)
+    let why = full["error"].as_str().expect("a reason");
+    assert!(
+        why.contains(&MAX_BUILDS.to_string()) && why.contains("retry"),
+        "{why}"
+    );
+    // (8)
+    let (key, build) = held.first().expect("a held build");
+    builds.finish(
+        key,
+        build,
+        crate::calendar_of::KeptAnswer {
+            status: 200,
+            body: "{}".to_owned(),
+        },
+    );
+    assert_eq!(builds.in_flight(), MAX_BUILDS - 1);
+    let (status, answered) = fixture.get("feed=gdfl").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{answered}");
+    assert_eq!(
+        answered["status"], "withheld",
+        "GDFL holds no census: {answered}"
+    );
+}

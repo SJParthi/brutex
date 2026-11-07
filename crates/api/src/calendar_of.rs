@@ -2135,6 +2135,398 @@ pub(crate) mod tests {
             report.unreadable
         );
     }
+
+    /// **A MONTH LISTED MORE THAN ONCE IS READ EACH TIME AND ITS DAYS FILED
+    /// ONCE, SO THE CALENDAR IS THE ONE THE MONTH LISTED ONCE GIVES**
+    /// (BASE-COV-API-AS2; W1-api2-0, D-1443).
+    ///
+    /// Extremes: (1) January listed three times; (2) February listed twice;
+    /// (3) out of order, February first; (4) each traded day is classified
+    /// once, three days three calls; (5) January's counter still matches its
+    /// two days, never four or six; (6) February is walked each time it is
+    /// listed; (7) every listing's records are counted; (8) the calendar is,
+    /// byte for byte, the one each month listed once gives. Combined: (9) out
+    /// of order AND repeated; (10) a counter-matched month AND a walked month
+    /// both repeated: three counts and two walks. Out of the box: (11) a month
+    /// list with more entries than distinct months.
+    #[test]
+    fn a_month_listed_twice_is_read_each_time_and_its_days_filed_once() {
+        let root = crate::scratch::path("calendar-of-month-twice");
+        let _ = std::fs::remove_dir_all(&root);
+        let (january, february) = (
+            YearMonth::new(2026, 1).expect("a real month"),
+            YearMonth::new(2026, 2).expect("a real month"),
+        );
+        let (jan5, jan6, feb2) = (
+            epoch_day(2026, 1, 5),
+            epoch_day(2026, 1, 6),
+            epoch_day(2026, 2, 2),
+        );
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            january,
+            &[stamp(jan5, OPEN), stamp(jan6, OPEN)],
+        );
+        let mut minutes = minutes_of(jan5, &[(OPEN, LAST)]);
+        minutes.extend(minutes_of(jan6, &[(OPEN, LAST)]));
+        write_bars(&root, Timeframe::MINUTE_1, january, &minutes);
+        write_bars(&root, Timeframe::DAY_1, february, &[stamp(feb2, OPEN)]);
+        // One minute short, so February is walked: 374 records.
+        write_bars(
+            &root,
+            Timeframe::MINUTE_1,
+            february,
+            &minutes_of(feb2, &[(OPEN, LAST - 1)]),
+        );
+        let (once, _) = derive(
+            &root,
+            Vendor::Zerodha,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            &[january, february],
+        );
+        DAY_MONTH_CALLS.with(|calls| calls.set(0));
+        // (1), (2), (3), (9), (11)
+        let (repeated, report) = derive(
+            &root,
+            Vendor::Zerodha,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            &[february, january, january, february, january],
+        );
+        let calls = DAY_MONTH_CALLS.with(std::cell::Cell::get);
+        // (4)
+        assert_eq!(calls, 3, "one civil-month classification per traded day");
+        // (5), (6), (10)
+        assert_eq!((report.months_by_counter, report.months_walked), (3, 2));
+        assert_eq!(repeated.expected_bars(jan5), Some(375));
+        // (7): February's daily record twice, January's two thrice, February's
+        // 374 minutes twice.
+        assert_eq!(report.records_read, 2 + 6 + 748);
+        // (8)
+        assert_eq!(json(&repeated), json(&once));
+        assert_eq!(repeated.sessions(), 3);
+        assert!(report.unreadable.is_empty(), "{:?}", report.unreadable);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A WALKED MINUTE MONTH WITH A RECORD THAT WILL NOT READ IS NAMED, AND
+    /// ITS DAYS ARE NEVER GIVEN WINDOWS FROM THE PART THAT DID**
+    /// (BASE-COV-API-AS2; W1-api2-9, D-1443).
+    ///
+    /// Extremes: (1) one flipped byte inside a walked month's minute file;
+    /// (2) the month is named, with what a split run would claim; (3) its days
+    /// are sessions of unrecorded length; (4) never the run that read before
+    /// the damage; (5) the walk is still counted, and its records read; (6) the
+    /// daily rung still proves both days; (7) nothing is unopened; (8) a rerun
+    /// is the same calendar byte for byte. Combined: (9) a damaged byte in a
+    /// month its counter answers is never read, so never named: that day is the
+    /// full session; (10) one damaged walked month AND one damaged counted
+    /// month: one name. Out of the box: (11) the damage sits inside the second
+    /// day's run, in a block the first day's run does not touch.
+    #[test]
+    fn a_walked_minute_month_that_will_not_read_is_named_and_never_split() {
+        let root = crate::scratch::path("calendar-of-minute-unreadable");
+        let _ = std::fs::remove_dir_all(&root);
+        let (january, february) = (
+            YearMonth::new(2026, 1).expect("a real month"),
+            YearMonth::new(2026, 2).expect("a real month"),
+        );
+        let (jan5, jan6, feb2) = (
+            epoch_day(2026, 1, 5),
+            epoch_day(2026, 1, 6),
+            epoch_day(2026, 2, 2),
+        );
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            january,
+            &[stamp(jan5, OPEN), stamp(jan6, OPEN)],
+        );
+        // 375 + 100 = 475 against 750 owed: walked.
+        let mut minutes = minutes_of(jan5, &[(OPEN, LAST)]);
+        minutes.extend(minutes_of(jan6, &[(OPEN, OPEN + 99)]));
+        write_bars(&root, Timeframe::MINUTE_1, january, &minutes);
+        write_bars(&root, Timeframe::DAY_1, february, &[stamp(feb2, OPEN)]);
+        write_bars(
+            &root,
+            Timeframe::MINUTE_1,
+            february,
+            &minutes_of(feb2, &[(OPEN, LAST)]),
+        );
+        let months = [january, february];
+        let (clean, clean_report) =
+            derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+        assert!(clean_report.unreadable.is_empty());
+        assert_eq!(windows_of(&clean, jan6), vec![(OPEN, OPEN + 99)]);
+        // (1), (11): record 400 is Jan 6's 26th minute, block 5 of a 73-record
+        // block geometry (store::file MAX_BLOCK_LEN / RECORD_STRIDE).
+        corrupt_record(&root, Timeframe::MINUTE_1, january, 400);
+        // (9)
+        corrupt_record(&root, Timeframe::MINUTE_1, february, 0);
+        let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+        // (5)
+        assert_eq!((report.months_by_counter, report.months_walked), (1, 1));
+        assert_eq!(report.records_read, 2 + 1 + 475);
+        // (2), (10)
+        assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+        let named = report.unreadable.first().cloned().unwrap_or_default();
+        assert!(
+            named.contains(&format!(
+                " minute record(s) in {january} could not be read, so the session \
+                 windows this month would report are not the ones it traded."
+            )) && named.ends_with("a split run is a midday break the exchange never took."),
+            "{named}"
+        );
+        assert!(report.says_what_it_lacks());
+        // (3), (4), (6)
+        for day in [jan5, jan6] {
+            assert_eq!(cal.kind_of(day), DayKind::OpenLengthUnmeasured, "day {day}");
+            assert_eq!(cal.expected_bars(day), None, "day {day}");
+        }
+        // (9)
+        assert_eq!(cal.kind_of(feb2), DayKind::Open(Session::full()));
+        // (7)
+        assert!(report.unopened.is_empty(), "{:?}", report.unopened);
+        // (8)
+        let (again, _) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+        assert_eq!(json(&again), json(&cal));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A SPAN NO `Day` CAN NAME IS LEFT AS IT IS, THE LAST MONTH ANY `Day`
+    /// NAMES ENDS THE WALK, AND PROVED MONTHS BEFORE THE SPAN ARE PASSED OVER**
+    /// (BASE-COV-API-AS2; R9-api-law-0, D-1443).
+    ///
+    /// Extremes: (1) a span before the epoch keeps its closed day closed and
+    /// withholds nothing; (2) a span past 9999-12-31 likewise; (3) the last
+    /// month a `Day` names, unproved, has its closed days withheld; (4) and is
+    /// named once; (5) proved, its closed days stay closed and nothing is
+    /// named; (6) proved months before the span are passed over to reach the
+    /// span's own; (7) a proved month after the span is never reached; (8) the
+    /// open days of every span stay open. Combined: (9) proved months before
+    /// the span AND the span's own month proved: nothing withheld; (10) proved
+    /// months before the span AND the span's month not among them: withheld,
+    /// named once. Out of the box: (11) a calendar that starts at epoch day -3.
+    #[test]
+    fn a_span_no_day_names_or_that_ends_the_calendar_is_withheld_only_where_it_can_be() {
+        use std::collections::BTreeSet;
+        let open = |day| pull::calendar::Observed { day, session: None };
+        let walk = |observed: &[pull::calendar::Observed], proved: &[(u16, u8)]| {
+            let mut calendar = Calendar::from_observed(observed);
+            let mut report = Report::default();
+            let proved: BTreeSet<(u16, u8)> = proved.iter().copied().collect();
+            withhold_unproved(&mut calendar, &proved, &mut report);
+            (calendar, report.withheld)
+        };
+        // (1), (11)
+        let (before, withheld) = walk(&[open(-3), open(-1)], &[]);
+        assert_eq!(before.kind_of(-2), DayKind::Closed);
+        assert_eq!(before.kind_of(-3), DayKind::OpenLengthUnmeasured);
+        assert!(withheld.is_empty());
+        // (2)
+        let past = epoch_day(9999, 12, 31) + 1;
+        let (beyond, withheld) = walk(&[open(past), open(past + 2)], &[]);
+        assert_eq!(beyond.kind_of(past + 1), DayKind::Closed);
+        assert!(withheld.is_empty());
+        // (3), (4), (8)
+        let (dec15, dec20) = (epoch_day(9999, 12, 15), epoch_day(9999, 12, 20));
+        let (last, withheld) = walk(&[open(dec15), open(dec20)], &[]);
+        assert_eq!(
+            withheld,
+            vec![YearMonth::new(9999, 12).expect("the last month a Day names")]
+        );
+        for day in dec15 + 1..dec20 {
+            assert_eq!(last.kind_of(day), DayKind::Unmeasured, "day {day}");
+        }
+        assert_eq!(last.kind_of(dec20), DayKind::OpenLengthUnmeasured);
+        // (5)
+        let (proved, withheld) = walk(&[open(dec15), open(dec20)], &[(9999, 12)]);
+        assert!(withheld.is_empty());
+        assert_eq!(proved.kind_of(dec15 + 1), DayKind::Closed);
+        // (6), (7), (9)
+        let (jan2, jan5) = (epoch_day(2026, 1, 2), epoch_day(2026, 1, 5));
+        let (passed, withheld) = walk(
+            &[open(jan2), open(jan5)],
+            &[(2025, 11), (2025, 12), (2026, 1), (2026, 3)],
+        );
+        assert!(withheld.is_empty());
+        assert_eq!(passed.kind_of(epoch_day(2026, 1, 3)), DayKind::Closed);
+        // (10)
+        let (unproved, withheld) = walk(&[open(jan2), open(jan5)], &[(2025, 11), (2025, 12)]);
+        assert_eq!(
+            withheld,
+            vec![YearMonth::new(2026, 1).expect("a real month")]
+        );
+        for day in epoch_day(2026, 1, 3)..=epoch_day(2026, 1, 4) {
+            assert_eq!(unproved.kind_of(day), DayKind::Unmeasured, "day {day}");
+        }
+    }
+
+    /// **A MONTH COUNTED WITH NO CENSUS ENTRY IS ANSWERED AND NEVER
+    /// REMEMBERED: THE NEXT ASK OPENS THE FILE AGAIN** (BASE-COV-API-AS2;
+    /// D-3336).
+    ///
+    /// Extremes: (1) counted with no entry: the days are exact; (2) nothing is
+    /// remembered; (3) asked again with the file moved aside: refused, never
+    /// answered from memory; (4) a day past the month counts zero; (5) a day
+    /// with no bar counts zero; (6) the first and the last day of the month each
+    /// count; (7) counted under an entry it is remembered; (8) and that entry is
+    /// answered with the file gone. Combined: (9) a remembered entry AND an ask
+    /// with no entry, file gone: the no-entry ask is refused; (10) a remembered
+    /// entry AND a different entry, file gone: refused. Out of the box: (11) a
+    /// census entry of zero rows and zero stamps is a key like any other.
+    #[test]
+    fn a_month_counted_with_no_census_entry_is_answered_and_never_remembered() {
+        let root = crate::scratch::path("calendar-of-month-days-unentered");
+        let _ = std::fs::remove_dir_all(&root);
+        let march = YearMonth::new(2022, 3).expect("a real month");
+        let (first, last) = (epoch_day(2022, 3, 1), epoch_day(2022, 3, 31));
+        write_bars_for(
+            &root,
+            "NIFTY",
+            Timeframe::DAY_1,
+            march,
+            &[stamp(first, OPEN), stamp(last, OPEN)],
+        );
+        let cache = Cache::default();
+        let count = |entry| {
+            month_days(
+                &cache,
+                &root,
+                Vendor::Zerodha,
+                "NSE",
+                "INDEX",
+                "NIFTY",
+                Timeframe::DAY_1,
+                march,
+                entry,
+            )
+        };
+        // (1), (4), (5), (6)
+        let days = count(None).expect("the month counts");
+        assert_eq!(
+            (days.count(0), days.count(1), days.count(30), days.count(31)),
+            (1, 0, 1, 0)
+        );
+        // (2)
+        assert_eq!(cache.remembered_months(), 0);
+        let bars = root.join("bars");
+        let aside = root.join("bars-aside");
+        // (3)
+        std::fs::rename(&bars, &aside).expect("move the bars aside");
+        assert!(matches!(count(None), Err(MonthFault::Unopened(_))));
+        std::fs::rename(&aside, &bars).expect("put the bars back");
+        // (7), (11)
+        let zero = Some((0, 0, 0));
+        assert_eq!(count(zero), Ok(days));
+        assert_eq!(cache.remembered_months(), 1);
+        std::fs::rename(&bars, &aside).expect("move the bars aside again");
+        // (8)
+        assert_eq!(count(zero), Ok(days));
+        // (9)
+        assert!(matches!(count(None), Err(MonthFault::Unopened(_))));
+        // (10)
+        assert!(matches!(
+            count(Some((2, 0, 0))),
+            Err(MonthFault::Unopened(_))
+        ));
+        std::fs::rename(&aside, &bars).expect("put the bars back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A LANDING THAT HOLDS NO KEY REMOVES NO FLIGHT, AND STILL LANDS AND
+    /// WAKES ITS OWN** (BASE-COV-API-AS2; W1-api2-11, D-1443).
+    ///
+    /// `cached_by` hands every landing it makes the key of the flight it
+    /// registered, so a keyless one is built here directly.
+    ///
+    /// Extremes: (1) a keyless landing with no answer lands abandoned; (2) the
+    /// flight registered under a key is left in the map; (3) a follower waiting
+    /// on the flight is woken; (4) a keyless landing with an answer lands
+    /// answered; (5) with that answer's calendar, shared; (6) the map is left
+    /// as it was by both; (7) a keyed landing removes its own flight; (8) the
+    /// waiting gauge is untouched. Combined: (9) a keyless landing AND that
+    /// same flight in the map: the entry stays; (10) a keyless landing AND then
+    /// a keyed one for the same flight: only the keyed one removes it. Out of
+    /// the box: (11) one flight landed twice: the second landing's state is the
+    /// one left.
+    #[test]
+    fn a_landing_that_holds_no_key_removes_no_flight_and_still_lands_its_own() {
+        use std::sync::{Arc, PoisonError};
+        let cache = Cache::default();
+        let flight = Arc::new(Flight::default());
+        let key = (nifty_key(), std::time::SystemTime::UNIX_EPOCH);
+        cache
+            .flights
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone(), Arc::clone(&flight));
+        // (1), (3)
+        let woken = std::thread::scope(|scope| {
+            let follower = scope.spawn(|| {
+                let mut landed = flight.landed.lock().unwrap_or_else(PoisonError::into_inner);
+                while matches!(*landed, Landed::Deriving) {
+                    landed = flight
+                        .ready
+                        .wait(landed)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                matches!(*landed, Landed::Abandoned)
+            });
+            drop(Landing {
+                cache: &cache,
+                key: None,
+                flight: Arc::clone(&flight),
+                answer: None,
+            });
+            follower.join().expect("the follower")
+        });
+        assert!(woken, "the follower was woken to an abandoned flight");
+        // (2), (6), (9)
+        assert!(
+            cache
+                .flights
+                .lock()
+                .is_ok_and(|flights| flights.len() == 1 && flights.contains_key(&key))
+        );
+        // (4), (5), (11)
+        let (calendar, _) = one_session();
+        let calendar = Arc::new(calendar);
+        drop(Landing {
+            cache: &cache,
+            key: None,
+            flight: Arc::clone(&flight),
+            answer: Some(Derived {
+                calendar: Arc::clone(&calendar),
+                unopened: Vec::new(),
+            }),
+        });
+        let answered = match &*flight.landed.lock().unwrap_or_else(PoisonError::into_inner) {
+            Landed::Answered(derived) => Some(Arc::clone(&derived.calendar)),
+            Landed::Deriving | Landed::Abandoned => None,
+        };
+        assert!(answered.is_some_and(|held| Arc::ptr_eq(&held, &calendar)));
+        assert!(
+            cache
+                .flights
+                .lock()
+                .is_ok_and(|flights| flights.contains_key(&key))
+        );
+        // (8)
+        assert_eq!(cache.waiting(), 0);
+        // (7), (10)
+        drop(Landing {
+            cache: &cache,
+            key: Some(key),
+            flight: Arc::clone(&flight),
+            answer: None,
+        });
+        assert!(cache.flights.lock().is_ok_and(|flights| flights.is_empty()));
+    }
 }
 
 #[cfg(test)]
@@ -2761,6 +3153,65 @@ mod wire {
         );
         assert!(wire.contains("\"sessions\":0"), "{wire}");
     }
+
+    /// **TWO WITHHELD STRETCHES ARE TWO RUNS ON THE WIRE, COMMA-SEPARATED, AND A
+    /// CLOSED DAY BETWEEN THEM IS IN NEITHER** (BASE-COV-API-AS2; R9-api-law-0,
+    /// W1-api2-9).
+    ///
+    /// Extremes: (1) a run of two days; (2) a run of one day; (3) two runs are
+    /// separated by one comma; (4) a closed day left between runs is in
+    /// neither; (5) the sessions are listed; (6) an unsized session owes
+    /// `null`; (7) a third run is a third object; (8) withholding an open day
+    /// changes nothing. Combined: (9) a run between two sessions AND an unsized
+    /// session between two runs; (10) three runs AND a closed day left between
+    /// two of them. Out of the box: (11) withholding a range wholly past the
+    /// span changes nothing and adds no run.
+    #[test]
+    fn two_withheld_stretches_are_two_runs_on_the_wire() {
+        let full = |day| Observed::from_runs(day, &[(555, 929)]);
+        let mut cal = Calendar::from_observed(&[
+            full(100),
+            Observed::from_runs(103, &[]),
+            full(105),
+            full(108),
+        ]);
+        // 101-102, 104 and 106-107 are closed between sessions.
+        // (1)
+        assert_eq!(cal.withhold_closed(101, 102), 2);
+        // (2)
+        assert_eq!(cal.withhold_closed(104, 104), 1);
+        // (8)
+        assert_eq!(cal.withhold_closed(105, 105), 0);
+        // (11)
+        assert_eq!(cal.withhold_closed(200, 300), 0);
+        let two = json(&cal);
+        // (3), (4), (9)
+        assert!(
+            two.contains("\"withheld\":[{\"from\":101,\"to\":102},{\"from\":104,\"to\":104}]}"),
+            "{two}"
+        );
+        // (5)
+        assert!(
+            two.contains("{\"day\":100,\"owed\":375,\"indexOwed\":375}"),
+            "{two}"
+        );
+        // (6)
+        assert!(
+            two.contains("{\"day\":103,\"owed\":null,\"indexOwed\":null}"),
+            "{two}"
+        );
+        // (7), (10)
+        assert_eq!(cal.withhold_closed(107, 107), 1);
+        let three = json(&cal);
+        assert!(
+            three.contains(
+                "\"withheld\":[{\"from\":101,\"to\":102},{\"from\":104,\"to\":104},\
+                 {\"from\":107,\"to\":107}]}"
+            ),
+            "{three}"
+        );
+        assert!(!three.contains("\"from\":106"), "{three}");
+    }
 }
 
 /// One day the instruments did not read the same way.
@@ -3186,6 +3637,93 @@ mod agreement {
         // The per-symbol payload is untouched: no caller of `json` gains fields
         // it did not ask for.
         assert!(!json(&exchange).contains("derivedFrom"));
+    }
+
+    /// **EVERY DISAGREEMENT AFTER THE FIRST IS COMMA-SEPARATED, AND EVERY
+    /// SILENT NAME IS LISTED, QUOTED, IN ORDER** (BASE-COV-API-AS2).
+    ///
+    /// Extremes: (1) a day two readings were silent about lists both, sorted;
+    /// (2) a day of two lengths lists them ascending; (3) its silent list is
+    /// empty; (4) the second disagreement follows the first after one comma;
+    /// (5) the agreed day takes the longest session; (6) the day all agreed is
+    /// no disagreement; (7) `derivedFrom` keeps the order given; (8) the wire
+    /// parses as JSON. Combined: (9) one seen name AND two silent ones on one
+    /// day; (10) three disagreements AND names needing escapes. Out of the box:
+    /// (11) silent names carrying a quote, a backslash and a tab, escaped.
+    #[test]
+    fn every_disagreement_after_the_first_and_every_silent_name_is_listed() {
+        let nifty = Calendar::from_observed(&[
+            Observed::from_runs(500, &FULL_RUN),
+            Observed::from_runs(501, &FULL_RUN),
+            Observed::from_runs(502, &FULL_RUN),
+        ]);
+        let bank = Calendar::from_observed(&[
+            Observed::from_runs(500, &FULL_RUN),
+            Observed::from_runs(502, &SHORT_RUN),
+        ]);
+        let vix = Calendar::from_observed(&[
+            Observed::from_runs(500, &FULL_RUN),
+            Observed::from_runs(502, &FULL_RUN),
+        ]);
+        let readings = [
+            ("NIFTY".to_owned(), nifty),
+            ("BANKNIFTY".to_owned(), bank),
+            ("INDIAVIX".to_owned(), vix),
+        ];
+        let (exchange, clashes) = agree(&readings);
+        let from: Vec<String> = readings.iter().map(|(name, _)| name.clone()).collect();
+        let wire = exchange_json(&exchange, &from, &clashes);
+        // (1), (2), (3), (4), (9)
+        assert!(
+            wire.contains(
+                "\"disagreements\":[{\"day\":501,\"seenBy\":[\"NIFTY\"],\
+                 \"silent\":[\"BANKNIFTY\",\"INDIAVIX\"],\"owed\":[375]},\
+                 {\"day\":502,\"seenBy\":[\"BANKNIFTY\",\"INDIAVIX\",\"NIFTY\"],\
+                 \"silent\":[],\"owed\":[60,375]}]}"
+            ),
+            "{wire}"
+        );
+        // (5)
+        assert!(
+            wire.contains("{\"day\":502,\"owed\":375,\"indexOwed\":375}"),
+            "{wire}"
+        );
+        // (6)
+        assert!(!wire.contains("{\"day\":500,\"seenBy\""), "{wire}");
+        // (7)
+        assert!(
+            wire.contains("\"derivedFrom\":[\"NIFTY\",\"BANKNIFTY\",\"INDIAVIX\"]"),
+            "{wire}"
+        );
+        // (8)
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&wire).is_ok(),
+            "{wire}"
+        );
+        // (10), (11)
+        let mut three = clashes.clone();
+        three.push(Disagreement {
+            day: 7,
+            seen_by: vec!["A".to_owned()],
+            silent: vec![
+                "QUOTE\"D".to_owned(),
+                "BACK\\SLASH".to_owned(),
+                "TAB\tBED".to_owned(),
+            ],
+            owed: Vec::new(),
+        });
+        let escaped = exchange_json(&exchange, &from, &three);
+        assert!(
+            escaped.contains(
+                ",{\"day\":7,\"seenBy\":[\"A\"],\
+                 \"silent\":[\"QUOTE\\\"D\",\"BACK\\\\SLASH\",\"TAB\\tBED\"],\"owed\":[]}]}"
+            ),
+            "{escaped}"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&escaped).is_ok(),
+            "{escaped}"
+        );
     }
 }
 

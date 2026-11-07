@@ -1316,3 +1316,127 @@ pub(super) fn warm(site: &Site, feeds: &[Vendor]) -> crate::calendar_of::build::
     warmed.total_ms = millis(started.elapsed());
     warmed
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod tests {
+    use super::*;
+
+    /// **A START-UP QUESTION NO URI CAN SPELL IS A NAMED 500, AND A START-UP
+    /// QUEUE DROPPED WITH A BUILD STILL IN IT ABANDONS IT WITH A REFUSAL THAT
+    /// SENDS THE NEXT REQUEST TO LEAD ITS OWN** (BASE-COV-API-AS2; DB-N19).
+    ///
+    /// `question` and `Queue` are private to this file, and `warm` hands them
+    /// only keys it spells itself, which always parse, and drops its queue
+    /// empty unless it unwinds: both refusals are reached here, directly.
+    ///
+    /// Extremes: (1) a symbol with a space is no URI: `500`; (2) the refusal
+    /// quotes the text it could not spell; (3) and is JSON's content type;
+    /// (4) a rung and a symbol spell one question, in that order; (5) the
+    /// exchange's question names the feed alone; (6) a key queued twice is
+    /// queued once; (7) a queue dropped with its build abandons it, answered
+    /// `503`; (8) naming the feed and telling the next request to lead its own.
+    /// Combined: (9) a key pushed twice AND the queue dropped: one build
+    /// abandoned, none left in flight, none unqueued; (10) the abandoned key
+    /// asked again: the request leads. Out of the box: (11) `NIFTY 50`, the
+    /// index's own published name, as a symbol.
+    #[test]
+    fn a_question_no_uri_can_spell_is_refused_and_a_dropped_queue_abandons_its_builds() {
+        // (1), (11)
+        let Err((status, headers, body)) = question(&(Vendor::Gdfl, None, "NIFTY 50".to_owned()))
+        else {
+            panic!("a space is no URI character");
+        };
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        // (3)
+        assert_eq!(
+            headers.first().map(|(_, value)| *value),
+            Some("application/json; charset=utf-8")
+        );
+        // (2)
+        let refused: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let why = refused
+            .get("refusal")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            why.starts_with(
+                "the start-up build could not spell \
+                 \"/calendar.json?feed=gdfl&symbol=NIFTY 50\" as a request: "
+            ),
+            "{why}"
+        );
+        // (4)
+        let spelled = question(&(
+            Vendor::Zerodha,
+            Some(store::path::Timeframe::MINUTE_1),
+            "BANKNIFTY".to_owned(),
+        ))
+        .expect("spelled");
+        assert_eq!(
+            spelled.to_string(),
+            "/calendar.json?feed=zerodha&rung=1min&symbol=BANKNIFTY"
+        );
+        // (5)
+        let exchange = question(&(Vendor::Gdfl, None, String::new())).expect("spelled");
+        assert_eq!(exchange.to_string(), "/calendar.json?feed=gdfl");
+
+        let root = crate::scratch::path("calendar-route-queue-drop");
+        let _ = std::fs::remove_dir_all(&root);
+        let masters = root.join("masters");
+        std::fs::create_dir_all(&masters).expect("empty offline masters");
+        let site = Site::load(&masters, &root);
+        let key = (Vendor::Gdfl, None, "NIFTY".to_owned());
+        let mut warmed = crate::calendar_of::build::Warmed {
+            feeds: Vec::new(),
+            census_ms: 0,
+            built: 0,
+            refused: 0,
+            unqueued: 0,
+            building_ms: 0,
+            journal: Ok((0, 0)),
+            total_ms: 0,
+        };
+        let abandoned = {
+            let mut queue = Queue {
+                site: &site,
+                builds: std::collections::VecDeque::new(),
+            };
+            queue.push(key.clone(), &mut warmed);
+            queue.push(key.clone(), &mut warmed);
+            // (6)
+            assert_eq!(queue.builds.len(), 1);
+            queue
+                .builds
+                .front()
+                .map(|(_, build)| std::sync::Arc::clone(build))
+                .expect("queued")
+        };
+        // (7): the queue was dropped at the end of the block above.
+        let answer = abandoned.answer().expect("abandoned with an answer");
+        assert_eq!(answer.status, 503);
+        // (8)
+        assert!(
+            answer.body.contains("\"feed\":\"gdfl\"")
+                && answer
+                    .body
+                    .contains("ask again, and the request leads a build of its own"),
+            "{}",
+            answer.body
+        );
+        // (9)
+        assert_eq!(site.calendars.builds.in_flight(), 0);
+        assert_eq!(warmed.unqueued, 0);
+        // (10)
+        assert!(matches!(
+            site.calendars.builds.join(&key, None),
+            crate::calendar_of::build::Joined::Lead(_)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

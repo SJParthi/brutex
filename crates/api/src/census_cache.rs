@@ -2545,4 +2545,1238 @@ mod tests {
             "the appended row is the newest"
         );
     }
+
+    // ══ BASE-COV-API-AS2, shard G2: the warm's rows, the re-read's loop, the stamps ══
+
+    /// A served site over an empty store named after `name`: what [`start`]
+    /// is handed.
+    fn loaded(name: &str) -> crate::server::Loaded {
+        let dir = crate::scratch::path(&format!("{name}-assets"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        crate::server::Loaded::new(site(name, &dir))
+    }
+
+    /// Every cache [`start`] listed, once none is warming or refreshing.
+    fn settled(site: &Site) -> Vec<Warmth> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        loop {
+            let rows = warmth(site);
+            if !rows.is_empty()
+                && rows
+                    .iter()
+                    .all(|row| matches!(row.state, WarmState::Ready | WarmState::Failed))
+            {
+                return rows;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never settled: {rows:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// The row `name` of `vendor` in `rows`.
+    fn row_named<'a>(rows: &'a [Warmth], name: &str, vendor: Vendor) -> &'a Warmth {
+        rows.iter()
+            .find(|row| row.name == name && row.vendor == vendor)
+            .unwrap_or_else(|| panic!("{name} of {} is not listed: {rows:?}", vendor.as_str()))
+    }
+
+    /// Waits until row `name` of `vendor` passes `ready`, reading `vendors`'
+    /// rows directly: no lock of the site's census is taken, so a test that
+    /// holds that lock may wait here.
+    fn until_row(
+        vendors: &Vendors,
+        name: &str,
+        vendor: Vendor,
+        ready: impl Fn(&Warmth) -> bool,
+    ) -> Warmth {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        loop {
+            let found = vendors
+                .warmth
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .find(|row| row.name == name && row.vendor == vendor)
+                .cloned();
+            if let Some(row) = found
+                && ready(&row)
+            {
+                return row;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{name} of {} never got there",
+                vendor.as_str()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// Waits until `holds` answers true, failing with `what` after a minute.
+    fn until(what: &str, holds: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        while !holds() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// **A CENSUS READ ITS OWN STAMPS CANNOT VOUCH FOR IS NEVER KEPT, AND THE
+    /// WARM BUILDS NOTHING OVER IT, NAMING WHY** (BASE-COV-API-AS2; R3-09,
+    /// D-0695).
+    ///
+    /// A store whose `manifest/REQUIRES` names a reader feature no build has
+    /// refuses every vendor's census before its manifest is looked at, while
+    /// each vendor's manifest stamp says "missing": a refusal that stamp could
+    /// not have read, so the cell keeps nothing. The warm then lists the
+    /// offered feed's derived caches failed, each quoting the census's own
+    /// refusal, and lists nothing derived for the vendors it was not given.
+    ///
+    /// Extremes: (1) the offered feed's census is listed failed, in the
+    /// refusal's own words; (2) its import journal, index map and facet index
+    /// are each listed failed, never ready; (3) each reason says the read was
+    /// not kept and quotes the census's refusal; (4) none carries a build time,
+    /// a generation or an entry count; (5) a vendor not offered lists its
+    /// census row alone; (6) the cell keeps no read; (7) a reader after the
+    /// warm reads for itself and is current, never stale over a read never
+    /// kept; (8) `/census/warm.json` lists every cache failed. Combined:
+    /// (9) every vendor refused at once AND the census in background mode: two
+    /// readers each read for themselves, two slots; (10) a refusal under a
+    /// missing manifest AND a root that is a directory: a stamp that could not
+    /// have read it. Out of the box: (11) a requirements file naming a feature
+    /// no build has, over a store that holds no manifest at all.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one warm, then every row and reader its Extremes: line names"
+    )]
+    fn a_census_read_its_stamps_cannot_vouch_for_derives_nothing_and_names_why() {
+        let site = loaded("census-warm-unkept");
+        // (11): census_store.rs:2684-2689 puts REQUIRES at `manifest/REQUIRES`.
+        std::fs::write(
+            pull::ingest::census_store::requires_path(&site.store_root),
+            "requires=census-v9 vendor=*\n",
+        )
+        .expect("a requirement no build has");
+        start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+        let rows = settled(&site);
+
+        // (1)
+        let census_row = row_named(&rows, CENSUS, Vendor::Gdfl);
+        assert_eq!(census_row.state, WarmState::Failed, "{census_row:?}");
+        let refusal = census_row.reason.clone().unwrap_or_default();
+        assert!(
+            refusal.contains("census-v9") && refusal.contains("REQUIRES"),
+            "{refusal}"
+        );
+        for name in [JOURNAL, INDEX_MAP, FACETS] {
+            let row = row_named(&rows, name, Vendor::Gdfl);
+            // (2)
+            assert_eq!(row.state, WarmState::Failed, "{row:?}");
+            // (3): census_cache.rs:1097-1101.
+            let why = row.reason.as_deref().unwrap_or_default();
+            assert!(
+                why.starts_with(
+                    "not built: the census read was not kept, because the manifest's \
+                     stamps contradict it ("
+                ) && why.contains(&refusal)
+                    && why.ends_with("); the first request that needs it builds it"),
+                "{name}: {why}"
+            );
+            // (4)
+            assert_eq!(
+                (row.took_ms, row.generation, row.entries),
+                (None, None, None),
+                "{name}"
+            );
+        }
+        // (5)
+        for vendor in Vendor::ALL
+            .into_iter()
+            .filter(|vendor| *vendor != Vendor::Gdfl)
+        {
+            let theirs: Vec<&Warmth> = rows.iter().filter(|row| row.vendor == vendor).collect();
+            assert_eq!(theirs.len(), 1, "{}: {theirs:?}", vendor.as_str());
+            assert!(
+                theirs
+                    .iter()
+                    .all(|row| row.name == CENSUS && row.state == WarmState::Failed),
+                "{theirs:?}"
+            );
+        }
+        // (6)
+        assert!(kept_slot(&site, Vendor::Gdfl).is_none(), "nothing was kept");
+        // (7), (9)
+        assert!(in_background(&site));
+        let (_, first) = vendor_census(&site, Vendor::Gdfl);
+        let (_, second) = vendor_census(&site, Vendor::Gdfl);
+        assert_eq!(first.freshness(), Freshness::Current);
+        assert_eq!(second.freshness(), Freshness::Current);
+        assert!(
+            !Arc::ptr_eq(first.slot(), second.slot()),
+            "never kept: each reader reads for itself"
+        );
+        let read = first.census().expect("one row");
+        assert!(
+            matches!(
+                read.state,
+                census::Census::Unreadable {
+                    fault: census::Fault::Refused,
+                    ..
+                }
+            ),
+            "{}",
+            read.note()
+        );
+        // (10)
+        assert!(!stamp_could_read(ManifestStamp::Missing, true, &read.state));
+        assert!(manifest_stamps(&site.store_root).root_is_dir);
+        // (8)
+        let body: serde_json::Value = serde_json::from_str(&warm_json(&site)).expect("json");
+        let caches = body["caches"].as_array().expect("caches");
+        assert_eq!(caches.len(), rows.len());
+        assert!(
+            caches.iter().all(|cache| cache["state"] == "failed"),
+            "{body}"
+        );
+        // (11): no manifest anywhere.
+        assert!(
+            Vendor::ALL.into_iter().all(|vendor| {
+                !pull::manifest::manifest_path(&site.store_root, vendor).exists()
+            })
+        );
+    }
+
+    /// **A KEPT ABSENCE IS SERVED, STALE, UNDER THE STAMP IT WAS READ UNDER,
+    /// WHILE THE FIRST MANIFEST IS READ IN THE BACKGROUND** (BASE-COV-API-AS2;
+    /// R3-09, D-0695).
+    ///
+    /// The warm keeps GDFL absent under a missing manifest. A first manifest
+    /// lands: the next reader is answered from the kept absence, saying so,
+    /// with the stamps that absence was read under, so no calendar is kept
+    /// from it under the new manifest's time. The re-stamp after the read is
+    /// for a current absence only, and this one is stale.
+    ///
+    /// Extremes: (1) the answer is stale; (2) the kept absence is served as
+    /// read, never turned into a contradiction; (3) its stamp is the kept
+    /// "missing", never the new manifest's time; (4) it gives no calendar a
+    /// time; (5) it is the kept slot, not a copy; (6) its refreshing header is
+    /// `1`; (7) once the re-read lands the answer is current and holds the 375
+    /// rows; (8) its stamp then carries the manifest's own time. Combined:
+    /// (9) stale AND absent at once, the one pairing the re-stamp after the
+    /// read skips; (10) the landed read listed ready over the generation
+    /// served. Out of the box: (11) the store's first manifest appearing after
+    /// the warm.
+    #[test]
+    fn a_kept_absence_is_served_stale_under_its_own_stamp_while_the_first_manifest_is_read() {
+        let site = loaded("census-stale-absence");
+        start(&site, &[]).expect("the warm thread starts");
+        let _warm = settled(&site);
+        let (before, absent) = vendor_census(&site, Vendor::Gdfl);
+        assert_eq!(absent.freshness(), Freshness::Current);
+        // (11)
+        let (key, manifest) = held_nifty();
+        std::fs::write(
+            pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl),
+            manifest.image(),
+        )
+        .expect("the first manifest");
+        let (stamps, stale) = vendor_census(&site, Vendor::Gdfl);
+        // (1)
+        assert!(stale.freshness().is_stale(), "{:?}", stale.freshness());
+        let row = stale.census().expect("one row");
+        // (2), (9)
+        assert!(
+            matches!(row.state, census::Census::Absent),
+            "{}",
+            row.note()
+        );
+        // (3)
+        assert_eq!(
+            stamps.manifests.get(Vendor::Gdfl as usize),
+            Some(&ManifestStamp::Missing)
+        );
+        assert_eq!(
+            stamps, before,
+            "exactly the stamps the kept read was taken under"
+        );
+        // (4)
+        assert_eq!(stamps.modified(row), None);
+        // (5)
+        assert!(Arc::ptr_eq(stale.slot(), absent.slot()));
+        // (6)
+        let mut headers = axum::http::HeaderMap::new();
+        freshness_headers(&mut headers, stale.freshness());
+        assert_eq!(
+            headers
+                .get(CENSUS_REFRESHING_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        // (7)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        let (landed_stamps, landed) = loop {
+            let (stamps, now) = vendor_census(&site, Vendor::Gdfl);
+            if now.freshness() == Freshness::Current
+                && now
+                    .census()
+                    .is_some_and(|row| row.rows_of(&key) == RowsOf::Held(375))
+            {
+                break (stamps, now);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never landed: {:?}",
+                now.freshness()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        // (8)
+        let held = landed.census().expect("one row");
+        assert!(matches!(
+            landed_stamps.manifests.get(Vendor::Gdfl as usize),
+            Some(ManifestStamp::At { .. })
+        ));
+        assert!(landed_stamps.modified(held).is_some());
+        // (10)
+        let rows = settled(&site);
+        let gdfl = row_named(&rows, CENSUS, Vendor::Gdfl);
+        assert_eq!(gdfl.state, WarmState::Ready);
+        assert_eq!(gdfl.generation, held.generation());
+    }
+
+    /// **A CACHE IS SAID TO BE WARMING ONLY WHILE THE WARM THREAD RUNS AND HAS
+    /// NOT BUILT IT, AND SINCE THE INSTANT IT WAS LISTED** (BASE-COV-API-AS2;
+    /// R3-09).
+    ///
+    /// GDFL's single-flight lock is held from before the start, so GDFL's census
+    /// read, and every cache derived from it, waits on it: the warm thread runs
+    /// for as long as the test holds the lock, with no clock in the
+    /// interleaving.
+    ///
+    /// Extremes: (1) before the start no warm thread runs: nothing is warming;
+    /// (2) GDFL's census is warming since the instant it was listed; (3) so is
+    /// its facet index, derived after it; (4) a vendor not offered has no facet
+    /// index warming; (5) asked again while it still waits, the same instant,
+    /// never "now"; (6) once the warm is done no cache of the feed is warming;
+    /// (7) once the warm thread has ended no vendor's census is; (8) the
+    /// instants handed are the listed rows' own. Combined: (9) the warm thread
+    /// still running AND another vendor's census built meanwhile: not warming;
+    /// (10) a warming row of that name AND another vendor asked: not warming.
+    /// Out of the box: (11) a cache name `WARMED` does not list.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one warm held open, then every question its Extremes: line names"
+    )]
+    fn a_cache_is_warming_only_while_the_warm_thread_runs_and_has_not_built_it() {
+        let site = loaded("census-warming-since");
+        let vendors = vendors_of(&site);
+        // (1)
+        assert_eq!(
+            warming_since(&site, CENSUS, Vendor::Gdfl),
+            None,
+            "no warm thread yet"
+        );
+        let cell = vendors
+            .cells
+            .get(Vendor::Gdfl as usize)
+            .expect("GDFL's cell");
+        let single_flight = cell.build.lock().unwrap_or_else(PoisonError::into_inner);
+        start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+        let listed = warmth(&site);
+        let began = |name: &str| row_named(&listed, name, Vendor::Gdfl).since;
+        // (2), (8)
+        assert_eq!(
+            warming_since(&site, CENSUS, Vendor::Gdfl),
+            Some(began(CENSUS))
+        );
+        // (3)
+        assert_eq!(
+            warming_since(&site, FACETS, Vendor::Gdfl),
+            Some(began(FACETS))
+        );
+        // (4)
+        assert_eq!(warming_since(&site, FACETS, Vendor::Dhan), None);
+        // (10)
+        assert_eq!(warming_since(&site, JOURNAL, Vendor::Zerodha), None);
+        // (11)
+        assert_eq!(warming_since(&site, "no such cache", Vendor::Gdfl), None);
+        // (9): only GDFL's read waits on the lock held; Dhan's is built.
+        let dhan = until_row(&vendors, CENSUS, Vendor::Dhan, |row| {
+            row.state != WarmState::Warming
+        });
+        assert!(
+            vendors
+                .warm_running
+                .load(std::sync::atomic::Ordering::Acquire),
+            "the warm thread still runs: GDFL's read waits on the lock held"
+        );
+        assert_eq!(warming_since(&site, CENSUS, Vendor::Dhan), None, "{dhan:?}");
+        // (5)
+        assert_eq!(
+            warming_since(&site, CENSUS, Vendor::Gdfl),
+            Some(began(CENSUS))
+        );
+        drop(single_flight);
+        // (6)
+        let rows = settled(&site);
+        for name in WARMED {
+            assert_eq!(
+                warming_since(&site, name, Vendor::Gdfl),
+                None,
+                "{name}: {rows:?}"
+            );
+        }
+        // (7)
+        until("the warm thread ends", || {
+            !vendors
+                .warm_running
+                .load(std::sync::atomic::Ordering::Acquire)
+        });
+        assert!(
+            Vendor::ALL
+                .into_iter()
+                .all(|vendor| warming_since(&site, CENSUS, vendor).is_none())
+        );
+    }
+
+    /// **A CACHE NOTED AGAIN IN THE STATE IT IS IN KEEPS THE INSTANT IT ENTERED
+    /// IT; ONLY A CHANGE MOVES IT** (BASE-COV-API-AS2; R3-09).
+    ///
+    /// `/census/warm.json`'s `since_ms` is how long a cache has been in its
+    /// state, so a second "failed" (a re-read refused twice) must not restart it.
+    ///
+    /// Extremes: (1) failed noted failed again keeps its instant; (2) and its
+    /// reason is the newest; (3) a reason cleared in the same state keeps the
+    /// instant; (4) warming noted warming keeps its instant; (5) a change moves
+    /// the instant to the change; (6) another vendor's row of the same name is
+    /// its own; (7) another name of the same vendor is its own; (8) a build's
+    /// time, generation and entries survive a note in the same state.
+    /// Combined: (9) the same state AND a new reason AND another vendor noted
+    /// in between: one instant kept, one row each; (10) a change and back moves
+    /// the instant both times. Out of the box: (11) a name that is no cache
+    /// `WARMED` lists is listed like any other.
+    #[test]
+    fn a_cache_noted_in_the_state_it_is_in_keeps_the_instant_it_entered_it() {
+        let vendors = Vendors::default();
+        let row = |name: &str, vendor: Vendor| -> Warmth {
+            vendors
+                .warmth
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .find(|row| row.name == name && row.vendor == vendor)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} of {} is not listed", vendor.as_str()))
+        };
+        note_warmth(
+            &vendors,
+            CENSUS,
+            Vendor::Gdfl,
+            WarmState::Failed,
+            Some("first".to_owned()),
+        );
+        let first = row(CENSUS, Vendor::Gdfl);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // (9): another vendor noted in between.
+        note_warmth(
+            &vendors,
+            CENSUS,
+            Vendor::Dhan,
+            WarmState::Failed,
+            Some("dhan".to_owned()),
+        );
+        note_warmth(
+            &vendors,
+            CENSUS,
+            Vendor::Gdfl,
+            WarmState::Failed,
+            Some("second".to_owned()),
+        );
+        let again = row(CENSUS, Vendor::Gdfl);
+        // (1)
+        assert_eq!(again.since, first.since);
+        // (2)
+        assert_eq!(again.reason.as_deref(), Some("second"));
+        // (3)
+        note_warmth(&vendors, CENSUS, Vendor::Gdfl, WarmState::Failed, None);
+        let cleared = row(CENSUS, Vendor::Gdfl);
+        assert_eq!((cleared.since, cleared.reason), (first.since, None));
+        // (6)
+        assert_eq!(row(CENSUS, Vendor::Dhan).reason.as_deref(), Some("dhan"));
+        // (4)
+        note_warmth(&vendors, FACETS, Vendor::Gdfl, WarmState::Warming, None);
+        let warming = row(FACETS, Vendor::Gdfl);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        note_warmth(&vendors, FACETS, Vendor::Gdfl, WarmState::Warming, None);
+        assert_eq!(row(FACETS, Vendor::Gdfl).since, warming.since);
+        // (7)
+        assert_eq!(row(CENSUS, Vendor::Gdfl).state, WarmState::Failed);
+        // (5), (10)
+        let before_change = std::time::SystemTime::now();
+        note_warmth(&vendors, CENSUS, Vendor::Gdfl, WarmState::Ready, None);
+        let changed = row(CENSUS, Vendor::Gdfl);
+        assert!(
+            changed.since >= before_change && changed.since > first.since,
+            "{changed:?}"
+        );
+        let before_back = std::time::SystemTime::now();
+        note_warmth(
+            &vendors,
+            CENSUS,
+            Vendor::Gdfl,
+            WarmState::Failed,
+            Some("third".to_owned()),
+        );
+        assert!(row(CENSUS, Vendor::Gdfl).since >= before_back);
+        // (8)
+        let (_, manifest) = held_nifty();
+        let slot = Slot::detached(census::VendorCensus {
+            vendor: Vendor::Gdfl,
+            path: std::path::PathBuf::from("/nonexistent/census-cache/gdfl.man"),
+            state: census::Census::Held {
+                manifest: census::Manifests::single(manifest),
+            },
+        });
+        note_ready(&vendors, JOURNAL, Vendor::Gdfl, 7, &slot);
+        let built = row(JOURNAL, Vendor::Gdfl);
+        note_warmth(&vendors, JOURNAL, Vendor::Gdfl, WarmState::Ready, None);
+        let noted = row(JOURNAL, Vendor::Gdfl);
+        assert_eq!(
+            (noted.since, noted.took_ms, noted.generation, noted.entries),
+            (built.since, Some(7), built.generation, Some(1))
+        );
+        assert!(noted.generation.is_some());
+        // (11)
+        note_warmth(
+            &vendors,
+            "no such cache",
+            Vendor::Zerodha,
+            WarmState::Ready,
+            None,
+        );
+        assert_eq!(
+            row("no such cache", Vendor::Zerodha).state,
+            WarmState::Ready
+        );
+        assert_eq!(
+            vendors
+                .warmth
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+            5,
+            "one row per name and feed"
+        );
+    }
+
+    /// **A ROW KEPT UNDER A STAMP OF A VENDOR PAST THE LAST IS NEVER WRITTEN
+    /// INTO THE KEY, BEFORE THE READ OR AFTER IT** (BASE-COV-API-AS2; R3-09,
+    /// D-0695).
+    ///
+    /// `census_now_stamped` names each stale row by `vendor as usize`; the read
+    /// is handed in here, so an index past the stamps is driven directly.
+    ///
+    /// Extremes: (1) an index one past the last vendor is ignored; (2) an index
+    /// two past is ignored; (3) an in-range kept stamp replaces the request's;
+    /// (4) the replaced stamp is the one its absence is judged by: served
+    /// unreadable, contradicted; (5) the stamps handed back hold one per
+    /// vendor, never more; (6) a read with a contradicted row is not kept;
+    /// (7) a read whose every row is vouched for is kept under the stamps
+    /// taken; (8) a later call under the same stamps is a hit and reads
+    /// nothing. Combined: (9) past-the-end AND in-range indices in one list:
+    /// only the in-range one replaces; (10) past-the-end indices AND an
+    /// all-absent read: stamped again after the read, and still kept. Out of
+    /// the box: (11) an index of `usize::MAX`.
+    #[test]
+    fn a_row_kept_under_a_vendor_past_the_last_is_never_written_into_the_key() {
+        let dir = crate::scratch::path("census-kept-under-past-assets");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let site = site("census-kept-under-past", &dir);
+        let taken = manifest_stamps(&site.store_root);
+        let past = Vendor::ALL.len();
+        let denied = ManifestStamp::Faulted(std::io::ErrorKind::PermissionDenied);
+        let kept = || {
+            site.census
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .and_then(Cached::kept_stamps)
+        };
+        // (3), (4), (9), (11)
+        let (stamps, (rows, _)) = census_now_kept(&site, manifest_stamps, |root| {
+            (
+                census::read_all(root),
+                Some(vec![
+                    (past, ManifestStamp::Missing),
+                    (Vendor::Gdfl as usize, denied),
+                    (usize::MAX, ManifestStamp::Missing),
+                ]),
+            )
+        });
+        // (5)
+        assert_eq!(stamps.manifests.len(), Vendor::ALL.len());
+        for vendor in Vendor::ALL {
+            let want = if vendor == Vendor::Gdfl {
+                Some(&denied)
+            } else {
+                taken.manifests.get(vendor as usize)
+            };
+            assert_eq!(
+                stamps.manifests.get(vendor as usize),
+                want,
+                "{}",
+                vendor.as_str()
+            );
+        }
+        let gdfl = rows
+            .iter()
+            .find(|row| row.vendor == Vendor::Gdfl)
+            .expect("GDFL's row");
+        assert!(
+            matches!(
+                gdfl.state,
+                census::Census::Unreadable {
+                    fault: census::Fault::Contradicted,
+                    ..
+                }
+            ),
+            "{}",
+            gdfl.note()
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.vendor != Vendor::Gdfl)
+                .all(|row| matches!(row.state, census::Census::Absent))
+        );
+        // (6)
+        assert_eq!(kept(), None);
+        // (1), (2), (7), (10), (11)
+        let reads = std::cell::Cell::new(0_u32);
+        let (stamps, (rows, _)) = census_now_kept(&site, manifest_stamps, |root| {
+            reads.set(reads.get() + 1);
+            (
+                census::read_all(root),
+                Some(vec![
+                    (past, denied),
+                    (past + 1, denied),
+                    (usize::MAX, denied),
+                ]),
+            )
+        });
+        assert_eq!(reads.get(), 1);
+        assert_eq!(stamps, taken);
+        assert!(
+            rows.iter()
+                .all(|row| matches!(row.state, census::Census::Absent))
+        );
+        assert_eq!(kept(), Some(taken.clone()));
+        // (8)
+        let (hit, _) = census_now_kept(&site, manifest_stamps, |root| {
+            reads.set(reads.get() + 1);
+            (census::read_all(root), None)
+        });
+        assert_eq!(hit, taken);
+        assert_eq!(reads.get(), 1, "a hit reads nothing");
+    }
+
+    /// **A MANIFEST THAT MOVES AGAIN WHILE ITS BACKGROUND RE-READ RUNS IS READ
+    /// AGAIN BY THAT SAME THREAD, BEFORE IT ENDS** (BASE-COV-API-AS2; R3-09).
+    ///
+    /// The census cache's own lock is held from before the re-read starts: the
+    /// re-read's first pass publishes its read and lists it ready, then waits
+    /// on that lock before it can stamp the manifest again. The second append
+    /// lands exactly there, with no clock in the interleaving. Nothing else
+    /// asks for the census, so the newest entry is served only if the same
+    /// thread went round again.
+    ///
+    /// Extremes: (1) the first pass publishes its read, listed ready over two
+    /// entries; (2) a second append lands before that pass stamps again;
+    /// (3) the same thread reads it, by its tail; (4) no reader asked for it;
+    /// (5) the newest entry, 500 rows, is served; (6) the thread ends once the
+    /// stamp holds still across a pass; (7) every read in the window is the
+    /// background thread's own; (8) the warm list ends ready over three
+    /// entries. Combined: (9) the census listed ready AND its stamp already
+    /// moved: the thread does not stop at ready; (10) two passes AND no whole
+    /// read, two tails only. Out of the box: (11) both modified times move
+    /// backwards, to 1970, long before the file was written: an equality key,
+    /// still read again.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one interleaving, held open step by step"
+    )]
+    fn a_manifest_moved_while_its_re_read_runs_is_read_again_by_that_thread() {
+        use std::os::unix::fs::FileExt as _;
+        let site = loaded("census-reread-moved");
+        let (key, mut manifest) = held_nifty();
+        let gdfl = pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl);
+        std::fs::write(&gdfl, manifest.image()).expect("a manifest on disk");
+        let vendors = vendors_of(&site);
+        start(&site, &[]).expect("the warm thread starts");
+        let warm = settled(&site);
+        assert_eq!(row_named(&warm, CENSUS, Vendor::Gdfl).entries, Some(1));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&gdfl)
+            .expect("open");
+        // One more entry for the same key, at its own offset then the slot that
+        // counts it (the importer's order, as
+        // `a_moved_stamp_with_nothing_appended_keeps_the_same_slot` writes it),
+        // and a modified time of its own.
+        let mut append = |rows: u64, last_ts_micros: i64, hours: u64| {
+            let one = manifest
+                .record(pull::manifest::Entry {
+                    key,
+                    rows,
+                    first_ts_micros: 1_788_926_700_000_000,
+                    last_ts_micros,
+                })
+                .expect("records");
+            file.write_all_at(&one.bytes, one.offset).expect("entry");
+            file.write_all_at(&one.commit.bytes, one.commit.offset)
+                .expect("slot");
+            file.set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(hours * 3_600),
+            )
+            .expect("a modified time of its own");
+        };
+        append(400, 1_789_000_000_000_000, 1_000);
+        let whole = census::manifest_reads::of(&gdfl);
+        let mark = census::manifest_reads::threads_under(&site.store_root).len();
+        let held = site.census.lock().unwrap_or_else(PoisonError::into_inner);
+        // (4): the test starts it; no reader asks.
+        assert!(
+            refresh_in_background(&vendors, Vendor::Gdfl),
+            "a re-read starts"
+        );
+        // (1), (9)
+        let first = until_row(&vendors, CENSUS, Vendor::Gdfl, |row| {
+            row.state == WarmState::Ready && row.entries == Some(2)
+        });
+        assert_eq!(first.reason, None);
+        // (2), (11)
+        append(500, 1_789_100_000_000_000, 2_000);
+        drop(held);
+        // (3), (5)
+        until("the newest entry is served", || {
+            kept_slot(&site, Vendor::Gdfl)
+                .is_some_and(|slot| slot.census().rows_for(&key) == Some(500))
+        });
+        // (6)
+        let cell = vendors
+            .cells
+            .get(Vendor::Gdfl as usize)
+            .expect("GDFL's cell");
+        until("the re-read ends", || {
+            !cell.refreshing.load(std::sync::atomic::Ordering::Acquire)
+        });
+        // (7), (10)
+        let reads = census::manifest_reads::threads_under(&site.store_root);
+        let window: Vec<(&str, &str)> = reads
+            .get(mark..)
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, kind, thread)| (*kind, thread.as_str()))
+            .collect();
+        assert_eq!(window, vec![("tail", "brutex-census-gdfl"); 2], "{reads:?}");
+        assert_eq!(
+            census::manifest_reads::of(&gdfl),
+            whole,
+            "nothing read whole"
+        );
+        // (8)
+        let rows = settled(&site);
+        let gdfl_row = row_named(&rows, CENSUS, Vendor::Gdfl);
+        assert_eq!(
+            (gdfl_row.state, gdfl_row.entries),
+            (WarmState::Ready, Some(3))
+        );
+    }
+
+    /// **A STORE ROOT THAT COMES BACK WHILE ITS BACKGROUND RE-READ RUNS IS
+    /// READ AGAIN BY THAT SAME THREAD, THOUGH NO MANIFEST STAMP MOVED**
+    /// (BASE-COV-API-AS2; R3-09, D-0695).
+    ///
+    /// GDFL has no manifest, so its own stamp says "missing" whether the root
+    /// is there or not: only whether the root answered as a directory moves.
+    /// The census cache's lock is held from before the re-read starts, so its
+    /// first pass reads the root refused, keeps and lists that, and waits
+    /// before it stamps again; the root comes back there.
+    ///
+    /// Extremes: (1) with the root away the pass reads the root's refusal;
+    /// (2) listed failed, naming the root; (3) GDFL's own stamp is "missing"
+    /// before, during and after; (4) only whether the root is a directory
+    /// moved; (5) the same thread reads again: absent, listed ready; (6) the
+    /// cell keeps the absence; (7) no reader asked for it; (8) the thread then
+    /// ends. Combined: (9) a vendor stamp unchanged AND the root's answer
+    /// changed: read again; (10) a root away AND no manifest anywhere: the
+    /// refusal is the root's own. Out of the box: (11) the whole store
+    /// directory renamed out from under a running server, and back.
+    #[test]
+    fn a_root_back_while_its_re_read_runs_is_read_again_by_that_thread() {
+        let site = loaded("census-reread-root");
+        let vendors = vendors_of(&site);
+        start(&site, &[]).expect("the warm thread starts");
+        let warm = settled(&site);
+        assert_eq!(
+            row_named(&warm, CENSUS, Vendor::Gdfl).state,
+            WarmState::Ready
+        );
+        let root = site.store_root.clone();
+        let aside = crate::scratch::path("store-census-reread-root-aside");
+        let _ = std::fs::remove_dir_all(&aside);
+        let gdfl_stamp = || {
+            manifest_stamps(&root)
+                .manifests
+                .get(Vendor::Gdfl as usize)
+                .copied()
+        };
+        // (3)
+        assert_eq!(gdfl_stamp(), Some(ManifestStamp::Missing));
+        assert!(manifest_stamps(&root).root_is_dir);
+        // (11)
+        std::fs::rename(&root, &aside).expect("the root moved aside");
+        // (3), (4)
+        assert_eq!(gdfl_stamp(), Some(ManifestStamp::Missing));
+        assert!(!manifest_stamps(&root).root_is_dir);
+        let held = site.census.lock().unwrap_or_else(PoisonError::into_inner);
+        // (7)
+        assert!(
+            refresh_in_background(&vendors, Vendor::Gdfl),
+            "a re-read starts"
+        );
+        // (1), (2), (10): census.rs:2002-2014 words the root's refusal.
+        let refused = until_row(&vendors, CENSUS, Vendor::Gdfl, |row| {
+            row.state == WarmState::Failed
+        });
+        let why = refused.reason.unwrap_or_default();
+        assert!(
+            why.contains("configured store root")
+                && why.contains("is unavailable")
+                && why.contains(&root.display().to_string()),
+            "{why}"
+        );
+        std::fs::rename(&aside, &root).expect("the root back");
+        drop(held);
+        // (5), (9)
+        let back = until_row(&vendors, CENSUS, Vendor::Gdfl, |row| {
+            row.state == WarmState::Ready
+        });
+        assert_eq!(back.reason, None);
+        // (6)
+        assert!(
+            kept_slot(&site, Vendor::Gdfl)
+                .is_some_and(|slot| matches!(slot.census().state, census::Census::Absent))
+        );
+        // (8)
+        let cell = vendors
+            .cells
+            .get(Vendor::Gdfl as usize)
+            .expect("GDFL's cell");
+        until("the re-read ends", || {
+            !cell.refreshing.load(std::sync::atomic::Ordering::Acquire)
+        });
+        // (3)
+        assert_eq!(gdfl_stamp(), Some(ManifestStamp::Missing));
+    }
+
+    /// Names the no-sink child's folder.
+    const NO_SINK_CHILD: &str = "BRUTEX_TEST_CENSUS_NO_SINK_CHILD";
+
+    /// **A BUILD NOTED WHERE NO LOG IS INSTALLED STILL LISTS ITS ROW, TIMED AND
+    /// STANDING ON ITS CENSUS** (BASE-COV-API-AS2; R3-09).
+    ///
+    /// This binary installs one shared sink (`crate::emitted::sink`), so the
+    /// branch that writes no `cache built` line is reached in a child of it,
+    /// which runs this one test and installs none. The child proves it ran by
+    /// the file it writes.
+    ///
+    /// Extremes: (1) no sink is installed in the child; (2) the census line
+    /// would not be admitted; (3) a held census is listed ready; (4) with the
+    /// build time it was handed; (5) the generation it stood on; (6) its entry
+    /// count; (7) and no reason; (8) a refused census is listed failed in its
+    /// own words. Combined: (9) a refused census AND no sink: failed, with no
+    /// generation and no entries; (10) one cache noted ready then failed with
+    /// no sink: one row, the newest state. Out of the box: (11) a build time of
+    /// `u64::MAX` is listed as handed.
+    #[test]
+    fn a_build_noted_where_no_log_is_installed_still_lists_its_row() {
+        if let Some(dir) = std::env::var_os(NO_SINK_CHILD) {
+            let dir = std::path::PathBuf::from(dir);
+            // (1)
+            assert!(telemetry::global().is_none(), "the child installs no sink");
+            // (2)
+            assert!(!telemetry::admits(telemetry::Level::Info, "api.census"));
+            let vendors = Vendors::default();
+            let (_, manifest) = held_nifty();
+            let held = Slot::detached(census::VendorCensus {
+                vendor: Vendor::Gdfl,
+                path: dir.join("gdfl.man"),
+                state: census::Census::Held {
+                    manifest: census::Manifests::single(manifest),
+                },
+            });
+            let refused = Slot::detached(census::VendorCensus {
+                vendor: Vendor::Dhan,
+                path: dir.join("dhan.man"),
+                state: census::Census::Unreadable {
+                    reason: "a header that does not decode".to_owned(),
+                    fault: census::Fault::Refused,
+                },
+            });
+            note_ready(&vendors, CENSUS, Vendor::Gdfl, u64::MAX, &held);
+            note_ready(&vendors, CENSUS, Vendor::Dhan, 7, &refused);
+            note_ready(&vendors, JOURNAL, Vendor::Gdfl, 3, &held);
+            note_ready(&vendors, JOURNAL, Vendor::Gdfl, 4, &refused);
+            let rows = vendors
+                .warmth
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let gdfl = row_named(&rows, CENSUS, Vendor::Gdfl);
+            // (3)
+            assert_eq!(gdfl.state, WarmState::Ready);
+            // (4), (11)
+            assert_eq!(gdfl.took_ms, Some(u64::MAX));
+            // (5)
+            assert!(gdfl.generation.is_some());
+            assert_eq!(gdfl.generation, held.census().generation());
+            // (6)
+            assert_eq!(gdfl.entries, Some(1));
+            // (7)
+            assert_eq!(gdfl.reason, None);
+            let dhan = row_named(&rows, CENSUS, Vendor::Dhan);
+            // (8)
+            assert_eq!(dhan.state, WarmState::Failed);
+            assert_eq!(
+                dhan.reason.as_deref(),
+                Some(refused.census().note().as_str())
+            );
+            // (9)
+            assert_eq!(
+                (dhan.generation, dhan.entries, dhan.took_ms),
+                (None, None, Some(7))
+            );
+            // (10)
+            let journal: Vec<&Warmth> = rows.iter().filter(|row| row.name == JOURNAL).collect();
+            assert_eq!(journal.len(), 1);
+            assert!(
+                journal
+                    .iter()
+                    .all(|row| row.state == WarmState::Failed && row.took_ms == Some(4))
+            );
+            std::fs::write(dir.join("child-ran"), b"noted").expect("the child's proof");
+            return;
+        }
+        let dir = crate::scratch::path("census-no-sink");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the child's folder");
+        let _ = crate::isolated::rerun(
+            "server::census_cache::tests::a_build_noted_where_no_log_is_installed_still_lists_its_row",
+            &[(NO_SINK_CHILD, dir.as_os_str())],
+        );
+        assert_eq!(
+            std::fs::read(dir.join("child-ran")).ok().as_deref(),
+            Some(&b"noted"[..]),
+            "the child noted every row"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN IMPORT JOURNAL THAT CANNOT BE READ IS LISTED FAILED BY ITS OWN
+    /// PATH, AND THE WARM GOES ON TO THE CACHES AFTER IT** (BASE-COV-API-AS2;
+    /// R3-09).
+    ///
+    /// Extremes: (1) the journal's cache is listed failed; (2) the reason names
+    /// the journal's path; (3) it carries no build time; (4) the census beside
+    /// it is ready; (5) the facet index after it is ready; (6) the index map
+    /// after it is listed too, failed without a manifest as its route refuses;
+    /// (7) the route's own count says the same words; (8) a vendor not offered
+    /// keeps no journal row. Combined: (9) a journal unread AND an absent
+    /// census: the census ready and empty, the journal failed; (10) the journal
+    /// failed AND every later cache still built: nothing is left warming. Out
+    /// of the box: (11) a regular file where the journal's folder belongs.
+    #[test]
+    fn an_import_journal_that_cannot_be_read_is_failed_by_its_path_and_the_warm_goes_on() {
+        let site = loaded("census-journal-unread");
+        // (11)
+        std::fs::write(
+            site.store_root.join("imports"),
+            b"a file where the journal's folder belongs",
+        )
+        .expect("a file at imports/");
+        start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
+        let rows = settled(&site);
+        let journal = row_named(&rows, JOURNAL, Vendor::Gdfl);
+        // (1)
+        assert_eq!(journal.state, WarmState::Failed, "{journal:?}");
+        // (2)
+        let why = journal.reason.clone().unwrap_or_default();
+        assert!(why.contains("gdfl.journal"), "{why}");
+        // (3)
+        assert_eq!(journal.took_ms, None);
+        // (4), (9)
+        let census_row = row_named(&rows, CENSUS, Vendor::Gdfl);
+        assert_eq!(
+            (census_row.state, census_row.generation),
+            (WarmState::Ready, None)
+        );
+        // (5)
+        assert_eq!(
+            row_named(&rows, FACETS, Vendor::Gdfl).state,
+            WarmState::Ready
+        );
+        // (6): as census_warm_tests' empty store lists it.
+        assert_eq!(
+            row_named(&rows, INDEX_MAP, Vendor::Gdfl).state,
+            WarmState::Failed
+        );
+        // (7)
+        let behind = crate::server::store_route::behind(&site, Vendor::Gdfl);
+        assert_eq!(behind.unread.as_deref(), Some(why.as_str()));
+        // (8)
+        assert!(
+            rows.iter()
+                .all(|row| row.vendor == Vendor::Gdfl || row.name == CENSUS)
+        );
+        // (10)
+        assert!(rows.iter().all(|row| row.state != WarmState::Warming));
+    }
+
+    /// **A MIGRATED VENDOR'S SEGMENT IS STAMPED BY WHAT ITS OWN `stat` SAID, AND
+    /// ONLY A ROW THE STAMP COULD HAVE READ IS GIVEN THE PARTITIONS' TIME**
+    /// (BASE-COV-API-AS2; D-3316, D-0695).
+    ///
+    /// Extremes: (1) a segment name that is a link to itself is stamped by the
+    /// fault its `stat` met, never as missing; (2) an empty segment directory is
+    /// listed with no epoch; (3) a segment that is not there is missing; (4) the
+    /// partitions' latest time is the vendor directory's or the empty segment's,
+    /// the faulted one adding none; (5) the census reads the link refused, kept
+    /// under that stamp: a second read is the same slot; (6) that refusal is
+    /// given the partitions' latest time; (7) an epoch installed in the empty
+    /// segment moves the stamp; (8) and is stamped by its number. Combined:
+    /// (9) a partitioned stamp AND a row read absent: no time; (10) a
+    /// partitioned stamp AND a root the stamps did not see as a directory: no
+    /// time, even for the refusal. Out of the box: (11) a symbolic link whose
+    /// target is its own name, where a partition belongs.
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one migrated layout, then every stamp and row its Extremes: line names"
+    )]
+    fn a_partition_segment_is_stamped_by_what_its_own_stat_said() {
+        use brutex_core::instrument::Segment;
+        let dir = crate::scratch::path("census-segment-stamps-assets");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let site = site("census-segment-stamps", &dir);
+        let root = site.store_root.clone();
+        let index = pull::manifest::segment_dir(&root, Vendor::Gdfl, Segment::Index);
+        let cash = pull::manifest::segment_dir(&root, Vendor::Gdfl, Segment::Cash);
+        std::fs::create_dir_all(&cash).expect("an empty CASH partition");
+        // (11)
+        std::os::unix::fs::symlink("INDEX", &index).expect("a link that names itself");
+        let Err(looped) = std::fs::metadata(&index)
+            .map(drop)
+            .map_err(|why| why.kind())
+        else {
+            panic!("a link to itself resolved");
+        };
+        assert_ne!(looped, std::io::ErrorKind::NotFound);
+        let ManifestStamp::Partitioned(stamp) = vendor_stamp(&root, Vendor::Gdfl) else {
+            panic!("a vendor directory is stamped by its partitions");
+        };
+        // (1), (2), (3)
+        assert!(
+            matches!(
+                stamp.segments,
+                [
+                    SegmentStamp::Faulted(kind),
+                    SegmentStamp::Listed { epoch: None, .. },
+                    SegmentStamp::Missing,
+                ] if kind == looped
+            ),
+            "{stamp:?}"
+        );
+        // (4)
+        let modified = |path: &std::path::Path| {
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .expect("a modified time")
+        };
+        let vendor_dir = pull::manifest::vendor_dir(&root, Vendor::Gdfl);
+        assert_eq!(stamp.modified(), modified(&vendor_dir).max(modified(&cash)));
+        // (5)
+        let (_, read) = vendor_census(&site, Vendor::Gdfl);
+        let (_, again) = vendor_census(&site, Vendor::Gdfl);
+        assert!(Arc::ptr_eq(read.slot(), again.slot()), "kept, and a hit");
+        let refused = read.census().expect("one row").clone();
+        assert!(
+            matches!(
+                refused.state,
+                census::Census::Unreadable {
+                    fault: census::Fault::Refused,
+                    ..
+                }
+            ),
+            "{}",
+            refused.note()
+        );
+        // (6)
+        let mut manifests = vec![ManifestStamp::Missing; Vendor::ALL.len()];
+        if let Some(at) = manifests.get_mut(Vendor::Gdfl as usize) {
+            *at = ManifestStamp::Partitioned(stamp);
+        }
+        let stamps = CensusStamps {
+            manifests,
+            root_is_dir: true,
+        };
+        assert_eq!(stamps.modified(&refused), Some(stamp.modified()));
+        // (9)
+        let absent = census::VendorCensus {
+            state: census::Census::Absent,
+            ..refused.clone()
+        };
+        assert_eq!(stamps.modified(&absent), None);
+        // (10)
+        let away = CensusStamps {
+            root_is_dir: false,
+            ..stamps.clone()
+        };
+        assert_eq!(away.modified(&refused), None);
+        // (7), (8)
+        std::fs::write(
+            pull::manifest::epoch_path(&root, Vendor::Gdfl, Segment::Cash, 1),
+            b"an epoch's bytes",
+        )
+        .expect("an epoch");
+        let ManifestStamp::Partitioned(moved) = vendor_stamp(&root, Vendor::Gdfl) else {
+            panic!("still partitioned");
+        };
+        assert_ne!(moved, stamp);
+        assert!(
+            matches!(
+                moved.segments,
+                [
+                    SegmentStamp::Faulted(_),
+                    SegmentStamp::Listed {
+                        epoch: Some((1, _, _)),
+                        ..
+                    },
+                    SegmentStamp::Missing,
+                ]
+            ),
+            "{moved:?}"
+        );
+    }
+
+    /// **AN EPOCH ITS SEGMENT LISTS BUT WILL NOT LET BE MEASURED IS STAMPED BY
+    /// THAT FAULT, NEVER AS NO EPOCH** (BASE-COV-API-AS2; D-3316, D-0695).
+    ///
+    /// Root reads past mode bits, so this runs as uid 65534 (D-0995).
+    ///
+    /// Extremes: (1) a searchable segment is listed with its epoch's number;
+    /// (2) made listable but not searchable, its listing still names epoch 1;
+    /// (3) the epoch's own `stat` is refused; (4) the segment is stamped by that
+    /// fault's kind; (5) the fault is a key that holds still; (6) the mode
+    /// change moves the key; (7) searchable again, it is listed again; (8) the
+    /// other segments stay missing throughout. Combined: (9) an epoch present
+    /// AND unmeasurable: a fault, never "no epoch"; (10) a listing that answers
+    /// AND a `stat` that is refused in one stamp: the stamp says the refusal.
+    /// Out of the box: (11) a directory the process may list but not enter.
+    #[cfg(unix)]
+    #[test]
+    fn an_epoch_listed_in_a_segment_that_may_not_be_searched_is_stamped_its_fault() {
+        crate::isolated::where_permission_binds(
+            "server::census_cache::tests::an_epoch_listed_in_a_segment_that_may_not_be_searched_is_stamped_its_fault",
+            || {
+                use brutex_core::instrument::Segment;
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = crate::scratch::path("census-unsearchable-segment");
+                let _ = std::fs::remove_dir_all(&root);
+                let fno = pull::manifest::segment_dir(&root, Vendor::Gdfl, Segment::Fno);
+                std::fs::create_dir_all(&fno).expect("the FNO partition");
+                let epoch = pull::manifest::epoch_path(&root, Vendor::Gdfl, Segment::Fno, 1);
+                std::fs::write(&epoch, b"bytes no census reads here").expect("an epoch");
+                let open = vendor_stamp(&root, Vendor::Gdfl);
+                // (11)
+                std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o600))
+                    .expect("listable, not searchable");
+                let listed = census::current_epoch(&fno);
+                let measured = std::fs::metadata(&epoch)
+                    .map(drop)
+                    .map_err(|why| why.kind());
+                let shut = vendor_stamp(&root, Vendor::Gdfl);
+                let still = vendor_stamp(&root, Vendor::Gdfl);
+                std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755))
+                    .expect("searchable again");
+                let reopened = vendor_stamp(&root, Vendor::Gdfl);
+                let _ = std::fs::remove_dir_all(&root);
+                // (1), (8)
+                assert!(
+                    matches!(
+                        open,
+                        ManifestStamp::Partitioned(PartitionStamp {
+                            segments: [
+                                SegmentStamp::Missing,
+                                SegmentStamp::Missing,
+                                SegmentStamp::Listed {
+                                    epoch: Some((1, _, _)),
+                                    ..
+                                },
+                            ],
+                            ..
+                        })
+                    ),
+                    "{open:?}"
+                );
+                // (2), (10)
+                assert_eq!(listed, Ok(Some(1)), "the listing still names the epoch");
+                // (3)
+                assert_eq!(measured, Err(std::io::ErrorKind::PermissionDenied));
+                // (4), (8), (9)
+                assert!(
+                    matches!(
+                        shut,
+                        ManifestStamp::Partitioned(PartitionStamp {
+                            segments: [
+                                SegmentStamp::Missing,
+                                SegmentStamp::Missing,
+                                SegmentStamp::Faulted(std::io::ErrorKind::PermissionDenied),
+                            ],
+                            ..
+                        })
+                    ),
+                    "{shut:?}"
+                );
+                // (5)
+                assert_eq!(shut, still);
+                // (6)
+                assert_ne!(open, shut);
+                // (7)
+                assert!(
+                    matches!(
+                        reopened,
+                        ManifestStamp::Partitioned(PartitionStamp {
+                            segments: [
+                                SegmentStamp::Missing,
+                                SegmentStamp::Missing,
+                                SegmentStamp::Listed {
+                                    epoch: Some((1, _, _)),
+                                    ..
+                                },
+                            ],
+                            ..
+                        })
+                    ),
+                    "{reopened:?}"
+                );
+            },
+        );
+    }
 }
