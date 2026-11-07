@@ -358,4 +358,17 @@ indexstopqualificationjson::saved_tests::a_forty_session_training_window_is_meas
 The logs r3_24 change restores a premise and adds no assert: red before it, 5 of 12 runs alone at
 crates/api/src/logs.rs:10249 (`audited_from < ring_from`); green after it, 20 of 20. The four other tests of this
 continuation changed only their doc comments (`Extremes:` lines).
+
+Continuation -5, run red6: the Admitted launch test (new) and the Rejected launch test (its launch moved into the
+shared child half `launched_settings`). Tree: a local, never-pushed commit red6 (0036c049) over code tip f0c9b20f
+holding two hand changes; built with the repo toolchain (rustc 1.97.1), CARGO_TARGET_DIR=/var/tmp/as3/K4, cargo test
+-p api --lib --locked --no-run (stamped); run as api-<hash> --exact <the 2 full names>: "test result: FAILED. 0
+passed; 2 failed".
+
+indexstopqualificationjson::saved_tests::a_setting_that_passes_every_check_is_ranked_admitted (new)
+  hand change: crates/api/src/indexstopqualificationjson.rs:235: «Admitted => admitted += 1,» -> «Admitted => rejected += 1,»
+  red at crates/api/src/indexstopqualificationjson_saved_tests.rs:792 (the child): summary left {"institutional_admitted":"0","rejected":"1",...}; the parent at :260
+indexstopqualificationjson::saved_tests::a_forty_session_training_window_is_measured_whole_and_ranked_rejected (moved into the shared child half)
+  hand change: crates/api/src/indexstopqualificationjson.rs:236: «Rejected => rejected += 1,» -> «Rejected => unmeasured += 1,»
+  red at crates/api/src/indexstopqualificationjson_saved_tests.rs:725 (the child): summary left {"rejected":"0","unmeasured":"4",...}; the parent at :260
 `````
