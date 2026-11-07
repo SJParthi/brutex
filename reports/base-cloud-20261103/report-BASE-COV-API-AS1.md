@@ -16,9 +16,16 @@ replaces its figures.
   module declared at the end of `credential_law.rs`), `page_report_route::tests::a_report_in_a_process_with_no_log_..`
   (169:28 False, 172, a child with no log), `backtest::tests::a_ledger_is_appendable_only_..` (927:40 False).
 
-NEXT: batch 2 (`chain.rs` 696-708, 819/1006, 837-843, 1205; `pullrun.rs` 1725, 2092, 4004/4044/4049; `facets.rs`
-794, 818-825), then `bars.rs`' merge-plan arms, then `recovery.rs`; then Route B whole:api on the code tip and the
-lists, report and json.
+- `9456e268`: four tests, red 4 of 4 under four hand changes (reverted): `server::chain::tests::a_month_that_opens_..`
+  (706-708 and 837-843: month files whose non-tail checksum block was changed after writing, so the month opens and
+  the block refuses every read that meets it), `served_routes_tests::every_pooled_door_..` with `/chain.json` added to
+  its crowded store-read doors (1205), `server::facets::tests::a_kick_while_a_build_is_pending_..` (794),
+  `pullrun::tests::a_run_whose_document_holds_no_row_..` (4004:20 and 4044:24 False).
+- `759dc617`: `bars::cloud_mutant_tests::every_merge_arm_a_direct_call_reaches_..` (956, 1788:29 and 1868:29 True,
+  2175, 2242, 2367, 2454, 2492), red with the chain test's spot arm, 2 of 2. Proved (U) from the code, to be listed:
+  `bars.rs` 2218, 2245, 2253, 2256, 2267, 2370, 2378, 2503, 2571, 2574, 2607 and `pullrun.rs` 1725, 2092 True, 4049.
+
+NEXT: `recovery.rs`' reachable rows; then Route B whole:api on the code tip and the lists, report and json.
 
 TOKEN `BASE-COV-API-AS1-20261105-3` (the second continuation; the first session's was `BASE-COV-API-AS1-20261105-1`,
 the first continuation's `BASE-COV-API-AS1-20261105-2`); branch `cloud/cov-api-as1-20261105`, cut from the kit
