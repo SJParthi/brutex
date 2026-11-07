@@ -1427,3 +1427,504 @@ async fn a_shares_assessment_reads_its_cash_session_and_its_withdrawn_days() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Every F&O underlying a recovery may name: the universe table less the four
+/// indices `checked` refuses.
+fn recoverable() -> Vec<&'static str> {
+    brutex_core::universe::FNO_UNDERLYINGS
+        .iter()
+        .copied()
+        .filter(|name| {
+            !matches!(
+                *name,
+                "FINNIFTY" | "MIDCPNIFTY" | "NIFTYNXT50" | "NIFTYNEXT50"
+            )
+        })
+        .collect()
+}
+
+/// **EVERY 100,000-UNIT BOUND REFUSES BY NAME, A UNIT OF TWO SYMBOLS IS NO
+/// UNIT, AND A SOURCE MINUTE OUTSIDE THE AUDITED SHAPE IS REFUSED**
+/// (BASE-COV-API repair 3, D-8661). `plan`, `validate_seal`, `append_attempt`,
+/// `symbol` and `outside_session_count`, driven directly; nothing is
+/// truncated and nothing is written past a bound. Extremes: a plan of 477
+/// one-day legs, each naming every recoverable underlying over its own
+/// window of January 2024 (100,170 windows: refused at the 100,001st, by
+/// name); a seal over 100,001 scan windows (refused: oversized); a shared
+/// attempt index holding 100,000 units asked for a new one (refused by
+/// name, nothing appended to either journal); the same index asked for a
+/// unit it already holds (appended: the bound counts units, not
+/// attempts); a unit naming two symbols (refused); one naming none
+/// (refused); one naming one (that symbol); a source minute on a day before
+/// the audited shape's first (refused: outside the shape); and, at once, a
+/// shape over every day the calendar of record measures with no minute
+/// stored (refused: the shape itself is cut at its gap bound), and a plan
+/// one window under its bound beside a seal one window over (the plan
+/// answered, the seal refused); out of the box, a minute stored on the
+/// Sunday before an audited Monday (outside the shape, never a conflict
+/// counted).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every bound beside the case one unit under it"
+)]
+fn every_unit_bound_refuses_by_name_and_a_minute_outside_the_audited_shape_is_refused() {
+    let today = today_or_now();
+    let members = recoverable();
+    assert!(members.len() > 200, "{}", members.len());
+    let windows: Vec<Window> = (1_u8..=31)
+        .flat_map(|from| (from..=31).map(move |to| (from, to)))
+        .map(|(from, to)| Window::new(on(2024, 1, from), on(2024, 1, to)).expect("a window"))
+        .collect();
+    let leg = |window: Window| {
+        let mut body = format!(
+            "target=fno&vendor=zerodha&cash_identity=zerodha_cross_checked&granularity=1day&from={}&to={}&recovery_kind=scan",
+            window.from(),
+            window.to()
+        );
+        // ENCODED AS `canonical` ENCODES ONE: an underlying such as `M&M`
+        // would otherwise split into two fields.
+        for member in &members {
+            let _ = write!(body, "&member={}", encode(member));
+        }
+        Leg {
+            route: Route::Spot,
+            vendor: "zerodha".to_owned(),
+            dir: "1day".to_owned(),
+            label: "fixture".to_owned(),
+            body,
+        }
+    };
+    let over = 100_001_usize.div_ceil(members.len());
+    let why = plan(windows.iter().take(over).copied().map(leg).collect(), today)
+        .expect_err("past the bound");
+    assert_eq!(
+        why,
+        "recovery plan exceeds its reported 100,000-window bound; nothing was truncated"
+    );
+    let under = 100_000 / members.len();
+    let planned = plan(
+        windows.iter().take(under).copied().map(leg).collect(),
+        today,
+    )
+    .expect("under the bound");
+    assert_eq!(planned.len(), under * members.len());
+
+    // A SEAL OVER 100,001 SCAN WINDOWS.
+    let scans: Vec<Record> = windows
+        .iter()
+        .flat_map(|window| {
+            members
+                .iter()
+                .map(move |member| record(canonical(member, "1day", *window, "scan")))
+        })
+        .take(100_001)
+        .collect();
+    assert_eq!(scans.len(), 100_001);
+    let why = validate_seal(&sealed(&scans, CONTROL_BODY), scope_identity(&scans))
+        .expect_err("oversized");
+    assert!(why.contains("empty, oversized"), "{why}");
+
+    // A SHARED ATTEMPT INDEX AT ITS BOUND.
+    let (root, site) = refused_site("recovery-cover-bounds");
+    let mut plan_journal = Journal::open(&plan_path(&site, [21; 32])).expect("a plan journal");
+    let mut shared = Journal::open(&root.join("recovery-shared-fixture.bin")).expect("a ledger");
+    for n in 0_u32..100_000 {
+        let mut key = [0_u8; 32];
+        key[..4].copy_from_slice(&n.to_le_bytes());
+        shared.latest.insert(
+            key,
+            Record {
+                key,
+                ..scans[0].clone()
+            },
+        );
+    }
+    let fresh = scans[1].clone();
+    let why = append_attempt(&mut plan_journal, &mut shared, fresh.clone()).expect_err("bound");
+    assert_eq!(
+        why,
+        "shared recovery attempt index reached its 100,000-unit bound"
+    );
+    assert!(
+        !plan_journal.latest.contains_key(&fresh.key),
+        "nothing appended"
+    );
+    assert_eq!(shared.latest.len(), 100_000);
+    let held = shared.latest[&[0_u8; 32]].clone();
+    append_attempt(&mut plan_journal, &mut shared, held.clone()).expect("a unit it holds");
+    assert_eq!(plan_journal.latest.len(), 1, "appended to the plan too");
+    drop(plan_journal);
+    drop(shared);
+    let _ = std::fs::remove_dir_all(&root);
+
+    // A UNIT OF TWO SYMBOLS, OF NONE, OF ONE.
+    let day = on(2026, 7, 1);
+    let one = canonical(
+        "NIFTY",
+        "1min",
+        Window::new(day, day).expect("a day"),
+        "scan",
+    );
+    let parsed = |body: &str| ingest::parse_spot(body, today).expect("a spot request");
+    assert_eq!(symbol(&parsed(&one)), Ok("NIFTY"));
+    for body in [
+        one.replace("member=NIFTY", "member=NIFTY&member=BANKNIFTY"),
+        one.replace("member=NIFTY", ""),
+    ] {
+        assert_eq!(
+            symbol(&parsed(&body)),
+            Err("recovery unit must name exactly one symbol".to_owned()),
+            "{body}"
+        );
+    }
+
+    // A MINUTE OUTSIDE THE AUDITED SHAPE.
+    let monday = on(2026, 8, 31);
+    let number = i64::from(monday.days_from_epoch());
+    for before in [on(2026, 8, 28), on(2026, 8, 30)] {
+        assert_eq!(
+            outside_session_count(&[at(before, 600, 0)], "NIFTY", number, number, None),
+            Err("stored minute lies outside the audited session shape".to_owned()),
+            "{before}"
+        );
+    }
+    assert_eq!(
+        outside_session_count(
+            &[],
+            "NIFTY",
+            pull::calendar::FIRST_DAY,
+            pull::calendar::LAST_DAY,
+            None
+        ),
+        Err("independent session shape could not be fully checked".to_owned())
+    );
+}
+
+/// A sound active pointer for plan `id`: activated once, keyed by its body.
+fn pointer(id: [u8; 32]) -> Record {
+    Record {
+        attempts: 1,
+        key: id,
+        ..record(hex(id))
+    }
+}
+
+/// **A SUCCESSOR IS PREPARED ONLY OVER A MISSING PREDECESSOR AND A QUEUED
+/// SCOPE THAT MATCHES, AND ACTIVATED ONLY ONCE PREPARED WHOLE**
+/// (BASE-COV-API repair 3, D-8661). `prepare_successor` and
+/// `preflight_submission`, driven directly over durable states this module's
+/// own journals write: an active pointer naming the predecessor, the shared
+/// attempt ledger, and the successor's plan in each shape it may be found in.
+/// Extremes: a successor the pointer history already names (refused:
+/// already activated); a predecessor whose plan is still on disk (refused:
+/// nothing replaced); a sound preparation (sealed, its scope queued); the
+/// same preparation asked again (answered, nothing appended twice); a
+/// successor plan holding a window outside the scope asked (refused:
+/// changed scope); one holding the scope's window verified (refused); one
+/// holding the window queued but with committed rows (refused: the window
+/// disagrees); an activation over a plan holding the scope with no seal
+/// (refused: not prepared); and, at once, an activation over a sealed plan
+/// asked with a window it never prepared (refused: incomplete scope), and
+/// the predecessor's plan on disk while the successor is already named
+/// (refused for the activation first); out of the box, a sound preparation
+/// read back by the activation check it was made for (accepted).
+#[test]
+fn a_successor_is_prepared_only_over_a_missing_predecessor_and_activated_only_once_whole() {
+    let (root, site) = refused_site("recovery-cover-successor");
+    let day = on(2026, 7, 1);
+    let window = Window::new(day, day).expect("a day");
+    let unit = record(canonical("NIFTY", "1min", window, "scan"));
+    // THE PREDECESSOR IS THE SCOPE'S OWN IDENTITY, as `submission` demands
+    // and `validate_seal` checks of every successor seal.
+    let predecessor = scope_identity(std::slice::from_ref(&unit));
+    let seal = format!(
+        "{SUCCESSOR_POLICY}:{}:{}",
+        hex(predecessor),
+        hex([0x52; 32])
+    );
+    let id = brutex_core::blake3::hash(seal.as_bytes());
+    let asked = |units: Vec<Record>| Submission {
+        id,
+        units,
+        successor: Some((predecessor, seal.clone())),
+        prepare_only: true,
+    };
+    let active = active_path(&site);
+    Journal::open(&active)
+        .expect("the pointer journal")
+        .append(pointer(predecessor))
+        .expect("the predecessor's pointer");
+    drop(Journal::open(&super::root(&site).join("attempts.bin")).expect("the shared ledger"));
+    let plan = plan_path(&site, id);
+    let reset = |rows: &[Record]| {
+        let _ = std::fs::remove_file(&plan);
+        let mut journal = Journal::open(&plan).expect("a successor plan");
+        for row in rows {
+            journal.append(row.clone()).expect("a row");
+        }
+    };
+
+    // ALREADY ACTIVATED, AND A PREDECESSOR STILL ON DISK.
+    Journal::open(&active)
+        .expect("the pointer journal")
+        .append(pointer(id))
+        .expect("the successor's pointer");
+    let held = plan_path(&site, predecessor);
+    std::fs::write(&held, b"").expect("the predecessor's plan");
+    assert_eq!(
+        prepare_successor(&site, &asked(vec![unit.clone()])),
+        Err("successor was already activated; preparation cannot reset it".to_owned()),
+        "the activation is refused first"
+    );
+    std::fs::remove_file(&active).expect("the pointers reset");
+    Journal::open(&active)
+        .expect("the pointer journal")
+        .append(pointer(predecessor))
+        .expect("the predecessor's pointer");
+    assert_eq!(
+        prepare_successor(&site, &asked(vec![unit.clone()])),
+        Err("predecessor plan exists; the missing-plan repair cannot replace it".to_owned())
+    );
+    std::fs::remove_file(&held).expect("the predecessor's plan removed");
+
+    // A SOUND PREPARATION, TWICE, READ BACK BY ITS ACTIVATION CHECK.
+    assert_eq!(prepare_successor(&site, &asked(vec![unit.clone()])), Ok(()));
+    assert_eq!(prepare_successor(&site, &asked(vec![unit.clone()])), Ok(()));
+    let prepared = crate::recovery_journal::snapshot(&plan).expect("the prepared plan");
+    assert_eq!(
+        prepared.latest.len(),
+        2,
+        "the window and the seal, once each"
+    );
+    assert_eq!(
+        preflight_submission(&site, &asked(vec![unit.clone()])),
+        Ok(())
+    );
+    let other = record(canonical("BANKNIFTY", "1min", window, "scan"));
+    assert_eq!(
+        preflight_submission(&site, &asked(vec![unit.clone(), other.clone()])),
+        Err("prepared successor scope is incomplete; activation refused".to_owned())
+    );
+
+    // A SUCCESSOR PLAN IN EVERY SHAPE IT MAY BE FOUND IN.
+    let changed =
+        "existing successor contains changed scope, activation or work; nothing was reset";
+    reset(std::slice::from_ref(&other));
+    assert_eq!(
+        prepare_successor(&site, &asked(vec![unit.clone()])),
+        Err(changed.to_owned()),
+        "a window outside the scope"
+    );
+    reset(&[Record {
+        status: Status::Verified,
+        ..unit.clone()
+    }]);
+    assert_eq!(
+        prepare_successor(&site, &asked(vec![unit.clone()])),
+        Err(changed.to_owned()),
+        "the window verified"
+    );
+    reset(&[Record {
+        committed: 7,
+        ..unit.clone()
+    }]);
+    assert_eq!(
+        prepare_successor(&site, &asked(vec![unit.clone()])),
+        Err("existing successor window disagrees with the requested queued scope".to_owned())
+    );
+    reset(std::slice::from_ref(&unit));
+    assert_eq!(
+        preflight_submission(&site, &asked(vec![unit.clone()])),
+        Err("successor must be prepared with its exact predecessor and generation before activation".to_owned())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A START REFUSED A RUN SLOT OR A DURABLE ACTIVATION SAYS SO AND STOPS,
+/// AND A PLAN NEVER SEALED IS NEVER SEEDED FOR WORK** (BASE-COV-API repair
+/// 3, D-8661). `start` over a site whose run slot another pull holds, and
+/// over one whose first activation cannot stage its pointer (a folder where
+/// the staging file goes); `seeded` with no new scope over a plan on disk
+/// with no seal. Extremes: a start while a pull owns the run slot (`409`,
+/// not started); the slot left as that pull holds it; a start whose
+/// activation cannot stage its pointer (`503`, not started, the reason
+/// named); the run left finished and blocked by that reason; no pointer
+/// published by it (`active.bin` absent); a plan journal without a seal
+/// asked to be seeded with no new windows (refused: not durably seeded);
+/// the same plan with its seal (seeded); a start asked twice after the
+/// staging folder is gone (the first starts); and, at once, a start whose
+/// run slot is free but whose staging fails after the plan was written (the
+/// plan kept, the pointer never linked), and an unsealed plan asked to be
+/// seeded on a store whose recovery folder already exists (refused, the
+/// folder untouched); out of the box, a staging folder holding a file of
+/// its own.
+#[tokio::test]
+async fn a_start_refused_a_slot_or_an_activation_says_so_and_a_plan_never_sealed_is_never_seeded() {
+    let day = on(2026, 7, 1);
+    let body = legs_of(&[("NIFTY", "1min", day, day)]);
+    let ask = |site: &Loaded| start(axum::extract::State(Loaded::clone(site)), body.clone());
+
+    // A PULL OWNS THE RUN SLOT.
+    let (slot_root, slot_site) = refused_site("recovery-cover-slot");
+    *slot_site.run.lock().expect("the run slot") = Some(Progress::claimed());
+    let (status, _, said) = ask(&slot_site).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    let said: serde_json::Value = serde_json::from_str(&said).expect("JSON");
+    assert_eq!(said["started"], false);
+    assert!(
+        said["why"]
+            .as_str()
+            .is_some_and(|why| why.starts_with("a pull already owns the run slot")),
+        "{said}"
+    );
+    assert!(
+        slot_site
+            .run
+            .lock()
+            .expect("the run slot")
+            .as_ref()
+            .is_some_and(Progress::running),
+        "the pull still holds it"
+    );
+    let _ = std::fs::remove_dir_all(&slot_root);
+
+    // THE FIRST POINTER CANNOT BE STAGED.
+    let (stage_root, stage_site) = refused_site("recovery-cover-staging");
+    let staging = super::root(&stage_site).join("active.bin.first");
+    std::fs::create_dir_all(&staging).expect("a folder at the staging name");
+    std::fs::write(staging.join("held"), b"a file of its own").expect("a file inside");
+    let (status, _, said) = ask(&stage_site).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{said}");
+    let said: serde_json::Value = serde_json::from_str(&said).expect("JSON");
+    assert_eq!(said["started"], false);
+    let why = said["why"].as_str().expect("the reason").to_owned();
+    assert!(!why.is_empty());
+    let finished = stage_site
+        .run
+        .lock()
+        .expect("the run slot")
+        .as_ref()
+        .and_then(|progress| progress.finished.clone())
+        .expect("the run finished");
+    assert!(finished.starts_with("Recovery BLOCKED: "), "{finished}");
+    assert!(finished.contains(&why), "{finished}");
+    assert!(!active_path(&stage_site).exists(), "no pointer was linked");
+    assert!(staging.join("held").exists(), "the folder untouched");
+    let _ = std::fs::remove_dir_all(&stage_root);
+
+    // A PLAN WITH NO SEAL IS NEVER SEEDED FOR WORK.
+    let (seed_root, seed_site) = refused_site("recovery-cover-unsealed");
+    let window = Window::new(day, day).expect("a day");
+    let scans = vec![record(canonical("NIFTY", "1min", window, "scan"))];
+    let id = scope_identity(&scans);
+    Journal::open(&plan_path(&seed_site, id))
+        .expect("a plan journal")
+        .append(scans[0].clone())
+        .expect("a window");
+    assert_eq!(
+        seeded(&seed_site, id, None).map(|_| ()),
+        Err("recovery plan was not durably seeded; no vendor work is allowed".to_owned())
+    );
+    assert!(super::root(&seed_site).is_dir(), "the folder untouched");
+    let mut control = record(CONTROL_BODY.to_owned());
+    control.key = CONTROL;
+    Journal::open(&plan_path(&seed_site, id))
+        .expect("the plan journal")
+        .append(control)
+        .expect("its seal");
+    assert!(seeded(&seed_site, id, None).is_ok(), "sealed: seeded");
+    let _ = std::fs::remove_dir_all(&seed_root);
+}
+
+/// The variable naming the proof file of
+/// [`a_pointer_to_a_plan_that_is_gone_or_no_file_is_refused_and_a_page_under_a_full_pool_says_so`]'s
+/// child.
+const FULL_POOL_CHILD: &str = "BRUTEX_RECOVERY_FULL_POOL_CHILD";
+
+/// **A POINTER TO A PLAN THAT IS GONE OR IS NO FILE IS REFUSED AT THE BOOT
+/// CHECK AND AT RESUME, AND A PAGE ASKED UNDER A FULL STORE-READ POOL SAYS
+/// ITS JOURNAL WAS NOT READ** (BASE-COV-API repair 3, D-8661).
+/// `in_flight_unopened` and `resume_with` over a sound pointer whose plan is
+/// missing or is a folder; `page` in a child of this test binary whose
+/// store-read pool is crowded (the child is alone, so no other test is
+/// starved), proved by the file its parent reads. Extremes: no pointer at
+/// all (nothing in flight, nothing resumed); a pointer to a plan that is
+/// gone, at the boot check (the missing plan named); the same at resume
+/// (named the same); a pointer to a plan that is a folder, at the boot check
+/// (refused, never called missing); the same at resume (refused); the page
+/// with the pool full (the journal not read, the pool's bound said); the
+/// page's run state still shown beside it (no run yet); the folder left as
+/// it was; and, at once, a folder plan asked at the boot check and at resume
+/// in turn (both refused the same way), and the full-pool page over a store
+/// with no recovery history at all (the pool's refusal said, not the
+/// history's); out of the box, a resume whose driver is never reached
+/// (refused before any work).
+#[tokio::test]
+async fn a_pointer_to_a_plan_that_is_gone_or_no_file_is_refused_and_a_page_under_a_full_pool_says_so()
+ {
+    if let Some(proof) = std::env::var_os(FULL_POOL_CHILD) {
+        let (root, site) = refused_site("recovery-cover-full-pool");
+        let crowd = crate::detail::crowd(crate::detail::Named::StoreRead);
+        let axum::response::Html(html) = page(axum::extract::State(Loaded::clone(&site))).await;
+        drop(crowd);
+        std::fs::write(proof, html).expect("the child's proof");
+        let _ = std::fs::remove_dir_all(&root);
+        return;
+    }
+    let never = |_site: Loaded, _id: [u8; 32], _prepared: Result<Journal, String>| -> () {
+        unreachable!("no driver runs over a refused plan")
+    };
+    let (root, site) = refused_site("recovery-cover-pointer");
+    assert_eq!(in_flight_unopened(&site), Ok(None), "no pointer");
+    assert_eq!(resume_with(Loaded::clone(&site), never), Ok(false));
+    let day = on(2026, 7, 1);
+    let scans = vec![record(canonical(
+        "NIFTY",
+        "1min",
+        Window::new(day, day).expect("a day"),
+        "scan",
+    ))];
+    let id = scope_identity(&scans);
+    Journal::open(&active_path(&site))
+        .expect("the pointer journal")
+        .append(pointer(id))
+        .expect("a sound pointer");
+    assert_eq!(in_flight_unopened(&site), Err(missing_plan(id)), "gone");
+    assert_eq!(
+        resume_with(Loaded::clone(&site), never),
+        Err(missing_plan(id))
+    );
+    let plan = plan_path(&site, id);
+    std::fs::create_dir_all(&plan).expect("a folder at the plan's path");
+    for refused in [
+        in_flight_unopened(&site).map(|_| ()),
+        resume_with(Loaded::clone(&site), never).map(|_| ()),
+    ] {
+        let why = refused.expect_err("a folder is no plan");
+        assert_ne!(why, missing_plan(id), "never called missing");
+        assert!(!why.is_empty());
+    }
+    assert!(plan.is_dir(), "the folder left as it was");
+    let _ = std::fs::remove_dir_all(&root);
+
+    // THE PAGE, IN A CHILD WHOSE STORE-READ POOL IS FULL.
+    let dir = crate::scratch::path("recovery-cover-full-pool-proof");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch folder");
+    let proof = dir.join("child-ran");
+    let _ = crate::isolated::rerun(
+        "recovery::cover_tests::a_pointer_to_a_plan_that_is_gone_or_no_file_is_refused_and_a_page_under_a_full_pool_says_so",
+        &[(FULL_POOL_CHILD, proof.as_os_str())],
+    );
+    let html = std::fs::read_to_string(&proof).expect("the child ran and wrote its proof");
+    assert!(html.contains("the recovery journal was not read"), "{html}");
+    assert!(
+        html.contains(&format!(
+            "at most {} store reads run at once",
+            crate::detail::MAX_STORE_READ_CONCURRENT
+        )),
+        "{html}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
