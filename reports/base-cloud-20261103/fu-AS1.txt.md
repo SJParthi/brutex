@@ -1,11 +1,11 @@
 # fu-AS1.txt.md
 
-Session BASE-COV-API-AS1 (second continuation, token BASE-COV-API-AS1-20261105-3). One fenced block below: every uncovered row of G1's files that is an (F) failing arm of an assert or panic in test code whose statement runs, or a (U) row with its proof in brackets (on every target unless the proof names one).
+Session BASE-COV-API-AS1 (third continuation, token BASE-COV-API-AS1-20261105-4). One fenced block below: every uncovered row of G1's files that is an (F) failing arm of an assert or panic in test code whose statement runs, or a (U) row with its proof in brackets (on every target unless the proof names one).
 
 `````text
-BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip 5f028785a452c773dd51f14887e22d6421b144d1, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 11 test files AS1 added, 216)
-G1 files read 87 of 87 (SHARDS.md's 76 and the 11 test files AS1 declared in them): lines 60195/60999 (804 uncovered), branches 4293/4986 (693 uncovered sides)
-classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 10 sides; (F) 139 lines 397 sides; (U) 71 lines 37 sides
+BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip 4325492338f45405d8ba4bea05f1e16fd4549a2f, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
+G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 61508/62240 (732 uncovered), branches 4342/5000 (658 uncovered sides)
+classified: GAP prod 342 lines 110 sides; GAP test 75 lines 81 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 10 sides; (F) 143 lines 400 sides; (U) 84 lines 57 sides
 (F) LINE crates/api/src/assets.rs:1137  default_web_dir().display()
 (F) LINE crates/api/src/assets.rs:1453  assets.named().display()
 (F) LINE crates/api/src/assets.rs:1566  panic!(
@@ -14,7 +14,7 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) BRANCH crates/api/src/assets.rs:1565:13 False  let Build::Stale { ref newer, by_secs } = *built.build() else {
 (F) BRANCH crates/api/src/assets.rs:1582:13 False  note.contains("STALE") && note.contains("does not carry that edit"),
 (F) BRANCH crates/api/src/assets.rs:1582:39 False  note.contains("STALE") && note.contains("does not carry that edit"),
-(U) LINE crates/api/src/audit.rs:634  [(U) on every target: the wildcard arm of a match on pull::session::DropReason, a foreign #[non_exhaustive] enum with exactly five constructors, each matched above (the source comment says so)] _ => 0,
+(U) LINE crates/api/src/audit.rs:634  [(U) on every target: the wildcard arm of a match on pull::session::DropReason, a foreign #[non_exhaustive] _ => 0,
 (F) LINE crates/api/src/audit.rs:3566  panic!("three entries: {page:?}");
 (F) LINE crates/api/src/audit.rs:3635  &read[read.len().saturating_sub(40)..]
 (F) LINE crates/api/src/audit.rs:4041  kind.label(),
@@ -52,7 +52,16 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) LINE crates/api/src/backtest.rs:2330  broken.to_json()
 (F) BRANCH crates/api/src/backtest.rs:2151:13 False  body.contains(r#""runs":[]"#) && body.contains(r#""best_complete":null"#),
 (F) BRANCH crates/api/src/backtest.rs:2151:46 False  body.contains(r#""runs":[]"#) && body.contains(r#""best_complete":null"#),
+(F) BRANCH crates/api/src/backtest.rs:2638:17 False  assert!(both.partial_tail && both.refusal.is_some(), "both said");
+(F) BRANCH crates/api/src/backtest.rs:2638:38 False  assert!(both.partial_tail && both.refusal.is_some(), "both said");
 (U) LINE crates/api/src/bars.rs:749  [(U) on every target: as bars.rs:748:13 False (u64::try_from of a usize is always Ok, so the else never runs)] break;
+(U) LINE crates/api/src/bars.rs:2219  [(U) on every target: inside if plans.len() == 1 (2217), plans.first() is Some] return Ok(Vec::new());
+(U) LINE crates/api/src/bars.rs:2246  [(U) on every target: every position seek walks is made by SeriesPlan::nth or after (one plan) or by merged's heads, each only through runs.get(run)? (bars_series.rs 1552, 1563, 1571; bars.rs head 2394), and runs is written only by SeriesPlan::build (bars_series.rs 1296 and 1372, in cut_months and cut_days, called only at 1203-1205 from build), so plan.runs.get(at.run) is Some] continue;
+(U) LINE crates/api/src/bars.rs:2371  [(U) on every target: best is Some((ts, series)) only for a series whose held head was Some in the loop over heads just above (2359-2365), and nothing writes heads between, so heads.get(series) is Some(Some(..))] break;
+(U) LINE crates/api/src/bars.rs:2504  [(U) on every target: run_at ranges over 0..runs where runs is plan.runs.len() taken before the loop (2498-2499); runs is written only by SeriesPlan::build (bars_series.rs 1296, 1372, called at 1203-1205), never by read_stretch or behind_of, so plan.runs.get(run_at) is Some] continue;
+(U) LINE crates/api/src/bars.rs:2572  [(U) on every target: a Candidate is pushed only for a series whose rules.get(series) was Some (2492) with series from enumerate over plans (2491), and neither slice changes length after, so (plans.get_mut(series), rules.get(series)) are both Some] continue;
+(U) LINE crates/api/src/bars.rs:2575  [(U) on every target: chosen.run is a run_at that indexed plan.runs (2503) when the candidate was made, and runs is written only by SeriesPlan::build, so plan.runs.get(chosen.run) is Some] continue;
+(U) LINE crates/api/src/bars.rs:2609  [(U) on every target: slot ranges over 0..plan.slots.len() (2606) and slots is written only by SeriesPlan::build (bars_series.rs 1250 in admit, called at 1182), never by days_covered, so plan.slots.get(slot) is Some] continue;
 (F) LINE crates/api/src/bars.rs:2892  found.len()
 (F) LINE crates/api/src/bars.rs:3051  compared.get()
 (F) LINE crates/api/src/bars.rs:3126  ist_clock(at)
@@ -60,6 +69,17 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) LINE crates/api/src/bars.rs:4643  panic!("one request took more than 256 looks at its flag");
 (U) BRANCH crates/api/src/bars.rs:738:16 False  [(U) on every target: usize is at most 64 bits wide on every Rust target, so u64::try_from of a usize (here skip and skip + take) is always Ok and the pattern always matches] && let (Ok(first), Ok(end)) = (
 (U) BRANCH crates/api/src/bars.rs:748:13 False  [(U) on every target: usize is at most 64 bits wide on every Rust target, so u64::try_from(i) of the usize index is always Ok] let Ok(index) = u64::try_from(i) else {
+(U) BRANCH crates/api/src/bars.rs:2218:13 False  [(U) on every target: inside if plans.len() == 1 (2217), plans.first() is Some] let Some(plan) = plans.first() else {
+(U) BRANCH crates/api/src/bars.rs:2245:13 False  [(U) on every target: every position seek walks is made by SeriesPlan::nth or after (one plan) or by merged's heads, each only through runs.get(run)? (bars_series.rs 1552, 1563, 1571; bars.rs head 2394), and runs is written only by SeriesPlan::build (bars_series.rs 1296 and 1372, in cut_months and cut_days, called only at 1203-1205 from build), so plan.runs.get(at.run) is Some] let Some(run) = plan.runs.get(at.run).copied() else {
+(U) BRANCH crates/api/src/bars.rs:2253:20 False  [(U) on every target: index is either unopened.len() - 1 taken right after unopened.push (2249-2251) or one stored by an earlier push; unopened is a local never shortened, so unopened.get_mut(index) is Some] if let Some((_, rows)) = unopened.get_mut(index) {
+(U) BRANCH crates/api/src/bars.rs:2256:20 False  [(U) on every target: last is vec![None; plans.len()] (2231) and series < plans.len() was just shown by plans.get_mut(series) being Some at 2242, so last.get_mut(series) is Some] if let Some(slot) = last.get_mut(series) {
+(U) BRANCH crates/api/src/bars.rs:2267:16 False  [(U) on every target: last is vec![None; plans.len()] (2231) and series < plans.len() was just shown by plans.get_mut(series) being Some at 2242, so last.get_mut(series) is Some] if let Some(slot) = last.get_mut(series) {
+(U) BRANCH crates/api/src/bars.rs:2370:13 False  [(U) on every target: best is Some((ts, series)) only for a series whose held head was Some in the loop over heads just above (2359-2365), and nothing writes heads between, so heads.get(series) is Some(Some(..))] let Some(Some((_, at))) = heads.get(series).copied() else {
+(U) BRANCH crates/api/src/bars.rs:2378:16 False  [(U) on every target: heads has one entry per plan, pushed in the loop over plans (2349-2353), and series < heads.len() (P6 above), so both plans.get_mut(series) and heads.get_mut(series) are Some] if let (Some(plan), Some(slot)) = (plans.get_mut(series), heads.get_mut(series)) {
+(U) BRANCH crates/api/src/bars.rs:2503:17 False  [(U) on every target: run_at ranges over 0..runs where runs is plan.runs.len() taken before the loop (2498-2499); runs is written only by SeriesPlan::build (bars_series.rs 1296, 1372, called at 1203-1205), never by read_stretch or behind_of, so plan.runs.get(run_at) is Some] let Some(run) = plan.runs.get(run_at as usize).copied() else {
+(U) BRANCH crates/api/src/bars.rs:2571:13 False  [(U) on every target: a Candidate is pushed only for a series whose rules.get(series) was Some (2492) with series from enumerate over plans (2491), and neither slice changes length after, so (plans.get_mut(series), rules.get(series)) are both Some] let (Some(plan), Some(series_rules)) = (plans.get_mut(series), rules.get(series)) else {
+(U) BRANCH crates/api/src/bars.rs:2574:13 False  [(U) on every target: chosen.run is a run_at that indexed plan.runs (2503) when the candidate was made, and runs is written only by SeriesPlan::build, so plan.runs.get(chosen.run) is Some] let Some(run) = plan.runs.get(chosen.run as usize).copied() else {
+(U) BRANCH crates/api/src/bars.rs:2607:17 False  [(U) on every target: slot ranges over 0..plan.slots.len() (2606) and slots is written only by SeriesPlan::build (bars_series.rs 1250 in admit, called at 1182), never by days_covered, so plan.slots.get(slot) is Some] let Some((month, rows)) = plan.slots.get(slot).map(|at| (at.month, at.held.n_valid))
 (F) BRANCH crates/api/src/bars.rs:3943:17 False  !body.contains("note_unreadable_records") && !body.contains("telemetry::emit"),
 (F) BRANCH crates/api/src/bars.rs:3943:62 False  !body.contains("note_unreadable_records") && !body.contains("telemetry::emit"),
 (F) BRANCH crates/api/src/bars.rs:4225:13 False  got.faults[0].contains(" record 73: ")
@@ -234,6 +254,8 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) BRANCH crates/api/src/coverage.rs:1206:17 False  line.contains("not pull readiness")
 (F) BRANCH crates/api/src/coverage.rs:1207:24 False  && line.contains("does not silently skip")
 (F) BRANCH crates/api/src/coverage.rs:1208:24 False  && line.contains("non-ISIN"),
+(F) LINE crates/api/src/credential_law_cover_tests.rs:117  panic!("a value rejected earlier is never sent again")
+(F) BRANCH crates/api/src/credential_law_cover_tests.rs:114:9 False  let Reread::Halted(CredentialStop::SameValue, why) =
 (F) LINE crates/api/src/credential_law_tests.rs:193  panic!("a same-value verdict halts the feed");
 (F) LINE crates/api/src/credential_law_tests.rs:392  panic!("an unusable configuration halts");
 (F) LINE crates/api/src/credential_law_tests.rs:445  panic!("Dhan is HTTP");
@@ -272,6 +294,8 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) BRANCH crates/api/src/detail.rs:2321:40 False  why.contains(field) && why.contains("canonical"),
 (F) BRANCH crates/api/src/detail.rs:2653:17 False  assert!(!held.is_empty() && held.len() <= super::MAX_OPS_READ_CONCURRENT);
 (F) BRANCH crates/api/src/detail.rs:2653:37 False  assert!(!held.is_empty() && held.len() <= super::MAX_OPS_READ_CONCURRENT);
+(F) LINE crates/api/src/detail_cover_tests.rs:238  || -> Result<u32, String> { unreachable!("a kept handle is served, never reopened") };
+(F) LINE crates/api/src/detail_cover_tests.rs:249  |_| unreachable!("nothing to refresh"),
 (F) BRANCH crates/api/src/detail_cover_tests.rs:175:9 False  why.contains("runs.bin at")
 (F) BRANCH crates/api/src/detail_cover_tests.rs:176:16 False  && why.contains("could not be measured before its bounded read"),
 (U) LINE crates/api/src/facets.rs:932  [(U) on every target: line 921 returns unless serves_as_previous(&held, ..), which is held.reflects.as_ref().is_some_and(..) (line 838); held is the same read guard at 924, so reflects is Some there] None => Err(ms_since(since)),
@@ -285,7 +309,7 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (U) LINE crates/api/src/facets.rs:1990  [(U) on every target: as facets.rs:1984 (compact cannot fail)] generation,
 (U) LINE crates/api/src/facets.rs:1991  [(U) on every target: as facets.rs:1984 (compact cannot fail)] );
 (U) BRANCH crates/api/src/facets.rs:757:44 False  [(U) on every target: moved_off_lock answers true whenever part_of(slot, segment) is None (facets.rs 1135-1148: it returns at 1138 or at 1148), so the right operand of the && at 757 is never false when it is evaluated] if part_of(slot, segment).is_none() && moved_off_lock(site, vendor, cell, segment, slot) {
-(U) BRANCH crates/api/src/facets.rs:2307:32 False  [(U) on every target: sides is a [Option<&Agg>; 2] indexed by usize::from(!call), which is 0 or 1, so get_mut is always Some] if let Some(side) = sides.get_mut(usize::from(!call)) {
+(U) BRANCH crates/api/src/facets.rs:2307:32 False  [(U) on every target: sides is a [Option<&Agg>; 2] if let Some(side) = sides.get_mut(usize::from(!call)) {
 (F) BRANCH crates/api/src/facets_tests.rs:652:13 False  assert!(EXCHANGES.is_sorted() && SEGMENTS.is_sorted());
 (F) BRANCH crates/api/src/facets_tests.rs:652:38 False  assert!(EXCHANGES.is_sorted() && SEGMENTS.is_sorted());
 (F) BRANCH crates/api/src/facets_tests.rs:1785:13 False  exchange.is_none() && keys.is_empty() && sums.is_empty(),
@@ -365,6 +389,7 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (U) LINE crates/api/src/indexmap.rs:672  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] "{}: the census read returned no row for this feed",
 (U) LINE crates/api/src/indexmap.rs:673  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] feed.as_str()
 (U) LINE crates/api/src/indexmap.rs:674  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] ));
+(U) BRANCH crates/api/src/indexmap.rs:592:16 False  [(U) on every target: slots is a Mutex<[Kept; Vendor::ALL.len()]> and slot is census.vendor as usize; Vendor declares five variants with implicit discriminants 0-4 (core/src/vendor.rs:52-80) and ALL lists all five in that order, so get_mut(slot) is Some; indexmap::tests::a_name_of_nothing_.. asserts every vendor's place in ALL is its discriminant] if let Some(held) = self
 (U) BRANCH crates/api/src/indexmap.rs:637:9 False  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] let Some(census) = now.census() else {
 (U) BRANCH crates/api/src/indexmap.rs:670:9 False  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] let Some(census) = now.census() else {
 (F) BRANCH crates/api/src/indexmap.rs:912:17 False  assert!(banknifty.is_some() && nifty.is_some());
@@ -410,6 +435,8 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) BRANCH crates/api/src/optiongreeks_route_tests.rs:810:9 False  let RateTable::Loaded(series) = &*moved else {
 (F) BRANCH crates/api/src/page_report_route_tests.rs:153:60 False  matches!((asked, read_back), (Some(a), Some(r)) if a < r),
 (U) LINE crates/api/src/pullrun.rs:876  [(U) on every target: Feed::ALL holds TrueData and GDFL, whose transport kind is Folder (pull's own test asserts both, crates/pull/src/vendor.rs:6444-6445), so unjournalled_feeds is never empty] return String::new();
+(U) LINE crates/api/src/pullrun.rs:1726  [(U) on every target: every Guess is pushed with at: self.position (pullrun.rs 1804-1808, 1980-1984), and walk sets walker.position to the enumerate index over the same read it is handed (1675-1676) before the guesses are read here, so read.get(*at) is Some] continue;
+(U) LINE crates/api/src/pullrun.rs:2093  [(U) on every target: the loop runs while skip < INTERRUPTED_SCAN.min(records), and Journal::page(records, skip, MAX_PAGE_RECORDS) reads wanted = min(records - skip, MAX_PAGE_RECORDS) >= 1 records (audit.rs 1982-1985) and returns one Entry per record read (2017-2037) or the read error (2006), never an empty page] break;
 (F) LINE crates/api/src/pullrun.rs:4446  panic!("a disagreeing leg must be refused, got {answer:?}");
 (F) LINE crates/api/src/pullrun.rs:4580  panic!("a repeated payload field must refuse the run: {answer:?}");
 (F) LINE crates/api/src/pullrun.rs:4680  panic!("a four-part leg must be refused, got {answer:?}");
@@ -423,13 +450,16 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) LINE crates/api/src/pullrun.rs:7396  panic!("with the lock held nothing is known: {held:?}");
 (F) LINE crates/api/src/pullrun.rs:7422  panic!("an index that cannot be written leaves nothing known: {refused:?}");
 (F) LINE crates/api/src/pullrun.rs:7492  panic!("NOT KNOWN was expected, and the scan said {found:?}");
-(F) LINE crates/api/src/pullrun.rs:8597  &|_site, _leg| -> Answer { unreachable!("a terminal feed is never asked again") },
-(F) LINE crates/api/src/pullrun.rs:9782  panic!("a payload past the bound must refuse the run: {answer:?}");
-(F) LINE crates/api/src/pullrun.rs:10879  panic!("one counted pairing: {:?}", found.left_open);
-(F) LINE crates/api/src/pullrun.rs:10954  panic!("one counted pairing: {:?}", found.left_open);
-(F) LINE crates/api/src/pullrun.rs:11038  panic!("expected a guessed answer, got {answer:?}");
-(F) LINE crates/api/src/pullrun.rs:11091  panic!("one doubted run: {:?}", answer.doubted);
+(F) LINE crates/api/src/pullrun.rs:8753  &|_site, _leg| -> Answer { unreachable!("a terminal feed is never asked again") },
+(F) LINE crates/api/src/pullrun.rs:9938  panic!("a payload past the bound must refuse the run: {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:11035  panic!("one counted pairing: {:?}", found.left_open);
+(F) LINE crates/api/src/pullrun.rs:11110  panic!("one counted pairing: {:?}", found.left_open);
+(F) LINE crates/api/src/pullrun.rs:11194  panic!("expected a guessed answer, got {answer:?}");
+(F) LINE crates/api/src/pullrun.rs:11247  panic!("one doubted run: {:?}", answer.doubted);
 (U) BRANCH crates/api/src/pullrun.rs:875:8 True  [(U) on every target: Feed::ALL holds TrueData and GDFL, whose transport kind is Folder (pull's own test asserts both, crates/pull/src/vendor.rs:6444-6445), so unjournalled_feeds is never empty] if names.is_empty() {
+(U) BRANCH crates/api/src/pullrun.rs:1725:13 False  [(U) on every target: every Guess is pushed with at: self.position (pullrun.rs 1804-1808, 1980-1984), and walk sets walker.position to the enumerate index over the same read it is handed (1675-1676) before the guesses are read here, so read.get(*at) is Some] let Some((_, made)) = read.get(*at) else {
+(U) BRANCH crates/api/src/pullrun.rs:2092:12 True  [(U) on every target: the loop runs while skip < INTERRUPTED_SCAN.min(records), and Journal::page(records, skip, MAX_PAGE_RECORDS) reads wanted = min(records - skip, MAX_PAGE_RECORDS) >= 1 records (audit.rs 1982-1985) and returns one Entry per record read (2017-2037) or the read error (2006), never an empty page] if page.is_empty() {
+(U) BRANCH crates/api/src/pullrun.rs:4049:16 False  [(U) on every target: nth comes from enumerate over groups.iter().zip(outcomes.iter_mut()).zip(checkpoints) (3979-3983), so nth < outcomes.len() and outcomes.get_mut(nth) is Some] if let Some(held) = outcomes.get_mut(nth) {
 (F) BRANCH crates/api/src/pullrun.rs:4445:17 False  let Err(Refusal::Disagrees { leg, why }) = answer else {
 (F) BRANCH crates/api/src/pullrun.rs:4579:13 False  let Err(Refusal::Malformed(why)) = answer else {
 (F) BRANCH crates/api/src/pullrun.rs:4679:13 False  let Err(Refusal::Malformed(named)) = answer else {
@@ -483,19 +513,19 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) BRANCH crates/api/src/pullrun.rs:8457:20 False  && summary.contains("Full basket coverage has not been verified")
 (F) BRANCH crates/api/src/pullrun.rs:8514:13 False  summary.contains("ceiling")
 (F) BRANCH crates/api/src/pullrun.rs:8515:20 False  && summary.contains("Full basket coverage has not been verified")
-(F) BRANCH crates/api/src/pullrun.rs:8607:17 False  assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
-(F) BRANCH crates/api/src/pullrun.rs:8607:45 False  assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
-(F) BRANCH crates/api/src/pullrun.rs:8673:17 False  assert!(progress.feeds[1].finished && progress.feeds[1].doing.is_empty());
-(F) BRANCH crates/api/src/pullrun.rs:8673:47 False  assert!(progress.feeds[1].finished && progress.feeds[1].doing.is_empty());
-(F) BRANCH crates/api/src/pullrun.rs:9363:17 False  assert!(!feed.store_unavailable && !feed.credential_dead);
-(F) BRANCH crates/api/src/pullrun.rs:9363:44 False  assert!(!feed.store_unavailable && !feed.credential_dead);
-(F) BRANCH crates/api/src/pullrun.rs:9781:13 False  let Err(Refusal::Malformed(why)) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:10878:13 False  let [counted] = found.left_open.as_slice() else {
-(F) BRANCH crates/api/src/pullrun.rs:10953:13 False  let [counted] = found.left_open.as_slice() else {
-(F) BRANCH crates/api/src/pullrun.rs:11037:13 False  let Restart::Guessed(guessed) = answer else {
-(F) BRANCH crates/api/src/pullrun.rs:11061:17 False  assert!(answer.sure.is_empty() && answer.doubted.is_empty());
-(F) BRANCH crates/api/src/pullrun.rs:11061:43 False  assert!(answer.sure.is_empty() && answer.doubted.is_empty());
-(F) BRANCH crates/api/src/pullrun.rs:11090:13 False  let [doubted] = answer.doubted.as_slice() else {
+(F) BRANCH crates/api/src/pullrun.rs:8763:17 False  assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
+(F) BRANCH crates/api/src/pullrun.rs:8763:45 False  assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
+(F) BRANCH crates/api/src/pullrun.rs:8829:17 False  assert!(progress.feeds[1].finished && progress.feeds[1].doing.is_empty());
+(F) BRANCH crates/api/src/pullrun.rs:8829:47 False  assert!(progress.feeds[1].finished && progress.feeds[1].doing.is_empty());
+(F) BRANCH crates/api/src/pullrun.rs:9519:17 False  assert!(!feed.store_unavailable && !feed.credential_dead);
+(F) BRANCH crates/api/src/pullrun.rs:9519:44 False  assert!(!feed.store_unavailable && !feed.credential_dead);
+(F) BRANCH crates/api/src/pullrun.rs:9937:13 False  let Err(Refusal::Malformed(why)) = answer else {
+(F) BRANCH crates/api/src/pullrun.rs:11034:13 False  let [counted] = found.left_open.as_slice() else {
+(F) BRANCH crates/api/src/pullrun.rs:11109:13 False  let [counted] = found.left_open.as_slice() else {
+(F) BRANCH crates/api/src/pullrun.rs:11193:13 False  let Restart::Guessed(guessed) = answer else {
+(F) BRANCH crates/api/src/pullrun.rs:11217:17 False  assert!(answer.sure.is_empty() && answer.doubted.is_empty());
+(F) BRANCH crates/api/src/pullrun.rs:11217:43 False  assert!(answer.sure.is_empty() && answer.doubted.is_empty());
+(F) BRANCH crates/api/src/pullrun.rs:11246:13 False  let [doubted] = answer.doubted.as_slice() else {
 (F) LINE crates/api/src/pullrun_restart_tests.rs:117  panic!("expected a guessed NOT KNOWN, got {answer:?}");
 (F) LINE crates/api/src/pullrun_restart_tests.rs:376  run.words()
 (F) LINE crates/api/src/pullrun_restart_tests.rs:634  panic!("expected a guessed NOT KNOWN, got {answer:?}");
@@ -528,6 +558,10 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) BRANCH crates/api/src/pullrun_restart_tests.rs:1188:14 False  ) && why.contains("closing record at record 900"),
 (F) BRANCH crates/api/src/pullrun_restart_tests.rs:1382:13 False  words.contains("writes no opening record") && words.contains("never reported here"),
 (F) BRANCH crates/api/src/pullrun_restart_tests.rs:1382:59 False  words.contains("writes no opening record") && words.contains("never reported here"),
+(U) LINE crates/api/src/recovery.rs:769  [(U) on every target: active_history returns Ok over an existing pointer file only with a non-empty latest (recovery.rs 266-268), and an absent file returned early (764, 809), so max_by_key over latest is Some] return Ok(None);
+(U) LINE crates/api/src/recovery.rs:773  [(U) on every target: active_history refused every row whose key is not pointer_identity(&row.body) (recovery.rs 273), so for the row it returned, pointer.key == pointer_identity(&pointer.body)] return Err("active recovery identity mismatch".to_owned());
+(U) LINE crates/api/src/recovery.rs:814  [(U) on every target: active_history returns Ok over an existing pointer file only with a non-empty latest (recovery.rs 266-268), and an absent file returned early (764, 809), so max_by_key over latest is Some] return Ok(false);
+(U) LINE crates/api/src/recovery.rs:818  [(U) on every target: active_history refused every row whose key is not pointer_identity(&row.body) (recovery.rs 273), so for the row it returned, pointer.key == pointer_identity(&pointer.body)] return Err("active recovery identity mismatch".to_owned());
 (F) LINE crates/api/src/recovery.rs:2493  panic!("a server that refuses writes resumed, or said nothing");
 (F) LINE crates/api/src/recovery.rs:2503  hex(id)
 (F) LINE crates/api/src/recovery.rs:2762  attempts
@@ -535,6 +569,11 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) LINE crates/api/src/recovery.rs:2764  .values()
 (F) LINE crates/api/src/recovery.rs:2765  .map(|row| row.attempts)
 (F) LINE crates/api/src/recovery.rs:2766  .collect::<Vec<_>>()
+(U) BRANCH crates/api/src/recovery.rs:768:9 False  [(U) on every target: active_history returns Ok over an existing pointer file only with a non-empty latest (recovery.rs 266-268), and an absent file returned early (764, 809), so max_by_key over latest is Some] let Some(pointer) = active.latest.values().max_by_key(|record| record.attempts) else {
+(U) BRANCH crates/api/src/recovery.rs:772:8 True  [(U) on every target: active_history refused every row whose key is not pointer_identity(&row.body) (recovery.rs 273), so for the row it returned, pointer.key == pointer_identity(&pointer.body)] if pointer.key != id {
+(U) BRANCH crates/api/src/recovery.rs:813:9 False  [(U) on every target: active_history returns Ok over an existing pointer file only with a non-empty latest (recovery.rs 266-268), and an absent file returned early (764, 809), so max_by_key over latest is Some] let Some(pointer) = active.latest.values().max_by_key(|record| record.attempts) else {
+(U) BRANCH crates/api/src/recovery.rs:817:8 True  [(U) on every target: active_history refused every row whose key is not pointer_identity(&row.body) (recovery.rs 273), so for the row it returned, pointer.key == pointer_identity(&pointer.body)] if pointer.key != id {
+(U) BRANCH crates/api/src/recovery.rs:1584:27 True  [(U) on every target: the shape is classified over an empty slice (1573-1582), and the ledger's invalid_timestamps counts only the stamps it is handed (pull/src/gaps.rs 796-799), so it is 0] if shape.truncated || shape.invalid_timestamps > 0 {
 (F) BRANCH crates/api/src/recovery.rs:2272:17 False  assert!(plan_records > 40 && attempt_records == 25 && active_records == 1);
 (F) BRANCH crates/api/src/recovery.rs:2272:38 False  assert!(plan_records > 40 && attempt_records == 25 && active_records == 1);
 (F) BRANCH crates/api/src/recovery.rs:2272:63 False  assert!(plan_records > 40 && attempt_records == 25 && active_records == 1);
@@ -542,6 +581,7 @@ classified: GAP prod 429 lines 172 sides; GAP test 77 lines 77 sides; GAP ignore
 (F) BRANCH crates/api/src/recovery.rs:2507:24 False  && line.contains(&format!("plan {} is IN FLIGHT", hex(id))),
 (F) BRANCH crates/api/src/recovery.rs:3320:28 False  .all(|row| row.status == Status::Queued && row.attempts == 0)
 (F) LINE crates/api/src/recovery_cover_tests.rs:704  panic!("{day} is an open day of the calendar of record");
+(F) LINE crates/api/src/recovery_cover_tests.rs:1876  unreachable!("no driver runs over a refused plan")
 (F) BRANCH crates/api/src/recovery_cover_tests.rs:701:9 False  let pull::calendar::DayKind::Open(session) =
 (U) LINE crates/api/src/recovery_journal.rs:192  [(U) on every target: put writes 8 bytes at UNVERIFIED_OFFSET 856 into a RECORD_LEN 1,024 image, so the range is always in bounds] )?;
 (U) LINE crates/api/src/recovery_journal.rs:386  [(U) on every target: self.bytes is the journal's length, at most a file length (st_size is a signed 64-bit off_t), so adding one RECORD_LEN of 1,024 cannot overflow u64] io::Error::other("recovery journal length cannot fit its next record")
