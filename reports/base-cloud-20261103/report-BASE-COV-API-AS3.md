@@ -3,7 +3,7 @@ STATUS: IN PROGRESS
 # BASE-COV-API-AS3 (shard G3 of `SHARDS.md`, BASE-COV-API repair r3): report
 
 - Branch `cloud/cov-api-as3-20261105`, cut from the kit commit `f4111a0132473d8771d8624a9538b1362926f70b`; START
-  `6ea46e59c07488eeccff388407976041852aae2c`. Code tip `f0c9b20f726aa4429134a94ca01f381754b22d72` (what
+  `6ea46e59c07488eeccff388407976041852aae2c`. Code tip `98908e7773e8f4d1d81a3cf9a6a2ac9f9a73884b` (what
   `git rev-list -1 HEAD -- . ':(exclude)reports'` prints).
 - Sessions: token `-1` pushed to `7700e2f0`; the main session paused the shard at `edd54703`; token `-3`
   (`a5f009a8`) worked to `44a0a656` and was cut by the account's weekly limit (Thu 5 Nov, about 21:28 IST): its
@@ -15,7 +15,7 @@ STATUS: IN PROGRESS
   `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`; llvm-cov and llvm-profdata `LLVM version 23.1.0-rust-1.99.0-nightly`.
   Every kit file's sha256 matched `MANIFEST.md`. Every figure here is this host's, the builder's: the Mac re-measures.
 
-## What continuation -5 did (`7694e19b`..`f0c9b20f`, 7 Nov)
+## What continuation -5 did (`7694e19b`..`98908e77`, 7 Nov)
 
 - **NEXT 0, the late red, found and fixed** (`32fbc1ab`). It was the test, not the host's day:
   `an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused` read the NEWEST NOT STARTED record
@@ -65,6 +65,12 @@ STATUS: IN PROGRESS
     any metric ("offered 7874, expected 7875, missing 1"), so a Refused verdict needs an execution the strict load
     admits and the runner still marks incomplete (`metrics::execution_complete`, or a day the calendar assessment
     counts unmeasured).
+- **A coverage row that moved between runs, made deterministic** (`98908e77`): the measurement of `f0c9b20f` left
+  `bars_series.rs` 387 True and 388 uncovered, which `4a86f408`'s had covered with the same code: the
+  `Weighed` memo's re-put of a key its young generation holds (`WeighedGenerations::admit`), reached only when two
+  readers race to fill one month's time-of-day index. `a_key_put_again_replaces_its_value_and_its_weight` drives
+  it directly (same, heavier and lighter re-puts; a re-put on the young half's exact edge, which counted twice
+  would turn a generation; a value too heavy to hold refused over a held key).
 - **NEXT 2 not done**: `indexstopcandlesjson.rs` 117 True, 118, 120 need a source page over 8 MiB. No production
   writer makes one: every source context it seals takes its condition names from `vocab::table::TABLE`, its
   expression from at most `vocab::expression::MAX_INSTRUCTIONS` (1,151) instructions, and its candles from a window
@@ -78,10 +84,10 @@ STATUS: IN PROGRESS
   100% of a core past 13 minutes and was stopped. At Route B's opt-level 0 that is hours: a probe needs a lighter
   configuration first. `selectionv6json.rs` has a public way in, `cli::run(["ledger-v6", ...])`, which sweeps both
   indices at every rung: not tried.
-- Red under a hand change for every new assert of this continuation (run red5, `red-AS3.txt.md`); clippy, fmt, the
-  stable suite and Route B of record on the code tip `4a86f408`; `gaps-AS3.txt.md` and `fu-AS3.txt.md` rewritten from
-  that measurement (each earlier row carried over through a line map from `git diff 26003a03 4a86f408`, its text
-  checked; every row that did not carry over classified by hand).
+- Red under a hand change for every new assert of this continuation (runs red5, red6 and red7, `red-AS3.txt.md`);
+  clippy, fmt, the stable suite and Route B of record on the code tip `98908e77`; `gaps-AS3.txt.md` and
+  `fu-AS3.txt.md` rewritten from that measurement (each earlier row carried over through line maps from `git diff`,
+  its text checked; every row that did not carry over classified by hand).
 
 ## Why IN PROGRESS
 
@@ -151,12 +157,12 @@ All G3's: the 48 `SHARDS.md` gives G3 and 8 new test files, each declared in the
 `crates/api/benches/`, `Cargo.*`, `docs/`, `.github/`, another group's file. Reports: this file,
 `fix-BASE-COV-API-AS3.json.md`, `OWNER-BASE-COV-API-AS3.md`, `gaps-AS3.txt.md`, `fu-AS3.txt.md`, `red-AS3.txt.md`.
 
-## Tests by name (112 new since START, by file under `crates/api/src/`)
+## Tests by name (113 new since START, by file under `crates/api/src/`)
 
 - `autopilot.rs` (2): `a_live_loop_over_an_empty_vendor_refuses_it_by_name_and_keeps_passing`, `a_probe_name_the_host_refuses_keeps_the_hosts_own_words`
 - `bars_export.rs` (6): `a_full_scan_pool_refuses_an_export_by_name_and_it_is_written_once_the_pool_frees`, `an_end_read_that_cannot_open_its_month_refuses_the_export_by_name`, `a_page_read_past_a_full_pool_is_read_and_a_task_that_will_not_join_cuts_the_stream`, `a_refusal_before_a_byte_is_the_windows_and_a_name_is_always_a_file_name`, `a_refused_read_is_named_and_one_past_the_cheap_budget_is_asked_again_as_a_scan`, `every_page_that_cannot_be_written_whole_cuts_the_stream_by_name`
 - `bars_route.rs` (4): `a_time_of_day_of_one_field_or_four_is_refused_and_an_open_end_runs_to_the_last_second`, `a_value_past_a_browsers_number_is_withheld_by_name_and_a_month_dropped_in_part_is_served`, `a_window_names_damaged_records_withholds_an_inexact_value_and_counts_coverage`, `an_abandoned_scan_stops_and_an_answered_one_cancels_nothing_past_a_full_pool`
-- `bars_series.rs` (4): `a_journal_that_cannot_be_read_moves_no_index_life`, `a_plan_serves_every_month_it_can_and_names_every_one_it_cannot`, `a_summary_whose_days_do_not_add_up_is_refused_by_name`, `an_instant_before_the_month_and_a_unit_past_the_span_answer_nothing`
+- `bars_series.rs` (5): `a_journal_that_cannot_be_read_moves_no_index_life`, `a_key_put_again_replaces_its_value_and_its_weight`, `a_plan_serves_every_month_it_can_and_names_every_one_it_cannot`, `a_summary_whose_days_do_not_add_up_is_refused_by_name`, `an_instant_before_the_month_and_a_unit_past_the_span_answer_nothing`
 - `bars_window_route_tests.rs` (1): `a_window_refused_by_a_full_scan_pool_is_asked_again_and_answered_there`
 - `booleanevidencejson_tests.rs` (1): `the_scanner_reads_unclosed_and_look_alike_tokens_as_the_rule_needs`
 - `census_rollup_cover_tests.rs` (3): `a_span_the_calendar_cannot_count_is_none_never_zero`, `an_answer_carries_the_cell_bound_and_is_refused_one_past_it`, `every_exchange_word_is_read_resolved_or_refused_by_name`
@@ -204,21 +210,23 @@ after it and the new asserts of 2 widened tests: trees `532b881e` and `a9118762`
 (`month_get`'s retry and the candle reader's new assert: tree `fca3d025` over `7d7d243f`), run red5 (continuation
 -5: the 2 new tests and the new asserts of 2 changed tests, four hand changes at once: tree `dfc51d90` over
 `4a86f408`, "0 passed; 4 failed"). The `-3` session's 13 are in its report (`red3`, `red4`), 11 of them new tests.
-93 + 4 + 1 + 11 + 2 + 1 = all 112 new tests, each red at the assertion its change aimed for (red6: the Admitted launch test, and the Rejected one again after its launch moved into the shared child half).
+93 + 4 + 1 + 11 + 2 + 1 + 1 = all 113 new tests, each red at the assertion its change aimed for (red6: the Admitted launch test, and the Rejected one again after its launch moved into the shared child half; red7: the Weighed memo re-put test).
 
-## Gates on the code tip `4a86f408`
+## Gates on the code tip `98908e77`
 
 - `cargo fmt --all --check`: clean (checked before every code commit of this continuation).
 - `cargo clippy -p api --all-targets --locked -- -D warnings` (stable 1.97.1, `CARGO_TARGET_DIR=/var/tmp/as3/K2`, on
-  the tree `4a86f408` commits): clean, exit 0. Its first run refused two rows of this continuation's own code (an
-  unused generator after the launch tests' refactor, and `similar_names`), fixed in `4a86f408`.
+  the tree `98908e77` commits): clean, exit 0. Its first run of this continuation refused two rows of its own code
+  (an unused generator after the launch tests' refactor, and `similar_names`), fixed in `4a86f408`.
 - `cargo test -p api --locked --no-fail-fast -- --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held`
   (stable 1.97.1, `CARGO_TARGET_DIR=/var/tmp/as3/K2`, TMPDIR a 1777 tmpfs folder, a stamped build of the committed
-  tree): exit 101, passed 3189 failed 13 ignored 16 over 9 result lines: the lib target 3105 / 13 / 16; the main
+  tree): exit 101, passed 3191 failed 13 ignored 16 over 9 result lines: the lib target 3107 / 13 / 16; the main
   target, the 6 integration targets (the load-bound `pool_load` among them) and the doc tests green. The 13 are the
-  host reds below (G3's three root reds and ten of other shards); no G3 test fails for a G3 reason.
-- The same tests under Route B (instrumented, nightly, opt-level 0): `tests passed 3189 failed 13 ignored 16` (7 min),
-  the same 13.
+  host reds below (G3's three root reds and ten of other shards); no G3 test fails for a G3 reason. The same run on
+  `4a86f408` and on `f0c9b20f` gave the same 13 (3189 and 3190 passed).
+- The same tests under Route B (instrumented, nightly, opt-level 0): `tests passed 3190 failed 14 ignored 16` (7 min):
+  the same 13 and G1's load-bound `the_feed_list_stays_fast_while_32_clients_loop_each_route` (`pool_load.rs`), which
+  passed in the stable runs and in Route B on `4a86f408` and fails under instrumentation now and then.
 - Benches: none run this round (no p50 or p99 to give). The feeds_route small-size wrapper runs in the suite with
   its ratio gate lifted.
 - Mutants: deferred (operator, 30 Oct): not run; each new test was shown red under a hand change instead.
@@ -227,32 +235,37 @@ after it and the new asserts of 2 widened tests: trees `532b881e` and `a9118762`
 
 The kit's `d3-route-b-cloud.sh`, unchanged (sha256 checked against `MANIFEST.md`), with `D3_W=/var/tmp/as3`, the
 pinned nightly and its own llvm tools, on a clean worktree checked out at the code tip:
-`d3-route-b-cloud.sh /var/tmp/as3/wt-rb5 /var/tmp/as3/K1 /var/tmp/as3/P8 /var/tmp/as3/L8 <set> api -- --skip
+`d3-route-b-cloud.sh /var/tmp/as3/wt-rb5 /var/tmp/as3/K1 /var/tmp/as3/P10 /var/tmp/as3/L10 <set> api -- --skip
 spot_json_is_refused_by_name_when_every_store_read_slot_is_held`. The set is the kit's
 `deep-BASE-COV-API-6ea46e59c074-set.txt` plus one `coverage <file> whole` line for each of the 8 files the branch
 added (whole:api names every file; the kit's set predates them): 213 coverage lines. TMPDIR was a 1777 tmpfs folder,
-and the profile folder was made 1777 and the script run under `umask 0000`, so the children
-`isolated::where_permission_binds` re-runs as uid 65534 write their profiles (CLOUD.md item 10). Started 15:38:02 IST
-7 Nov; build 3 min (cold target), tests 7 min, readout done 16:04:29 IST; exit 3 for NOT PROVED: the 22 benches and
-`lib.rs` only (L-BCA-2). No test process ended by a signal.
+and each profile folder was made 1777 and the script run under `umask 0000`, so the children
+`isolated::where_permission_binds` re-runs as uid 65534 write their profiles (CLOUD.md item 10). Started 20:51:53 IST
+7 Nov; build 3 min, tests 7 min, readout done 21:23:57 IST; exit 3 for NOT PROVED: the 22 benches and `lib.rs` only
+(L-BCA-2). No test process ended by a signal. Continuation -5 measured three tips this way: `4a86f408` (15:38-16:04),
+`f0c9b20f` (20:05-20:38) and this one, the record.
 
-- Whole api (the 190 files read): lines 179147/183008 (3861 uncovered), branches 13021/15386 (2365 uncovered sides).
-- G3 (56 files): lines 63260/63962 (702 uncovered), branches 4726/5124 (398 uncovered sides). Classified strictly
+- Whole api (the 190 files read): lines 179253/183116 (3863 uncovered), branches 13032/15398 (2366 uncovered sides).
+- G3 (56 files): lines 63366/64070 (704 uncovered), branches 4736/5136 (400 uncovered sides). Classified strictly
   by recipe step 4:
-  - (F) 235 lines 312 sides; (U) 97 lines 52 sides, each with its proof; (H) 44 lines 2 sides (`fu-AS3.txt.md`);
-  - GAP 326 lines 32 sides (`gaps-AS3.txt.md`): in `#[ignore]`d tests 86 lines (L-BCA-3, the Mac); L-BCA-5 193 lines
+  - (F) 235 lines 312 sides; (U) 100 lines 54 sides, each with its proof; (H) 44 lines 2 sides (`fu-AS3.txt.md`);
+  - GAP 325 lines 32 sides (`gaps-AS3.txt.md`): in `#[ignore]`d tests 86 lines (L-BCA-3, the Mac); L-BCA-5 193 lines
     15 sides (`booleanevidencejson.rs` 184/13, `selectionv6json.rs` 9/2); L-BCA-6 18 lines 7 sides
     (`mastersrun.rs`); the host clock 18 lines 4 sides (`autopilot.rs`); a race 4 lines 4 sides (`dayflags.rs`
     3220, 3322, 3323; `indexstopcandlesjson.rs` 188-191; `bars_export.rs` 979); a failing medium or a cut append 3
-    lines 1 side (`imports.rs` 1342-1344, `optiongreeks.rs` 558); reachable and not done 4 lines 1 side
-    (`indexstopqualificationjson.rs` 235, 237; `indexstopcandlesjson.rs` 117 True, 118, 120); test code: none.
-- Against `26003a03`: 2 production lines closed (`bars_export.rs` 974, `indexstopqualificationjson.rs` 236), and the
-  4 rows the new code added are (F) (2 sides of a new assert) or (U) (the new launch test's unstamped arm, the proof
-  the saved probe's carries). Every other row carried over through a line map from `git diff 26003a03 4a86f408`, its
-  source text checked (1,100 rows); two GAP reasons this round's evidence corrected were rewritten (235, 237).
+    lines 1 side (`imports.rs` 1342-1344, `optiongreeks.rs` 558); reachable and not done 3 lines 1 side
+    (`indexstopqualificationjson.rs` 237; `indexstopcandlesjson.rs` 117 True, 118, 120); test code: none.
+- Against `26003a03` (continuation -4's record): 3 production lines closed (`bars_export.rs` 974,
+  `indexstopqualificationjson.rs` 235 and 236); the rows the new code added are (F) (two sides of a new assert) or
+  (U) (the launch tests' unstamped arms, the proof the saved probe's carries). Every other row carried over through
+  line maps from `git diff`, its source text checked (1,104 rows at this tip); the GAP reasons this round's evidence
+  corrected were rewritten (235 while it stood, 237).
+- Between `4a86f408` and `f0c9b20f` one production arm moved with no code change (`bars_series.rs` 387 True, 388: a
+  race between two readers filling one memo entry); its unit test (`98908e77`) makes it deterministic, and it is
+  covered at this tip.
 - The (H) rows: the three G3 root reds failed as root in this run and passed as uid 65534
   (`setpriv --reuid=65534 --regid=65534 --clear-groups`) with this run's instrumented binary
-  (`api-bbc8861d417950e8`): `test result: ok. 1 passed` each.
+  (`api-bbc8861d417950e8`, built at `98908e77`): `test result: ok. 1 passed` each.
 
 The `--skip`: `cloud_mutants_bars.rs` `spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (G2's file,
 unchanged from START) hangs on this host: it fills `detail::MAX_STORE_READ_CONCURRENT` holders behind a barrier the
@@ -267,7 +280,7 @@ pool can never fill here (the pool has one slot a core: 4 on this host). Its row
 | `frontierjson.rs` | `every_edge_of_a_page_answers_or_refuses_by_name` | 10 / 2 / 2, kept | 10 / 2 / 2 |
 | `mastersrun.rs` | `a_refresh_with_no_credential_lands_the_public_masters_and_says_it_is_not_whole` | 9 configurations / 2 / 1, kept | 9 / 2 / 1 |
 
-Of the 112 new tests, all 112 name their extremes on an `Extremes:` line; of the four lines continuation -5 added, the three whose own count is short name the test that carries their file's count.
+Of the 113 new tests, all 113 name their extremes on an `Extremes:` line; of the four lines continuation -5 added, the three whose own count is short name the test that carries their file's count.
 
 ## Host reds (each with its proof)
 
@@ -294,7 +307,7 @@ Of the 112 new tests, all 112 name their extremes on an `Extremes:` line; of the
 
 ## Decision drafts (ids D-8664 and D-8665 only; ASA writes the docs entries)
 
-- **D-8664 (draft): shard G3's new tests, and the defects they fixed, outside `feeds_route.rs`.** The 112 test
+- **D-8664 (draft): shard G3's new tests, and the defects they fixed, outside `feeds_route.rs`.** The 113 test
   functions this round added in G3's files (listed by file above), each driving the input of a row of
   `base-cov-api-gaps-r2.txt.md` or of a G3 row Route B left uncovered on the way; each shown red under a hand change
   (`red-AS3.txt.md`, and the `-3` session's report for its 13). Cited as "D-8664" in `bars_series.rs` by session 1.
