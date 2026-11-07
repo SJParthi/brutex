@@ -335,4 +335,27 @@ server::ops_safety_tests::a_month_asked_while_every_store_read_slot_is_held_is_a
 indexstopqualificationjson::saved_tests::a_saved_qualification_is_served_by_every_page_that_reads_it (red3: its kept-candle-reader assert)
   hand change: crates/api/src/indexstopcandlesjson.rs: «cached.root == root && cached.identity == asked.identity» -> «cached.identity == asked.identity»
   red at crates/api/src/indexstopqualificationjson_saved_tests.rs:468 (the child): no source is saved under another root: Object {"admitted_bytes": String("3326290"), ... (the kept reader answered)
+
+Continuation -5 (token BASE-COV-API-AS3-20261105-5, 7 Nov), run red5: the new test and the new asserts of three
+changed tests. Tree: a local, never-pushed commit red5 (dfc51d90) over code tip 4a86f408 holding four hand changes;
+built with the repo toolchain (rustc 1.97.1), CARGO_TARGET_DIR=/var/tmp/as3/K4, cargo test -p api --lib --locked
+--no-run (stamped: a clean committed tree); run as api-<hash> --exact <the 4 full names> (TMPDIR a 1777 tmpfs):
+"test result: FAILED. 0 passed; 4 failed".
+
+server::cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused (changed: its first-tick window assert)
+  hand change: crates/api/src/autopilot.rs (drivable): «let month = floor.year_month().ok()?;» -> «let month = month_after(floor.year_month().ok()?)?;»
+  red at crates/api/src/server_cloud_mutant_tests_c.rs:2541: the first tick is Zerodha's floor month: ... left (16467, 16494) right (16436, 16466)
+server::feeds_route::tests::the_held_span_bench_runs_at_a_small_size (widened: its own extremes)
+  hand change: crates/api/src/feeds_route.rs (part_span, the appended-key fold): «span.fold(part, key);» -> «let _ = key;»
+  red at crates/api/src/feeds_route.rs:3229: 2 keys and 6 appends: left Some("2020-09-02") (the bench's own sizes, 20/30/40 keys, cannot see it: their last day stays the 20th)
+server::bars_export::tests::an_end_read_that_cannot_open_its_month_refuses_the_export_by_name (new)
+  hand change: crates/api/src/bars_export.rs:974: «=> return refused_read(&why),» -> «=> return refused(StatusCode::INTERNAL_SERVER_ERROR, "end_read", &format!("{why:?}")),»
+  red at crates/api/src/bars_export.rs:1829: left 500 right 400 ({"code":"end_read"}: the end read is the one refusing)
+indexstopqualificationjson::saved_tests::a_forty_session_training_window_is_measured_whole_and_ranked_rejected (new)
+  hand change: crates/api/src/indexstopqualificationjson.rs:236: «Rejected => rejected += 1,» -> «Rejected => unmeasured += 1,»
+  red at crates/api/src/indexstopqualificationjson_saved_tests.rs:586 (the child): summary left {"rejected":"0","unmeasured":"4",...}; the parent at :159
+
+The logs r3_24 change restores a premise and adds no assert: red before it, 5 of 12 runs alone at
+crates/api/src/logs.rs:10249 (`audited_from < ring_from`); green after it, 20 of 20. The four other tests of this
+continuation changed only their doc comments (`Extremes:` lines).
 `````
