@@ -371,4 +371,12 @@ indexstopqualificationjson::saved_tests::a_setting_that_passes_every_check_is_ra
 indexstopqualificationjson::saved_tests::a_forty_session_training_window_is_measured_whole_and_ranked_rejected (moved into the shared child half)
   hand change: crates/api/src/indexstopqualificationjson.rs:236: «Rejected => rejected += 1,» -> «Rejected => unmeasured += 1,»
   red at crates/api/src/indexstopqualificationjson_saved_tests.rs:725 (the child): summary left {"rejected":"0","unmeasured":"4",...}; the parent at :260
+
+Continuation -5, run red7: the Weighed memo re-put test (new). Tree: a local, never-pushed commit red7 (4e480fd6)
+over code tip 98908e77 holding one hand change; built as red6; run as api-<hash> --exact <its full name>: "test
+result: FAILED. 0 passed; 1 failed".
+
+bars::series::tod_index_tests::a_key_put_again_replaces_its_value_and_its_weight (new)
+  hand change: crates/api/src/bars_series.rs:387 (WeighedGenerations::admit): «if let Some((_, was)) = self.young.remove(&key) {» -> «if let Some((_, was)) = self.young.remove(&key).filter(|_| false) {»
+  red at crates/api/src/bars_series.rs:2757: the first weight out, not counted twice: left 200 right 100
 `````
