@@ -707,6 +707,37 @@ json.
   quarantine route's full-pool 429 sends no `Retry-After` header, and its module doc now says
   so (it said one was sent): whether to send one, as `bars_export.rs` does, is the
   operator's call.
+  **Session -5 adds:** (1) `fno_walk` builds the F&O request URLs from `Wire::spec`, the feed's
+  own descriptor (and `chain::month` from `lookup_of(feed)`), while `Credentials::Scripted` puts
+  its loopback base only in the source's spec, and the F&O walk reads `Broker` only to render a
+  line: a test that drives the walk past discovery with a scripted credential reaches the
+  vendor's real host. Production is unaffected; the operator chooses between `Script` replacing
+  `Wire::spec` too, the walk honouring `Broker::Refused`, or neither. Until then `server.rs`
+  11993 (a successful Groww name walk) stays a GAP of L-BCA-6's kind, never driven by a test.
+  (2) D-1202's point 5 says "the tests drive only the suppressed arm"; the spawning arm is now
+  driven too, only in a child whose `PATH` is one scratch folder holding no handler or a link to
+  the system's `true`/`false`, so `cargo test` still reaches no real handler and no script.
+  `open_in_browser`'s doc says so; ASA amends D-1202's wording by a note in its own entry.
+  (3) Two defects fixed at their cause, each pinned by a test red on the old code: provenance's
+  `bars_on_no_journal_day` is `null` whenever a day's bar lookup failed (it counted bars on a
+  journal day as on none), and `record::answer`'s withheld reason names the months that would
+  not read (it said the feed held no bar). Draft invariant rows for ASA's `docs/04-invariants.md`:
+  "a reconstruction never counts bars on no journal day while a day's lookup failed" (test
+  `server::provenance::tests::a_day_whose_bars_will_not_read_is_a_lookup_error_named_by_its_day`)
+  and "a calendar withheld because its months would not read names them, never 'holds no bar'"
+  (test `server::calendar_route_tests::a_month_that_opens_and_will_not_be_looked_up_is_named_and_the_rest_is_answered`).
+  (4) Left to the operator, observed and not changed: `census_cache.rs` reports a census warm
+  row's `took_ms` from the cell's kept read, so a read not kept shows the previous kept read's
+  time or 0 (§3 rule 6); `speed.rs`'s SIGINT/SIGTERM arms (888-889, 894-897) need a signal this
+  crate cannot raise (rustix has no `process` feature, `unsafe` is denied, gate 0 refuses `kill`);
+  `bars_sort.rs` `select_in`'s midpoint (1085) and `cut_extremes`' stretch length (1725) overflow
+  only on inputs no request makes; two (U) rows rest on a size bound worked out from the code
+  (`booleanjson.rs` 138-143, `booleancampaignjson.rs` 73-78), to be read by the reviewer;
+  `emitted.rs` (G1's) still lists `api.speed`'s "the minute thread did not start" as unreachable,
+  now reached; `server::stop_tests::a_stop_during_a_slow_load_ends_within_the_stop_bound` (G1's)
+  failed once here under load (7.1 s against 6 s: L-BCA-4). (5) Two tests the helper drafted for
+  `indexstopvixjson.rs` 105-108 and 151:16 F belong in `indexstopvix_projection_tests.rs`, G1's
+  file by `SHARDS.md`: G1 or ASA lands them (the draft is reproducible from this report's rows).
 
 ## NEEDS THE MAC
 
@@ -719,6 +750,13 @@ json.
 - Non-root runs of the permission tests (this host is root; `where_permission_binds` children
   run as uid 65534 here).
 - Gate 23 on the Mac's CI shell gates, and the D1 landing.
+- Session -5's platform items: `a_pull_journal_that_ends_before_its_length_is_refused_by_the_record_it_ended_before`
+  is Linux-only (a sysfs attribute that reports more bytes than it holds), so provenance.rs
+  1576:16 T and 1577-1581 are reached here and, on aarch64-apple-darwin, are a (U) candidate (no
+  file there reports more bytes than it holds without a concurrent writer): the Mac to confirm or
+  name its own input. server.rs 6855:68 F reads the wall clock (`finished_day_only`): a run on a
+  settled day or after the close takes it, as this Saturday run does. The spawning-arm child links
+  the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
 
 NEXT: G2's production rows left in the final lists, file by file, largest first: server.rs's
 `fno_futures` past its refusal (a `Credentials::Scripted` site and a loopback vendor reach it,
