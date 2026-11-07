@@ -158,3 +158,109 @@ fn a_report_the_log_did_not_take_is_never_answered_written() {
         "and drops the log's answer nowhere: {body}"
     );
 }
+
+/// The variable naming the proof file of
+/// [`a_report_in_a_process_with_no_log_is_answered_not_written_and_never_counted`]'s
+/// child.
+const NO_LOG_CHILD: &str = "BRUTEX_PAGE_REPORT_NO_LOG_CHILD";
+
+/// **A REPORT IN A PROCESS WITH NO LOG IS ANSWERED NOT WRITTEN AND NEVER
+/// COUNTED WRITTEN** (BASE-COV-API repair 3, D-8661). `note` driven whole in a
+/// child of this test binary, which has its own ration window and no log: the
+/// parent's log is a process singleton installed by its first use
+/// (`emitted::sink`), which the child never makes. The child proves it ran by
+/// the file its parent reads, never by a print. Extremes: the window's first
+/// report with no log (`503 NOT WRITTEN`, `written` false); its
+/// `written_total` (`0`: nothing was written); the window's last admitted
+/// report (`503`, the total still `0`); the report past the ration (`429`,
+/// kept out before the log is asked); a report of exactly 1 KiB (read, then
+/// not written); a body past 1 KiB (`413`, the log never asked); an empty
+/// page (`400`, the same); the next window's first report (`503` again: a new
+/// window makes no log); and, at once, the ration spent with no log (every
+/// admitted report `503` and none counted written), and the next window's
+/// report with no log carrying the reports kept out (`503`, `kept_out_total`
+/// `1`); out of the box, thirty-one reports in one millisecond (thirty
+/// admitted, one kept out: the ration counts reports, not milliseconds).
+#[test]
+fn a_report_in_a_process_with_no_log_is_answered_not_written_and_never_counted() {
+    if let Some(proof) = std::env::var_os(NO_LOG_CHILD) {
+        let t = 4_102_444_800_000_u64;
+        let body = "page=%2Fno-log&what=boom";
+        let mut said: Vec<(u16, String)> = Vec::new();
+        for _ in 0..=REPORTS_PER_WINDOW {
+            said.push(answer(body, t));
+        }
+        let next = t + crate::logs::FAILED_LINE_WINDOW_MS + 1;
+        said.push(answer(body, next));
+        // EXACTLY 1 KiB: the page unencoded, as the test above writes it, so
+        // the body is `page=` + page + `&what=` + what, 11 bytes besides.
+        let page = "/no-log";
+        said.push(answer(
+            &format!(
+                "page={page}&what={}",
+                "y".repeat(MAX_REPORT_BYTES - page.len() - 11)
+            ),
+            next,
+        ));
+        said.push(answer(
+            &format!("page=%2Fno-log&what={}", "x".repeat(MAX_REPORT_BYTES)),
+            t,
+        ));
+        said.push(answer("page=&what=boom", t));
+        let text = said
+            .iter()
+            .map(|(status, json)| format!("{status} {json}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(proof, text).expect("the child's proof");
+        return;
+    }
+    let dir = crate::scratch::path("page-report-no-log");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch folder");
+    let proof = dir.join("child-ran");
+    let _ = crate::isolated::rerun(
+        "page_report_route::tests::a_report_in_a_process_with_no_log_is_answered_not_written_and_never_counted",
+        &[(NO_LOG_CHILD, proof.as_os_str())],
+    );
+    let text = std::fs::read_to_string(&proof).expect("the child ran and wrote its proof");
+    let said: Vec<(u16, serde_json::Value)> = text
+        .lines()
+        .map(|line| {
+            let (status, json) = line.split_once(' ').expect("a status and its JSON");
+            (
+                status.parse().expect("a status"),
+                serde_json::from_str(json).expect("JSON"),
+            )
+        })
+        .collect();
+    let admitted = usize::try_from(REPORTS_PER_WINDOW).expect("thirty");
+    assert_eq!(said.len(), admitted + 5, "{text}");
+    for (n, (status, json)) in said.iter().take(admitted).enumerate() {
+        assert_eq!(*status, 503, "report {n}: {json}");
+        assert_eq!(json["written"], false, "report {n}: {json}");
+        assert_eq!(json["written_total"], 0, "report {n}: {json}");
+        assert!(
+            json["why"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("NOT WRITTEN")),
+            "report {n}: {json}"
+        );
+    }
+    let (kept_status, kept) = &said[admitted];
+    assert_eq!(*kept_status, 429, "past the ration: {kept}");
+    assert_eq!(kept["kept_out_total"], 1, "{kept}");
+    let (next_status, next) = &said[admitted + 1];
+    assert_eq!(*next_status, 503, "a new window makes no log: {next}");
+    assert_eq!(next["written"], false, "{next}");
+    assert_eq!(next["written_total"], 0, "{next}");
+    assert_eq!(next["kept_out_total"], 1, "{next}");
+    let (whole_status, whole) = &said[admitted + 2];
+    assert_eq!(
+        *whole_status, 503,
+        "exactly 1 KiB is read, then not written: {whole}"
+    );
+    assert_eq!(whole["written_total"], 0, "{whole}");
+    assert_eq!(said[admitted + 3].0, 413, "{text}");
+    assert_eq!(said[admitted + 4].0, 400, "{text}");
+}

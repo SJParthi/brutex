@@ -473,3 +473,7 @@ fn note(feed: pull::vendor::Feed, what: &str, rotated: Option<bool>) {
     };
     let _dropped_when_filtered = telemetry::emit(&event);
 }
+
+#[cfg(test)]
+#[path = "credential_law_cover_tests.rs"]
+mod cover_tests;

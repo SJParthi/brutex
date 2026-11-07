@@ -1377,4 +1377,149 @@ mod tests {
         );
         assert_eq!(Listed::Master.word(), "master");
     }
+
+    /// An in-memory GDFL census holding `keys`, each one month of one row.
+    fn held(
+        keys: &[(
+            brutex_core::instrument::Segment,
+            &str,
+            Option<brutex_core::instrument::Contract>,
+        )],
+    ) -> crate::census::VendorCensus {
+        use brutex_core::instrument::Exchange;
+        use brutex_core::symbol::Symbol;
+        use pull::manifest::{Entry, EntryKey, Manifest};
+        use store::path::{Timeframe, YearMonth};
+        let mut manifest = Manifest::open_image(Vendor::Gdfl, &[]).expect("genesis");
+        for &(segment, symbol, contract) in keys {
+            let _append = manifest
+                .record(Entry {
+                    key: EntryKey {
+                        contract,
+                        exchange: Exchange::Nse,
+                        segment,
+                        symbol: Symbol::new(symbol).expect("symbol"),
+                        timeframe: Timeframe::SECOND_1,
+                        month: YearMonth::new(2019, 9).expect("month"),
+                    },
+                    rows: 1,
+                    first_ts_micros: 1_567_000_000_000_000,
+                    last_ts_micros: 1_567_000_000_000_000,
+                })
+                .expect("recorded");
+        }
+        crate::census::VendorCensus {
+            vendor: Vendor::Gdfl,
+            path: std::path::PathBuf::from("/nonexistent/indexmap-held"),
+            state: crate::census::Census::Held {
+                manifest: crate::census::Manifests::single(manifest),
+            },
+        }
+    }
+
+    /// **A NAME THAT COLLAPSES TO NOTHING IS NO NAME, A VERBATIM NAME THE
+    /// TABLE DID NOT CHOOSE IS SHOWN BESIDE ITS ANSWER, AND AN INDEX KEY
+    /// CARRYING A CONTRACT IS NO INDEX** (BASE-COV-API repair 3, D-8661).
+    /// `Published::from_text`, `join` and `held_index_symbols`. Extremes: a
+    /// published name of punctuation alone (`--`, never listed); a name that
+    /// is empty before its category (`,broad`, the same); the store key
+    /// `NIFTY` published verbatim beside the table's `NIFTY 50` (aliased to
+    /// `NIFTY 50`, the verbatim `NIFTY` shown as what the key alone resolves
+    /// to, `published`); `BANKNIFTY` published verbatim beside the table's
+    /// `NIFTY BANK` (the same); an INDEX key carrying an option contract (not
+    /// listed); an INDEX key without one (listed); a CASH key of an index's
+    /// name (not listed); each vendor's keeper slot is its place in
+    /// `Vendor::ALL` (the slot table the keeper indexes by `vendor as usize`
+    /// holds every vendor: the proof of `symbols`' missing-slot arm); and, at
+    /// once, a list whose every name collapses to nothing (empty, no
+    /// candidate), and a census whose only INDEX keys carry contracts (no
+    /// index listed, never an error); out of the box, the store key published
+    /// verbatim with the table's own name absent from the list (the rename
+    /// cannot be followed, so the key's own verbatim answer stands).
+    #[test]
+    fn a_name_of_nothing_is_no_name_and_a_verbatim_name_the_table_did_not_choose_is_shown() {
+        use brutex_core::instrument::{Contract, Segment};
+        let listed = Published::from_text(
+            "index_name,category\nNIFTY 50,broad\n--,punctuation\n,broad\nNIFTY BANK,sectoral\n",
+        );
+        assert_eq!(
+            listed.len(),
+            2,
+            "only the two names that collapse to something"
+        );
+        assert_eq!(
+            listed
+                .names
+                .iter()
+                .map(|(_, written)| written.as_str())
+                .collect::<Vec<_>>(),
+            ["NIFTY 50", "NIFTY BANK"],
+            "the candidate list holds no name of nothing"
+        );
+        assert_eq!(listed.candidates("NIFTY50"), ["NIFTY 50"]);
+        let nothing = Published::from_text("--,punctuation\n,broad\n - ,dashes\n");
+        assert!(nothing.is_empty(), "every name collapses to nothing");
+        assert!(nothing.candidates("NIFTY").is_empty());
+
+        let verbatim = Published::from_text(
+            "index_name,category\nNIFTY 50,broad\nNIFTY,invented\nNIFTY BANK,sectoral\nBANKNIFTY,invented\n",
+        );
+        let rows = join(&verbatim, Vendor::Zerodha, ["NIFTY", "BANKNIFTY"]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (
+                    row.symbol.as_str(),
+                    row.nse.as_deref(),
+                    row.basis,
+                    row.unaided.clone()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "BANKNIFTY",
+                    Some("NIFTY BANK"),
+                    Some(Basis::Aliased),
+                    Some(Unaided::Differs("BANKNIFTY".to_owned(), Basis::Published))
+                ),
+                (
+                    "NIFTY",
+                    Some("NIFTY 50"),
+                    Some(Basis::Aliased),
+                    Some(Unaided::Differs("NIFTY".to_owned(), Basis::Published))
+                ),
+            ]
+        );
+        assert!(rows.iter().all(|row| row.alias.is_some()), "{rows:?}");
+        let alone = join(
+            &Published::from_text("index_name,category\nNIFTY,invented\n"),
+            Vendor::Zerodha,
+            ["NIFTY"],
+        );
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].nse.as_deref(), Some("NIFTY"), "{alone:?}");
+        assert_eq!(alone[0].basis, Some(Basis::Published), "{alone:?}");
+        assert!(alone[0].alias.is_none(), "the rename was not followed");
+
+        let option = Some(Contract::parse("2019-09-26-1150000-CE").expect("a contract"));
+        let mut symbols = held_index_symbols(&held(&[
+            (Segment::Index, "NIFTY", option),
+            (Segment::Index, "NIFTYIT", None),
+            (Segment::Cash, "BANKNIFTY", None),
+        ]))
+        .expect("held");
+        symbols.sort_unstable();
+        assert_eq!(symbols, ["NIFTYIT"], "a contract or a share is no index");
+        assert_eq!(
+            held_index_symbols(&held(&[
+                (Segment::Index, "NIFTY", option),
+                (Segment::Index, "BANKNIFTY", option),
+            ])),
+            Ok(Vec::new()),
+            "contracts alone: no index, and no error"
+        );
+
+        for (place, vendor) in Vendor::ALL.into_iter().enumerate() {
+            assert_eq!(vendor as usize, place, "{vendor:?}");
+        }
+    }
 }

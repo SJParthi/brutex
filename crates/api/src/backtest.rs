@@ -2565,4 +2565,94 @@ mod tests {
         mixed.runs.reverse();
         assert_eq!(mixed.best_complete().expect("a winner").index, 1);
     }
+
+    /// **A LEDGER IS APPENDABLE ONLY WHEN IT IS THIS VERSION, WHOLE AND READ
+    /// TO ITS END** (BASE-COV-API repair 3, D-8661). `to_json`'s `appendable`
+    /// over every reason a ledger is not. Extremes: a current-version ledger
+    /// read whole (appendable); an empty one (appendable: nothing refused);
+    /// a current-version ledger whose second-newest record will not read
+    /// (not appendable, the refusal naming that record); one whose newest
+    /// record will not read (not appendable, no run kept); one whose header
+    /// will not read (not appendable, no version known); a ragged tail (not
+    /// appendable, nothing refused); a version-2 ledger read whole (not
+    /// appendable: it is not this build's version); a version-2 ledger whose
+    /// record will not read (not appendable); and, at once, a current-version
+    /// ledger with a ragged tail AND a record that will not read (not
+    /// appendable, both said), and a version-2 ledger with a ragged tail (not
+    /// appendable for both reasons); out of the box, a current-version ledger
+    /// whose OLDEST record alone will not read, after every newer one did
+    /// (still not appendable: one record unread is enough).
+    #[test]
+    fn a_ledger_is_appendable_only_when_it_is_this_version_whole_and_read_to_its_end() {
+        // `Some(word)` when `appendable` is said exactly once, `None` when it
+        // is said both ways or not at all.
+        let said = |ledger: &Ledger| {
+            let json = ledger.to_json();
+            let yes = json.contains(r#""appendable":true"#);
+            (yes != json.contains(r#""appendable":false"#)).then_some(yes)
+        };
+        let appendable = |ledger: &Ledger| said(ledger) == Some(true);
+        let refused = |ledger: &Ledger| said(ledger) == Some(false);
+        let three = || {
+            file(
+                VERSION,
+                &[
+                    record(1, false, 10),
+                    record(2, false, 20),
+                    record(3, false, 30),
+                ],
+            )
+        };
+        assert!(appendable(&over(three(), 10)), "whole");
+        assert!(appendable(&over(file(VERSION, &[]), 10)), "empty");
+
+        let second = over_failing(FailsAt::new(three()).read_fails_after(2), 10);
+        assert!(refused(&second));
+        assert!(
+            second
+                .refusal
+                .as_deref()
+                .is_some_and(|why| why.starts_with("record 1 of")),
+            "{:?}",
+            second.refusal
+        );
+        let newest = over_failing(FailsAt::new(three()).read_fails_after(1), 10);
+        assert!(refused(&newest));
+        assert!(newest.runs.is_empty(), "nothing above it was read");
+        let header = over_failing(FailsAt::new(three()).read_fails_after(0), 10);
+        assert!(refused(&header));
+        assert_eq!(header.version, 0, "no version is known");
+        let mut ragged = three();
+        ragged.extend_from_slice(&[0_u8; 30]);
+        let torn = over(ragged.clone(), 10);
+        assert_eq!(torn.refusal, None);
+        assert!(refused(&torn), "a ragged tail");
+
+        let old = || file_v2(&[record_v2(1, false, 10), record_v2(2, false, 20)]);
+        assert!(refused(&over(old(), 10)), "another version");
+        let old_unread = over_failing(FailsAt::new(old()).read_fails_after(2), 10);
+        assert!(old_unread.refusal.is_some());
+        assert!(refused(&old_unread));
+
+        let both = over_failing(FailsAt::new(ragged).read_fails_after(2), 10);
+        assert!(both.partial_tail && both.refusal.is_some(), "both said");
+        assert!(refused(&both));
+        let mut old_ragged = old();
+        old_ragged.extend_from_slice(&[0_u8; 7]);
+        let old_torn = over(old_ragged, 10);
+        assert!(old_torn.partial_tail);
+        assert!(refused(&old_torn));
+
+        let oldest = over_failing(FailsAt::new(three()).read_fails_after(3), 10);
+        assert_eq!(oldest.runs.len(), 2, "every newer record was read");
+        assert!(
+            oldest
+                .refusal
+                .as_deref()
+                .is_some_and(|why| why.starts_with("record 0 of")),
+            "{:?}",
+            oldest.refusal
+        );
+        assert!(refused(&oldest));
+    }
 }

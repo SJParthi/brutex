@@ -208,6 +208,161 @@ async fn the_scan_entry_answers_and_a_path_that_cannot_be_measured_is_refused() 
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **A REFUSED REFRESH KEEPS A HANDLE ANOTHER OPEN PUBLISHED MEANWHILE**
+/// (BASE-COV-API repair 3, D-8661). `with_verified` discards the handle a
+/// refresh refused only while that handle is still the one published. The
+/// race is held open deterministically: the competing open publishes from
+/// INSIDE the refresh, where only the refused handle's own lock is held
+/// (`install` takes the slot lock alone). Extremes: a refresh that publishes
+/// a replacement and then refuses (the refusal returned, the replacement
+/// kept and served next); one that refuses with no replacement (the slot
+/// emptied, the next call opens); a replacement for another root (kept, the
+/// refused root opens again); a kept replacement refused by its own next
+/// refresh (emptied then); replacements holding `0` and `u32::MAX` (served
+/// as published); an empty cache (the open runs, the refresh never); a
+/// refresh that publishes a replacement and then passes (`f` reads the
+/// handle it refreshed, the next call the replacement); and, at once, two
+/// replacements published inside one refusing refresh (the last kept), and
+/// a kept replacement whose own refusing refresh publishes another (the
+/// newest kept); out of the box, a replacement holding the very value the
+/// refresh refused (kept all the same: a handle is its slot, not its value).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one cache carried through every order of publish and refusal"
+)]
+fn a_refused_refresh_keeps_a_handle_another_open_published_meanwhile() {
+    let root = std::path::Path::new("/verified-race-fixture");
+    let other = std::path::Path::new("/verified-race-other");
+    let never =
+        || -> Result<u32, String> { unreachable!("a kept handle is served, never reopened") };
+    let served = |cache: &Cached<u32>, at: &std::path::Path| {
+        cache.with_verified(at, never, |_| Ok(()), |held| *held)
+    };
+
+    // AN EMPTY CACHE OPENS; THE REFRESH NEVER RUNS.
+    let cache: Cached<u32> = Cached::new();
+    assert_eq!(
+        cache.with_verified(
+            root,
+            || Ok(7),
+            |_| unreachable!("nothing to refresh"),
+            |held| *held
+        ),
+        Ok(7)
+    );
+
+    // A REPLACEMENT PUBLISHED, THEN THE REFUSAL: KEPT.
+    for value in [8, 0, u32::MAX] {
+        let refused = cache.with_verified(
+            root,
+            never,
+            |_| {
+                cache.install(root, value, |_| ());
+                Err("a refused generation".to_owned())
+            },
+            |held| *held,
+        );
+        assert_eq!(refused, Err("a refused generation".to_owned()));
+        assert_eq!(served(&cache, root), Ok(value), "the replacement is kept");
+    }
+
+    // NO REPLACEMENT: EMPTIED, THEN OPENED AGAIN.
+    let refused = cache.with_verified(root, never, |_| Err("stale".to_owned()), |held| *held);
+    assert_eq!(refused, Err("stale".to_owned()));
+    assert_eq!(
+        cache.with_verified(root, || Ok(21), |_| Ok(()), |held| *held),
+        Ok(21),
+        "emptied, so the next call opens"
+    );
+
+    // ANOTHER ROOT'S REPLACEMENT: KEPT, AND THE REFUSED ROOT OPENS AGAIN.
+    let refused = cache.with_verified(
+        root,
+        never,
+        |_| {
+            cache.install(other, 31, |_| ());
+            Err("refused".to_owned())
+        },
+        |held| *held,
+    );
+    assert!(refused.is_err());
+    assert_eq!(
+        served(&cache, other),
+        Ok(31),
+        "the other root's handle is kept"
+    );
+    assert_eq!(
+        cache.with_verified(root, || Ok(41), |_| Ok(()), |held| *held),
+        Ok(41),
+        "the refused root is opened again"
+    );
+
+    // A REPLACEMENT PUBLISHED, THEN THE REFRESH PASSES.
+    let passed = cache.with_verified(
+        root,
+        never,
+        |_| {
+            cache.install(root, 51, |_| ());
+            Ok(())
+        },
+        |held| *held,
+    );
+    assert_eq!(passed, Ok(41), "`f` reads the handle it refreshed");
+    assert_eq!(served(&cache, root), Ok(51), "the replacement is published");
+
+    // A KEPT REPLACEMENT REFUSED BY ITS OWN NEXT REFRESH: EMPTIED.
+    assert!(
+        cache
+            .with_verified(root, never, |_| Err("refused".to_owned()), |held| *held)
+            .is_err()
+    );
+    assert_eq!(
+        cache.with_verified(root, || Ok(61), |_| Ok(()), |held| *held),
+        Ok(61)
+    );
+
+    // AT ONCE: TWO REPLACEMENTS IN ONE REFUSING REFRESH; THEN A KEPT
+    // REPLACEMENT WHOSE OWN REFUSING REFRESH PUBLISHES ANOTHER.
+    let refused = cache.with_verified(
+        root,
+        never,
+        |_| {
+            cache.install(root, 71, |_| ());
+            cache.install(root, 72, |_| ());
+            Err("refused".to_owned())
+        },
+        |held| *held,
+    );
+    assert!(refused.is_err());
+    assert_eq!(served(&cache, root), Ok(72), "the last replacement is kept");
+    let refused = cache.with_verified(
+        root,
+        never,
+        |_| {
+            cache.install(root, 81, |_| ());
+            Err("refused".to_owned())
+        },
+        |held| *held,
+    );
+    assert!(refused.is_err());
+    assert_eq!(served(&cache, root), Ok(81), "the newest is kept");
+
+    // OUT OF THE BOX: THE REPLACEMENT HOLDS THE REFUSED VALUE ITSELF.
+    let refused = cache.with_verified(
+        root,
+        never,
+        |held| {
+            let same = *held;
+            cache.install(root, same, |_| ());
+            Err("refused".to_owned())
+        },
+        |held| *held,
+    );
+    assert!(refused.is_err());
+    assert_eq!(served(&cache, root), Ok(81), "kept: a handle is its slot");
+}
+
 /// **A PARENT OR LEDGER THAT WILL NOT OPEN IS REFUSED, NEVER READ AS
 /// ABSENT** (BASE-COV-API repair 3, D-8661). Extremes: a ledger of garbage
 /// bytes; a ledger path under a file; an empty ledger (absent, `None`); no
