@@ -199,14 +199,29 @@ fn facts(page: &str, label: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every record in the journal under `root`, newest first.
+/// Every record in the journal under `root`, newest first (the newest page:
+/// at most `audit::MAX_PAGE_RECORDS`).
 fn journal_records(root: &Path) -> Vec<audit::Record> {
+    journal_page(root, |_| 0)
+}
+
+/// The OLDEST page of the journal under `root`, newest first within it: the
+/// records a loop that kept on ticking wrote first.
+fn oldest_records(root: &Path) -> Vec<audit::Record> {
+    journal_page(root, |records| {
+        records.saturating_sub(audit::MAX_PAGE_RECORDS)
+    })
+}
+
+/// One page of the journal under `root`, `skip(records)` records back from
+/// its newest.
+fn journal_page(root: &Path, skip: impl Fn(u64) -> u64) -> Vec<audit::Record> {
     let journal = audit::Journal::at(root);
     let audit::Log::Held { records, .. } = journal.look() else {
         return Vec::new();
     };
     journal
-        .page(records, 0, records)
+        .page(records, skip(records), records)
         .expect("the journal reads")
         .into_iter()
         .map(|entry| entry.decoded.expect("each record decodes"))
@@ -2456,6 +2471,27 @@ fn the_fno_contract_refusal_carries_no_vendor_down_marker() {
 /// blocked, so the record is NOT STARTED with the tick's own default reason,
 /// and it closes the run the tick opened (`autopilot::fly`'s loop and
 /// `tick`'s unblocked arms).
+///
+/// THE FIRST TICK'S RECORD, BY CONSTRUCTION (BASE-COV-API-AS3, D-8664). The
+/// loop does not stop at one tick: a Zerodha month that reaches nobody is dry,
+/// so it is asked again and then passed with no wait, month after month, until
+/// Groww's floor month (2020-01) ties Zerodha's and Groww, earlier in
+/// `Feed::ALL`, is chosen and refused by the vendor. The journal reads newest
+/// first, a page of at most `audit::MAX_PAGE_RECORDS` (200), so a host fast
+/// enough to run those 120 dry ticks (two records each) between two polls
+/// handed this test Groww's record, with the first tick's no longer on the
+/// newest page. The records read are the journal's OLDEST page, and the
+/// oldest NOT STARTED record there has Zerodha's floor month for its window:
+/// the first tick's, however many ticks the host ran after it.
+///
+/// Extremes: singles — the twenty-second grace spent before any tick, a feed
+/// no instrument maps to chosen first, a vendor refusing every request, a
+/// journal read newest first while the loop keeps ticking, a journal longer
+/// than one page; combinations — a fast host running every dry month up to
+/// Groww's floor between two polls and the oldest record still Zerodha's
+/// floor month at once, the first tick's run opened and closed on the same
+/// oldest page at once; out of the box — the loop paused and aborted
+/// mid-flight, its journal error still empty.
 #[tokio::test]
 async fn an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused() {
     let vendor = FakeVendor::answering(|_, _| (400, "{\"reason\":\"no\"}".to_owned())).await;
@@ -2478,20 +2514,34 @@ async fn an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_r
         !site.autopilot.json().contains(r#""ticks":0,"#)
     })
     .await;
-    let records = journal_records(&fx.root);
     site.autopilot.pause();
     flying.abort();
     let _aborted = flying.await;
+    let records = oldest_records(&fx.root);
 
+    // NEWEST FIRST within the oldest page, so the first tick's record is the
+    // LAST not-started one there.
     let closed = records
         .iter()
-        .find(|record| record.outcome == audit::Outcome::NotStarted)
+        .rfind(|record| record.outcome == audit::Outcome::NotStarted)
         .expect("the tick's record");
     assert_eq!(closed.kind, audit::Kind::Run);
     assert!(closed.source.contains("autopilot"), "{closed:?}");
     assert_eq!(
         closed.note, "no instrument in the universe could be reached",
         "{closed:?}"
+    );
+    let floor_month = |day: u8| {
+        i64::from(
+            Day::new(2015, 1, day)
+                .expect("Zerodha's floor month")
+                .days_from_epoch(),
+        )
+    };
+    assert_eq!(
+        (i64::from(closed.from_days), i64::from(closed.to_days)),
+        (floor_month(1), floor_month(31)),
+        "the first tick is Zerodha's floor month: {closed:?}"
     );
     assert!(
         records

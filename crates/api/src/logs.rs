@@ -10192,6 +10192,15 @@ mod r3_24_tests {
                 .with("instrument", "NIFTY")
                 .with("code", "zip_member_missing"),
         );
+        // THE NOISE IS STAMPED A MILLISECOND LATER, BY CONSTRUCTION
+        // (BASE-COV-API-AS3, D-8664). The sink stamps each line with the host
+        // clock in milliseconds, and on a tmpfs the refusal and the 200 lines
+        // after it fit inside one: the ring's oldest kept line then carried
+        // the refusal's own stamp, and "the audited history reaches further
+        // than the ring" (`audited_from < ring_from` below) failed on a fast
+        // host (1 run in 3 alone). Two milliseconds of sleep move the clock
+        // past the refusal's stamp before any line the ring keeps is written.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let wide = "w".repeat(1024);
         for _ in 0..200 {
             let _ =
