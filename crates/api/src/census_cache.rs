@@ -3805,7 +3805,9 @@ mod tests {
     /// order. Out of the box: (11) a re-read asked again after its refusal is
     /// refused again, never waiting; (12) the calendar warm, whose journal walk
     /// cannot start either, builds nothing it was not asked for and says the
-    /// walk could not start.
+    /// walk could not start; (13) the census warm itself, asked where it
+    /// stands, warms the feed whose thread is refused on its own thread, and
+    /// every row `start` listed settles.
     #[test]
     fn a_host_that_starts_no_thread_is_said_and_nothing_waits_on_one() {
         use std::sync::atomic::Ordering;
@@ -3879,6 +3881,16 @@ mod tests {
             assert!(
                 walked.starts_with("the pull journal's walk could not start: "),
                 "(12) {walked}"
+            );
+            // (13)
+            warm(&site, &vendors);
+            let warmed = warmth(&site);
+            assert_eq!(warmed.len(), listed.len(), "(13) {warmed:?}");
+            assert!(
+                warmed
+                    .iter()
+                    .all(|row| matches!(row.state, WarmState::Ready | WarmState::Failed)),
+                "(13) {warmed:?}"
             );
             std::fs::write(
                 std::path::Path::new(&proof).join("child-ran"),
