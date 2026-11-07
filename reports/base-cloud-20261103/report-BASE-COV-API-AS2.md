@@ -542,13 +542,43 @@ operator's call (D-8663).
   (crates/pull/src/gdfl_run_ledger.rs:435-452).
 - `open_spot_landing`'s `None => None` (6174): `Feed::store_vendor` is `Some` on every arm.
 
-NEXT (session -5): the rest of server.rs's production rows (the cash-eligibility verdicts
-5825-5826, 6075, 6614, 6632, 6855, 9884, `pull_run` 10093-10130, 10594, 11549, 11928 (reached by
-no HTTP feed: a (U) candidate), 11993, 12949, 13019, 14661, 14899, 15926, 37592; the start-up
-rows 20830-21092 need the build stamp, `BRUTEX_AUTOPILOT` or a host fault: read each), then the
-helpers' drafts (bars_sort, provenance with calendar_record, sources with speed, census_cache with
-the calendar files), a red round for every new test, Route B whole:api on the code tip, the lists
-and the FIX json.
+### Batches from the helpers' drafts (each built here, run instrumented, rows read covered)
+
+| commit | file(s) | tests | rows |
+|---|---|---|---|
+| bars_sort | `bars_sort.rs` (`mod cloud_mutant_tests`) | 9 direct-call tests (select_in, start_key, cut, cut_extremes, page_once's guards, the read and extremes budgets), 11-12 extremes each | 25 lines, 16 sides; 16 lines, 23 sides proved (U) (the index is drawn inside the same function); 2074-2075 and 2144-2145 need more than 2^32 series plans (about 1.4 TiB; `window_admitted` refuses past 1,024 series): GAP, named; 2388-2390 only a file changed between two reads in one call reaches: GAP, named |
+| provenance | `provenance_tests.rs`, `calendar_record_tests.rs` | 13 tests | provenance 50 lines, 20 sides; calendar_record 5 lines, 2 sides; the rest (U) |
+| sources, speed | `sources_tests.rs`, `sources_day_truth_tests.rs`, `speed_tests.rs` | 15 tests | sources 40 lines, 32 sides (the rest (U)); speed 17 lines, 4 sides; left: a two-thread insert race (585-586) and the SIGINT/SIGTERM arms (888-889, 894-897), which this crate cannot raise (rustix has no `process` feature, `unsafe` is denied, gate 0 refuses starting `kill`): the operator's |
+| census, calendars | `census_cache.rs`, `calendar_route_tests.rs`, `calendar_route.rs` (a new `#[cfg(test)] mod tests`, test code only), `calendar_of.rs` | 26 tests | census_cache 28 lines, 17 sides; calendar_route 38 lines, 7 sides; calendar_of 17 lines, 11 sides; left: thread starts and panics the host decides, two races (census_cache 918, 1287-1303), (U) rows, and calendar_of 551:32 F and 827:35 T, which only a hand-crafted bar file (a record rewritten with its checksum block recomputed) reaches |
+
+Two defects found by these tests and fixed at their cause (each pinned by a test that is red on
+the old code):
+
+- `provenance.rs` `day_json`'s reconstruction: `bars_on_no_journal_day` was `n_valid` minus the
+  bars held on journal days even when a day's bar lookup failed, so it counted bars on a journal
+  day whose lookup failed as on no journal day. It is `null` whenever `bar_lookup_errors` is
+  non-zero (`a_day_whose_bars_will_not_read_is_a_lookup_error_named_by_its_day`).
+- `calendar_record.rs` `record::answer`: with the asked series' only month unreadable, the answer
+  was withheld as "<feed> holds no <rung> bar for <series>" and the unreadable list was dropped, so
+  a read failure read as an empty store, and was kept. The reason now says "holds no readable
+  <rung> bar ... N month(s) could not be read (<each>)"
+  (`a_month_that_opens_and_will_not_be_looked_up_is_named_and_the_rest_is_answered`, case 8).
+
+Observations recorded, not changed (the operator's): `census_cache.rs` reports a census warm
+row's `took_ms` from the cell's kept read (`kept_read_ms`), so a read that was not kept shows
+the previous kept read's time or 0 (a measurement this read did not take; a red-first test needs
+a read slow enough to time); `bars_sort.rs` `select_in`'s `lo + (hi - lo) / 2` (1085) overflows
+on instants spanning more than `i64::MAX` and `cut_extremes`' `(end - start)` (1725) underflows
+for a stretch with `start > end`, each reachable only by a direct call no request makes;
+`emitted.rs` (G1's) still lists `api.speed`'s "the minute thread did not start" as unreachable,
+which `a_minute_thread_that_cannot_start_is_said_and_the_table_still_counts` now reaches.
+
+NEXT (session -5): a red round for every new test (hand changes proposed by a helper, applied in
+the main tree with every test committed, restored by `git checkout`); the rest of server.rs's
+production rows (5825-5826, 6632, 9884, `pull_run` 10093-10130, 10594, 11549, 11928 (reached by
+no HTTP feed: a (U) candidate), 11993, 12949, 13019, 14661, 14899, 15926, 37592; the start-up rows
+20830-21092); the helpers' drafts for the small files and for the test-code rows; Route B
+whole:api on the code tip; the lists; the FIX json.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
