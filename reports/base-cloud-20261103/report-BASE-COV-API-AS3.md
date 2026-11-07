@@ -3,7 +3,7 @@ STATUS: IN PROGRESS
 # BASE-COV-API-AS3 (shard G3 of `SHARDS.md`, BASE-COV-API repair r3): report
 
 - Branch `cloud/cov-api-as3-20261105`, cut from the kit commit `f4111a0132473d8771d8624a9538b1362926f70b`; START
-  `6ea46e59c07488eeccff388407976041852aae2c`. Code tip `4a86f4085b6ec5d0303b5e4de5a0a99801c868fe` (what
+  `6ea46e59c07488eeccff388407976041852aae2c`. Code tip `f0c9b20f726aa4429134a94ca01f381754b22d72` (what
   `git rev-list -1 HEAD -- . ':(exclude)reports'` prints).
 - Sessions: token `-1` pushed to `7700e2f0`; the main session paused the shard at `edd54703`; token `-3`
   (`a5f009a8`) worked to `44a0a656` and was cut by the account's weekly limit (Thu 5 Nov, about 21:28 IST): its
@@ -15,7 +15,7 @@ STATUS: IN PROGRESS
   `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`; llvm-cov and llvm-profdata `LLVM version 23.1.0-rust-1.99.0-nightly`.
   Every kit file's sha256 matched `MANIFEST.md`. Every figure here is this host's, the builder's: the Mac re-measures.
 
-## What continuation -5 did (`7694e19b`..`4a86f408`, 7 Nov)
+## What continuation -5 did (`7694e19b`..`f0c9b20f`, 7 Nov)
 
 - **NEXT 0, the late red, found and fixed** (`32fbc1ab`). It was the test, not the host's day:
   `an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused` read the NEWEST NOT STARTED record
@@ -44,14 +44,23 @@ STATUS: IN PROGRESS
   naming the month). With the stamp moved, the plan opens the month itself and the first page refuses the export as
   not whole (500): the same damage is a 400 from the end read and a 500 from the plan (a follow-up for the operator,
   not changed here: production behaviour).
-- **NEXT 1 in part** (`042384a3`, `4a86f408`): `indexstopqualificationjson.rs` 236 (`rank`'s Rejected arm) by
-  `a_forty_session_training_window_is_measured_whole_and_ranked_rejected`, a second production launch beside the
-  saved probe: April and May 2025 for training (forty open sessions: every split value measured, where May alone,
-  21 sessions, leaves values unmeasured), June later, March generated for the launch's first read (without it the
-  launch is refused "No such file or directory"). The two launch tests share one parent half.
-  - Admitted (235) not reached: a policy file with every floor at its least the policy admits (1 for the structural
-    counts, 0 elsewhere, every ceiling at its domain's top, both rejection requirements false) still fails
-    `worst_reward_risk` and `worst_trade_loss` on the generated minutes (signal-candle stops lose more than the risk).
+- **NEXT 1, two of three** (`042384a3`, `4a86f408`, `f0c9b20f`): `indexstopqualificationjson.rs` 236 (`rank`'s
+  Rejected arm) by `a_forty_session_training_window_is_measured_whole_and_ranked_rejected`, a second production
+  launch beside the saved probe: April and May 2025 for training (forty open sessions: every split value measured,
+  where May alone, 21 sessions, leaves values unmeasured), June later, March generated for the launch's first read
+  (without it the launch is refused "No such file or directory").
+  - Admitted (235) by `a_setting_that_passes_every_check_is_ranked_admitted`, a third launch (after a restart of
+    this session's worker, at the operator's "try again"): the same windows over generated months that rise through
+    every session by a slope of their own each day, the 09:16 minute dipping 10 paisa past the stop on seven
+    sessions of both windows, under an admission policy at its floors (1 for the structural counts the policy
+    refuses at 0, 0 or the domain's bottom for every other floor, every ceiling at its domain's top, neither
+    rejection required). The long setting of the bullish bar passes every check, the operator's fixed rules no file
+    sets among them, and is ranked Admitted. Found by six local experiments: the shipped generator fails
+    `worst_reward_risk` and `worst_trade_loss` whatever the policy; identical daily P&L is refused by the
+    Romano-Wolf procedure (`NonzeroConstant`); the trade checks read the later window, so the losses must fall in
+    June too; a dip held over four minutes chains re-entries whose third loss passes the risk. The three launch
+    tests share one parent half (`in_a_launch_child`, taking the store and the policy) and the two new ones one
+    child half (`launched_settings`).
   - Refused (237) not reached: a minute left out of a training session is refused by the calendar receipt before
     any metric ("offered 7874, expected 7875, missing 1"), so a Refused verdict needs an execution the strict load
     admits and the runner still marks incomplete (`metrics::execution_complete`, or a day the calendar assessment
@@ -78,8 +87,8 @@ STATUS: IN PROGRESS
 
 Every uncovered row of a G3 file is now (F), (U) with its proof, (H), or a GAP row that names what it is owed to,
 except the rows still G3's to reach (`gaps-AS3.txt.md`, "reachable, not done" and the L-BCA-5 renders):
-`indexstopqualificationjson.rs` 235 and 237 (`rank`'s Admitted and Refused arms: the launches tried this round
-reach Rejected only), `indexstopcandlesjson.rs` 117 True, 118, 120 (a hand re-sealed source context), and the two
+`indexstopqualificationjson.rs` 237 (`rank`'s Refused arm: this round's launches reach Unmeasured, Rejected and
+Admitted), `indexstopcandlesjson.rs` 117 True, 118, 120 (a hand re-sealed source context), and the two
 saved-artifact renders `booleanevidencejson.rs` (184 lines 13 sides: the production launch writes its artifact but
 ran past 13 minutes at opt-level 3) and `selectionv6json.rs` (9 lines 2 sides: the public `cli::run` ledger-v6 verb,
 not tried). NEXT names each with its way in. Every gate is green on the code tip except the 13 host reds, each
@@ -142,7 +151,7 @@ All G3's: the 48 `SHARDS.md` gives G3 and 8 new test files, each declared in the
 `crates/api/benches/`, `Cargo.*`, `docs/`, `.github/`, another group's file. Reports: this file,
 `fix-BASE-COV-API-AS3.json.md`, `OWNER-BASE-COV-API-AS3.md`, `gaps-AS3.txt.md`, `fu-AS3.txt.md`, `red-AS3.txt.md`.
 
-## Tests by name (111 new since START, by file under `crates/api/src/`)
+## Tests by name (112 new since START, by file under `crates/api/src/`)
 
 - `autopilot.rs` (2): `a_live_loop_over_an_empty_vendor_refuses_it_by_name_and_keeps_passing`, `a_probe_name_the_host_refuses_keeps_the_hosts_own_words`
 - `bars_export.rs` (6): `a_full_scan_pool_refuses_an_export_by_name_and_it_is_written_once_the_pool_frees`, `an_end_read_that_cannot_open_its_month_refuses_the_export_by_name`, `a_page_read_past_a_full_pool_is_read_and_a_task_that_will_not_join_cuts_the_stream`, `a_refusal_before_a_byte_is_the_windows_and_a_name_is_always_a_file_name`, `a_refused_read_is_named_and_one_past_the_cheap_budget_is_asked_again_as_a_scan`, `every_page_that_cannot_be_written_whole_cuts_the_stream_by_name`
@@ -160,7 +169,7 @@ All G3's: the 48 `SHARDS.md` gives G3 and 8 new test files, each declared in the
 - `indexstopjson_cover_tests.rs` (1): `a_second_root_reopens_and_a_page_kind_no_query_names_is_refused_by_name`
 - `indexstoplaunch_tests.rs` (5): `a_foreign_command_and_a_count_of_no_or_too_many_digits_are_refused_before_any_read`, `a_launch_whose_slot_moved_and_a_preview_that_cannot_run_are_refused_by_name`, `a_preview_past_its_observation_records_or_store_bounds_names_each_one`, `every_incoherent_observation_is_refused_by_name_and_its_coherent_edges_pass`, `the_configuration_preview_door_answers_json_when_nothing_is_configured`
 - `indexstopqualificationjson.rs` (1): `a_refusal_names_a_value_by_its_own_text`
-- `indexstopqualificationjson_saved_tests.rs` (2): `a_forty_session_training_window_is_measured_whole_and_ranked_rejected`, `a_saved_qualification_is_served_by_every_page_that_reads_it`
+- `indexstopqualificationjson_saved_tests.rs` (3): `a_forty_session_training_window_is_measured_whole_and_ranked_rejected`, `a_saved_qualification_is_served_by_every_page_that_reads_it`, `a_setting_that_passes_every_check_is_ranked_admitted`
 - `ingest.rs` (1): `a_discovery_asks_for_the_named_expirys_month_or_the_windows`
 - `ingest_cover_tests.rs` (5): `a_clock_at_the_epoch_is_refused_without_naming_a_control`, `a_date_in_pieces_is_finished_or_missing_never_guessed`, `one_named_expiry_keeps_its_own_series_of_that_day_and_no_other`, `the_rate_box_is_read_or_refused_by_name_and_names_its_control`, `what_no_form_reaches_still_says_what_it_is`
 - `ingest_refusals.rs` (1): `a_bound_a_short_day_an_unreadable_journal_and_the_route_each_answer_by_name`
@@ -195,7 +204,7 @@ after it and the new asserts of 2 widened tests: trees `532b881e` and `a9118762`
 (`month_get`'s retry and the candle reader's new assert: tree `fca3d025` over `7d7d243f`), run red5 (continuation
 -5: the 2 new tests and the new asserts of 2 changed tests, four hand changes at once: tree `dfc51d90` over
 `4a86f408`, "0 passed; 4 failed"). The `-3` session's 13 are in its report (`red3`, `red4`), 11 of them new tests.
-93 + 4 + 1 + 11 + 2 = all 111 new tests, each red at the assertion its change aimed for.
+93 + 4 + 1 + 11 + 2 + 1 = all 112 new tests, each red at the assertion its change aimed for (red6: the Admitted launch test, and the Rejected one again after its launch moved into the shared child half).
 
 ## Gates on the code tip `4a86f408`
 
@@ -258,7 +267,7 @@ pool can never fill here (the pool has one slot a core: 4 on this host). Its row
 | `frontierjson.rs` | `every_edge_of_a_page_answers_or_refuses_by_name` | 10 / 2 / 2, kept | 10 / 2 / 2 |
 | `mastersrun.rs` | `a_refresh_with_no_credential_lands_the_public_masters_and_says_it_is_not_whole` | 9 configurations / 2 / 1, kept | 9 / 2 / 1 |
 
-Of the 111 new tests, all 111 name their extremes on an `Extremes:` line; of the four lines continuation -5 added, the three whose own count is short name the test that carries their file's count.
+Of the 112 new tests, all 112 name their extremes on an `Extremes:` line; of the four lines continuation -5 added, the three whose own count is short name the test that carries their file's count.
 
 ## Host reds (each with its proof)
 
@@ -285,7 +294,7 @@ Of the 111 new tests, all 111 name their extremes on an `Extremes:` line; of the
 
 ## Decision drafts (ids D-8664 and D-8665 only; ASA writes the docs entries)
 
-- **D-8664 (draft): shard G3's new tests, and the defects they fixed, outside `feeds_route.rs`.** The 111 test
+- **D-8664 (draft): shard G3's new tests, and the defects they fixed, outside `feeds_route.rs`.** The 112 test
   functions this round added in G3's files (listed by file above), each driving the input of a row of
   `base-cov-api-gaps-r2.txt.md` or of a G3 row Route B left uncovered on the way; each shown red under a hand change
   (`red-AS3.txt.md`, and the `-3` session's report for its 13). Cited as "D-8664" in `bars_series.rs` by session 1.
@@ -343,18 +352,13 @@ Of the 111 new tests, all 111 name their extremes on an `Extremes:` line; of the
 
 ## NEXT (not done; G3's)
 
-1. `indexstopqualificationjson.rs` 235 and 237, `rank`'s Admitted and Refused arms, each a launch beside the two
-   launch tests (`in_a_launch_child` takes the months; `launch_body_over` the windows):
-   - Admitted (235): every check must pass with measured evidence. A policy file at the least the policy admits
-     still fails `worst_reward_risk` (the smallest win must be at least three times the largest loss: the operator's
-     own rule, which no policy file sets) and `worst_trade_loss` (the largest loss against the risk) on the generated
-     minutes, so the minutes must change: signal candles whose stops lose at most the risk and whose winning
-     trades each gain at least three times it
-     (for example one strong one-way session pattern a day, the risk raised with `max_loss_points`).
-   - Refused (237): an execution the strict load admits and `metrics::execution_complete` still refuses (an entry,
-     path or closing refusal, an unreachable trade, an unaccepted minute) or a training day the calendar assessment
-     counts unmeasured (a day whose pessimistic and optimistic readings disagree in sign). A missing minute does not
-     do it: the calendar receipt refuses the month first.
+1. `indexstopqualificationjson.rs` 237, `rank`'s Refused arm, a launch beside the three launch tests
+   (`in_a_launch_child` takes the store and the policy; `launched_settings` the windows): an execution the strict
+   load admits and `metrics::execution_complete` still refuses (an entry, path or closing refusal, an unreachable
+   trade, an unaccepted minute) or a training day the calendar assessment counts unmeasured (a day whose
+   pessimistic and optimistic readings disagree in sign). A missing minute does not do it: the calendar receipt
+   refuses the month first. The trending generator is a good base: a session whose 15:09 minute the facts do not
+   accept, or one whose stop minute makes the two readings disagree, are the candidates.
 2. `indexstopcandlesjson.rs` 117 True, 118, 120: the hand re-seal its `gaps-AS3.txt.md` rows spell out (a launch's
    source context with one referenced name made about 9 MiB long, then its context identity and receipt, the
    BRISCL01 relation and the contextual catalog identity recomputed with the keyless digests the reader checks), in a
