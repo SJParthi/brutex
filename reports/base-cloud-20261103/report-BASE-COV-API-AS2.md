@@ -635,9 +635,49 @@ panic in test code at a test's own assertion (seven of them children, whose pare
 round 4's list: `0 passed; 4 failed` (the `/pull/run` kind read as Dhan's; the landing refusal's
 status; the contract refusal's words; an after-close minute kept), each at its own assertion, restored.
 
-NEXT (session -5): the small files' draft (booleanjson, booleancampaignjson, scrub_route,
-indexstopvixjson, operation_audit, master, topjson, verify, constituents); a red round for those
-tests; then Route B whole:api on the code tip, the lists and the FIX json.
+### The small files (a helper's draft, built and run here)
+
+| file | test | extremes (single / combined / out of the box) | rows |
+|---|---|---|---|
+| `booleanjson_tests.rs` | `every_saved_axis_is_paged_and_a_kind_axis_or_rung_no_catalog_holds_is_refused_by_name` | 12 (8 / 2 / 2) | booleanjson.rs 286, 364-368, 407-416, 194:30 F |
+| `booleanjson_tests.rs` | `a_forced_stop_is_served_by_its_kind_and_its_exact_level` | 8+ | 380-384 |
+| `booleanjson_tests.rs` | `the_public_handler_serves_a_saved_page_whole_from_the_configured_root` (a child: `BRUTEX_STORE`) | 8+ | 136-139, 138:16 T |
+| `booleancampaignjson_tests.rs` | `every_slot_state_a_qualified_history_records_is_served_by_name` | 8+ | 107-111 and their sides |
+| `booleancampaignjson_tests.rs` | `both_campaign_doors_serve_a_saved_snapshot_whole_from_the_configured_root` (a child) | 8+ | 71-74, 73:16 T |
+| `scrub_route.rs` | `an_index_out_of_step_files_without_a_count_and_a_step_of_no_bytes_reads_nothing` | 12 (8 / 2 / 2) | 518, 568, 576, 513:16 F, 563:20 F, 569:20 F, 570:24 F, 579:20 F, 985:51 F |
+| `operation_audit_tests.rs` | `an_audit_whose_blocking_pool_is_gone_is_said_at_the_start_and_at_the_terminal` | 8+ | operation_audit.rs 196-238 (all seven) |
+| `topjson.rs` | `a_top_report_past_the_response_ceiling_is_refused_whole` | 8+ | 137, 139, 136:16 T |
+| `verify.rs` | `a_scrub_that_sees_its_reader_leave_is_refused_and_counts_its_stage_cancelled` | 8+ | 326, 321:26 T |
+| `constituents.rs` | `a_claim_takes_an_id_only_when_there_is_one` | 8+ | 533:16 F |
+
+Each has an `Extremes:` line of at least 8 cases (2 combined, 1 out of the box). Restructured test
+rows: `indexstopvixjson.rs`'s inline tests (a let-else whose arm returned `Err` now panics, so the
+test fails either way and its `Result` return is gone; a collector is per-case asserts) and
+`topjson.rs` 609. Not landed: a `master.rs` test reading `/proc/<pid>/pagemap` (the kernel refuses
+the reader's unaligned reads with `EINVAL`, so the file never grows past the bound there; master.rs
+356-361 stay GAP), and the two tests the helper put in `indexstopvix_projection_tests.rs`, which
+is G1's file by `SHARDS.md` (indexstopvixjson.rs 105-108, 107:16 T and 151:16 F stay GAP;
+indexstopvixjson.rs 107:16 F, 110, 112 need a native catalog of 171 or more trades, not built).
+Filtered instrumented run (`dev-sf2`): `111 passed`.
+
+Red round 6 (the ten): `0 passed; 10 failed`, each at its own assertion (a refusal reworded, a
+forced-stop kind renamed, a 200 made 202 in each saved door, a slot state renamed, a count filed
+for the wrong pass, the audit's start sentence, the ceiling's sentence, a cancelled scrub read as
+answered, a pushed id dropped), restored with `git checkout -- crates/`.
+
+### Gate 23 by hand (session -5)
+
+The `Gate 23` step of `.github/workflows/ci.yml` (job language-purity), its `run:` script taken from
+the file unchanged, run on this tree at `b0b3a034` and on `f01d7a0e4` (a detached worktree), each
+with its own scanner and runtime tool built as the job builds them (`rustc --edition=2024 -D
+warnings .github/source_scan.rs`, then `.github/gates_runtime.rs` with `CARGO_BIN_EXE_source_scan`
+naming it; `RUNNER_TEMP` and `SOURCE_SCAN` pointing at them). Both exit 1 (BASE-REDS-1023's reds).
+`diff` of the two outputs is the one line `993 tracked source file(s)` on f01d7a0e4 against `997`
+here; the print-surface section is the same 56 lines on both and names no `api/src/sources_tests.rs`
+site (`grep -c sources_tests` of this tree's output: 0), and no clause-C site of this session's.
+
+NEXT (session -5): Route B whole:api on the code tip `b0b3a034` (running), the lists and the FIX
+json.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
