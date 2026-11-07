@@ -7,8 +7,10 @@ Branch `cloud/cov-api-as2-20261105`, cut from the kit commit
 Owners in order: token `BASE-COV-API-AS2-20261105-1` (commits `dd7f285b`..`f13f4f57`), the main
 session's pause `PAUSED-BY-MAIN-20261105-1420` (`0eff0822`), `BASE-COV-API-AS2-20261105-3`
 (`8ed8a90f`..`c47e9a06`; the account's weekly limit cut it at about 21:28 IST on 5 Nov, its work
-intact), and this continuation, `BASE-COV-API-AS2-20261105-4` (from `725e11d5`, 6 Nov). The first
-session wrote no report, so its commits are its record; this file is the shard's one report.
+intact), `BASE-COV-API-AS2-20261105-4` (`725e11d5`..`85bff1da`, 6 Nov; cut by the weekly limit
+after its last push, its work intact), and this continuation, `BASE-COV-API-AS2-20261105-5`
+(from `80d4dfcd`, 7 Nov; its section is "Session -5" below). The first session wrote no report,
+so its commits are its record; this file is the shard's one report.
 
 ## Kit check
 
@@ -483,6 +485,70 @@ neither did any work this shard relies on. A third, after the final measurement:
 this folder's report files for that language's name, run to confirm no report holds it (none
 does), wrote the name in its pattern. It only searched; the rule forbids writing the name at
 all, so it is recorded here too.
+
+## Session -5 (7 Nov)
+
+### Host and pins
+
+A fresh container: Linux x86_64, root, 4 cores, 15 GB memory, 30 GB free disk; TMPDIR
+`/dev/shm/as2tmp` (tmpfs, mode 1777). The pinned nightly installed as `nightly-2026-08-08`:
+`rustc -V` prints exactly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, its llvm-cov and
+llvm-profdata print `LLVM version 23.1.0-rust-1.99.0-nightly`. fmt and clippy on `1.97.1` (the
+repository's pin). One `CARGO_TARGET_DIR` (`/home/user/tgt/cov`) for every build, clippy's
+included; `CARGO_PROFILE_DEV_DEBUG=0`. The kit's files checked against `MANIFEST.md` (sha256 of
+`d3-route-b-cloud.sh`, `d3-covset.mjs`, the set file, `CLOUD.md`, `CONTEXT.md`, `DECISIONS.md`,
+`SHARDS.md`: all equal). The instrumented build of `-p api` from nothing took 151 s here.
+
+Four read-only helpers (no edit, no build; drafts in this session's scratchpad only) read
+`bars_sort.rs`, `provenance.rs` with `calendar_record.rs`, `sources.rs` with `speed.rs`, and
+`census_cache.rs` with the two calendar files, and drafted tests for their GAP rows; every test
+lands only after this session builds it, runs it instrumented and reads its rows covered.
+
+### Tests added (each run instrumented and filtered, its target rows read covered)
+
+| file | test | extremes (single / combined / out of the box) | rows it reaches (`b3d5321c` numbering) |
+|---|---|---|---|
+| `server.rs` | `the_futures_route_past_its_refusal_plans_pulls_and_names_its_plan` (a child whose `BRUTEX_MASTERS` is a scratch folder, proving itself by a file) | 9 (6 / 2 / 1) | 14332:32 F, 14358:12 F, 14361-14430, 14398:12 T/F, 14406:8 T/F, 14412:8 T/F |
+| `server.rs` | `the_spawning_arm_names_a_missing_handler_and_leaves_a_started_one_to_its_reaper` (a child whose `PATH` is a scratch folder) | 10 (7 / 2 / 1) | 20528:8 F, 20530-20549 |
+| `server.rs` | `a_store_that_cannot_take_a_write_is_found_by_asking_it`: one case more (a root that refuses `audit/`, where the mode bits bind) | (an existing test) | 4100:12 T, 4101-4102 |
+| `server.rs` | `a_landing_refused_by_another_holder_answers_409_on_every_door`: one case more (a repair request opens a `pull-repair` run) | (an existing test) | 6176:27 T, 6177 |
+
+**A finding on the futures route (test hazard, not a production defect).** `fno_walk` builds the
+F&O request URLs from `Wire::spec`, the descriptor's own spec, while `Credentials::Scripted` puts
+its loopback base only in the source's spec. So a test that drives `fno_walk` past discovery with
+a scripted credential sends its requests to the vendor's real host: this session's first draft of
+the futures test did, once (`https://api.kite.trade/instruments/historical/...`; the sandbox
+refused every attempt and nothing was received or written). The test now drives `fno_futures`
+through a `Wire` whose spec and source both carry the loopback base, as `credential_law_tests.rs`
+does. The F&O walk reads `Broker` only to render a line (`accepted_html`), so `Broker::Refused`
+does not stop a socket on that path. Production is unaffected (there both specs are one);
+whether `Script` should also replace `Wire::spec`, or the walk honour `Broker::Refused`, is the
+operator's call (D-8663).
+
+### Rows proved (U) in this continuation (proofs go in `fu-AS2.txt.md` at the final readout)
+
+- `verify_json`'s `let Some(census) = now.census() else` (server.rs 1922:9 F, 1923-1927):
+  `VendorCensusNow::census` (census_cache.rs:688-690) is a `const fn` whose body is
+  `Some(&self.census)`.
+- `health`'s `if !body.ends_with('\n')` (1990:8 T, 1991): `report_from` (server.rs:768-783) ends
+  the body with `writeln!` into a `String`.
+- `count_targets`' `targets.get_mut(slot)` (2758:31 F): `targets` has `SpotTarget::ALL.len()`
+  cells and `slot` enumerates `SpotTarget::ALL`.
+- `failure_window`'s `Window::new(day, day)` (4521:16 F): `Window::new` refuses only a window
+  that runs backwards (crates/pull/src/session.rs:1056-1067).
+- `note_run_started`'s `run == 0` (5019:21 T, 5020): its one caller passes the run of a landing
+  that is always opened (`Feed::store_vendor` is `Some` on every arm), and `pullrun::open_landing`
+  takes a given non-zero run or allocates `max(now, last + 1, ..) >= 1`
+  (crates/pull/src/gdfl_run_ledger.rs:435-452).
+- `open_spot_landing`'s `None => None` (6174): `Feed::store_vendor` is `Some` on every arm.
+
+NEXT (session -5): the rest of server.rs's production rows (the cash-eligibility verdicts
+5825-5826, 6075, 6614, 6632, 6855, 9884, `pull_run` 10093-10130, 10594, 11549, 11928 (reached by
+no HTTP feed: a (U) candidate), 11993, 12949, 13019, 14661, 14899, 15926, 37592; the start-up
+rows 20830-21092 need the build stamp, `BRUTEX_AUTOPILOT` or a host fault: read each), then the
+helpers' drafts (bars_sort, provenance with calendar_record, sources with speed, census_cache with
+the calendar files), a red round for every new test, Route B whole:api on the code tip, the lists
+and the FIX json.
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
