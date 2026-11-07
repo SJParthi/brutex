@@ -1183,3 +1183,373 @@ fn the_table_names_itself_a_percentile_keeps_its_max_and_a_clock_step_back_close
     assert_eq!(zero.closed.map(|window| window.served), Some(2));
     assert_eq!(far.routes["/spot.json"].opened_ms, 0);
 }
+
+/// **A ROW WITH NO KEPT COPY SAYS NO MINUTE UNTIL IT HAS ONE, AND THE NEXT
+/// MINUTE COUNTS FROM THE FREEZE IT KEPT** (BASE-COV-API-AS2). A row is made
+/// with one zero copy and `Speed::roll` never empties it, so a roll that
+/// finds none has nothing to set its minute against: it says no line for
+/// that row and keeps its freeze as the next base. Extremes: (1) a row whose
+/// kept copies were emptied: a roll says no line for it though it counted a
+/// request; (2) that roll keeps its freeze as the next base, one copy; (3)
+/// emptied again and quiet: still nothing said; (4) the next minute's line
+/// counts only what came after the base, one request, refused; (5) its window
+/// is the minute since the base; (6) its max is that minute's 7 µs, not the
+/// 40 µs before the base; (7) since-start keeps both requests; (8) the last
+/// hour starts at the kept base: one request over one minute. Combined: (9)
+/// emptied copies AND a shutdown roll: nothing said for that row; (10) a
+/// sibling row with its copies in the same roll is said, partial, as usual.
+/// Out of the box: (11) the cold first time survives the emptying: 40 µs.
+#[test]
+fn a_row_with_no_kept_copy_says_no_minute_until_it_has_one() {
+    let speed = Speed::new(0, 4);
+    let bare = speed.row("/speed-test/no-copy", Kind::Route, 0);
+    let kept = speed.row("/speed-test/kept-copy", Kind::Route, 0);
+    bare.add(40, Outcome::Answered);
+    kept.add(9, Outcome::Answered);
+    bare.0.frozen.lock().unwrap().clear();
+    // (1), (2), (9), (10).
+    let at_stop = speed.roll(MINUTE_MS, true);
+    let said: Vec<(&str, u64, bool)> = at_stop
+        .iter()
+        .map(|line| (line.route.as_str(), line.figures.n, line.partial))
+        .collect();
+    assert_eq!(said, [("/speed-test/kept-copy", 1, true)]);
+    assert_eq!(
+        bare.0.frozen.lock().unwrap().len(),
+        1,
+        "the freeze is kept as the next minute's base"
+    );
+    // (3).
+    bare.0.frozen.lock().unwrap().clear();
+    assert!(speed.roll(2 * MINUTE_MS, false).is_empty());
+    // (4)-(6).
+    bare.add(7, Outcome::Refused);
+    let next = speed.roll(3 * MINUTE_MS, false);
+    assert_eq!(next.len(), 1, "{next:?}");
+    let line = &next[0];
+    assert_eq!(line.route, "/speed-test/no-copy");
+    assert_eq!(
+        (
+            line.figures.n,
+            line.figures.refused,
+            line.figures.max_micros,
+            line.window_ms
+        ),
+        (1, 1, 7, MINUTE_MS)
+    );
+    // (7), (8), (11).
+    let report = speed.report(3 * MINUTE_MS);
+    let row = report
+        .rows
+        .iter()
+        .find(|row| row.route == "/speed-test/no-copy")
+        .unwrap();
+    assert_eq!(row.since_start.n, 2);
+    assert_eq!((row.last_hour.n, row.last_hour_minutes), (1, 1));
+    assert_eq!(row.first_after_start_micros, Some(40));
+}
+
+/// **A STAGE COUNTED DIRECTLY IS A STAGE ROW, NEVER A ROUTE ROW**
+/// (BASE-COV-API-AS2). `stage` has no caller in the workspace; its contract
+/// is driven here on the process table, under names no other test uses.
+/// Extremes: (1) a stage counted by `stage` is the row `stage:<name>`, kind
+/// stage; (2) its time is its max and its first; (3) a failed outcome is
+/// counted failed; (4) a stage of zero microseconds counts with max 0; (5) a
+/// cancelled outcome is counted cancelled; (6) the longest time, `u64::MAX`,
+/// is the max and the p99 (the top bucket, clamped); (7) the first time stays
+/// the first one; (8) one name twice is one row of two. Combined: (9) zero
+/// time AND cancelled, twice: one row, two, both cancelled, max 0; (10) a
+/// stage named like a route path stays a stage row and makes no route row.
+/// Out of the box: (11) an empty stage name is the row `stage:`.
+#[test]
+fn a_stage_counted_directly_is_a_stage_row_and_never_a_route_row() {
+    let named = |what: &str| format!("speed-test/as2 direct {what}");
+    let row_of = |route: &str| {
+        global()
+            .report(now_ms())
+            .rows
+            .into_iter()
+            .find(|row| row.route == route)
+    };
+    // (1)-(3).
+    stage(&named("failed"), 1_500, Outcome::Failed);
+    let failed = row_of(&format!("stage:{}", named("failed"))).expect("the stage's row");
+    assert_eq!(failed.kind, Kind::Stage);
+    let once = failed.since_start;
+    assert_eq!((once.n, once.failed, once.max_micros), (1, 1, 1_500));
+    assert_eq!(failed.first_after_start_micros, Some(1_500));
+    // (4), (5), (8), (9).
+    stage(&named("instant"), 0, Outcome::Cancelled);
+    stage(&named("instant"), 0, Outcome::Cancelled);
+    let instant = row_of(&format!("stage:{}", named("instant"))).expect("one row for both");
+    let twice = instant.since_start;
+    assert_eq!(
+        (twice.n, twice.cancelled, twice.max_micros, twice.p99_micros),
+        (2, 2, 0, 0)
+    );
+    // (6), (7).
+    stage(&named("longest"), 5, Outcome::Answered);
+    stage(&named("longest"), u64::MAX, Outcome::Answered);
+    let longest = row_of(&format!("stage:{}", named("longest"))).expect("the row");
+    let ends = longest.since_start;
+    assert_eq!(
+        (ends.max_micros, ends.p99_micros, ends.p50_micros),
+        (u64::MAX, u64::MAX, 5)
+    );
+    assert_eq!(longest.first_after_start_micros, Some(5));
+    // (10).
+    let shaped = "/speed-test/as2-route-shaped";
+    stage(shaped, 3, Outcome::Answered);
+    assert_eq!(
+        row_of(&format!("stage:{shaped}")).map(|row| row.kind),
+        Some(Kind::Stage)
+    );
+    assert!(row_of(shaped).is_none(), "a stage makes no route row");
+    // (11).
+    stage("", 4, Outcome::Refused);
+    let bare = row_of("stage:").expect("an empty name is the row `stage:`");
+    assert_eq!(bare.kind, Kind::Stage);
+    assert!(bare.since_start.refused >= 1, "{bare:?}");
+}
+
+/// **A STOP ASKED UNDER A RUNTIME THAT IS GONE ANSWERS CTRL-C'S OWN ERROR AND
+/// SAYS `SIGTERM` CANNOT BE CAUGHT** (BASE-COV-API-AS2). tokio refuses to
+/// register a signal on a runtime whose driver was dropped ("signal driver
+/// gone"), before it touches the process's handlers, so `stop_asked` called
+/// with such a runtime's handle entered takes the arm that names the
+/// uncatchable `SIGTERM` and answers Ctrl-C's registration error, as its
+/// `# Errors` section says. It runs in a child all the same, as the
+/// registering test beside it does; the child proves it ran by a file its
+/// parent reads. Extremes: (1) a runtime built and dropped before the call:
+/// its handle, entered, still lets the call return a future without a panic;
+/// (2) the future resolves at once, waiting for no signal; (3) to Ctrl-C's
+/// own registration error, never a stop; (4) in tokio's words, "signal
+/// driver gone"; (5) "SIGTERM cannot be caught" is said, at error level; (6)
+/// with the same reason; (7) a second call on the same dead handle answers
+/// the same; (8) and says the line again: two lines for two polls. Combined:
+/// (9) a dead runtime's handle AND a poller with no signal driver: the same
+/// answer; (10) two futures from one dead handle polled one after the other:
+/// two errors, two lines. Out of the box: (11) a runtime that never ran a
+/// task before it died.
+#[test]
+fn a_stop_asked_of_a_runtime_that_is_gone_answers_ctrl_cs_error_and_says_so() {
+    const CHILD: &str = "BRUTEX_TEST_STOP_DRIVER_GONE_CHILD";
+    if let Some(proof) = std::env::var_os(CHILD) {
+        let mark = crate::emitted::mark();
+        let gone = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let handle = gone.handle().clone();
+        drop(gone);
+        let ask = || {
+            let _inside = handle.enter();
+            stop_asked()
+        };
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ask))
+            .expect("a dead runtime's handle is entered without a panic");
+        let second = ask();
+        let poller = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a runtime with a clock and no signal driver");
+        let answers: Vec<String> = [first, second]
+            .into_iter()
+            .map(|asked| {
+                poller
+                    .block_on(async {
+                        tokio::time::timeout(std::time::Duration::from_secs(10), asked).await
+                    })
+                    .expect("answered at once: no signal is waited for")
+                    .expect_err("Ctrl-C's own registration error, never a stop")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(answers, ["signal driver gone", "signal driver gone"]);
+        let said = crate::emitted::landed(mark, "api.speed", "SIGTERM cannot be caught");
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said.iter()
+                .all(|record| record.level == telemetry::Level::Error
+                    && crate::emitted::says(record, "why", "signal driver gone")),
+            "{said:?}"
+        );
+        std::fs::write(
+            std::path::Path::new(&proof).join("child-ran"),
+            answers.join("; "),
+        )
+        .expect("the child's proof");
+        return;
+    }
+    let proof = crate::scratch::path("speed-stop-driver-gone");
+    let _ = std::fs::remove_dir_all(&proof);
+    std::fs::create_dir_all(&proof).expect("the child's proof folder");
+    let _ = crate::isolated::rerun(
+        "speed::tests::a_stop_asked_of_a_runtime_that_is_gone_answers_ctrl_cs_error_and_says_so",
+        &[(CHILD, proof.as_os_str())],
+    );
+    assert_eq!(
+        std::fs::read_to_string(proof.join("child-ran"))
+            .ok()
+            .as_deref(),
+        Some("signal driver gone; signal driver gone"),
+        "the child asked twice under a dead runtime and heard Ctrl-C's error twice"
+    );
+    let _ = std::fs::remove_dir_all(&proof);
+}
+
+/// **A MINUTE THREAD THAT CANNOT START IS SAID, AND THE TABLE STILL COUNTS**
+/// (BASE-COV-API-AS2). `global()` makes the table even when the OS refuses
+/// its minute thread, says so once at `error`, and the minutes are then
+/// written only at shutdown. The refusal is arranged in a child whose
+/// `RUST_MIN_STACK` asks every new thread for 2^60 bytes of stack, which no
+/// address space holds, so `pthread_create` answers `EAGAIN`. The child
+/// proves it ran by a file its parent reads. Extremes: (1) the minute thread
+/// that cannot start is said once, at error level; (2) with the OS's reason;
+/// (3) the process table is made all the same; (4) a stage counted on it is
+/// kept, once, 42 µs; (5) its first time is 42 µs; (6) a route counted beside
+/// it is kept too; (7) the report lists the route before the stage; (8) with
+/// no minute thread ever rolling, the shutdown freeze writes both rows'
+/// minute. Combined: (9) the thread refused AND a stage counted before any
+/// route: the route still leads the report; (10) the thread refused AND the
+/// shutdown freeze: two lines. Out of the box: (11) a stack request of one
+/// exbibyte.
+#[test]
+fn a_minute_thread_that_cannot_start_is_said_and_the_table_still_counts() {
+    const CHILD: &str = "BRUTEX_TEST_SPEED_NO_MINUTE_THREAD_CHILD";
+    if let Some(proof) = std::env::var_os(CHILD) {
+        let mark = crate::emitted::mark();
+        assert!(TABLE.get().is_none(), "this child has made no table yet");
+        stage("as2 first count", 42, Outcome::Answered);
+        assert!(TABLE.get().is_some(), "the table is made all the same");
+        let said = crate::emitted::landed(mark, "api.speed", "the minute thread did not start");
+        assert_eq!(said.len(), 1, "{said:?}");
+        let record = said.first().expect("the line");
+        assert_eq!(record.level, telemetry::Level::Error);
+        let why = record
+            .field("why")
+            .and_then(telemetry::OwnedValue::as_str)
+            .unwrap_or("");
+        assert!(why.contains("os error"), "{said:?}");
+        global().record(
+            "/speed-test/as2-beside",
+            Kind::Route,
+            9,
+            Outcome::Refused,
+            now_ms(),
+        );
+        let report = global().report(now_ms());
+        let names: Vec<&str> = report.rows.iter().map(|row| row.route.as_str()).collect();
+        assert_eq!(names, ["/speed-test/as2-beside", "stage:as2 first count"]);
+        let counted = report
+            .rows
+            .iter()
+            .find(|row| row.kind == Kind::Stage)
+            .expect("the stage row");
+        assert_eq!(
+            (
+                counted.since_start.n,
+                counted.since_start.max_micros,
+                counted.first_after_start_micros
+            ),
+            (1, 42, Some(42))
+        );
+        assert_eq!(
+            flush_at_shutdown(),
+            2,
+            "no minute thread rolled: both rows' minute"
+        );
+        std::fs::write(std::path::Path::new(&proof).join("child-ran"), b"no thread")
+            .expect("the child's proof");
+        return;
+    }
+    let proof = crate::scratch::path("speed-no-minute-thread");
+    let _ = std::fs::remove_dir_all(&proof);
+    std::fs::create_dir_all(&proof).expect("the child's proof folder");
+    let _ = crate::isolated::rerun(
+        "speed::tests::a_minute_thread_that_cannot_start_is_said_and_the_table_still_counts",
+        &[
+            (CHILD, proof.as_os_str()),
+            (
+                "RUST_MIN_STACK",
+                std::ffi::OsStr::new("1152921504606846976"),
+            ),
+        ],
+    );
+    assert_eq!(
+        std::fs::read(proof.join("child-ran")).ok().as_deref(),
+        Some(&b"no thread"[..]),
+        "the child's minute thread was refused and its table still counted"
+    );
+    let _ = std::fs::remove_dir_all(&proof);
+}
+
+/// **THE MINUTE THREAD WRITES NOTHING WHILE NO TABLE IS MADE, AND KEEPS
+/// RUNNING** (BASE-COV-API-AS2). `global()` makes the table as it starts the
+/// thread, whose first wake is the next minute's end, so a served process
+/// never shows the thread an unmade table; started here in a child that makes
+/// none, it wakes to an empty slot. SLOW: it waits for one wall-clock minute
+/// boundary. Extremes: (1) no table is made before the thread starts; (2) the
+/// thread announces its start before its first wait; (3) the wall clock
+/// passes the boundary it waited for; (4) it is still running after it woke;
+/// (5) it made no table; (6) no minute line was written; (7) the shutdown
+/// freeze finds no table: zero lines; (8) the exit flush likewise, naming
+/// nothing open. Combined: (9) no table AND no line after the wake; (10) both
+/// flushes at once: zero and zero. Out of the box: (11) a minute thread
+/// started with no table at all, which `global()` never does.
+#[test]
+fn the_minute_thread_writes_nothing_while_no_table_is_made() {
+    const CHILD: &str = "BRUTEX_TEST_MINUTE_THREAD_NO_TABLE_CHILD";
+    if let Some(proof) = std::env::var_os(CHILD) {
+        let mark = crate::emitted::mark();
+        assert!(TABLE.get().is_none(), "this child makes no table");
+        let (started, heard) = std::sync::mpsc::channel::<u64>();
+        let thread = std::thread::Builder::new()
+            .name("speed-minute-under-test".into())
+            .spawn(move || {
+                let _sent = started.send(now_ms());
+                minute_thread();
+            })
+            .expect("the thread starts");
+        let at = heard.recv().expect("the thread announced its start");
+        let boundary = (at / MINUTE_MS + 1) * MINUTE_MS;
+        let woken = if boundary - at < 2_000 {
+            boundary + MINUTE_MS
+        } else {
+            boundary
+        };
+        while now_ms() < woken + 2_000 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(now_ms() >= woken);
+        assert!(
+            !thread.is_finished(),
+            "an unmade table does not end the thread"
+        );
+        assert!(
+            TABLE.get().is_none(),
+            "the minute thread never makes the table"
+        );
+        assert!(crate::emitted::landed(mark, "api.speed", "minute ended").is_empty());
+        assert_eq!(flush_at_shutdown(), 0);
+        assert_eq!(flush_at_exit(), 0);
+        std::fs::write(
+            std::path::Path::new(&proof).join("child-ran"),
+            b"woke to no table",
+        )
+        .expect("the child's proof");
+        return;
+    }
+    let proof = crate::scratch::path("speed-minute-thread-no-table");
+    let _ = std::fs::remove_dir_all(&proof);
+    std::fs::create_dir_all(&proof).expect("the child's proof folder");
+    let _ = crate::isolated::rerun(
+        "speed::tests::the_minute_thread_writes_nothing_while_no_table_is_made",
+        &[(CHILD, proof.as_os_str())],
+    );
+    assert_eq!(
+        std::fs::read(proof.join("child-ran")).ok().as_deref(),
+        Some(&b"woke to no table"[..])
+    );
+    let _ = std::fs::remove_dir_all(&proof);
+}

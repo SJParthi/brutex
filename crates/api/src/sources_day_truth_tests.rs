@@ -656,3 +656,161 @@ fn the_gdfl_sum_is_never_said_verified_and_a_derivative_restart_day_is_named() {
         assert_eq!(gdfl_sum_why(false, segment, ordinary), None);
     }
 }
+
+/// **A SIDECAR'S RECORDS OF OTHER DAYS STAY THEIRS, AND ONLY THOSE OUTSIDE
+/// ITS MONTH ARE NAMED** (BASE-COV-API-AS2). The sidecar tests held one day,
+/// or one record after the month. Extremes: (1) a record one second before the
+/// file's month is named outside it; (2) one at the month's first instant is
+/// inside it, another day's, neither a print nor named; (3) one on the day
+/// before is skipped; (4) one at the day's first instant is the day's print,
+/// outside the band; (5) one at the day's last second is the day's print; (6)
+/// one at a stored second whose close is another price is not also in the
+/// bars; (7) one on the day after is skipped; (8) one at the month's last
+/// second is inside it, skipped, not named; (9) one at the next month's first
+/// instant is named outside. Combined: (10) a stored second at the print's own
+/// instant with its volume equal to the quantity but another close: not
+/// counted twice, the price decides; (11) the day's last-second print is the
+/// day's AND outside the band. Out of the box: (12) a version-1 file carrying
+/// records outside its month at BOTH ends at once, still in day order: both
+/// named, with ordinals 0 and 8.
+#[test]
+fn a_sidecars_records_of_other_days_stay_theirs_and_only_those_outside_its_month_are_named() {
+    let root = root("as2-other-days");
+    let on = day(2026, 9, 22);
+    seconds(
+        &root,
+        "SYNTHSPAN",
+        &[
+            second(t(on, 9, 15, 0), 555_000, 10),
+            second(t(on, 15, 29, 3), 555_500, 5),
+        ],
+    );
+    let record = |when: Day, sod: u32, quantity: u64| {
+        auction::Record::of(when, &print(sod, 555_555, quantity))
+    };
+    let records = [
+        auction::Record {
+            t_micros: t(day(2026, 9, 1), 0, 0, 0) - 1_000_000,
+            price_paisa: 555_555,
+            quantity: 1,
+            rows: 1,
+        },
+        record(day(2026, 9, 1), at(0, 0, 0), 2),
+        record(day(2026, 9, 21), at(15, 29, 2), 3),
+        record(on, at(0, 0, 0), 4),
+        record(on, at(15, 29, 3), 5),
+        record(on, at(23, 59, 59), 6),
+        record(day(2026, 9, 23), at(15, 29, 4), 7),
+        record(day(2026, 9, 30), at(23, 59, 59), 8),
+        record(day(2026, 10, 1), at(0, 0, 0), 9),
+    ];
+    let mut bytes = auction::header_of(auction::VERSION_1).to_vec();
+    for kept in &records {
+        bytes.extend_from_slice(&kept.to_bytes());
+    }
+    fs::write(auction::path(&root, &key("SYNTHSPAN"), on).unwrap(), &bytes).unwrap();
+    let body = day_of(&root, "SYNTHSPAN", on);
+    let row = &body["days"][0];
+    let auc = &row["auction"];
+    assert_eq!(auc["state"], "kept_apart", "{auc:#}");
+    assert_eq!(auc["version"], 1);
+    let placed: Vec<(u64, &str, u64, bool, bool)> = auc["prints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kept| {
+            (
+                kept["ordinal"].as_u64().unwrap(),
+                kept["at"].as_str().unwrap(),
+                kept["quantity"].as_u64().unwrap(),
+                kept["in_band"].as_bool().unwrap(),
+                kept["also_in_bars"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        placed,
+        vec![
+            (3, "00:00:00", 4, false, false),
+            (4, "15:29:03", 5, true, false),
+            (5, "23:59:59", 6, false, false),
+        ]
+    );
+    assert_eq!(auc["also_in_bars"]["count"], 0);
+    assert_eq!(
+        auc["outside_month"],
+        json!([
+            { "ordinal": 0, "at": "2026-08-31 23:59:59" },
+            { "ordinal": 8, "at": "2026-10-01 00:00:00" },
+        ])
+    );
+    assert!(!flags(row).contains(&"auction_print_also_in_bars".to_owned()));
+    assert_eq!(body["summary"]["auction_print_also_in_bars"], 0);
+}
+
+/// **A MASTER THAT LOADED BUT NAMES ANOTHER SHARE IS UNVERIFIED, AND ITS
+/// ANSWER COMES BACK FROM MEMORY** (BASE-COV-API-AS2). Every master the band
+/// tests installed named the share asked, and none was asked twice. Extremes:
+/// (1) a dated master that loaded but lists another share: `unverified`,
+/// never `not_eligible`; (2) the reason says UNVERIFIED and names the share
+/// asked; (3) the band's seconds are still counted, one second, volume 20;
+/// (4) no `auction_band_bars` flag, and the page counts none; (5) a master that
+/// loaded is kept, whatever it said of this share; (6) with the masters folder
+/// deleted, the next request answers from the kept master, word for word;
+/// (7) and the day's facts come from the day memo; (8) a master of the day
+/// before is not this day's: `unverified` with the day's own load refusal,
+/// and nothing is kept for the day. Combined: (9) a kept master AND its folder
+/// gone AND the day's facts cached: the same answer with nothing read from
+/// disk; (10) the eve's master on disk AND the day asked: never borrowed.
+/// Out of the box: (11) the whole `session-masters` folder deleted under a
+/// reader that already loaded from it.
+#[test]
+fn a_loaded_master_that_names_another_share_is_unverified_and_answers_again_from_memory() {
+    let on = day(2026, 9, 22);
+    let rows = [
+        second(t(on, 9, 15, 0), 931_300, 100),
+        second(t(on, 15, 15, 0), 931_310, 20),
+    ];
+    let root = root("as2-master-other-share");
+    seconds(&root, "RELIANCE", &rows);
+    master(&root, on, "TCS", 1);
+    // (1)-(5).
+    let first = day_of(&root, "RELIANCE", on);
+    let row = &first["days"][0];
+    let band = &row["auction"]["auction_band_bars"];
+    assert_eq!(band["eligibility"], "unverified", "{band:#}");
+    let why = band["why"].as_str().unwrap().to_owned();
+    assert!(
+        why.contains("UNVERIFIED") && why.contains("no EQ mapping") && why.contains("RELIANCE"),
+        "{why}"
+    );
+    assert_eq!((&band["count"], &band["volume"]), (&json!(1), &json!(20)));
+    assert!(!flags(row).contains(&"auction_band_bars".to_owned()));
+    assert_eq!(first["summary"]["auction_band_bars"], 0);
+    let memo = (root.join("session-masters"), on.days_from_epoch());
+    assert!(MASTERS.get(&memo).is_some(), "a master that loaded is kept");
+    // (6), (7), (9), (11).
+    fs::remove_dir_all(root.join("session-masters")).unwrap();
+    let again = day_of(&root, "RELIANCE", on);
+    assert_eq!(again["summary"]["days_from_cache"], 1);
+    assert_eq!(
+        again["days"][0]["auction"]["auction_band_bars"]["why"],
+        json!(why),
+        "read from the kept master, never from the disk"
+    );
+    // (8), (10).
+    let eve = self::root("as2-master-eve");
+    seconds(&eve, "RELIANCE", &rows);
+    master(&eve, day(2026, 9, 21), "RELIANCE", 1);
+    let band = &day_of(&eve, "RELIANCE", on)["days"][0]["auction"]["auction_band_bars"];
+    assert_eq!(band["eligibility"], "unverified", "{band:#}");
+    assert!(
+        band["why"].as_str().unwrap().contains("2026-09-22"),
+        "{band:#}"
+    );
+    assert!(
+        MASTERS
+            .get(&(eve.join("session-masters"), on.days_from_epoch()))
+            .is_none()
+    );
+}

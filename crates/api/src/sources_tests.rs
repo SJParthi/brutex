@@ -2658,3 +2658,1127 @@ fn the_day_questions_an_unmeasured_basis_and_a_missing_days_reason_are_said_at_t
         assert_eq!(absent_why(series, when), want, "{when}");
     }
 }
+
+/// **A RETIRED KEY READ PAST THE ROUTE'S OWN CHECK IS STILL GONE, AND A
+/// CHAIN IS NEVER THE RETIRED KEY** (BASE-COV-API-AS2). Every route asks
+/// `refuse_retired` first, so the reader's own refusal of a retired option
+/// month arrives only when the ledger lands between that check and the read;
+/// `Refusal::store` must then answer the ledger's `410`, never a `503` that
+/// reads as a store fault. Extremes: (1) a retired option's month read
+/// through `Rows` is refused `410`, never `503`; (2) with the ledger's
+/// sentence word for word; (3) before any record is read; (4) its answer is
+/// the `410` JSON a page reads; (5) `contract_refused` with no colon is a
+/// store fault, `503`; (6) a bare `contract_refused:` is the re-key's, `410`;
+/// (7) the word anywhere but at the start is a store fault; (8) an empty
+/// refusal is a `503`. Combined: (9) the ledger naming the underlying's
+/// option AND an `FNO` question naming no contract: never the retired key,
+/// `Ok`; (10) the retired contract asked as its own key: `refuse_retired`
+/// answers the same `410`. Out of the box: (11) an index carrying the retired
+/// contract, which no query can build: not refused, the segment decides
+/// first.
+#[test]
+fn a_retired_key_read_past_the_route_is_gone_and_a_chain_is_never_the_retired_key() {
+    let fx = Fixture::empty("as2-retired-read");
+    let a = day_a();
+    fx.bars(
+        Vendor::Gdfl,
+        "FNO",
+        "NIFTY",
+        Some(option()),
+        Timeframe::SECOND_1,
+        &[bar(t(a, 9, 15, 0), (1_000, 1_000, 1_000, 1_000), 75, 5_000)],
+    );
+    let retired = pull::gdfl_lineage::RetiredRecord {
+        underlying: Symbol::new("NIFTY").expect("a symbol"),
+        key: option(),
+        why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+        day: a,
+        median: Some(10_000),
+        days: 1,
+        bars: 1,
+    };
+    let ledger = pull::gdfl_lineage::lineage_path(&fx.root);
+    fs::create_dir_all(ledger.parent().expect("imports")).expect("imports dir");
+    fs::write(&ledger, format!("{}\n", retired.line())).expect("the ledger");
+    let fno = |contract: Option<Contract>| Instrument {
+        exchange: Exchange::Nse,
+        segment: Segment::Fno,
+        symbol: "NIFTY".to_owned(),
+        contract,
+    };
+    // (1)-(4): the reader's own refusal, the route's check passed by.
+    let series = Series {
+        inst: fno(Some(option())),
+        vendor: Vendor::Gdfl,
+        rung: Timeframe::SECOND_1,
+    };
+    let held = series.held(&fx.root).expect("its files are kept");
+    assert_eq!(held.len(), 1);
+    let mut budget = Budget::new();
+    let refused = Rows::new(&fx.root, &series, &held, day_bounds(a), false)
+        .all(&mut budget)
+        .expect_err("the reader refuses a retired key too");
+    assert_eq!(refused.status, axum::http::StatusCode::GONE);
+    assert_eq!(refused.why, retired.refusal());
+    assert_eq!(budget.used(), 0, "refused before any record was read");
+    let (status, _, body) = refused.answer();
+    assert_eq!(status, axum::http::StatusCode::GONE);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("JSON"),
+        json!({ "error": retired.refusal() })
+    );
+    // (5)-(8): the prefix and its colon, at their edges.
+    for (why, status) in [
+        ("contract_refused", 503_u16),
+        ("contract_refused:", 410),
+        ("contract_refused: a key the re-key retired", 410),
+        (" contract_refused: a leading space", 503),
+        ("", 503),
+    ] {
+        assert_eq!(Refusal::store(why).status.as_u16(), status, "{why:?}");
+    }
+    // (9)-(11): what `refuse_retired` refuses.
+    assert_eq!(refuse_retired(&fx.root, &fno(None)), Ok(()));
+    assert_eq!(
+        refuse_retired(&fx.root, &fno(Some(option()))),
+        Err(Refusal::gone(retired.refusal()))
+    );
+    let index_with_contract = Instrument {
+        exchange: Exchange::Nse,
+        segment: Segment::Index,
+        symbol: "NIFTY".to_owned(),
+        contract: Some(option()),
+    };
+    assert_eq!(refuse_retired(&fx.root, &index_with_contract), Ok(()));
+}
+
+/// Records one month of `contract` on `symbol`'s `FNO` series at `rung` in
+/// `vendor`'s census, as [`Fixture::census`] records a spot series.
+fn census_of_contract(
+    fx: &Fixture,
+    vendor: Vendor,
+    (symbol, contract): (&str, Contract),
+    rung: Timeframe,
+    rows: &[Bar],
+) {
+    let first = rows.first().expect("rows").ts_micros;
+    let last = rows.last().expect("rows").ts_micros;
+    let civil = Day::from_days(u32::try_from(day_number(first)).expect("a day")).expect("civil");
+    let path = manifest_path(&fx.root, vendor);
+    let bytes = fs::read(&path).unwrap_or_default();
+    let mut manifest = Manifest::open_image(vendor, &bytes).expect("manifest");
+    manifest
+        .record(Entry {
+            key: EntryKey {
+                contract: Some(contract),
+                exchange: Exchange::Nse,
+                segment: Segment::Fno,
+                symbol: Symbol::new(symbol).expect("symbol"),
+                timeframe: rung,
+                month: YearMonth::new(civil.year(), civil.month()).expect("month"),
+            },
+            rows: u64::try_from(rows.len()).expect("rows"),
+            first_ts_micros: first,
+            last_ts_micros: last,
+        })
+        .expect("one contract month in the census");
+    fs::create_dir_all(path.parent().expect("parent")).expect("manifest dir");
+    fs::write(&path, manifest.image()).expect("publish the census");
+    fx.stamps.set(fx.stamps.get() + 1);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("the manifest")
+        .set_modified(
+            std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 + 60 * fx.stamps.get()),
+        )
+        .expect("a filesystem that carries modified times");
+}
+
+/// **EVERY RUNG STATE IS SAID, AND A CALENDAR THAT REFUSED IS QUOTED, NEVER
+/// READ AS SESSIONS** (BASE-COV-API-AS2). The route tests' stores held only
+/// rungs their feeds serve or derive, a derived rung behind by whole months,
+/// censuses that were either whole or absent, and calendars that answered.
+/// Extremes: (1) a Zerodha one-second folder, a rung its descriptor neither
+/// serves nor derives, is tagged `zerodha_unexpected` and kind `unexpected`;
+/// (2) its state is `unexpected` before any census word, though the census
+/// counts none of it; (3) no calendar is asked for it: `sessions` is null;
+/// (4) a one-second folder that is not stored folds to nothing: no
+/// `zerodha_fold` row; (5) a derived rung a day behind its minutes inside one
+/// month is `partial`, `days_behind` 1, no month missing; (6) its sessions
+/// match its minutes' exactly: `sessions_missing` 0, exact; (7) a held census
+/// that lacks one of a stored rung's months is `uncounted`, naming 2019-04;
+/// (8) the stored rung with every month counted beside it is `held`; (9) a
+/// feed whose census will not read has its rung's calendar refusal quoted
+/// with its `503`, and no unheld session named; (10) that feed is
+/// `unreadable` in the feed head. Combined: (11) the unreadable census AND a
+/// stored one-second rung: the rung is `uncounted` and its fold rows are
+/// still listed; (12) a future contract on a derived rung with its census
+/// month counted: no calendar owes it a session, so `sessions_unchecked`,
+/// and with no minutes beside it no `behind_source`. Out of the box: (13) a
+/// census file holding twelve bytes of text.
+#[tokio::test]
+async fn every_rung_state_is_said_and_a_refused_calendar_is_quoted() {
+    let fx = Fixture::empty("as2-rung-states");
+    let (a, b, c) = (day_a(), day_b(), day_c());
+    let (z, idx) = (Vendor::Zerodha, Segment::Index);
+    let flat = |at: i64, price: i64| bar(at, (price, price, price, price), 0, OI_NULL);
+    fx.counted(
+        z,
+        idx,
+        "NIFTY",
+        Timeframe::MINUTE_1,
+        &[flat(t(a, 9, 15, 0), 100_000), flat(t(b, 9, 15, 0), 100_100)],
+    );
+    fx.counted(
+        z,
+        idx,
+        "NIFTY",
+        Timeframe::MINUTE_5,
+        &[flat(t(a, 9, 15, 0), 100_000)],
+    );
+    fx.counted(
+        z,
+        idx,
+        "NIFTY",
+        Timeframe::DAY_1,
+        &[flat(t(a, 0, 0, 0), 100_000)],
+    );
+    fx.bars(
+        z,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::DAY_1,
+        &[flat(t(c, 0, 0, 0), 100_200)],
+    );
+    fx.bars(
+        z,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        &[flat(t(a, 9, 15, 0), 100_000)],
+    );
+    fx.bars(
+        Vendor::Gdfl,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::SECOND_1,
+        &[flat(t(a, 9, 15, 0), 100_000)],
+    );
+    let gdfl_census = manifest_path(&fx.root, Vendor::Gdfl);
+    fs::create_dir_all(gdfl_census.parent().expect("a parent")).expect("the census folder");
+    fs::write(&gdfl_census, b"not a census").expect("a census that will not read");
+    let future = Contract::parse("2019-03-28-FUT").expect("a future");
+    let five = [flat(t(a, 9, 15, 0), 100_500)];
+    fx.bars(
+        z,
+        "FNO",
+        "BANKNIFTY",
+        Some(future),
+        Timeframe::MINUTE_5,
+        &five,
+    );
+    census_of_contract(&fx, z, ("BANKNIFTY", future), Timeframe::MINUTE_5, &five);
+
+    let (status, body) = fx.get("/sources.json", NIFTY).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+    let rows = &body["rungs"];
+    // (1)-(4).
+    let unexpected = row(rows, "zerodha_unexpected", "1s");
+    assert_eq!(unexpected["kind"], "unexpected");
+    assert_eq!(unexpected["state"], "unexpected", "{unexpected:#}");
+    assert_eq!(unexpected["census"]["months_uncounted"], 1);
+    assert_eq!(unexpected["sessions"], Value::Null);
+    assert!(
+        rows.as_array()
+            .expect("rows")
+            .iter()
+            .all(|rung| rung["tag"] != "zerodha_fold"),
+        "{rows:#}"
+    );
+    // (5), (6).
+    let derived = row(rows, "zerodha_derived", "5min");
+    assert_eq!(derived["state"], "partial", "{derived:#}");
+    let behind = &derived["behind_source"];
+    assert_eq!(behind["months_missing"], 0);
+    assert_eq!(behind["days_behind"], 1);
+    assert_eq!(behind["sessions_missing"], 0);
+    assert_eq!(behind["sessions_missing_exact"], true);
+    // (7), (8).
+    let days = row(rows, "zerodha_stored", "1day");
+    assert_eq!(days["state"], "uncounted", "{days:#}");
+    assert_eq!(days["census"]["months_counted"], 1);
+    assert_eq!(days["census"]["uncounted"], json!(["2019-04"]));
+    assert_eq!(row(rows, "zerodha_stored", "1min")["state"], "held");
+    // (9)-(11), (13).
+    let seconds = row(rows, "gdfl_1s", "1s");
+    let sessions = &seconds["sessions"];
+    assert_eq!(sessions["status"], 503, "{sessions:#}");
+    assert!(
+        sessions["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("census could not be read")),
+        "{sessions:#}"
+    );
+    assert!(sessions.get("not_held").is_none(), "{sessions:#}");
+    assert_eq!(seconds["state"], "uncounted");
+    assert_eq!(row(rows, "gdfl_fold", "1day")["state"], "on_request");
+    let gdfl = body["feeds"]
+        .as_array()
+        .expect("feeds")
+        .iter()
+        .find(|feed| feed["feed"] == "gdfl")
+        .expect("gdfl");
+    assert_eq!(gdfl["census"]["state"], "unreadable");
+    // (12).
+    let (status, contract) = fx
+        .get(
+            "/sources.json",
+            "exchange=NSE&segment=FNO&symbol=BANKNIFTY&contract=2019-03-28-FUT",
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{contract:#}");
+    let traded = row(&contract["rungs"], "zerodha_derived", "5min");
+    assert_eq!(traded["state"], "sessions_unchecked", "{traded:#}");
+    assert_eq!(traded["census"]["months_counted"], 1);
+    assert!(traded["behind_source"].is_null());
+    assert!(
+        traded["sessions"]["why"]
+            .as_str()
+            .is_some_and(|why| why.starts_with("trade_driven")),
+        "{traded:#}"
+    );
+    assert_eq!(
+        contract["notes"],
+        json!(["Global Datafeeds holds no rung of NSE-FNO-BANKNIFTY-2019-03-28-FUT in this store"])
+    );
+}
+
+/// **A MINUTE RUNG WHOSE UNHELD SESSIONS PASS THE CALENDAR'S LIST IS COUNTED
+/// WHOLE AND SET AGAINST A DERIVED RUNG AS A LOWER BOUND** (BASE-COV-API-AS2).
+/// `/calendar.json` names at most `MAX_LISTED` unheld sessions and says when
+/// it cut the list; every route test held a few days, so no list was ever cut.
+/// Extremes: (1) a stored rung of 36 consecutive months, one bar each: every
+/// month counted, `held`; (2) its unheld sessions outnumber what the calendar
+/// lists; (3) the count is the calendar's whole count, never the list's
+/// length; (4) 24 of them are named; (5) a derived rung holding only the
+/// first month: 35 months missing, 24 named; (6) 1,065 days behind; (7) its
+/// own calendar lists every unheld session it has, none; (8) set against a
+/// cut list, the sessions it lacks are the difference of the counts, said not
+/// exact and naming no day. Combined: (9) a whole derived list AND a cut
+/// minute list at once: `sessions_missing_exact` false; (10) 35 months
+/// missing AND `sessions_missing` 0: `partial` on the months alone. Out of the
+/// box: (11) a derived unheld count far below its minutes': saturated at 0,
+/// never a wrap.
+#[tokio::test]
+async fn a_minute_rung_whose_unheld_sessions_pass_the_calendars_list_is_a_lower_bound() {
+    let fx = Fixture::empty("as2-cut-short");
+    let (z, idx) = (Vendor::Zerodha, Segment::Index);
+    let first_day = |month: u8| day(2019 + u16::from(month / 12), month % 12 + 1, 1);
+    let flat = |on: Day| {
+        bar(
+            t(on, 9, 15, 0),
+            (100_000, 100_000, 100_000, 100_000),
+            0,
+            OI_NULL,
+        )
+    };
+    for month in 0..36_u8 {
+        fx.counted(
+            z,
+            idx,
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            &[flat(first_day(month))],
+        );
+    }
+    fx.counted(z, idx, "NIFTY", Timeframe::MINUTE_5, &[flat(first_day(0))]);
+    let (status, body) = fx.get("/sources.json", NIFTY).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+    // (1)-(4).
+    let minutes = row(&body["rungs"], "zerodha_stored", "1min");
+    assert_eq!(minutes["months_held"], 36);
+    assert_eq!(minutes["census"]["months_counted"], 36);
+    assert_eq!(minutes["state"], "held", "{minutes:#}");
+    let sessions = &minutes["sessions"];
+    let listed = u64::try_from(crate::calendar_of::record::MAX_LISTED).expect("small");
+    let unheld = sessions["not_held"].as_u64().expect("a whole count");
+    assert!(
+        unheld > listed,
+        "{unheld} unheld against a list of {listed}: {sessions:#}"
+    );
+    assert_eq!(
+        sessions["not_held_named"].as_array().map(Vec::len),
+        Some(MAX_NAMED)
+    );
+    // (5)-(11).
+    let derived = row(&body["rungs"], "zerodha_derived", "5min");
+    assert_eq!(derived["state"], "partial", "{derived:#}");
+    let behind = &derived["behind_source"];
+    assert_eq!(behind["months_missing"], 35);
+    assert_eq!(
+        behind["months_missing_named"].as_array().map(Vec::len),
+        Some(MAX_NAMED)
+    );
+    assert_eq!(behind["days_behind"], 1_065);
+    assert_eq!(behind["sessions_missing"], 0);
+    assert_eq!(behind["sessions_missing_named"], json!([]));
+    assert_eq!(behind["sessions_missing_exact"], false);
+}
+
+/// **A CUT-SHORT MINUTE LIST AND A LONG UNCOUNTED RUN ARE SAID AS FAR AS
+/// THEY ARE KNOWN** (BASE-COV-API-AS2). Extremes: (1) a whole derived list
+/// against a cut minute list is the difference of the counts, not exact,
+/// naming no day; (2) both lists cut: the same; (3) minutes lacking more
+/// sessions than the derived rung: 0; (4) 24 uncounted months are all named;
+/// (5) 25 are all counted and the first 24 named, 2019-01 to 2020-12; (6) a
+/// run of 25 months with no hole: no month absent; (7) no census at all:
+/// every month uncounted, `uncounted`, 0 rows; (8) a rung row given no
+/// calendar answer carries `sessions` null and no window label. Combined:
+/// (9) a whole EMPTY derived list against a cut list of three: 0, not exact;
+/// (10) a derived rung with no minutes beside it AND no calendar answer: no
+/// `behind_source`, and `uncounted` before `sessions_unchecked`. Out of the
+/// box: (11) a whole derived count of `u64::MAX` against a cut list of 0:
+/// `u64::MAX`, never wrapped.
+#[test]
+fn a_cut_short_minute_list_and_a_long_uncounted_run_are_said_as_far_as_they_are_known() {
+    let held = |count: u64, days: &[&str], whole: bool| NotHeld {
+        count,
+        days: days.iter().map(|day| (*day).to_owned()).collect(),
+        whole,
+    };
+    let five = [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05",
+    ];
+    // (1)-(3), (9), (11).
+    assert_eq!(
+        sessions_behind(&held(5, &five, true), &held(3, &five[..1], false)),
+        (2, Vec::new(), false)
+    );
+    assert_eq!(
+        sessions_behind(&held(600, &five, false), &held(590, &five, false)),
+        (10, Vec::new(), false)
+    );
+    assert_eq!(
+        sessions_behind(&held(1, &five[..1], true), &held(4, &five[..4], false)),
+        (0, Vec::new(), false)
+    );
+    assert_eq!(
+        sessions_behind(&held(0, &[], true), &held(3, &[], false)),
+        (0, Vec::new(), false)
+    );
+    assert_eq!(
+        sessions_behind(&held(u64::MAX, &[], true), &held(0, &[], false)),
+        (u64::MAX, Vec::new(), false)
+    );
+    // (4)-(8), (10).
+    let inst = Instrument::parse(NIFTY).expect("NIFTY");
+    let run = |count: u8| -> Arc<[YearMonth]> {
+        (0..count)
+            .map(|n| YearMonth::new(2019 + u16::from(n / 12), n % 12 + 1).expect("a month"))
+            .collect::<Vec<_>>()
+            .into()
+    };
+    let rung = |kind: Kind, rung: Timeframe, months: Arc<[YearMonth]>| Held {
+        feed: Feed::Zerodha,
+        vendor: Vendor::Zerodha,
+        rung,
+        kind,
+        months,
+        span: None,
+    };
+    let none = MinuteSource {
+        months_and_span: None,
+        not_held: None,
+    };
+    let quiet = Sessions::default();
+    let all_named = rung_row(
+        &inst,
+        &rung(Kind::Stored, Timeframe::MINUTE_1, run(24)),
+        None,
+        &none,
+        &quiet,
+    );
+    assert_eq!(all_named["census"]["months_uncounted"], 24);
+    assert_eq!(
+        all_named["census"]["uncounted"].as_array().map(Vec::len),
+        Some(24)
+    );
+    let past = rung_row(
+        &inst,
+        &rung(Kind::Stored, Timeframe::MINUTE_1, run(25)),
+        None,
+        &none,
+        &quiet,
+    );
+    let census = &past["census"];
+    assert_eq!(census["months_uncounted"], 25, "{past:#}");
+    assert_eq!(census["months_counted"], 0);
+    assert_eq!(census["rows"], 0);
+    let named = census["uncounted"].as_array().expect("named months");
+    assert_eq!(named.len(), MAX_NAMED);
+    assert_eq!(named.first(), Some(&json!("2019-01")));
+    assert_eq!(named.last(), Some(&json!("2020-12")));
+    assert_eq!(past["months_held"], 25);
+    assert_eq!(past["months_absent"], 0);
+    assert_eq!(past["last_month"], "2021-01");
+    assert_eq!(past["state"], "uncounted");
+    assert_eq!(past["sessions"], Value::Null);
+    assert!(past["outside_window"].is_null());
+    let derived = rung_row(
+        &inst,
+        &rung(Kind::Derived, Timeframe::MINUTE_5, run(1)),
+        None,
+        &none,
+        &quiet,
+    );
+    assert_eq!(derived["derived_from"], "1min");
+    assert!(derived["behind_source"].is_null(), "{derived:#}");
+    assert_eq!(derived["state"], "uncounted");
+}
+
+/// **A TIMELINE NOBODY HOLDS, OR A DAY NO SOURCE HOLDS, READS NOTHING AND
+/// SAYS WHY** (BASE-COV-API-AS2). Every timeline test asked for days its
+/// sources held. Extremes: (1) a symbol no feed holds, at `1min`: GDFL is
+/// named as neither serving nor deriving the rung, with no second to fold;
+/// (2) Zerodha as holding no month, with no finer rung that folds; (3) then
+/// the note that no offered feed holds it; (4) at `1s`, the finest rung, the
+/// roles swap: GDFL holds no month, Zerodha neither serves nor derives; (5)
+/// at `1day`, the widest, GDFL again has no second to fold; (6) each answers
+/// no source, no row, complete, no cursor and nothing read; (7) on a day the
+/// store holds nothing of, a held fold source reads no bucket and is
+/// exhausted; (8) a held stored source beside it likewise. Combined: (9) both
+/// sources held AND both empty on one day: two sources, zero rows, no
+/// one-source note, nothing read; (10) an index with no source at all still
+/// says its volume note, after the absence notes. Out of the box: (11) a
+/// symbol of 24 bytes, the longest the store files, named whole.
+#[tokio::test]
+async fn a_timeline_nobody_holds_or_a_day_no_source_holds_reads_nothing_and_says_why() {
+    let fx = Fixture::nifty("as2-empty-timelines");
+    let nobody = "exchange=NSE&segment=INDEX&symbol=NOSUCH";
+    let neither = |feed: &str, rung: &str| {
+        format!(
+            "{feed} neither serves nor derives a {rung} rung, and holds no one-second month \
+             of NSE-INDEX-NOSUCH to fold to it"
+        )
+    };
+    let no_month = |feed: &str, rung: &str| {
+        format!(
+            "{feed} holds no {rung} month of NSE-INDEX-NOSUCH, and no finer stored rung of \
+             it folds to {rung}"
+        )
+    };
+    let (gdfl, zerodha) = ("Global Datafeeds", "Zerodha");
+    // (1)-(6), (10).
+    for (rung, from_gdfl, from_zerodha) in [
+        ("1min", neither(gdfl, "1min"), no_month(zerodha, "1min")),
+        ("1s", no_month(gdfl, "1s"), neither(zerodha, "1s")),
+        ("1day", neither(gdfl, "1day"), no_month(zerodha, "1day")),
+    ] {
+        let (status, body) = fx
+            .get(
+                "/sources/bars.json",
+                &format!("{nobody}&rung={rung}&from=2019-03-28"),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{rung}: {body:#}");
+        assert_eq!(
+            body["notes"],
+            json!([
+                from_gdfl,
+                from_zerodha,
+                format!(
+                    "no offered feed holds NSE-INDEX-NOSUCH at {rung} or a finer rung that folds to it"
+                ),
+                "an index has no traded volume (D-2802, D-3322): volume is never compared",
+            ]),
+            "{rung}"
+        );
+        assert_eq!(body["sources"], json!([]), "{rung}");
+        assert_eq!(body["rows"], json!([]), "{rung}");
+        assert_eq!(body["complete"], true, "{rung}");
+        assert_eq!(body["next_cursor"], Value::Null, "{rung}");
+        assert_eq!(body["records_read"], 0, "{rung}");
+        assert_eq!(body["summary"]["rows"], 0, "{rung}");
+    }
+    // (11).
+    let longest = "ABCDEFGHIJKLMNOPQRSTUVWX";
+    let (status, body) = fx
+        .get(
+            "/sources/bars.json",
+            &format!("exchange=NSE&segment=INDEX&symbol={longest}&rung=1min&from=2019-03-28"),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+    assert_eq!(body["instrument"]["key"], format!("NSE-INDEX-{longest}"));
+    assert_eq!(
+        body["notes"][2],
+        format!(
+            "no offered feed holds NSE-INDEX-{longest} at 1min or a finer rung that folds to it"
+        )
+    );
+    // (7)-(9): both sources held, neither holding 2019-03-27.
+    let (status, body) = fx
+        .get(
+            "/sources/bars.json",
+            &format!("{NIFTY}&rung=1min&from=2019-03-27"),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+    let read: Vec<(&str, &Value, &Value)> = body["sources"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .map(|source| {
+            (
+                source["tag"].as_str().expect("a tag"),
+                &source["buckets_read"],
+                &source["exhausted"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ("gdfl_fold", &json!(0), &json!(true)),
+            ("zerodha_stored", &json!(0), &json!(true)),
+        ]
+    );
+    assert_eq!(body["rows"], json!([]));
+    assert_eq!(body["complete"], true);
+    assert_eq!(body["records_read"], 0);
+    assert_eq!(
+        body["notes"],
+        json!(["an index has no traded volume (D-2802, D-3322): volume is never compared"])
+    );
+}
+
+/// **A RECORD THAT FAILS ITS CHECKSUM, OR A MONTH CUT UNDER ITS READER, IS A
+/// STORE REFUSAL THAT NAMES THE FILE** (BASE-COV-API-AS2). Every route test
+/// read whole, well-formed months. Extremes: (1) a record whose bytes no
+/// longer match its block's checksum: the timeline answers `503`; (2) naming
+/// the file and the instant it could not locate; (3) the day table over the
+/// same month answers the same refusal; (4) the rung table, which reads only
+/// headers, still answers `200` with the month's first day; (5) a month cut to
+/// its header under an open reader: the 73 records of the block it had
+/// verified are still served; (6) the first record of the next block is
+/// refused `503`; (7) naming the file and row 73; (8) every record read before
+/// the refusal is counted: 74 taken from the budget. Combined: (9) the
+/// corrupted record is the month's only record AND the first thing a lookup
+/// touches: refused at the day's very first instant; (10) the cut leaves no
+/// record on disk AND the reader still serves 73 verified ones. Out of the
+/// box: (11) a month cut short while its reader holds the shared lock: the
+/// lock never stops the cut.
+#[tokio::test]
+async fn a_record_that_fails_its_checksum_or_a_month_cut_under_its_reader_is_a_store_refusal() {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let a = day_a();
+    let march = YearMonth::new(2019, 3).expect("a month");
+    let minutes = Series {
+        inst: Instrument::parse(NIFTY).expect("NIFTY"),
+        vendor: Vendor::Zerodha,
+        rung: Timeframe::MINUTE_1,
+    };
+    // (1)-(4), (9): one record, one byte flipped inside it.
+    let fx = Fixture::empty("as2-unlocatable");
+    fx.bars(
+        Vendor::Zerodha,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::MINUTE_1,
+        &[bar(
+            t(a, 9, 15, 0),
+            (100_000, 100_000, 100_000, 100_000),
+            0,
+            OI_NULL,
+        )],
+    );
+    let path = minutes.path(&fx.root, march).expect("the month's file");
+    {
+        let at = store::format::HEADER_LEN + 9;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the month");
+        let mut byte = [0_u8; 1];
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.read_exact(&mut byte).expect("read");
+        byte[0] ^= 0x5A;
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.write_all(&byte).expect("write");
+    }
+    let unlocatable = format!("{}: cannot locate {}: ", path.display(), t(a, 0, 0, 0));
+    for (route, query) in [
+        (
+            "/sources/bars.json",
+            format!("{NIFTY}&rung=1min&from=2019-03-28"),
+        ),
+        ("/sources/day.json", format!("{NIFTY}&from=2019-03-28")),
+    ] {
+        let (status, body) = fx.get(route, &query).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{route}: {body:#}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|why| why.starts_with(&unlocatable)),
+            "{route}: {body:#}"
+        );
+    }
+    let (status, table) = fx.get("/sources.json", NIFTY).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{table:#}");
+    assert_eq!(
+        row(&table["rungs"], "zerodha_stored", "1min")["first_day"],
+        "2019-03-28"
+    );
+    // (5)-(8), (10), (11): a hundred records, cut to the header under the reader.
+    let cut = Fixture::empty("as2-cut-under-reader");
+    let minute = |n: i64| {
+        bar(
+            t(a, 9, 15, 0) + n * 60_000_000,
+            (100_000, 100_000, 100_000, 100_000),
+            0,
+            OI_NULL,
+        )
+    };
+    let hundred: Vec<Bar> = (0..100).map(minute).collect();
+    cut.bars(
+        Vendor::Zerodha,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::MINUTE_1,
+        &hundred,
+    );
+    let cut_path = minutes.path(&cut.root, march).expect("the month's file");
+    let held = minutes.held(&cut.root).expect("held");
+    let mut budget = Budget::new();
+    let mut rows = Rows::new(&cut.root, &minutes, &held, day_bounds(a), false);
+    assert_eq!(
+        rows.next(&mut budget).expect("the first record reads"),
+        hundred.first().copied()
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&cut_path)
+        .expect("the month")
+        .set_len(store::format::HEADER_LEN)
+        .expect("cut to its header under the reader");
+    let refused = rows
+        .all(&mut budget)
+        .expect_err("a record past the verified block is refused");
+    assert_eq!(refused.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        refused
+            .why
+            .starts_with(&format!("{} record 73: ", cut_path.display())),
+        "{}",
+        refused.why
+    );
+    assert_eq!(
+        budget.used(),
+        74,
+        "73 records served, the 74th taken and refused"
+    );
+}
+
+/// **THE DAY TABLE'S PARTS REFUSE A MISLABELLED SERIES AND SAY A SYMBOL THEY
+/// CANNOT FILE** (BASE-COV-API-AS2). Extremes: (1) a day slot handed two
+/// records of one IST day refuses `503`, naming the instrument, the count and
+/// the day; (2) both records were read first; (3) a series no feed stores
+/// reads no row and spends no budget; (4) two records one second apart across
+/// IST midnight fold to two day bars: refused by name; (5) two records either
+/// side of UTC midnight (05:30 IST) fold to one day bar, stamped at IST
+/// midnight; (6) a 25-byte symbol's sidecar cannot be filed: unreadable, no
+/// file, no ordinal, the symbol named; (7) its JSON says so and it doubles no
+/// print; (8) an empty symbol likewise; (9) the same 25-byte symbol before the
+/// auction began is never asked: not applicable; (10) day notes with no
+/// dayflags list: three for a share, two for an index, one for a contract.
+/// Combined: (11) a share's notes with an EMPTY dayflags list stay three, and
+/// with one note it comes last. Out of the box: (12) a MINUTE series handed
+/// to the day slot, which no route builds.
+#[test]
+fn the_day_tables_parts_refuse_a_mislabelled_series_and_say_an_unfiled_symbol() {
+    let fx = Fixture::empty("as2-day-parts");
+    let (a, b) = (day_a(), day_b());
+    let flat = |at: i64, price: i64| bar(at, (price, price, price, price), 1, OI_NULL);
+    fx.bars(
+        Vendor::Zerodha,
+        "INDEX",
+        "NIFTY",
+        None,
+        Timeframe::MINUTE_1,
+        &[flat(t(a, 9, 15, 0), 100_000), flat(t(a, 9, 16, 0), 100_100)],
+    );
+    let inst = Instrument::parse(NIFTY).expect("NIFTY");
+    let minutes = Series {
+        inst: inst.clone(),
+        vendor: Vendor::Zerodha,
+        rung: Timeframe::MINUTE_1,
+    };
+    let held = minutes.held(&fx.root).expect("held");
+    // (1), (2), (12).
+    let mislabelled = DaySeries {
+        zerodha_day: Some((minutes.clone(), Arc::clone(&held))),
+        zerodha_minutes: None,
+        gdfl_seconds: None,
+    };
+    let mut budget = Budget::new();
+    let refused = day_facts(&fx.root, &inst, &mislabelled, a, &mut budget)
+        .expect_err("two records in the day slot");
+    assert_eq!(refused.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        refused.why,
+        "NSE-INDEX-NIFTY holds 2 day records on 2019-03-28; a day rung holds one"
+    );
+    assert_eq!(
+        budget.used(),
+        2,
+        "both records were read before the refusal"
+    );
+    // (3).
+    let mut untouched = Budget::new();
+    assert_eq!(day_rows(&fx.root, None, a, &mut untouched), Ok(Vec::new()));
+    assert_eq!(untouched.used(), 0);
+    // (4), (5).
+    let across = DayFold::of(
+        &[
+            flat(t(a, 23, 59, 59), 100_000),
+            flat(t(b, 0, 0, 0), 100_100),
+        ],
+        Bucket::SECOND,
+    )
+    .expect_err("two IST days in one day fold");
+    assert_eq!(across.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        across.why,
+        "pull::fold made 2 day bars of one IST day's records"
+    );
+    let utc_midnight = DayFold::of(
+        &[
+            flat(t(a, 5, 29, 59), 100_000),
+            flat(t(a, 5, 30, 0), 100_100),
+        ],
+        Bucket::SECOND,
+    )
+    .expect("one IST day")
+    .expect("a fold");
+    assert_eq!(
+        (utc_midnight.records, utc_midnight.bar.ts_micros),
+        (2, t(a, 0, 0, 0))
+    );
+    // (6)-(9).
+    let auction_day = day(2026, 9, 22);
+    let share = |symbol: &str| Instrument {
+        exchange: Exchange::Nse,
+        segment: Segment::Cash,
+        symbol: symbol.to_owned(),
+        contract: None,
+    };
+    let long = "S".repeat(25);
+    let said = format!("{long} is not a symbol the store keys");
+    let unfiled = auction_of(&fx.root, &share(&long), auction_day, &[]);
+    assert_eq!(
+        unfiled,
+        Auction::Unreadable {
+            file: String::new(),
+            ordinal: None,
+            why: said.clone(),
+        }
+    );
+    assert_eq!(
+        unfiled.json(),
+        json!({ "state": "unreadable", "file": "", "ordinal": null, "why": said })
+    );
+    assert_eq!(unfiled.also_in_bars(), 0);
+    assert_eq!(
+        auction_of(&fx.root, &share(""), auction_day, &[]),
+        Auction::Unreadable {
+            file: String::new(),
+            ordinal: None,
+            why: " is not a symbol the store keys".to_owned(),
+        }
+    );
+    assert_eq!(
+        auction_of(&fx.root, &share(&long), day(2026, 7, 31), &[]),
+        Auction::NotApplicable
+    );
+    // (10), (11).
+    let future = Instrument {
+        exchange: Exchange::Nse,
+        segment: Segment::Fno,
+        symbol: "NIFTY".to_owned(),
+        contract: Some(option()),
+    };
+    let count = |of: &Instrument, flagged: Option<&Vec<Value>>| day_notes(of, flagged).len();
+    assert_eq!(
+        (
+            count(&share("INVENTEDCO"), None),
+            count(&inst, None),
+            count(&future, None)
+        ),
+        (3, 2, 1)
+    );
+    let none_said: Vec<Value> = Vec::new();
+    assert_eq!(count(&share("INVENTEDCO"), Some(&none_said)), 3);
+    let one_said = vec![json!("a dayflags note")];
+    let with = day_notes(&share("INVENTEDCO"), Some(&one_said));
+    assert_eq!(with.len(), 4);
+    assert_eq!(with.last(), Some(&json!("a dayflags note")));
+}
+
+/// **A DAY ROW IS JUDGED BY ITS BASES AND ITS SEGMENT AT EVERY EDGE**
+/// (BASE-COV-API-AS2). Through `/sources/day.json` a share's bases always
+/// differ and its measured table is always read, and no stored index day
+/// carried volume, so these edges are asked of `day_row` directly.
+/// Extremes: (1) a day Zerodha alone holds is counted `zerodha_only`; (2) the
+/// sources a hand-built context does not hold say `no_feed_stores_this_rung`;
+/// (3) a same-basis share pair whose factor is exactly 2: no
+/// `basis_differs`, factor 2.0000; (4) against an earlier factor 1% away: no
+/// `basis_step`, and no reason needed; (5) its open set against the official
+/// open is flagged `open_mismatch` at 10000.00 bp; (6) GDFL's high above the
+/// day's high is `gdfl_extremes_outside_day`; (7) a share read with no
+/// measured basis table has `measured_run` null; (8) a share whose bases
+/// differ and whose GDFL day traded nothing: no volume factor,
+/// `volume_not_scaled_with_price` false; (9) an index day whose minutes hold
+/// half its day volume never carries `minute_volume_off_day`, and the page
+/// counts none. Combined: (10) bases `same` AND a factor of 2 AND a 1% move
+/// on one day; (11) an index day carrying traded volume AND minutes half of
+/// it. Out of the box: (12) a GDFL first print of 0 paisa: factor 0.0000,
+/// `basis_differs`, never `quantised` though both grids are held, and its
+/// volume never called unscaled.
+#[test]
+fn a_day_row_is_judged_by_its_bases_and_its_segment_at_every_edge() {
+    let a = day_a();
+    let none = DaySeries {
+        zerodha_day: None,
+        zerodha_minutes: None,
+        gdfl_seconds: None,
+    };
+    let context = |segment: Segment, bases: Option<bool>| DayContext {
+        segment,
+        bases,
+        series: &none,
+        measured: None,
+    };
+    let facts = |zerodha_day: Option<Bar>,
+                 zerodha_minutes: Option<DayFold>,
+                 gdfl_seconds: Option<DayFold>| DayFacts {
+        zerodha_day,
+        zerodha_minutes,
+        gdfl_seconds,
+        common_minute: None,
+        auction: Auction::NotApplicable,
+        band: None,
+        restart: None,
+        records_read: 0,
+    };
+    let midnight =
+        |prices: (i64, i64, i64, i64), volume: i64| bar(t(a, 0, 0, 0), prices, volume, OI_NULL);
+    let mut tally = DayTally::default();
+
+    // (1), (2): an index day Zerodha alone holds.
+    let index_day = midnight((100_000, 100_300, 99_900, 100_200), 0);
+    let alone = day_row(
+        a,
+        &facts(Some(index_day), None, None),
+        &context(Segment::Index, None),
+        None,
+        &mut PreviousFactor::default(),
+        &mut tally,
+    );
+    assert_eq!(
+        alone["absent"],
+        json!({
+            "zerodha_minutes": "no_feed_stores_this_rung",
+            "gdfl_seconds": "no_feed_stores_this_rung",
+        }),
+        "{alone:#}"
+    );
+    assert_eq!(alone["flags"], json!([]));
+
+    // (3)-(7), (10): a same-basis pair two times apart.
+    let share_day = midnight((50_000, 50_100, 49_900, 50_050), 1_000);
+    let doubled = DayFold {
+        bar: midnight((100_000, 100_100, 99_900, 100_050), 1_000),
+        records: 2,
+        first: bar(
+            t(a, 9, 15, 0),
+            (100_000, 100_100, 99_900, 100_000),
+            400,
+            OI_NULL,
+        ),
+        last: bar(
+            t(a, 15, 29, 59),
+            (100_050, 100_050, 100_050, 100_050),
+            600,
+            OI_NULL,
+        ),
+        grid: 50,
+    };
+    let mut earlier = PreviousFactor {
+        open: Some((99_000, 50_000)),
+        minute: None,
+    };
+    let same = day_row(
+        a,
+        &facts(Some(share_day), None, Some(doubled)),
+        &context(Segment::Cash, Some(false)),
+        None,
+        &mut earlier,
+        &mut tally,
+    );
+    let basis = &same["basis"];
+    assert_eq!(basis["bases"], "same", "{same:#}");
+    assert_eq!(basis["factor"], n("2.0000"));
+    assert_eq!(basis["basis_differs"], false);
+    assert_eq!(basis["basis_step"], false);
+    assert_eq!(basis["basis_step_why"], Value::Null);
+    assert_eq!(basis["measured_run"], Value::Null);
+    assert_eq!(
+        same["open"]["gdfl_vs_zerodha_day"],
+        json!({ "bps": n("10000.00"), "flag": true })
+    );
+    assert_eq!(
+        same["flags"],
+        json!([
+            "open_mismatch",
+            "gdfl_extremes_outside_day",
+            "official_vs_last_print"
+        ])
+    );
+    assert_eq!(
+        earlier.open,
+        Some((100_000, 50_000)),
+        "the day's pair is the next base"
+    );
+
+    // (8): the bases differ and GDFL traded nothing.
+    let silent = DayFold {
+        bar: midnight((100_000, 100_100, 99_900, 100_100), 0),
+        records: 2,
+        first: bar(
+            t(a, 9, 15, 0),
+            (100_000, 100_100, 99_900, 100_000),
+            0,
+            OI_NULL,
+        ),
+        last: bar(
+            t(a, 15, 29, 59),
+            (100_100, 100_100, 100_100, 100_100),
+            0,
+            OI_NULL,
+        ),
+        grid: 100,
+    };
+    let quiet = day_row(
+        a,
+        &facts(Some(share_day), None, Some(silent)),
+        &context(Segment::Cash, Some(true)),
+        None,
+        &mut PreviousFactor::default(),
+        &mut tally,
+    );
+    assert_eq!(quiet["basis"]["basis_differs"], true, "{quiet:#}");
+    assert_eq!(quiet["basis"]["volume_factor"], Value::Null);
+    assert_eq!(quiet["basis"]["volume_not_scaled_with_price"], false);
+    assert_eq!(
+        quiet["volume"]["gdfl_vs_zerodha_day"],
+        json!({ "factor": null, "why": "basis_differs" })
+    );
+    assert_eq!(quiet["flags"], json!(["basis_differs"]));
+
+    // (12): a first print of 0 paisa, with both grids held.
+    let minutes = DayFold {
+        bar: share_day,
+        records: 1,
+        first: bar(
+            t(a, 9, 15, 0),
+            (50_000, 50_100, 49_900, 50_050),
+            1_000,
+            OI_NULL,
+        ),
+        last: bar(
+            t(a, 9, 15, 0),
+            (50_000, 50_100, 49_900, 50_050),
+            1_000,
+            OI_NULL,
+        ),
+        grid: 50,
+    };
+    let zero_print = bar(t(a, 9, 15, 0), (0, 100_100, 0, 100_000), 5, OI_NULL);
+    let free = DayFold {
+        bar: midnight((0, 100_100, 0, 100_000), 5),
+        records: 1,
+        first: zero_print,
+        last: zero_print,
+        grid: 100,
+    };
+    let nought = day_row(
+        a,
+        &facts(Some(share_day), Some(minutes), Some(free)),
+        &context(Segment::Cash, Some(true)),
+        None,
+        &mut PreviousFactor::default(),
+        &mut tally,
+    );
+    assert_eq!(nought["basis"]["factor"], n("0.0000"), "{nought:#}");
+    assert_eq!(nought["basis"]["basis_differs"], true);
+    assert_eq!(nought["basis"]["quantised"], false);
+    assert_eq!(nought["basis"]["volume_not_scaled_with_price"], false);
+    assert_eq!(
+        nought["basis"]["grid_paisa"],
+        json!({ "zerodha_minutes": 50, "gdfl_seconds": 100 })
+    );
+    assert_eq!(nought["flags"], json!(["basis_differs"]));
+
+    // (9), (11): an index day that traded, its minutes half of it.
+    let traded = midnight((100_000, 100_300, 99_900, 100_200), 1_000);
+    let half_print = bar(
+        t(a, 9, 15, 0),
+        (100_000, 100_300, 99_900, 100_200),
+        500,
+        OI_NULL,
+    );
+    let half = DayFold {
+        bar: midnight((100_000, 100_300, 99_900, 100_200), 500),
+        records: 1,
+        first: half_print,
+        last: half_print,
+        grid: 100,
+    };
+    let index_volume = day_row(
+        a,
+        &facts(Some(traded), Some(half), None),
+        &context(Segment::Index, None),
+        None,
+        &mut PreviousFactor::default(),
+        &mut tally,
+    );
+    assert_eq!(
+        index_volume["volume"],
+        json!({ "why": "index_no_volume", "zerodha_day": 1_000, "gdfl_sum": null }),
+        "{index_volume:#}"
+    );
+    assert_eq!(index_volume["flags"], json!([]));
+
+    let summary = day_summary(&tally);
+    assert_eq!(summary["days"], 5, "{summary:#}");
+    assert_eq!(summary["zerodha_only"], 2);
+    assert_eq!(summary["both_feeds"], 3);
+    assert_eq!(summary["basis_differs"], 2);
+    assert_eq!(summary["minute_volume_off_day"], 0);
+}
