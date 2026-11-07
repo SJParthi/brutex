@@ -5063,6 +5063,126 @@ mod cloud_mutant_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **EVERY MERGE ARM A DIRECT CALL REACHES ANSWERS BY ITS OWN RULE, AND A
+    /// BUDGET THE EXTREMES WOULD PASS REFUSES THE PAGE** (BASE-COV-API repair
+    /// 3, D-8661). `seek` and `scan` handed fewer rules than plans, `merged`
+    /// asked past its total, `Changes::of_row` after a skipped row,
+    /// `behind_of` over a plan whose months were taken from it,
+    /// `SortKey::Change` read alone, and `window_admitted` with no budget
+    /// left. Extremes: a seek with no rules (no row); a scan with no rules (no
+    /// row, none read); a merge asked for three rows past the total (every
+    /// row, then the heads run out); one asked from the last row past the
+    /// total (that one row); a change after a skipped row (`previous_unreadable`,
+    /// a null); the next row's change against the row read before it (its
+    /// basis points, no null); a scan that does not order by change (no
+    /// value from `Changes`); the change column read from one bar alone
+    /// (`0`); a run whose month is no longer the plan's (nothing behind it);
+    /// a time-ordered page whose extremes owe rows past a budget of nothing
+    /// (`NEEDS_SCAN`); and, at once, an index's open-interest page (a seek)
+    /// with its extremes past that budget (`NEEDS_SCAN` too), and the same
+    /// page asked with no budget and then with none left (answered both
+    /// times: the month's extremes are folded once and kept); out of the box,
+    /// a merge asked for no rows at all from past the total (none).
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn every_merge_arm_a_direct_call_reaches_answers_by_its_rule_and_a_spent_budget_refuses() {
+        let (root, query, mut plans, rules) =
+            option_month("merge-arms", "FNO", &[Some(1), Some(2), Some(3)]);
+        let mut faults = FaultLog::default();
+        let none: [change::Rules; 0] = [];
+        let seeked = seek(&root, &mut plans, &none, &query, (0, 10), &mut faults).expect("a seek");
+        assert!(seeked.is_empty(), "no rules, no row");
+        let scanned = scan(
+            &root,
+            &mut plans,
+            &none,
+            &query,
+            (0, 10),
+            &mut faults,
+            &Cancel::never(),
+        )
+        .expect("a scan");
+        assert!(scanned.page.is_empty());
+        assert_eq!(scanned.rows, 0, "no series was read");
+
+        let total: u64 = plans.iter().map(SeriesPlan::total).sum();
+        assert_eq!(total, 3);
+        let every = merged(&root, &mut plans, 0, total + 3, Timeframe::MINUTE_1).expect("a merge");
+        assert_eq!(every.len(), 3, "every row, then the heads run out");
+        let last =
+            merged(&root, &mut plans, total - 1, total + 5, Timeframe::MINUTE_1).expect("a merge");
+        assert_eq!(last.len(), 1, "the last row alone");
+        let past =
+            merged(&root, &mut plans, total + 1, total + 1, Timeframe::MINUTE_1).expect("a merge");
+        assert!(past.is_empty(), "no rows asked");
+
+        let rule = rules.first().expect("a rule");
+        let start = YearMonth::new(2025, 5)
+            .expect("a month")
+            .ist_bounds_micros()
+            .0;
+        let (first, second) = (
+            bar(start, 90, 110, 100, 1),
+            bar(start + 60_000_000, 90, 120, 110, 1),
+        );
+        let mut skipped = Changes(Some((5, Behind::Nothing)));
+        assert_eq!(
+            skipped.of_row(rule, 7, &first),
+            Some((0, true)),
+            "the row before it would not read"
+        );
+        assert_eq!(
+            skipped.of_row(rule, 8, &second),
+            Some((1_000, false)),
+            "against the row read just before"
+        );
+        assert_eq!(Changes(None).of_row(rule, 0, &first), None);
+        assert_eq!(SortKey::Change.of(&first), 0);
+
+        let plan = plans.first_mut().expect("a plan");
+        plan.slots.clear();
+        let second_row = series::Position {
+            count: 1,
+            run: 0,
+            row: 1,
+        };
+        assert!(matches!(
+            behind_of(&root, plan, second_row, None, true),
+            Behind::Nothing
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A BUDGET THE EXTREMES WOULD PASS, ON A MONTH NOT YET FOLDED.
+        let (index_root, index_query, _, _) =
+            option_month("merge-budget-index", "INDEX", &[None, None, None]);
+        let timed = WindowQuery {
+            sort: SortKey::Ts,
+            want_extremes: true,
+            ..index_query.clone()
+        };
+        let by_oi = WindowQuery {
+            sort: SortKey::OpenInterest,
+            want_extremes: true,
+            ..index_query
+        };
+        for (what, asked) in [("time", &timed), ("open interest", &by_oi)] {
+            let why = window_admitted(&index_root, asked, &Cancel::never(), Some(0))
+                .map(|_| ())
+                .expect_err("the extremes would pass the budget");
+            assert!(needs_scan(&why), "{what}: {why}");
+        }
+        let answered = window_admitted(&index_root, &timed, &Cancel::never(), None)
+            .expect("no budget: answered");
+        assert!(answered.extremes.is_some(), "the extremes folded");
+        let kept = window_admitted(&index_root, &by_oi, &Cancel::never(), Some(0))
+            .expect("the month's extremes are kept");
+        assert!(kept.extremes.is_some());
+        let _ = std::fs::remove_dir_all(&index_root);
+    }
 }
 
 /// A cancellation that lands in the middle of a loop, made deterministic. A
