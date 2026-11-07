@@ -1258,6 +1258,20 @@ fn e1_docs() -> Vec<Doc> {
             ),
         );
     }
+    // A17's headline twin of E1-028: the same day, clause and dials
+    next(
+        &mut out,
+        e1_doc(
+            "",
+            "rung targets on the after-fold ladder, E1-028's inputs (A17 headline)",
+            seed,
+            &day,
+            1,
+            &top_all(&day),
+            &e1_params(Side::Long, 2),
+            Readings::HEADLINE,
+        ),
+    );
     out
 }
 
