@@ -457,7 +457,7 @@ mod ladder_rs {
     #[test]
     fn ladder_owing_names_the_hole_only_where_the_order_applies() {
         let held =
-            |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && matches!(k.month.month(), 1 | 3);
+            |k: &EntryKey| matches!((k.timeframe, k.month.month()), (Timeframe::DAY_1, 1 | 3));
         let ask = wanted("HOLED", &[1, 2, 3]);
         let hole = Owed {
             symbol: sym("HOLED"),
@@ -493,24 +493,26 @@ mod ladder_rs {
     #[test]
     fn ladder_an_unordered_ask_still_owes_the_hole_between_held_months() {
         let held =
-            |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && matches!(k.month.month(), 1 | 3);
+            |k: &EntryKey| matches!((k.timeframe, k.month.month()), (Timeframe::DAY_1, 1 | 3));
         let gated = gate(
             held,
             Feed::Zerodha,
             Timeframe::MINUTE_1,
             &wanted("HOLED", &[3, 1, 2]),
         );
-        let Gate::RungFirst {
-            needs,
-            missing,
-            of,
-            owed,
-            runs,
-        } = gated
-        else {
+        let Gate::RungFirst { owed, .. } = &gated else {
             panic!("February is owed: {gated:?}");
         };
-        assert_eq!((needs, missing, of, runs), (Timeframe::DAY_1, 1, 3, 1));
+        assert_eq!(
+            gated,
+            Gate::RungFirst {
+                needs: Timeframe::DAY_1,
+                missing: 1,
+                of: 3,
+                owed: owed.clone(),
+                runs: 1,
+            }
+        );
         assert_eq!(
             owed.iter().map(|o| (o.from, o.why)).collect::<Vec<_>>(),
             vec![(month(2), OwedWhy::Interior)]
@@ -609,17 +611,19 @@ mod ladder_rs {
             Timeframe::MINUTE_1,
             &asked,
         );
-        let Gate::RungFirst {
-            missing,
-            of,
-            owed,
-            runs,
-            ..
-        } = gated
-        else {
+        let Gate::RungFirst { needs, owed, .. } = &gated else {
             panic!("every month is owed: {gated:?}");
         };
-        assert_eq!((missing, of, runs), (3, 3, 3));
+        assert_eq!(
+            gated,
+            Gate::RungFirst {
+                needs: *needs,
+                missing: 3,
+                of: 3,
+                owed: owed.clone(),
+                runs: 3,
+            }
+        );
         assert_eq!(
             owed.iter()
                 .map(|o| (o.exchange, o.segment, o.from, o.to, o.months))
@@ -1484,7 +1488,8 @@ mod bars_rs {
         assert!(
             got.faults
                 .iter()
-                .any(|fault| fault.contains("2025-05") && fault.contains("another writer holds")),
+                .filter(|fault| fault.contains("2025-05"))
+                .any(|fault| fault.contains("another writer holds")),
             "{:?}",
             got.faults
         );

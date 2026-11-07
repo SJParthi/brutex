@@ -115,9 +115,21 @@ fn rows(month: YearMonth, level: i64, n: i64) -> Vec<Bar> {
 }
 
 async fn get(site: &Loaded, uri: &str) -> (StatusCode, Value) {
-    for _ in 0..400 {
+    // A FULL POOL (429) IS A NEIGHBOUR'S LOAD, not this route's answer, and
+    // the route is asked again, for two seconds at most. The loop starts from
+    // a 429 it was not sent, so its test is true once and false once on every
+    // host: whether a host meets a real one decides no line.
+    let mut status = StatusCode::TOO_MANY_REQUESTS;
+    let mut body = String::new();
+    let mut asks = 0_u16;
+    let mut pause = std::time::Duration::ZERO;
+    while status == StatusCode::TOO_MANY_REQUESTS {
+        assert!(asks < 400, "the pool stayed full for two seconds");
+        tokio::time::sleep(pause).await;
+        pause = std::time::Duration::from_millis(5);
+        asks += 1;
         let parsed: axum::http::Uri = uri.parse().expect("URI");
-        let (status, _, body) = if uri.starts_with("/bars/window.json") {
+        (status, _, body) = if uri.starts_with("/bars/window.json") {
             super::super::bars_route::bars_window_json(
                 axum::extract::State(Loaded::clone(site)),
                 parsed,
@@ -129,12 +141,8 @@ async fn get(site: &Loaded, uri: &str) -> (StatusCode, Value) {
         } else {
             quarantine_plan_json(axum::extract::State(Loaded::clone(site)), parsed).await
         };
-        if status != StatusCode::TOO_MANY_REQUESTS {
-            return (status, serde_json::from_str(&body).expect("JSON"));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    panic!("the pool stayed full for two seconds");
+    (status, serde_json::from_str(&body).expect("JSON"))
 }
 
 fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {

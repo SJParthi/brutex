@@ -643,10 +643,16 @@ impl Fixture {
         release
     }
 
-    /// `/calendar.json` with `query`, asked again while it is `"building"`,
-    /// until it is answered in full: the answer, which must be a `200`.
+    /// `/calendar.json` with `query`, asked first while `held` keeps the
+    /// census, and so the build, from finishing, then again with the census
+    /// let go, until it is answered in full: the answer, which must be a `200`.
+    ///
+    /// The first ask always meets `"building"`, so every host runs both paths
+    /// of the loop; before, only a host whose build was slower than the
+    /// request's wait did (BASE-COV-API-AS2).
     #[expect(clippy::panic, reason = "a build that never finishes fails the test")]
-    async fn settled(&self, query: &str) -> Value {
+    async fn settled(&self, query: &str, held: std::sync::mpsc::Sender<()>) -> Value {
+        let mut held = Some(held);
         for _ in 0..1_000 {
             let (status, answer) = self.get(query).await;
             if status == axum::http::StatusCode::OK {
@@ -658,6 +664,7 @@ impl Fixture {
                 "{query}: {answer}"
             );
             assert_eq!(answer["status"], "building", "{query}: {answer}");
+            drop(held.take());
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("{query}: still building after 1,000 asks");
@@ -774,8 +781,7 @@ async fn past_the_budget_a_request_is_answered_building_and_the_next_in_full() {
     assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{joined}");
     assert_eq!(fixture.site.calendars.builds.in_flight(), 1);
 
-    drop(release);
-    let full = fixture.settled("feed=gdfl&symbol=NIFTY").await;
+    let full = fixture.settled("feed=gdfl&symbol=NIFTY", release).await;
     assert_eq!(full["status"], "ok", "{full}");
     assert_eq!(full["days"], "R..RR");
     assert_eq!(full["held"], "10001", "held by NIFTY alone");
@@ -825,7 +831,9 @@ async fn while_the_census_is_read_at_start_a_request_reads_nothing_beside_it() {
         parked["from"], "the start-up build",
         "the request told to come back is handed the start-up build's answer"
     );
-    let banknifty = fixture.settled("feed=gdfl&symbol=BANKNIFTY").await;
+    let banknifty = fixture
+        .settled("feed=gdfl&symbol=BANKNIFTY", fixture.census_held())
+        .await;
     assert_eq!(banknifty["days"], "R..RR", "once read, it is built");
 }
 

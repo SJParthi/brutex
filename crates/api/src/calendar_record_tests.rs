@@ -260,6 +260,16 @@ fn a_reading_tells_held_from_read_and_empty_from_not_read() {
     assert_eq!(daily.at(at(2025, 5, 1)), None, "before the span");
     assert_eq!(daily.at(at(2025, 5, 7)), None, "after the span");
     assert_eq!(daily.held_span(), Some((at(2025, 5, 2), at(2025, 5, 6))));
+    // NOT READ INSIDE THE SPAN TOO (BASE-COV-API-AS2): a stretch whose daily
+    // rung was not read is withheld from the calendar (D-1443), and the
+    // reading built from it holds no count there, never a closed day's `0`.
+    let mut unread = calendar.clone();
+    assert_eq!(unread.withhold_closed(at(2025, 5, 3), at(2025, 5, 5)), 3);
+    let unread = Reading::from_calendar("NIFTY", &unread);
+    assert_eq!(unread.at(at(2025, 5, 2)), Some(1));
+    assert_eq!(unread.at(at(2025, 5, 4)), None, "withheld, not closed");
+    assert_eq!(unread.at(at(2025, 5, 6)), Some(1));
+    assert_eq!(unread.held_span(), Some((at(2025, 5, 2), at(2025, 5, 6))));
 
     let month = |y, m| store::path::YearMonth::new(y, m).expect("a month");
     let mut counts = [0_u32; 31];
@@ -471,9 +481,13 @@ fn a_whole_zerodha_span_is_tens_of_kilobytes() {
 fn a_held_answer_widened_to_the_record_reads_the_records_codes_beyond_it() {
     let month = store::path::YearMonth::new(2022, 3).expect("a month");
     let mut counts = [0_u32; 31];
+    // 2022-03-01 is no session in the record, so the record's own codes open
+    // the held span on 2022-03-02: pinned here, rather than skipped by a
+    // guard no day could take.
+    assert!(!record_code(at(2022, 3, 1)).is_some_and(is_session));
     for (offset, count) in counts.iter_mut().enumerate() {
         let day = at(2022, 3, 1) + i64::try_from(offset).expect("small");
-        if record_code(day).is_some_and(is_session) && day != at(2022, 3, 1) {
+        if record_code(day).is_some_and(is_session) {
             *count = 22_000;
         }
     }

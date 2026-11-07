@@ -471,11 +471,12 @@ mod tests {
                 panic!("interrupt the cache update")
             });
         }));
+        // The builder is never called -- the poisoned cache refuses first -- so
+        // it shares the line of the call that refuses (BASE-COV-API-AS2).
+        let (vendor, format) = (Vendor::Zerodha, Format::Expanded);
         assert!(
             cache
-                .get(&source, Vendor::Zerodha, Format::Expanded, || Ok(
-                    "[]".into()
-                ))
+                .get(&source, vendor, format, || Ok("[]".into()))
                 .is_err()
         );
     }
@@ -514,13 +515,9 @@ mod tests {
             .kept(&source, Vendor::Gdfl, "count", 0, || Ok(7_u64))
             .unwrap();
         let again = cache
-            .kept(
-                &source,
-                Vendor::Gdfl,
-                "count",
-                0,
-                || -> Result<u64, String> { panic!("derived twice") },
-            )
+            .kept(&source, Vendor::Gdfl, "count", 0, || {
+                panic!("derived twice")
+            })
             .unwrap();
         assert!(Arc::ptr_eq(&first, &again));
         let fresh = cache

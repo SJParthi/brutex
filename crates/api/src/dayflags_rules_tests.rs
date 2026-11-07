@@ -1600,12 +1600,15 @@ fn an_option_day_names_its_bar_definition() {
     assert_eq!(four["value"], 4);
     assert_eq!(four["current"], false);
     assert!(
-        says(record(&got, "2024-10-03")).iter().any(|said| said
-            .starts_with("bar definition 4 built this day: from 2026-08-03")
-            && said.ends_with(
-                "(D-4878 item 10); this build builds definition 5, so the day is labelled \
-                 until it is restated"
-            )),
+        says(record(&got, "2024-10-03"))
+            .iter()
+            .filter(|said| said.starts_with("bar definition 4 built this day: from 2026-08-03"))
+            .any(|said| {
+                said.ends_with(
+                    "(D-4878 item 10); this build builds definition 5, so the day is labelled \
+                     until it is restated",
+                )
+            }),
         "{:#?}",
         says(record(&got, "2024-10-03"))
     );
@@ -1977,8 +1980,11 @@ fn a_frozen_index_run_is_flagged_on_both_feeds() {
         .seconds(pull::vendor::Venue::NseIndex)
         .resume;
     let resume_hm = format!("{:02}:{:02}", resume / 3_600, resume % 3_600 / 60);
+    // The longest run starts after the halt resumes or before 09:15, never
+    // inside the halted morning: one range test, so neither bound is a side
+    // of its own.
     assert!(
-        from >= resume_hm.as_str() || from < "09:15",
+        !("09:15"..resume_hm.as_str()).contains(&from),
         "{from} vs {resume_hm}"
     );
 
@@ -2960,16 +2966,17 @@ fn a_days_scan_is_kept_once_and_a_grown_day_replaces_it() {
     );
     let open = || {
         let inst = super::super::instrument_of(key, "").expect("a key");
-        match super::super::open_month(
+        let opened = super::super::open_month(
             &root,
             Vendor::Zerodha,
             &inst,
             Timeframe::MINUTE_1,
             YearMonth::new(2024, 10).expect("a month"),
-        ) {
-            super::super::Opened::File(file) => file,
-            _ => panic!("the month opens"),
-        }
+        );
+        let super::super::Opened::File(file) = opened else {
+            panic!("the month opens");
+        };
+        file
     };
     let file = open();
     let id = file_identity(&file).expect("the host says");
@@ -3492,9 +3499,9 @@ fn a_day_whose_bars_will_not_read_is_named_and_not_counted() {
     );
     let inst = super::super::instrument_of(key, "").expect("a key");
     let month = YearMonth::new(2022, 3).expect("a month");
-    let super::super::Opened::File(file) =
-        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
-    else {
+    let opened =
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month);
+    let super::super::Opened::File(file) = opened else {
         panic!("the month opens");
     };
     // Whole, and with no memo key, the day is read and scanned in place.
@@ -3520,9 +3527,8 @@ fn a_day_whose_bars_will_not_read_is_named_and_not_counted() {
     assert!(whole.is_empty() && whole_faults.is_empty(), "{whole:#?}");
     // A HANDLE OF ITS OWN, opened before the cut: the first one keeps the
     // block it read, so only a handle that has read nothing meets the cut.
-    let super::super::Opened::File(file) =
-        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
-    else {
+    let again = super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month);
+    let super::super::Opened::File(file) = again else {
         panic!("the month opens again");
     };
     let path = month_path(&root, Vendor::Zerodha, key, Timeframe::MINUTE_1, month);
@@ -3797,9 +3803,9 @@ fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
     // The month's cold days, directly: a day with no bar is never cold, a kept
     // day is not, and a day read to another end row is cold again.
     let month = YearMonth::new(2022, 4).expect("a month");
-    let super::super::Opened::File(file) =
-        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
-    else {
+    let opened =
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month);
+    let super::super::Opened::File(file) = opened else {
         panic!("the month opens");
     };
     let identity = file_identity(&file).expect("an identity");
@@ -4046,9 +4052,9 @@ fn the_scans_edges_are_where_they_are_named() {
     );
     let inst = super::super::instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
     let month = YearMonth::new(2022, 3).expect("a month");
-    let super::super::Opened::File(file) =
-        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
-    else {
+    let opened =
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month);
+    let super::super::Opened::File(file) = opened else {
         panic!("the month opens");
     };
     let whole =
@@ -4090,9 +4096,9 @@ fn a_month_files_identity_is_its_own_device_and_inode() {
     );
     let opened = |key: &str| {
         let inst = super::super::instrument_of(key, "").expect("a key");
-        let super::super::Opened::File(file) =
-            super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
-        else {
+        let read =
+            super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month);
+        let super::super::Opened::File(file) = read else {
             panic!("the month opens");
         };
         file
