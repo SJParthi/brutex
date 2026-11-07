@@ -3,37 +3,81 @@ STATUS: IN PROGRESS
 # BASE-COV-API-AS3 (shard G3 of `SHARDS.md`, BASE-COV-API repair r3): report
 
 - Branch `cloud/cov-api-as3-20261105`, cut from the kit commit `f4111a0132473d8771d8624a9538b1362926f70b`; START
-  `6ea46e59c07488eeccff388407976041852aae2c`. Code tip `26003a036453c0c9012f32d7e5215d756ddb7166` (what
+  `6ea46e59c07488eeccff388407976041852aae2c`. Code tip `4a86f4085b6ec5d0303b5e4de5a0a99801c868fe` (what
   `git rev-list -1 HEAD -- . ':(exclude)reports'` prints).
 - Sessions: token `-1` pushed to `7700e2f0`; the main session paused the shard at `edd54703`; token `-3`
   (`a5f009a8`) worked to `44a0a656` and was cut by the account's weekly limit (Thu 5 Nov, about 21:28 IST): its
   helpers' unpushed work on `mastersrun.rs`, `optiongreeks.rs`, `autopilot.rs`, `selectionv6json.rs` and a saved
-  Boolean evidence probe was lost with their container. This continuation holds `BASE-COV-API-AS3-20261105-4`
-  (`7b6102cb`, 6 Nov) and worked the first three of those again.
+  Boolean evidence probe was lost with their container. Token `-4` (`7b6102cb`, 6 Nov) worked the first three of
+  those again and was cut by the weekly limit on Fri 6 Nov after `3055774c`, its report at IN PROGRESS. This
+  continuation holds `BASE-COV-API-AS3-20261105-5` (`7694e19b`, Sat 7 Nov).
 - Host: a fresh cloud container, 4 cores, 15 GB, root, Linux x86_64. Pinned nightly installed as `nightly-2026-08-08`:
   `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`; llvm-cov and llvm-profdata `LLVM version 23.1.0-rust-1.99.0-nightly`.
   Every kit file's sha256 matched `MANIFEST.md`. Every figure here is this host's, the builder's: the Mac re-measures.
 
-## Continuation -5 (`BASE-COV-API-AS3-20261105-5`, 7 Nov), working notes until its measurement lands
+## What continuation -5 did (`7694e19b`..`4a86f408`, 7 Nov)
 
-- OWNER `7694e19b`. NEXT 0 done (`32fbc1ab`): the autopilot tick test read the newest NOT STARTED record of a
-  journal read newest first and capped at 200 records a page, while the loop kept ticking dry Zerodha months with no
-  wait up to Groww's 2020-01; it now reads the journal's oldest page and asserts the first tick's window is
-  Zerodha's floor month (red before: 2 of 2 alone; green after: 3 of 3). The `logs::r3_24_tests` flake was the
-  refusal and the 200 noise lines sharing one millisecond on a tmpfs (5 of 12 red at `logs.rs:10249` alone); a 2 ms
-  sleep moves the clock first (20 of 20 green).
-- NEXT 5 done (`33fe1754`): `Extremes:` lines on the four tests; the feeds_route small-size wrapper now asserts its
-  own 8 singles / 2 combinations / 1 out of the box.
-- NEXT 3 done (`8b311fdc`): `bars_export.rs` 974 by a header zeroed in place with its stamp kept.
-- NEXT 1 in part (`042384a3`): `indexstopqualificationjson.rs` 236 (Rejected) by a forty-session training launch.
-  Admitted (235) and Refused (237) not reached: a permissive policy file still fails `worst_reward_risk` and
-  `worst_trade_loss` on the generated minutes, and a dropped minute is refused by the calendar receipt before any
-  metric, so Refused needs an incomplete execution the strict load admits.
-- NEXT 2 (`indexstopcandlesjson.rs` 117-120): not reachable through any production writer (the page stays under
-  2 MB: names from the vocabulary table, at most 1,151 instructions, at most 4,095 candles); only a hand-sealed
-  artifact chain could carry an 8 MiB condition name (L-BCA-5).
+- **NEXT 0, the late red, found and fixed** (`32fbc1ab`). It was the test, not the host's day:
+  `an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused` read the NEWEST NOT STARTED record
+  (`journal_records` reads newest first, a page of at most `audit::MAX_PAGE_RECORDS` = 200), while `autopilot::fly`
+  keeps ticking: a Zerodha month no instrument maps to is dry (no reason), so `FeedState::observe` asks it again and
+  then passes it with no wait (`DRY_ROUNDS` = 2), month after month from Zerodha's fixed floor (2015-01), until Groww's
+  fixed floor month (2020-01) ties it and Groww, earlier in `Feed::ALL`, wins the tie and is refused by the vendor. A
+  host fast enough to run those 120 dry ticks between two 250 ms polls handed the test Groww's record (the loaded
+  Route B runs of 6 Nov were slow enough to pass). Reproduced alone on this host, 2 of 2, at `:2492` with Groww's
+  record (`from_days` 18262). The test now reads the journal's OLDEST page and asserts the first tick's window is
+  Zerodha's floor month (2015-01-01..31); green 3 of 3 alone and in both full runs of this round. Production code
+  unchanged.
+- **The flaky `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`, found and fixed**
+  (`32fbc1ab`): the refusal and the 200 noise lines after it were stamped inside one millisecond on a tmpfs, so the
+  ring's oldest kept line carried the refusal's own stamp and `audited_from < ring_from` (`logs.rs:10249`) failed:
+  5 of 12 runs alone before. A 2 ms sleep after the refusal moves the clock first: 20 of 20 after.
+- **NEXT 5** (`33fe1754`): an `Extremes:` line on each of the four new tests that lacked one; the feeds_route
+  small-size wrapper `the_held_span_bench_runs_at_a_small_size` now runs the bench's own path at the sizes where its
+  answer moves (2, 15, 19 keys) and with its scales handed largest first, and names 8 singles, 2 combinations and 1
+  out of the box of its own (verify r3 item 3 for that file).
+- **NEXT 3** (`8b311fdc`): `bars_export.rs` 974 by
+  `an_end_read_that_cannot_open_its_month_refuses_the_export_by_name`: two series over three months, exported once
+  so every month's header is memoized by its stamp; one series' July zeroed over its whole header in place with its
+  length, inode and modification time kept, so the plan takes the memo's word and the ascending first page reads
+  only May and June; the descending end read is the first read that opens that July and the export is refused (400
+  naming the month). With the stamp moved, the plan opens the month itself and the first page refuses the export as
+  not whole (500): the same damage is a 400 from the end read and a 500 from the plan (a follow-up for the operator,
+  not changed here: production behaviour).
+- **NEXT 1 in part** (`042384a3`, `4a86f408`): `indexstopqualificationjson.rs` 236 (`rank`'s Rejected arm) by
+  `a_forty_session_training_window_is_measured_whole_and_ranked_rejected`, a second production launch beside the
+  saved probe: April and May 2025 for training (forty open sessions: every split value measured, where May alone,
+  21 sessions, leaves values unmeasured), June later, March generated for the launch's first read (without it the
+  launch is refused "No such file or directory"). The two launch tests share one parent half.
+  - Admitted (235) not reached: a policy file with every floor at its least the policy admits (1 for the structural
+    counts, 0 elsewhere, every ceiling at its domain's top, both rejection requirements false) still fails
+    `worst_reward_risk` and `worst_trade_loss` on the generated minutes (signal-candle stops lose more than the risk).
+  - Refused (237) not reached: a minute left out of a training session is refused by the calendar receipt before
+    any metric ("offered 7874, expected 7875, missing 1"), so a Refused verdict needs an execution the strict load
+    admits and the runner still marks incomplete (`metrics::execution_complete`, or a day the calendar assessment
+    counts unmeasured).
+- **NEXT 2 not reachable this way**: `indexstopcandlesjson.rs` 117 True, 118, 120 need a source page over 8 MiB.
+  Every source context the production writer seals takes its condition names from `vocab::table::TABLE`, its
+  expression from at most `vocab::expression::MAX_INSTRUCTIONS` (1,151) instructions, and its candles from a window
+  `Asked::parse` bounds below `detail::MAX_RESULT_ROWS` (4,096); its page stays under about 2 MB. The reader takes
+  the names from the saved image (`index_stop_source_context::selection`), so only a hand-sealed artifact chain
+  (context, link and catalog digests recomputed) could carry an 8 MiB name: owed to L-BCA-5 (its "only `cli`'s
+  private test fixtures can write"), not (U).
+- **NEXT 4 tried, not landed**: the withdrawn Boolean evidence probe (`050fd625^`) run again in a local scratch tree
+  with the forty-session window: the production launch writes its saved Boolean qualification about four minutes in
+  at opt-level 3 (statistics, admission, OOS, qualification, index consistency all saved), then was still running at
+  100% of a core past 13 minutes and was stopped. At Route B's opt-level 0 that is hours: a probe needs a lighter
+  configuration first. `selectionv6json.rs` has a public way in, `cli::run(["ledger-v6", ...])`, which sweeps both
+  indices at every rung: not tried.
+- Red under a hand change for every new assert of this continuation (run red5, `red-AS3.txt.md`); clippy, fmt, the
+  stable suite and Route B of record on the code tip `4a86f408`; `gaps-AS3.txt.md` and `fu-AS3.txt.md` rewritten from
+  that measurement (each earlier row carried over through a line map from `git diff 26003a03 4a86f408`, its text
+  checked; every row that did not carry over classified by hand).
 
 ## Why IN PROGRESS
+
+(Working note, continuation -5: Route B and the stable suite on `4a86f408` are running; until they land, the Gates
+and Coverage sections below and this paragraph still describe `26003a03`.)
 
 Every uncovered row of a G3 file is now (F), (U) with its proof, (H), or a GAP row that names what it is owed to,
 except 7 production rows still reachable from G3's own files and not driven this round (6 lines, 1 side), and the
@@ -42,7 +86,7 @@ two saved-artifact renders the `-3` session had begun to reach through the produ
 probes were lost with the helpers. NEXT names each with its way in. The stable gate run also found a test of
 `server_cloud_mutant_tests_c.rs` red since about 11:55 IST on 6 Nov whose cause is not found (Host reds, NEXT 0).
 
-## What this continuation did (`7b6102cb`..`26003a03`)
+## What continuation -4 did (`7b6102cb`..`26003a03`, 6 Nov)
 
 - `mastersrun.rs`: 3 new tests (a refetch that changed nothing and a reprimed step, each named; a reload that would
   lose a readable feed is refused and logged; a refresh task that does not return is a 500 that says where to
@@ -82,27 +126,27 @@ All G3's: the 48 `SHARDS.md` gives G3 and 8 new test files, each declared in the
 `census_rollup_cover_tests.rs`, `dayflags_cover_tests.rs`, `indexstopjson_cover_tests.rs`,
 `indexstopqualificationjson_saved_tests.rs`, `ingest_cover_tests.rs`, `logs_cover_tests.rs`,
 `optiongreeks_cover_tests.rs`, `sweeprun_cover_tests.rs`). From START, all under `crates/api/src/`:
-`autopilot.rs` +187 −36, `bars_export.rs` +588 −100, `bars_route.rs` +574 −93, `bars_series.rs` +499 −16,
+`autopilot.rs` +187 −36, `bars_export.rs` +708 −100, `bars_route.rs` +574 −93, `bars_series.rs` +517 −16,
 `bars_window_route_tests.rs` +130 −30, `booleanevidencejson_tests.rs` +42 −7, `census_request_tests.rs` +64 −61,
 `census_rollup.rs` +12 −0, `census_rollup_cover_tests.rs` +393 −0, `dayflags.rs` +17 −13, `dayflags_cover_tests.rs`
-+1812 −0, `dayflags_filter_tests.rs` +45 −3, `feeds_route.rs` +556 −23, `frontierjson.rs` +234 −0, `gaps_route.rs`
++1812 −0, `dayflags_filter_tests.rs` +45 −3, `feeds_route.rs` +574 −23, `frontierjson.rs` +234 −0, `gaps_route.rs`
 +24 −13, `http_admission_tests.rs` +102 −0, `imports.rs` +407 −0, `indexstopcandlesjson.rs` +9 −0, `indexstopjson.rs`
-+4 −0, `indexstopjson_cover_tests.rs` +53 −0, `indexstoplaunch_tests.rs` +547 −38, `indexstopqualificationjson.rs`
-+54 −2, `indexstopqualificationjson_saved_tests.rs` +490 −0, `ingest.rs` +107 −25, `ingest_cover_tests.rs` +321 −0,
-`ingest_refusals.rs` +86 −0, `ladder.rs` +47 −31, `logs.rs` +107 −48, `logs_cover_tests.rs` +922 −0,
++4 −0, `indexstopjson_cover_tests.rs` +53 −0, `indexstoplaunch_tests.rs` +556 −38, `indexstopqualificationjson.rs`
++54 −2, `indexstopqualificationjson_saved_tests.rs` +619 −0, `ingest.rs` +107 −25, `ingest_cover_tests.rs` +321 −0,
+`ingest_refusals.rs` +86 −0, `ladder.rs` +47 −31, `logs.rs` +116 −48, `logs_cover_tests.rs` +922 −0,
 `logs_units_tests.rs` +7 −4, `mastersrun.rs` +316 −27, `month_change.rs` +52 −0, `nse_identity.rs` +8 −8,
 `ops_safety_tests.rs` +144 −19, `optiongreeks.rs` +4 −0, `optiongreeks_cover_tests.rs` +556 −0, `owed_tests.rs`
 +9 −7, `pool_table_tests.rs` +51 −6, `serve_edge_tests.rs` +53 −13, `server_cloud_mutant_tests_b.rs` +109 −38,
-`server_cloud_mutant_tests_c.rs` +75 −55, `server_cloud_mutant_tests_d.rs` +4 −5, `strict_sweep_tests.rs` +25 −26,
+`server_cloud_mutant_tests_c.rs` +128 −58, `server_cloud_mutant_tests_d.rs` +4 −5, `strict_sweep_tests.rs` +25 −26,
 `sweepevidence.rs` +227 −0, `sweeprun.rs` +65 −66, `sweeprun_cover_tests.rs` +821 −0,
 `sweeprun_status_cache_tests.rs` +8 −8 (47 files). Outside ownership: none. Never touched: `crates/api/src/lib.rs`,
 `crates/api/benches/`, `Cargo.*`, `docs/`, `.github/`, another group's file. Reports: this file,
 `fix-BASE-COV-API-AS3.json.md`, `OWNER-BASE-COV-API-AS3.md`, `gaps-AS3.txt.md`, `fu-AS3.txt.md`, `red-AS3.txt.md`.
 
-## Tests by name (109 new since START, by file under `crates/api/src/`)
+## Tests by name (111 new since START, by file under `crates/api/src/`)
 
 - `autopilot.rs` (2): `a_live_loop_over_an_empty_vendor_refuses_it_by_name_and_keeps_passing`, `a_probe_name_the_host_refuses_keeps_the_hosts_own_words`
-- `bars_export.rs` (5): `a_full_scan_pool_refuses_an_export_by_name_and_it_is_written_once_the_pool_frees`, `a_page_read_past_a_full_pool_is_read_and_a_task_that_will_not_join_cuts_the_stream`, `a_refusal_before_a_byte_is_the_windows_and_a_name_is_always_a_file_name`, `a_refused_read_is_named_and_one_past_the_cheap_budget_is_asked_again_as_a_scan`, `every_page_that_cannot_be_written_whole_cuts_the_stream_by_name`
+- `bars_export.rs` (6): `a_full_scan_pool_refuses_an_export_by_name_and_it_is_written_once_the_pool_frees`, `an_end_read_that_cannot_open_its_month_refuses_the_export_by_name`, `a_page_read_past_a_full_pool_is_read_and_a_task_that_will_not_join_cuts_the_stream`, `a_refusal_before_a_byte_is_the_windows_and_a_name_is_always_a_file_name`, `a_refused_read_is_named_and_one_past_the_cheap_budget_is_asked_again_as_a_scan`, `every_page_that_cannot_be_written_whole_cuts_the_stream_by_name`
 - `bars_route.rs` (4): `a_time_of_day_of_one_field_or_four_is_refused_and_an_open_end_runs_to_the_last_second`, `a_value_past_a_browsers_number_is_withheld_by_name_and_a_month_dropped_in_part_is_served`, `a_window_names_damaged_records_withholds_an_inexact_value_and_counts_coverage`, `an_abandoned_scan_stops_and_an_answered_one_cancels_nothing_past_a_full_pool`
 - `bars_series.rs` (4): `a_journal_that_cannot_be_read_moves_no_index_life`, `a_plan_serves_every_month_it_can_and_names_every_one_it_cannot`, `a_summary_whose_days_do_not_add_up_is_refused_by_name`, `an_instant_before_the_month_and_a_unit_past_the_span_answer_nothing`
 - `bars_window_route_tests.rs` (1): `a_window_refused_by_a_full_scan_pool_is_asked_again_and_answered_there`
@@ -117,7 +161,7 @@ All G3's: the 48 `SHARDS.md` gives G3 and 8 new test files, each declared in the
 - `indexstopjson_cover_tests.rs` (1): `a_second_root_reopens_and_a_page_kind_no_query_names_is_refused_by_name`
 - `indexstoplaunch_tests.rs` (5): `a_foreign_command_and_a_count_of_no_or_too_many_digits_are_refused_before_any_read`, `a_launch_whose_slot_moved_and_a_preview_that_cannot_run_are_refused_by_name`, `a_preview_past_its_observation_records_or_store_bounds_names_each_one`, `every_incoherent_observation_is_refused_by_name_and_its_coherent_edges_pass`, `the_configuration_preview_door_answers_json_when_nothing_is_configured`
 - `indexstopqualificationjson.rs` (1): `a_refusal_names_a_value_by_its_own_text`
-- `indexstopqualificationjson_saved_tests.rs` (1): `a_saved_qualification_is_served_by_every_page_that_reads_it`
+- `indexstopqualificationjson_saved_tests.rs` (2): `a_forty_session_training_window_is_measured_whole_and_ranked_rejected`, `a_saved_qualification_is_served_by_every_page_that_reads_it`
 - `ingest.rs` (1): `a_discovery_asks_for_the_named_expirys_month_or_the_windows`
 - `ingest_cover_tests.rs` (5): `a_clock_at_the_epoch_is_refused_without_naming_a_control`, `a_date_in_pieces_is_finished_or_missing_never_guessed`, `one_named_expiry_keeps_its_own_series_of_that_day_and_no_other`, `the_rate_box_is_read_or_refused_by_name_and_names_its_control`, `what_no_form_reaches_still_says_what_it_is`
 - `ingest_refusals.rs` (1): `a_bound_a_short_day_an_unreadable_journal_and_the_route_each_answer_by_name`
@@ -132,9 +176,15 @@ All G3's: the 48 `SHARDS.md` gives G3 and 8 new test files, each declared in the
 - `sweepevidence.rs` (2): `a_saved_attempt_gone_empty_or_damaged_is_answered_as_such`, `an_attempt_replaced_between_its_two_reads_is_refused_never_mixed`
 - `sweeprun_cover_tests.rs` (8): `a_command_this_conductor_does_not_run_and_a_strict_knob_are_answered_by_name`, `a_finisher_with_no_audit_runs_bare_and_an_empty_finish_closes_failed`, `a_press_no_monitor_could_see_or_that_meets_a_running_sweep_is_refused`, `a_rewalk_that_no_longer_ends_on_the_marker_keeps_the_whole_windows_verdict`, `a_store_that_cannot_be_named_reads_no_cli_log_and_refuses_the_strict_command`, `a_strict_command_with_its_configuration_is_conducted_by_the_strict_audit`, `an_admission_over_a_store_that_is_not_there_is_refused_by_name`, `the_status_door_answers_each_observation_by_what_it_can_prove`
 
-Removed: none. Test helpers are not counted. Existing tests changed: in this continuation the probe-halt test of
-`autopilot.rs` and `pool_table_tests::a_read_stops_when_its_reader_leaves` (its wait); in the earlier sessions,
-among others, the bars_series summary test,
+Removed: none. Test helpers are not counted. Existing tests changed: in continuation -5,
+`server::cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused` (reads
+the journal's oldest page; a new first-tick window assert), `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`
+(a 2 ms sleep before the noise), `server::feeds_route::tests::the_held_span_bench_runs_at_a_small_size` (two more
+runs of the bench's path and four asserts), and doc-only `Extremes:` lines on the two bars_series tests, the
+indexstoplaunch preview door and the saved qualification probe (whose parent half is now the shared
+`in_a_launch_child`); in continuation -4 the probe-halt test of `autopilot.rs` and
+`pool_table_tests::a_read_stops_when_its_reader_leaves` (its wait); in the earlier sessions, among others, the
+bars_series summary test,
 `indexstopqualificationjson::tests::pins_scope_period_and_bounded_paging_are_required_before_any_read` and
 `indexstopcandlesjson::tests::original_source_requests_are_pinned_exact_and_bounded_before_file_reads`.
 
@@ -143,9 +193,10 @@ among others, the bars_series summary test,
 `red-AS3.txt.md` holds each new test's hand change and the assertion it failed at, all from local commits that were
 never pushed: run 1 (93 tests, tree `c8a3d979` over `2e742873`, "0 passed; 93 failed"), run 2 (the 4 tests added
 after it and the new asserts of 2 widened tests: trees `532b881e` and `a9118762` over `d1981ec9`), run 3
-(`month_get`'s retry and the candle reader's new assert: tree `fca3d025` over `7d7d243f`). The `-3` session's 13 are
-in its report (`red3`, `red4`), 11 of them new tests. 93 + 4 + 1 + 11 = all 109 new tests, each red at the assertion
-its change aimed for.
+(`month_get`'s retry and the candle reader's new assert: tree `fca3d025` over `7d7d243f`), run red5 (continuation
+-5: the 2 new tests and the new asserts of 2 changed tests, four hand changes at once: tree `dfc51d90` over
+`4a86f408`, "0 passed; 4 failed"). The `-3` session's 13 are in its report (`red3`, `red4`), 11 of them new tests.
+93 + 4 + 1 + 11 + 2 = all 111 new tests, each red at the assertion its change aimed for.
 
 ## Gates on the code tip `26003a03`
 
@@ -197,11 +248,11 @@ pool can never fill here (the pool has one slot a core: 4 on this host). Its row
 | file | test | count | verify r3 |
 |---|---|---|---|
 | `bars_series.rs` | `a_summary_that_does_not_describe_its_file_is_refused_field_by_field` | 11 / 3 / 2 | 9 / 1 / 0 |
-| `feeds_route.rs` | `the_held_span_bench_runs_at_a_small_size`: 3 sizes of its own (20, 30, 40 keys), its extremes those of `the_held_span_answers_at_every_edge_of_its_census`, which runs the same path where its answer turns | 6 / 2 / 3 | none declared |
+| `feeds_route.rs` | `the_held_span_bench_runs_at_a_small_size`, on its own `Extremes:` line (the bench path at 20/30/40, 2/15/19 and 40/30/20 keys); `the_held_span_answers_at_every_edge_of_its_census` beside it adds 6 / 2 / 3 | 8 / 2 / 1 | none declared |
 | `frontierjson.rs` | `every_edge_of_a_page_answers_or_refuses_by_name` | 10 / 2 / 2, kept | 10 / 2 / 2 |
 | `mastersrun.rs` | `a_refresh_with_no_credential_lands_the_public_masters_and_says_it_is_not_whole` | 9 configurations / 2 / 1, kept | 9 / 2 / 1 |
 
-Of the 109 new tests, 105 name their extremes on an `Extremes:` line; 4 do not (NEXT).
+Of the 111 new tests, all 111 name their extremes on an `Extremes:` line; of the four lines continuation -5 added, the three whose own count is short name the test that carries their file's count.
 
 ## Host reds (each with its proof)
 
@@ -209,7 +260,7 @@ Of the 109 new tests, 105 name their extremes on an `Extremes:` line; 4 do not (
   `server::cloud_mutant_tests_c::a_store_that_takes_no_write_trips_the_store_breaker`,
   `server::cloud_mutant_tests_c::a_store_whose_audit_dir_cannot_be_made_is_at_fault`. Each failed as root in the
   Route B run and passed as uid 65534 (`setpriv --reuid=65534 --regid=65534 --clear-groups`) with the same
-  instrumented binary (`api-7b94fb89521800a1`): `test result: ok. 1 passed` each. Their profiles, shown for every G3
+  instrumented binary (`api-7b94fb89521800a1`, 6 Nov): `test result: ok. 1 passed` each, and they failed the same way as root in this round's Route B run. Their profiles, shown for every G3
   file, make the rows only their later lines reach (H): covered there, owed to the Mac's Route B.
 - 4-core hang: the G2 test above (skipped).
 - Failing as root here and not in G3's files (not proved by this session; other shards' and the Mac's):
@@ -218,23 +269,16 @@ Of the 109 new tests, 105 name their extremes on an `Extremes:` line; 4 do not (
   `pullrun::cloud_mutant_tests::newest_records_that_cannot_be_read_leave_the_answer_not_known`,
   `pullrun::restart_tests::the_journals_own_extremes`,
   `server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`, five
-  `server::head_deadline_body_tests` slow-reader tests, and the integration test
-  `the_feed_list_stays_fast_while_32_clients_loop_each_route`.
-- Late reds, seen first in the stable gate run, both in G3 files and neither touched by this continuation:
-  - `server::cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused`
-    passed in all four Route B runs of 6 Nov up to 11:27 IST (the run of record included) and fails since about
-    11:55 IST on both builds, alone too (5 of 5, the instrumented binary of record among them): the first NOT
-    STARTED record is now Groww's 2020-01 tick (`from_days` 18262, BANKNIFTY asked, "the broker did not answer with
-    a window") where the test expects the Zerodha month's "no instrument in the universe could be reached". Its
-    production path (`autopilot::fly`, `survey`, `tick`) is unchanged on the branch, and session 1 changed only its
-    wait (two `eventually` calls for one loop), which cannot change which record is first. The cause is not found:
-    NEXT 0.
-  - `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code` (unchanged since START) is
-    flaky: it failed in the stable full run and in 1 of 3 runs alone ("the audit history reaches back 0 day(s)").
+  `server::head_deadline_body_tests` slow-reader tests (these ten all failed again in this round's Route B run), and the integration test
+  `the_feed_list_stays_fast_while_32_clients_loop_each_route` (it passed in this round's Route B run).
+- Late reds of 6 Nov, both in G3 files: fixed by continuation -5 (`32fbc1ab`), neither a host red. The autopilot
+  tick test's red was the test's own read (the journal's newest page while the loop kept ticking dry Zerodha months
+  up to Groww's floor; continuation -5 above); the `logs::r3_24_tests` flake was its refusal and its noise sharing one
+  millisecond on a tmpfs. Both green in the Route B run and in the stable run of record of this round.
 
 ## Decision drafts (ids D-8664 and D-8665 only; ASA writes the docs entries)
 
-- **D-8664 (draft): shard G3's new tests, and the defects they fixed, outside `feeds_route.rs`.** The 109 test
+- **D-8664 (draft): shard G3's new tests, and the defects they fixed, outside `feeds_route.rs`.** The 111 test
   functions this round added in G3's files (listed by file above), each driving the input of a row of
   `base-cov-api-gaps-r2.txt.md` or of a G3 row Route B left uncovered on the way; each shown red under a hand change
   (`red-AS3.txt.md`, and the `-3` session's report for its 13). Cited as "D-8664" in `bars_series.rs` by session 1.
@@ -244,7 +288,7 @@ Of the 109 new tests, 105 name their extremes on an `Extremes:` line; 4 do not (
   barrier: gdb showed four holders inside their slots); `ops_safety_tests::month_get`'s retry is driven by a child
   that holds the store-read pool instead of only by another test's chance contention; `pool_table_tests` waits
   through the shared `eventually`; the discovery test holds an expiry past its window's month and year; the
-  probe-halt test asserts the store root stays empty.
+  probe-halt test asserts the store root stays empty; the autopilot tick test reads the journal's oldest page and asserts the first tick's window (the loop runs on through dry Zerodha months, and a fast host ran them up to Groww's floor between two polls); the r3_24 refusal is stamped a millisecond before the ring's noise (continuation -5).
 - **D-8665 (draft): `feeds_route.rs`'s verify-r3 item (3) and its new tests; G3's test code rewritten so no row of
   it is a GAP; every (U) row of G3 with its proof; the rows G3 leaves owed outside.** The descriptor facts behind five
   `feeds_route.rs` branches are compile-time (`pull::vendor` descriptors) and are pinned feed by feed by
@@ -255,10 +299,15 @@ Of the 109 new tests, 105 name their extremes on an `Extremes:` line; 4 do not (
   `server_cloud_mutant_tests_b.rs`.
 - **Limit drafts for docs/06 (ASA assigns the rows; D-8665 names them):**
   1. L-BCA-5 widened: `selectionv6json.rs`'s saved arm (a sealed Selection V6 record only the production `ledger-v6`
-     chain writes; cli's `commit_stored_selection_v6` is `pub(crate)`), beside `booleanevidencejson.rs`, which the
+     chain writes; cli's `commit_stored_selection_v6` is `pub(crate)`, though the public `cli::run` runs that chain as
+     the `ledger-v6` verb, not tried this round), beside `booleanevidencejson.rs`, which the
      row already names. And narrowed: `indexstopqualificationjson.rs`, `indexstopcandlesjson.rs` and
      `indexstopjson.rs` are reached through the production launch (`indexstopqualificationjson_saved_tests.rs`), so
-     the row's "only cli's private test fixtures can write" no longer holds for them.
+     the row's "only cli's private test fixtures can write" no longer holds for them, except one side the production
+     writer cannot reach: `indexstopcandlesjson.rs` 117 True, 118, 120, a source page past 8 MiB (the production page
+     stays under about 2 MB; only a hand-sealed artifact chain could carry an 8 MiB condition name). A production
+     launch can write a saved Boolean qualification too (continuation -5: about four minutes in at opt-level 3), but
+     the launch ran on past 13 minutes, so the row stands for `booleanevidencejson.rs` until a lighter launch is found.
   2. L-BCA-6 widened: `mastersrun::refresh_work` past `masters_dir` (it fetches from the real public hosts), the
      whole-refresh 200 (it needs the credentialed Zerodha dump), and `pull::masters::PublicFetch::new`'s refusal
      (`mastersrun.rs` 595-603: its roots and TLS provider are compiled in), beside the credentialed success arm the
@@ -287,33 +336,38 @@ Of the 109 new tests, 105 name their extremes on an `Extremes:` line; 4 do not (
 
 ## NEXT (not done; G3's)
 
-0. The late red of `server_cloud_mutant_tests_c.rs` above: find why the survey now chooses Groww's 2020-01 over
-   Zerodha's older month (Zerodha's floor is the fixed 2015-01-01; a halt, an absent unit or a feed order would
-   each do it) and make the test hold by construction rather than by the day; then the flaky `logs::r3_24_tests`
-   test.
-1. `indexstopqualificationjson.rs` 235-237, the other verdict statuses of `rank`, each a launch beside the saved
-   probe: Refused (237) with one minute bar left out of a training-window session (the strict load checks checksums,
-   not calendar completeness, so the gap reaches the metrics as unavailable minutes); Rejected (236) with a training
-   window of an even number of open sessions (April and May 2025 hold 40), so every value is measured; Admitted (235)
-   needs a later window of at least 30 independent sessions and minutes with an edge every bound passes.
-2. `indexstopcandlesjson.rs` 117 True, 118, 120: a re-sealed source context whose referenced condition name exceeds
-   8 MiB, in a child with a large `BRUTEX_BOOLEAN_OBSERVATION_BYTES`, so the source page passes its byte admission.
-3. `bars_export.rs` 974: a two-series export over three months, exported once so every header is memoized, then one
-   series' last month made unopenable with its stamp kept, so the end read cannot open it.
-4. `booleanevidencejson.rs` (184 lines 13 sides): a production-path launch probe of the qualified Boolean search,
-   as the saved qualification's (the `-3` session's run took about 10 min at opt-level 0 and refused a 21-session
-   window: give it a longer one); `selectionv6json.rs` (9 lines 2 sides) through the production ledger verb.
-5. An `Extremes:` line for the 4 new tests that lack one: `bars_series.rs`
-   `a_journal_that_cannot_be_read_moves_no_index_life` and `an_instant_before_the_month_and_a_unit_past_the_span_answer_nothing`,
-   `indexstoplaunch_tests.rs` `the_configuration_preview_door_answers_json_when_nothing_is_configured`, and the saved
-   qualification probe.
-6. A mutation run over G3's modules.
+1. `indexstopqualificationjson.rs` 235 and 237, `rank`'s Admitted and Refused arms, each a launch beside the two
+   launch tests (`in_a_launch_child` takes the months; `launch_body_over` the windows):
+   - Admitted (235): every check must pass with measured evidence. A policy file at the least the policy admits
+     still fails `worst_reward_risk` (the smallest win over the largest loss, against a floor the launch derives
+     from the risk) and `worst_trade_loss` (against the risk itself) on the generated minutes, so the minutes must
+     change: signal candles whose stops lose at most the risk and whose winning trades each gain several times it
+     (for example one strong one-way session pattern a day, the risk raised with `max_loss_points`).
+   - Refused (237): an execution the strict load admits and `metrics::execution_complete` still refuses (an entry,
+     path or closing refusal, an unreachable trade, an unaccepted minute) or a training day the calendar assessment
+     counts unmeasured (a day whose pessimistic and optimistic readings disagree in sign). A missing minute does not
+     do it: the calendar receipt refuses the month first.
+2. `booleanevidencejson.rs` (184 lines 13 sides): the withdrawn probe (`050fd625^`) with the forty-session window
+   (March to June generated, April and May training) writes its saved Boolean qualification about four minutes in
+   at opt-level 3 and was still running past 13 minutes; find a lighter launch (fewer bits, a lower node allowance,
+   a shorter horizon, any draw count the Boolean statistics take from the environment) before it can be a suite test.
+3. `selectionv6json.rs` (9 lines 2 sides): `cli::run(["ledger-v6", VENDOR, FROM_Y, FROM_M, TO_Y, TO_M, SUPPORT_PPM,
+   MAX_POINTS, ROOT])` (public) over generated NIFTY and BANKNIFTY months at every rung it reads (the verb pairs the
+   two indices per rung), then `render_page` over its root.
+4. Mutants stay deferred (operator, 30 Oct): not run.
 
 ## Slips
 
 - The `-3` session recorded, in its report: twice a shell command named the Py-language's interpreter (once as a
   version check whose output was discarded); its helper b reported one such slip in its own shell. Nothing was
-  written to any file, tracked or not. None in this continuation.
+  written to any file, tracked or not. None in continuation -4.
+- Continuation -5, 7 Nov: one shell command (an experiment edit in a local scratch worktree, never pushed) began
+  with a version check of the Py-language's interpreter whose output was discarded; nothing ran under it and nothing
+  was written by it. The same command made a one-line edit in that scratch tree with perl; nothing of it is tracked.
+  Every other edit of this continuation was made with the editor or sed.
+- Continuation -5's first build of the revived Boolean probe in the scratch tree was unstamped (its file was still
+  untracked), so the probe took its unstamped arm; it was rebuilt from a committed tree. Every launch result in this
+  report is from a stamped build of a committed tree.
 - The `-3` session's helpers left work unpushed when it was cut; it was lost with their container. `mastersrun.rs`,
   `optiongreeks.rs` and `autopilot.rs` were redone here; the Selection V6 and Boolean evidence probes were not
   (NEXT 4).
