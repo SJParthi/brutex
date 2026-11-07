@@ -29,8 +29,56 @@ const CHILD_PATH: &str = concat!(
 
 /// Generated NIFTY minutes and days of the months of 2025 named in `months`
 /// under `zerodha`, every open session of the shared calendar, written by the
-/// store's writer.
+/// store's writer: minutes that cycle through a fixed pattern around
+/// 20,000.00.
 fn generated_nifty_months(root: &Path, months: &[u8]) {
+    nifty_months(root, months, |_month, day, minute, _place| {
+        let open = 2_000_000 + i64::from((minute + u16::from(day)) % 31) * 100;
+        // Each minute reaches up and down by its own amount, from 100 to
+        // 3,700 paisa, so the excursions an exit grid ranks spread wide enough
+        // on both sides for a 3:1 target pair.
+        let up = 100 + i64::from((minute * 7 + u16::from(day)) % 13) * 300;
+        let down = 100 + i64::from((minute * 11 + u16::from(day)) % 13) * 300;
+        let close = open + if minute % 3 == 0 { -50 } else { 50 };
+        (open, open + up, open - down, close)
+    });
+}
+
+/// The sessions of the trending months whose 09:16 minute dips 10 paisa
+/// below the 09:15 low, four in the training window and three in the later.
+const LOSS_DAYS: [(u8, u8); 7] = [(4, 15), (4, 22), (5, 6), (5, 20), (6, 10), (6, 17), (6, 24)];
+
+/// Generated NIFTY months that rise through every session from 20,000.00, by
+/// a slope of its own each day (no two days pay alike), every seventh minute
+/// a bearish candle and every other a bullish one; on [`LOSS_DAYS`] the 09:16
+/// minute dips 10 paisa below the 09:15 low, the only losses a long setting
+/// meets.
+fn trending_nifty_months(root: &Path, months: &[u8]) {
+    nifty_months(root, months, |month, day, _minute, place| {
+        let slope = 80 + i64::from(u16::from(day) * 7 % 41) + i64::from(month) * 3;
+        let price = 2_000_000 + slope * place;
+        let (open, close) = if place % 7 == 3 {
+            (price + slope + 50, price)
+        } else {
+            (price, price + slope)
+        };
+        let low = if place == 1 && LOSS_DAYS.contains(&(month, day)) {
+            1_999_970
+        } else {
+            open.min(close) - 20
+        };
+        (open, open.max(close) + 20, low, close)
+    });
+}
+
+/// Writes the NIFTY minutes `bar` prices — `(open, high, low, close)` of the
+/// month, day, minute of the day and place in its session — and their days,
+/// for every open session of the months of 2025 named in `months`.
+fn nifty_months(
+    root: &Path,
+    months: &[u8],
+    bar: impl Fn(u8, u8, u16, i64) -> (i64, i64, i64, i64),
+) {
     let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
     let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
     for &month in months {
@@ -47,19 +95,15 @@ fn generated_nifty_months(root: &Path, months: &[u8]) {
             let start = minutes.len();
             for window in session.windows.iter().take(usize::from(session.count)) {
                 for minute in window.from..=window.to {
-                    let open = 2_000_000 + i64::from((minute + u16::from(day)) % 31) * 100;
-                    // Each minute reaches up and down by its own amount, from
-                    // 100 to 3,700 paisa, so the excursions an exit grid ranks
-                    // spread wide enough on both sides for a 3:1 target pair.
-                    let up = 100 + i64::from((minute * 7 + u16::from(day)) % 13) * 300;
-                    let down = 100 + i64::from((minute * 11 + u16::from(day)) % 13) * 300;
+                    let place = i64::try_from(minutes.len() - start).expect("a session's minute");
+                    let (open, high, low, close) = bar(month, day, minute, place);
                     minutes.push(store::format::Bar {
                         ts_micros: stamp * 86_400_000_000 + i64::from(minute) * 60_000_000
                             - pull::session::IST_OFFSET_SECS * 1_000_000,
                         open,
-                        high: open + up,
-                        low: open - down,
-                        close: open + if minute % 3 == 0 { -50 } else { 50 },
+                        high,
+                        low,
+                        close,
                         volume: 100,
                         open_interest: i64::MIN,
                     });
@@ -103,14 +147,65 @@ fn generated_nifty_months(root: &Path, months: &[u8]) {
     }
 }
 
-/// The environment of the launch child over `root`, `child` naming it.
-fn launch_env(root: &Path, child: &'static str) -> Vec<(&'static str, std::ffi::OsString)> {
-    let policy = root.join("policy.toml");
-    std::fs::write(
-        &policy,
-        include_str!("../../../config/intraday-research-v1.toml"),
-    )
-    .expect("the policy file");
+/// The shipped admission policy profile.
+const SHIPPED_POLICY: &str = include_str!("../../../config/intraday-research-v1.toml");
+
+/// The admission policy at its floors: every structural count at 1 (the least
+/// `runner::admission` admits: a 0 there proves no sample and is refused),
+/// every other floor at 0 or its domain's bottom, every ceiling at its
+/// domain's top, and neither rejection required. The operator's own rules
+/// that no file sets (the smallest win at least three times the largest
+/// loss, the largest loss within the risk) still bind.
+const FLOOR_POLICY: &str = "policy_version = 1
+min_support_hits = 1
+min_independent_sessions = 1
+min_trades = 1
+max_mae_paisa = 18446744073709551615
+min_win_rate_ppm = 0
+min_wilson_win_rate_ppm = 0
+min_return_drawdown_ppm = 0
+min_weakest_period_return_paisa = -9223372036854775808
+max_pbo_ppm = 1000000
+max_fwer_p_value_ppm = 1000000
+max_spa_p_value_ppm = 1000000
+min_decided_folds = 1
+max_ambiguous_fill_rate_ppm = 1000000
+max_gap_affected_rate_ppm = 1000000
+max_session_concentration_ppm = 1000000
+max_largest_trade_profit_share_ppm = 1000000
+max_drawdown_paisa = 18446744073709551615
+max_losing_trade_rate_ppm = 1000000
+max_losing_trades = 18446744073709551615
+min_pessimistic_profit_paisa = -9223372036854775808
+min_winning_trades = 0
+min_average_win_paisa = 0
+max_average_loss_paisa = 18446744073709551615
+min_profit_factor_ppm = 0
+max_consecutive_losing_streak = 18446744073709551615
+min_consecutive_winning_streak = 0
+min_bootstrap_draws = 1
+min_bootstrap_strategies = 1
+min_bootstrap_periods = 1
+min_pbo_contributing_folds = 1
+max_pbo_unrankable_folds = 18446744073709551615
+min_profitable_oos_folds = 1
+min_oos_pessimistic_return_paisa = -9223372036854775808
+max_white_reality_p_value_ppm = 1000000
+require_white_reality_rejection = false
+max_romano_wolf_p_value_ppm = 1000000
+require_romano_wolf_rejection = false
+";
+
+/// The environment of the launch child over `root`, `child` naming it, with
+/// `policy` the admission policy file's text.
+fn launch_env(
+    root: &Path,
+    child: &'static str,
+    policy: &str,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    let policy_file = root.join("policy.toml");
+    std::fs::write(&policy_file, policy).expect("the policy file");
+    let policy = policy_file;
     let mut env: Vec<(&'static str, std::ffi::OsString)> = [
         ("BRUTEX_CHECKSUM_MAX_BYTES", "67108864"),
         ("BRUTEX_CHECKSUM_MAX_RECORDS", "3000000"),
@@ -133,14 +228,20 @@ fn launch_env(root: &Path, child: &'static str) -> Vec<(&'static str, std::ffi::
     env
 }
 
-/// The parent half of a launch test: generated NIFTY `months` of 2025 in a
-/// fresh scratch root named `name`, then `child_path` run alone in a child
-/// over it (`child` set to the root), which must pass.
-fn in_a_launch_child(child: &'static str, child_path: &str, name: &str, months: &[u8]) {
+/// The parent half of a launch test: a fresh scratch root named `name` that
+/// `store` fills, then `child_path` run alone in a child over it (`child` set
+/// to the root, `policy` its admission policy), which must pass.
+fn in_a_launch_child(
+    child: &'static str,
+    child_path: &str,
+    name: &str,
+    store: impl FnOnce(&Path),
+    policy: &str,
+) {
     let root = crate::scratch::path(name);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("a scratch root");
-    generated_nifty_months(&root, months);
+    store(&root);
     let log = root.join("child.log");
     let output = std::fs::File::create_new(&log).expect("a log");
     let child_test = child_path
@@ -150,7 +251,7 @@ fn in_a_launch_child(child: &'static str, child_path: &str, name: &str, months: 
         .args(["--exact", child_test, "--nocapture", "--test-threads=1"])
         .env_clear()
         .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|profile| ("LLVM_PROFILE_FILE", profile)))
-        .envs(launch_env(&root, child))
+        .envs(launch_env(&root, child, policy))
         .stdout(output.try_clone().expect("a second handle"))
         .stderr(output)
         .status()
@@ -213,7 +314,13 @@ async fn page(query: &str) -> (StatusCode, Value) {
 )]
 fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
     let Some(root) = std::env::var_os(CHILD) else {
-        return in_a_launch_child(CHILD, CHILD_PATH, "saved-qualification", &[4, 5, 6]);
+        return in_a_launch_child(
+            CHILD,
+            CHILD_PATH,
+            "saved-qualification",
+            |root| generated_nifty_months(root, &[4, 5, 6]),
+            SHIPPED_POLICY,
+        );
     };
     let root = PathBuf::from(root);
     let site = Arc::new(crate::server::Site::load(
@@ -498,6 +605,79 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
     });
 }
 
+/// The child half of a launch test over the store at `root`: the preview, the
+/// launch of the `training` and `later` windows (the first and last month of
+/// 2025 of each), its end, and the settings page of the qualification it
+/// saved. `None` in a build with no commit stamp, whose launch is refused
+/// with a 503 before anything runs.
+fn launched_settings(root: &Path, training: (u8, u8), later: (u8, u8)) -> Option<Value> {
+    let site = Arc::new(crate::server::Site::load(
+        &root.join("absent-masters"),
+        root,
+    ));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    runtime.block_on(async {
+        let (status, _, preview) = crate::indexstoplaunch::metadata(
+            axum::extract::State(Arc::clone(&site)),
+            Uri::from_static("/index-stop/launch.json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        let preview: Value = serde_json::from_str(&preview).expect("JSON");
+        assert_eq!(preview["ready"], true, "{preview}");
+        telemetry::install(&telemetry::Config::new(root.join("logs"))).expect("a log sink");
+        let body = launch_body_over(
+            preview["policy"]["digest"].as_str().expect("a digest"),
+            training,
+            later,
+        );
+        let (code, _, reply) = crate::sweeprun::command_with(&site, &body, cli::commit_stamp());
+        let Some(_stamp) = cli::commit_stamp() else {
+            assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
+            return None;
+        };
+        assert_eq!(code, StatusCode::ACCEPTED, "{reply}");
+        let run = loop {
+            let progress = site.sweep.lock().unwrap().clone().expect("the run's slot");
+            if !progress.in_flight() {
+                break progress;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert!(run.refusal.is_none(), "{:?}", run.refusal);
+        let fields = run.index_stop.expect("the single-stop status").fields();
+        let identity = fields["qualifications"][0]["identity"]
+            .as_str()
+            .expect("an identity")
+            .to_owned();
+        let (status, settings) = page(&format!("identity={identity}")).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        Some(settings)
+    })
+}
+
+/// Every institutional check of a settings row that did not pass, as
+/// `name:state`, in the row's order.
+fn not_passed(row: &Value) -> Vec<String> {
+    row["institutional"]["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .filter(|check| check["state"] != "passed")
+        .map(|check| {
+            format!(
+                "{}:{}",
+                check["name"].as_str().expect("a name"),
+                check["state"].as_str().expect("a state")
+            )
+        })
+        .collect()
+}
+
 /// Set in the child that runs the forty-session launch, over the store it
 /// names.
 const REJECTED_CHILD: &str = "BRUTEX_REJECTED_QUALIFICATION_TEST_CHILD";
@@ -533,73 +713,112 @@ fn a_forty_session_training_window_is_measured_whole_and_ranked_rejected() {
             REJECTED_CHILD,
             REJECTED_CHILD_PATH,
             "rejected-qualification",
-            &[3, 4, 5, 6],
+            |root| generated_nifty_months(root, &[3, 4, 5, 6]),
+            SHIPPED_POLICY,
         );
     };
-    let root = PathBuf::from(root);
-    let site = Arc::new(crate::server::Site::load(
-        &root.join("absent-masters"),
-        &root,
-    ));
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("a runtime");
-    runtime.block_on(async {
-        let (status, _, preview) = crate::indexstoplaunch::metadata(
-            axum::extract::State(Arc::clone(&site)),
-            Uri::from_static("/index-stop/launch.json"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{preview}");
-        let preview: Value = serde_json::from_str(&preview).expect("JSON");
-        assert_eq!(preview["ready"], true, "{preview}");
-        telemetry::install(&telemetry::Config::new(root.join("logs"))).expect("a log sink");
-        let body = launch_body_over(
-            preview["policy"]["digest"].as_str().expect("a digest"),
-            (4, 5),
-            (6, 6),
+    let Some(settings) = launched_settings(Path::new(&root), (4, 5), (6, 6)) else {
+        return;
+    };
+    let total = settings["total"].as_str().expect("a total");
+    assert_ne!(total, "0", "{settings}");
+    assert_eq!(
+        settings["summary"],
+        serde_json::json!({"institutional_admitted":"0","rejected":total,"refused":"0",
+            "unmeasured":"0","combined_qualified":"0"}),
+        "{settings}"
+    );
+    for row in settings["rows"].as_array().expect("rows") {
+        let checks = not_passed(row);
+        assert!(
+            !checks.iter().any(|check| check.ends_with(":unmeasured")),
+            "{row}"
         );
-        let (code, _, reply) = crate::sweeprun::command_with(&site, &body, cli::commit_stamp());
-        let Some(_stamp) = cli::commit_stamp() else {
-            return assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
-        };
-        assert_eq!(code, StatusCode::ACCEPTED, "{reply}");
-        let run = loop {
-            let progress = site.sweep.lock().unwrap().clone().expect("the run's slot");
-            if !progress.in_flight() {
-                break progress;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
-        assert!(run.refusal.is_none(), "{:?}", run.refusal);
-        let fields = run.index_stop.expect("the single-stop status").fields();
-        let identity = fields["qualifications"][0]["identity"]
-            .as_str()
-            .expect("an identity")
-            .to_owned();
-        let (status, settings) = page(&format!("identity={identity}")).await;
-        assert_eq!(status, StatusCode::OK, "{settings}");
-        let total = settings["total"].as_str().expect("a total");
-        assert_ne!(total, "0", "{settings}");
-        assert_eq!(
-            settings["summary"],
-            serde_json::json!({"institutional_admitted":"0","rejected":total,"refused":"0",
-                "unmeasured":"0","combined_qualified":"0"}),
-            "{settings}"
+        assert!(
+            checks.iter().any(|check| check.ends_with(":failed")),
+            "{row}"
         );
-        for row in settings["rows"].as_array().expect("rows") {
-            let check_states: Vec<&str> = row["institutional"]["checks"]
-                .as_array()
-                .expect("checks")
-                .iter()
-                .map(|check| check["state"].as_str().expect("a state"))
-                .collect();
-            assert!(!check_states.contains(&"unmeasured"), "{row}");
-            assert!(check_states.contains(&"failed"), "{row}");
-        }
-    });
+    }
+}
+
+/// Set in the child that runs the launch an admitted setting comes out of,
+/// over the store it names.
+const ADMITTED_CHILD: &str = "BRUTEX_ADMITTED_QUALIFICATION_TEST_CHILD";
+const ADMITTED_CHILD_PATH: &str = concat!(
+    module_path!(),
+    "::a_setting_that_passes_every_check_is_ranked_admitted"
+);
+
+/// **A SETTING THAT PASSES EVERY CHECK IS RANKED ADMITTED** (BASE-COV-API-AS3,
+/// D-8664). The forty-session launch over months that rise through every
+/// session ([`trending_nifty_months`]), under the policy at its floors
+/// ([`FLOOR_POLICY`]): the long setting of the bullish bar trades once a
+/// session from 09:16 to 15:10 and loses only on the seven sessions whose
+/// 09:16 minute dips 10 paisa past its stop, so it passes every check, the
+/// operator's own rules no file sets among them (the smallest win at least
+/// three times the largest loss, the largest loss within the five-point
+/// risk), and is ranked ADMITTED (`rank`'s admitted arm). The long setting of
+/// the bearish bar never loses, so the ratios a loss divides stay unmeasured;
+/// the short settings never win. Run in a child, since every bound comes from
+/// the environment.
+///
+/// Extremes: singles — a policy at its floors (every structural count 1,
+/// every other floor 0 or its domain's bottom, every ceiling at its domain's
+/// top, neither rejection required), sessions that only rise, each by a slope
+/// of its own, a long setting whose only losses are seven stops 10 paisa
+/// deep, a long setting with no loss at all (worst reward to risk, average
+/// loss and profit factor unmeasured), short settings that never win
+/// (average win unmeasured); combinations — one setting admitted while the
+/// other three are unmeasured at once, and the admitted setting qualifying by
+/// its days beside it (`combined_qualified` 1) at once; out of the box — a
+/// policy file that relaxes every threshold it may while the operator's
+/// fixed rules still bind and are met (`worst_reward_risk` and
+/// `worst_trade_loss` passed).
+#[test]
+fn a_setting_that_passes_every_check_is_ranked_admitted() {
+    let Some(root) = std::env::var_os(ADMITTED_CHILD) else {
+        return in_a_launch_child(
+            ADMITTED_CHILD,
+            ADMITTED_CHILD_PATH,
+            "admitted-qualification",
+            |root| trending_nifty_months(root, &[3, 4, 5, 6]),
+            FLOOR_POLICY,
+        );
+    };
+    let Some(settings) = launched_settings(Path::new(&root), (4, 5), (6, 6)) else {
+        return;
+    };
+    assert_eq!(settings["total"], "4", "{settings}");
+    assert_eq!(
+        settings["summary"],
+        serde_json::json!({"institutional_admitted":"1","rejected":"0","refused":"0",
+            "unmeasured":"3","combined_qualified":"1"}),
+        "{settings}"
+    );
+    let rows = settings["rows"].as_array().expect("rows");
+    let by_index = |index: &str| {
+        let row = rows
+            .iter()
+            .find(|row| row["index"] == index)
+            .unwrap_or_else(|| panic!("setting {index}: {settings}"));
+        not_passed(row)
+    };
+    assert_eq!(by_index("0"), Vec::<String>::new(), "the admitted setting");
+    assert_eq!(
+        by_index("2"),
+        [
+            "worst_reward_risk:unmeasured",
+            "average_loss:unmeasured",
+            "profit_factor:unmeasured"
+        ],
+        "a long setting that never loses"
+    );
+    for short in ["1", "3"] {
+        assert!(
+            by_index(short).contains(&"average_win:unmeasured".to_owned()),
+            "a short setting that never wins: {settings}"
+        );
+    }
 }
 
 /// One page of the single-stop source reader, as JSON with its status.
