@@ -30,9 +30,14 @@ const CHILD_PATH: &str = concat!(
 /// Generated NIFTY minutes and days of April to June 2025 under `zerodha`,
 /// every open session of the shared calendar, written by the store's writer.
 fn generated_nifty(root: &Path) {
+    generated_nifty_months(root, &[4, 5, 6]);
+}
+
+/// [`generated_nifty`] over the months of 2025 named in `months`.
+fn generated_nifty_months(root: &Path, months: &[u8]) {
     let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
     let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
-    for month in [4_u8, 5, 6] {
+    for &month in months {
         let mut minutes = Vec::new();
         let mut daily = Vec::new();
         for day in 1..=31_u8 {
@@ -102,8 +107,8 @@ fn generated_nifty(root: &Path) {
     }
 }
 
-/// The environment of the launch child over `root`.
-fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
+/// The environment of the launch child over `root`, `child` naming it.
+fn launch_env(root: &Path, child: &'static str) -> Vec<(&'static str, std::ffi::OsString)> {
     let policy = root.join("policy.toml");
     std::fs::write(
         &policy,
@@ -125,11 +130,39 @@ fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
     .into_iter()
     .map(|(name, value)| (name, value.into()))
     .collect();
-    for name in [CHILD, "BRUTEX_STORE", "BRUTEX_CHECKSUM_RECEIPTS"] {
+    for name in [child, "BRUTEX_STORE", "BRUTEX_CHECKSUM_RECEIPTS"] {
         env.push((name, root.into()));
     }
     env.push(("BRUTEX_ADMISSION_POLICY_FILE", policy.into()));
     env
+}
+
+/// The parent half of a launch test: generated NIFTY `months` of 2025 in a
+/// fresh scratch root named `name`, then `child_path` run alone in a child
+/// over it (`child` set to the root), which must pass.
+fn in_a_launch_child(child: &'static str, child_path: &str, name: &str, months: &[u8]) {
+    let root = crate::scratch::path(name);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    generated_nifty_months(&root, months);
+    let log = root.join("child.log");
+    let output = std::fs::File::create_new(&log).expect("a log");
+    let child_test = child_path
+        .split_once("::")
+        .map_or(child_path, |(_, path)| path);
+    let status = std::process::Command::new(std::env::current_exe().expect("this binary"))
+        .args(["--exact", child_test, "--nocapture", "--test-threads=1"])
+        .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|profile| ("LLVM_PROFILE_FILE", profile)))
+        .envs(launch_env(&root, child))
+        .stdout(output.try_clone().expect("a second handle"))
+        .stderr(output)
+        .status()
+        .expect("the child runs");
+    let printed = std::fs::read_to_string(&log).expect("the child's log");
+    assert!(status.success(), "{printed}");
+    assert!(printed.contains("test result: ok. 1 passed;"), "{printed}");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The launch request: NIFTY at one minute, May 2025 for training and June
@@ -137,9 +170,15 @@ fn launch_env(root: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
 /// the generated minutes, closing 50 paisa above or below their open, keep
 /// firing.
 fn launch_body(digest: &str) -> String {
+    launch_body_over(digest, (5, 5), (6, 6))
+}
+
+/// [`launch_body`] with the training and later windows given as the first
+/// and last month of 2025 of each.
+fn launch_body_over(digest: &str, training: (u8, u8), later: (u8, u8)) -> String {
     serde_json::json!({"command":crate::indexstoplaunch::COMMAND,"feed":"zerodha","index":"NSE-NIFTY",
-        "timeframes":["1min"],"from_year":2025,"from_month":5,"to_year":2025,"to_month":5,
-        "later_from_year":2025,"later_from_month":6,"later_to_year":2025,"later_to_month":6,
+        "timeframes":["1min"],"from_year":2025,"from_month":training.0,"to_year":2025,"to_month":training.1,
+        "later_from_year":2025,"later_from_month":later.0,"later_to_year":2025,"later_to_month":later.1,
         "bits":"30,31","max_loss_points":"5","batch_programs":"2","node_allowance":"128",
         "batch_allowance":"1","expected_policy_digest":digest})
     .to_string()
@@ -178,31 +217,7 @@ async fn page(query: &str) -> (StatusCode, Value) {
 )]
 fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
     let Some(root) = std::env::var_os(CHILD) else {
-        let root = crate::scratch::path("saved-qualification");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch root");
-        generated_nifty(&root);
-        let log = root.join("child.log");
-        let output = std::fs::File::create_new(&log).expect("a log");
-        let child_test = CHILD_PATH
-            .split_once("::")
-            .map_or(CHILD_PATH, |(_, path)| path);
-        let status = std::process::Command::new(std::env::current_exe().expect("this binary"))
-            .args(["--exact", child_test, "--nocapture", "--test-threads=1"])
-            .env_clear()
-            .envs(
-                std::env::var_os("LLVM_PROFILE_FILE").map(|profile| ("LLVM_PROFILE_FILE", profile)),
-            )
-            .envs(launch_env(&root))
-            .stdout(output.try_clone().expect("a second handle"))
-            .stderr(output)
-            .status()
-            .expect("the child runs");
-        let printed = std::fs::read_to_string(&log).expect("the child's log");
-        assert!(status.success(), "{printed}");
-        assert!(printed.contains("test result: ok. 1 passed;"), "{printed}");
-        let _ = std::fs::remove_dir_all(&root);
-        return;
+        return in_a_launch_child(CHILD, CHILD_PATH, "saved-qualification", &[4, 5, 6]);
     };
     let root = PathBuf::from(root);
     let site = Arc::new(crate::server::Site::load(
@@ -484,6 +499,110 @@ fn a_saved_qualification_is_served_by_every_page_that_reads_it() {
             elsewhere.starts_with("original_context_refused: ") && elsewhere.contains("(os error 2)"),
             "{elsewhere}"
         );
+    });
+}
+
+/// Set in the child that runs the forty-session launch, over the store it
+/// names.
+const REJECTED_CHILD: &str = "BRUTEX_REJECTED_QUALIFICATION_TEST_CHILD";
+const REJECTED_CHILD_PATH: &str = concat!(
+    module_path!(),
+    "::a_forty_session_training_window_is_measured_whole_and_ranked_rejected"
+);
+
+/// **A FORTY-SESSION TRAINING WINDOW IS MEASURED WHOLE AND RANKED REJECTED**
+/// (BASE-COV-API-AS3, D-8664). The saved probe trains on May alone: 21 open
+/// sessions, an odd count, so its split statistics leave values unmeasured
+/// and every setting is ranked UNMEASURED. April and May hold forty sessions,
+/// so every value of every check is measured, and the generated minutes'
+/// signal-candle stops, which lose more than the five-point risk the policy
+/// allows, fail at least one check: every setting is ranked REJECTED, none
+/// unmeasured, refused or admitted (`rank`'s rejected arm). March is
+/// generated too, the month before the window, which the launch reads before
+/// its first session (without it the launch is refused for a file it cannot
+/// find). Run in a child, since every bound comes from the environment.
+///
+/// Extremes: singles — a training window of two months (forty sessions,
+/// even), a later window of one month, every institutional check measured
+/// (no check is `unmeasured`), at least one check failed in every setting;
+/// combinations — every setting measured and rejected at once (`rejected` =
+/// `total`, every other count 0), and no setting qualifying by its days
+/// beside it (`combined_qualified` 0) at once; out of the box — a store
+/// holding a month neither window names (March), which the launch reads
+/// before the training window's first session and is not refused for.
+#[test]
+fn a_forty_session_training_window_is_measured_whole_and_ranked_rejected() {
+    let Some(root) = std::env::var_os(REJECTED_CHILD) else {
+        return in_a_launch_child(
+            REJECTED_CHILD,
+            REJECTED_CHILD_PATH,
+            "rejected-qualification",
+            &[3, 4, 5, 6],
+        );
+    };
+    let root = PathBuf::from(root);
+    let site = Arc::new(crate::server::Site::load(
+        &root.join("absent-masters"),
+        &root,
+    ));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    runtime.block_on(async {
+        let (status, _, preview) = crate::indexstoplaunch::metadata(
+            axum::extract::State(Arc::clone(&site)),
+            Uri::from_static("/index-stop/launch.json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        let preview: Value = serde_json::from_str(&preview).expect("JSON");
+        assert_eq!(preview["ready"], true, "{preview}");
+        telemetry::install(&telemetry::Config::new(root.join("logs"))).expect("a log sink");
+        let body = launch_body_over(
+            preview["policy"]["digest"].as_str().expect("a digest"),
+            (4, 5),
+            (6, 6),
+        );
+        let (code, _, reply) = crate::sweeprun::command_with(&site, &body, cli::commit_stamp());
+        let Some(_stamp) = cli::commit_stamp() else {
+            return assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
+        };
+        assert_eq!(code, StatusCode::ACCEPTED, "{reply}");
+        let run = loop {
+            let progress = site.sweep.lock().unwrap().clone().expect("the run's slot");
+            if !progress.in_flight() {
+                break progress;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert!(run.refusal.is_none(), "{:?}", run.refusal);
+        let fields = run.index_stop.expect("the single-stop status").fields();
+        let identity = fields["qualifications"][0]["identity"]
+            .as_str()
+            .expect("an identity")
+            .to_owned();
+        let (status, settings) = page(&format!("identity={identity}")).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        let total = settings["total"].as_str().expect("a total");
+        assert_ne!(total, "0", "{settings}");
+        assert_eq!(
+            settings["summary"],
+            serde_json::json!({"institutional_admitted":"0","rejected":total,"refused":"0",
+                "unmeasured":"0","combined_qualified":"0"}),
+            "{settings}"
+        );
+        for row in settings["rows"].as_array().expect("rows") {
+            let states: Vec<&str> = row["institutional"]["checks"]
+                .as_array()
+                .expect("checks")
+                .iter()
+                .map(|check| check["state"].as_str().expect("a state"))
+                .collect();
+            assert!(!states.contains(&"unmeasured"), "{row}");
+            assert!(states.contains(&"failed"), "{row}");
+        }
     });
 }
 
