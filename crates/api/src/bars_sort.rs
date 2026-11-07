@@ -4688,4 +4688,1207 @@ mod cloud_mutant_tests {
         }
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A ROW IS CHOSEN ONLY FROM SLICES THAT HOLD ROWS.** `null_slices`
+    /// gives no slice for a time array whose rows end where they start, or
+    /// before, and `select_in`, handed the read rows' slices directly, leaves
+    /// an empty slice out of its time bisection and out of the rows at the
+    /// instant it finds, and finds no instant at all in slices whose rows run
+    /// back in time. No caller builds either: every kept run holds a row, and
+    /// the read rows are sorted before they are sliced. Takes the false branch
+    /// of the time array's length test in `null_slices`, and `len == 0`,
+    /// `tlo > thi` and both `None` ends in `select_in`.
+    ///
+    /// Extremes: 12 (9 single, 2 combined, 1 out of the box): (1) a time array
+    /// whose rows end where they start gives no null slice; (2) nor one whose
+    /// rows end before they start; (3) beside them, a time array with rows and
+    /// the read null rows are one slice each; (4) an empty slice before a full
+    /// one is passed over, and the first row is the earliest instant's; (5)
+    /// the second row is the latest instant's; (6) an empty slice after the
+    /// full one, the same; (7) a row as far in as the rows held, or `u64::MAX`
+    /// rows in, is none; (8) every slice empty, none; (9) instants before the
+    /// epoch are chosen like any. Combined: (10) a slice whose first instant
+    /// is after its last holds no row, alone or beside an empty slice; (11)
+    /// two rows at one instant beside an empty slice: the second is the later
+    /// series'. Out of the box: (12) a slice that says it holds more rows than
+    /// the read rows hold is refused by name, `no such kept row`, and nothing
+    /// past them is read.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one set of slices and every extreme its Extremes line names, in order"
+    )]
+    fn a_row_is_chosen_only_from_slices_that_hold_rows() {
+        // NEVER CREATED: no row of these slices is read from a file.
+        let root = crate::scratch::path("cloud-sort-slices");
+        let row = |ts: i64, series: u32| super::Kept {
+            key: super::Key {
+                null: false,
+                vkey: 7,
+                ts,
+                series,
+            },
+            run: 0,
+            row: 0,
+        };
+        let time = |start: u64, end: u64| super::TimeArray {
+            series: 0,
+            run: 0,
+            slot: 0,
+            start,
+            end,
+        };
+        let null = super::Kept {
+            key: super::Key {
+                null: true,
+                vkey: 0,
+                ts: 30,
+                series: 0,
+            },
+            run: 0,
+            row: 1,
+        };
+        let named = |slices: Vec<(super::Slice, u64)>| -> Vec<String> {
+            slices
+                .into_iter()
+                .map(|(slice, len)| match slice {
+                    super::Slice::Run { array, lo, hi } => {
+                        format!("run {array} {lo}..{hi} ({len})")
+                    }
+                    super::Slice::Time { array, lo, hi } => {
+                        format!("time {array} {lo}..{hi} ({len})")
+                    }
+                    super::Slice::Kept { lo, hi } => format!("kept {lo}..{hi} ({len})"),
+                })
+                .collect()
+        };
+        let timed = super::Arrays {
+            runs: Vec::new(),
+            times: vec![time(5, 5), time(0, 3), time(9, 2)],
+            kept: vec![row(10, 0), null],
+            desc: false,
+        };
+        assert_eq!(
+            named(timed.null_slices()),
+            ["time 1 0..3 (3)", "kept 1..2 (1)"],
+            "(1) (2) (3)"
+        );
+        let mut plans: Vec<super::SeriesPlan> = Vec::new();
+        let mut pick = |kept: Vec<super::Kept>, slices: &[(super::Slice, u64)], j: u64| {
+            super::Arrays {
+                runs: Vec::new(),
+                times: Vec::new(),
+                kept,
+                desc: false,
+            }
+            .select_in(&root, &mut plans, slices, j)
+        };
+        let empty = (super::Slice::Kept { lo: 0, hi: 0 }, 0);
+        let full = (super::Slice::Kept { lo: 0, hi: 2 }, 2);
+        let two = || vec![row(10, 0), row(20, 1)];
+        let backwards = || vec![row(20, 0), row(10, 1)];
+        assert_eq!(pick(two(), &[empty, full], 0), Ok(Some((10, 0))), "(4)");
+        assert_eq!(pick(two(), &[empty, full], 1), Ok(Some((20, 1))), "(5)");
+        assert_eq!(pick(two(), &[full, empty], 1), Ok(Some((20, 1))), "(6)");
+        assert_eq!(pick(two(), &[empty, full], 2), Ok(None), "(7)");
+        assert_eq!(pick(two(), &[empty, full], u64::MAX), Ok(None), "(7)");
+        assert_eq!(pick(two(), &[empty, empty], 0), Ok(None), "(8)");
+        assert_eq!(
+            pick(vec![row(-1, 0), row(0, 1)], &[empty, full], 1),
+            Ok(Some((0, 1))),
+            "(9)"
+        );
+        assert_eq!(pick(backwards(), &[full], 0), Ok(None), "(10)");
+        assert_eq!(pick(backwards(), &[empty, full], 1), Ok(None), "(10)");
+        assert_eq!(
+            pick(vec![row(10, 0), row(10, 1)], &[empty, full], 1),
+            Ok(Some((10, 1))),
+            "(11)"
+        );
+        assert_eq!(
+            pick(
+                vec![row(10, 0)],
+                &[(super::Slice::Kept { lo: 0, hi: 1 }, 5)],
+                0
+            ),
+            Err("no such kept row".to_owned()),
+            "(12)"
+        );
+    }
+
+    /// **A VALUE BISECTION OVER FEWER ROWS THAN IT IS TOLD IT HOLDS IS
+    /// REFUSED BY NAME.** `start_key` is given the read rows and, apart from
+    /// them, how many of them are valued; `page_once` counts that while it
+    /// keeps them, so the two agree there. Told more than it holds, a page
+    /// inside the count finds no value to bisect at all, or a value no row
+    /// holds at the place asked, and it says which, never guessing a row.
+    /// Takes the `None` branches of the value domain and of the valued
+    /// `select_in` in `start_key`.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) no row at
+    /// all and one counted: no value domain, `no valued row to order`; (2) a
+    /// null row alone, counted as valued: the same; (3) one valued row counted
+    /// twice, the second asked: its value is found and no row holds it; (4)
+    /// counted once, the first asked: its key; (5) descending, the order key
+    /// named is the value's complement, `!7`, which is -8; (6) the order key
+    /// `i64::MIN`, below which no key is counted, is named; (7) so is
+    /// `i64::MAX`; (8) the row just past every row counted is no key, `None`,
+    /// not a refusal. Combined: (9) two values counted as three, the second
+    /// past the first asked: the bisection runs over the domain between them
+    /// and lands on the larger, which holds one row; (10) a null row alone,
+    /// descending, counted as valued: no value domain. Out of the box: (11)
+    /// `u64::MAX` rows counted and the next to last asked: the refusal names
+    /// that row, the one numbered `u64::MAX - 1`.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one helper and every extreme its Extremes line names, in order"
+    )]
+    fn a_value_bisection_over_fewer_rows_than_counted_is_refused_by_name() {
+        // NEVER CREATED: no row here is read from a file.
+        let root = crate::scratch::path("cloud-sort-start-key");
+        let valued = |vkey: i64, ts: i64| super::Kept {
+            key: super::Key {
+                null: false,
+                vkey,
+                ts,
+                series: 0,
+            },
+            run: 0,
+            row: 0,
+        };
+        let null = super::Kept {
+            key: super::Key {
+                null: true,
+                vkey: 0,
+                ts: 10,
+                series: 0,
+            },
+            run: 0,
+            row: 0,
+        };
+        let mut plans: Vec<super::SeriesPlan> = Vec::new();
+        let mut start = |kept: Vec<super::Kept>, desc: bool, kept_valued: u64, k: u64| {
+            let mut arrays = super::Arrays {
+                runs: Vec::new(),
+                times: Vec::new(),
+                kept,
+                desc,
+            };
+            super::start_key(&root, &mut plans, &mut arrays, kept_valued, k)
+        };
+        let no_domain = Err("no valued row to order".to_owned());
+        let found = |vk: &str, k: &str| -> Result<Option<super::Key>, String> {
+            Err(format!(
+                "the value bisection found {vk} for row {k} and no row holds it"
+            ))
+        };
+        assert_eq!(start(Vec::new(), false, 1, 0), no_domain, "(1)");
+        assert_eq!(start(vec![null], false, 1, 0), no_domain, "(2)");
+        assert_eq!(
+            start(vec![valued(5, 10)], false, 2, 1),
+            found("5", "1"),
+            "(3)"
+        );
+        assert_eq!(
+            start(vec![valued(5, 10)], false, 1, 0),
+            Ok(Some(super::Key {
+                null: false,
+                vkey: 5,
+                ts: 10,
+                series: 0,
+            })),
+            "(4)"
+        );
+        assert_eq!(
+            start(vec![valued(!7, 10)], true, 2, 1),
+            found("-8", "1"),
+            "(5)"
+        );
+        assert_eq!(
+            start(vec![valued(i64::MIN, 10)], false, 2, 1),
+            found("-9223372036854775808", "1"),
+            "(6)"
+        );
+        assert_eq!(
+            start(vec![valued(i64::MAX, 10)], false, 2, 1),
+            found("9223372036854775807", "1"),
+            "(7)"
+        );
+        assert_eq!(start(vec![valued(5, 10)], false, 1, 1), Ok(None), "(8)");
+        assert_eq!(
+            start(vec![valued(3, 1), valued(9, 2)], false, 3, 2),
+            found("9", "2"),
+            "(9)"
+        );
+        assert_eq!(start(vec![null], true, 1, 0), no_domain, "(10)");
+        assert_eq!(
+            start(vec![valued(5, 10)], false, u64::MAX, u64::MAX - 1),
+            found("5", "18446744073709551614"),
+            "(11)"
+        );
+    }
+
+    /// **A KEPT RUN IS CUT ONLY WHERE IT HOLDS ROWS: ONE THAT HOLDS NONE IS
+    /// CUT INTO NOTHING, EVEN STRICTLY INSIDE AN INDEX RUN.** Every run a plan
+    /// keeps holds a row (`SeriesPlan::build` keeps one only when it does), so
+    /// `cut` never met a run that an index run overhangs on both sides and
+    /// that holds none. The plan's runs are set here directly: an empty run
+    /// strictly inside the `.srt` run `[130, 260)` gets no piece from it, and
+    /// the runs beside it are cut as a day bound's would be. Takes the false
+    /// branch of `until > from` in `cut`.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a run of no
+    /// row strictly inside the index run `[130, 260)` is cut into nothing; (2)
+    /// one on the boundary of two index runs, nothing; (3) one at row 0,
+    /// nothing; (4) one at the month's end, row 360, nothing; (5) a run across
+    /// a boundary is two cut pieces meeting at it, each from its own index
+    /// run; (6) the whole month is the three index runs, whole; (7) a run
+    /// whose start is past its end, nothing; (8) every cut keeps its run's
+    /// place and series, and a cut piece carries the run's bound and no
+    /// entries yet. Combined: (9) a run that an index run cuts and that runs
+    /// past every row the index orders: one cut piece, and the rest read and
+    /// said to be appended after the index; (10) nine runs of one month walk
+    /// its index once. Out of the box: (11) a run of no row at `u64::MAX` is
+    /// past every index run and reads nothing.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one month and every extreme its Extremes line names, in order"
+    )]
+    fn a_kept_run_that_holds_no_row_is_cut_into_nothing() {
+        let root = scratch("empty-kept-run");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &rows, &rows);
+        let asked = query(index(), month(1), month(1), SortKey::Close);
+        let (mut plans, _) = plans_of(&root, &asked);
+        let plan = plans.first_mut().expect("one plan");
+        let whole = *plan.runs.first().expect("the month is one kept run");
+        assert_eq!((whole.slot, whole.start, whole.end), (0, 0, 360));
+        let kept_run = |start: u64, end: u64| super::super::series::Run {
+            start,
+            end,
+            ..whole
+        };
+        plan.runs = vec![
+            kept_run(200, 200),
+            kept_run(130, 130),
+            kept_run(0, 0),
+            kept_run(360, 360),
+            kept_run(125, 135),
+            kept_run(0, 360),
+            kept_run(350, 400),
+            kept_run(200, 100),
+            kept_run(u64::MAX, u64::MAX),
+        ];
+        let mut views = HashMap::new();
+        let cuts = super::cut(&root, &mut plans, &asked, &mut views, &super::Aside::new());
+        let pieces: Vec<Vec<String>> = cuts
+            .iter()
+            .map(|cut| {
+                cut.pieces
+                    .iter()
+                    .map(|piece| match piece {
+                        super::Piece::Indexed {
+                            run, start, end, ..
+                        } => {
+                            format!("indexed {run} {start}..{end}")
+                        }
+                        super::Piece::Cut {
+                            run, start, end, ..
+                        } => {
+                            format!("cut {run} {start}..{end}")
+                        }
+                        super::Piece::Read {
+                            start, end, why, ..
+                        } => {
+                            format!("read {start}..{end}: {}", why.sentence())
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            pieces,
+            [
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec!["cut 0 125..130", "cut 1 130..135"],
+                vec![
+                    "indexed 0 0..130",
+                    "indexed 1 130..260",
+                    "indexed 2 260..360"
+                ],
+                vec![
+                    "cut 2 350..360",
+                    "read 360..400: appended after its sort index, which orders rows 0..360",
+                ],
+                Vec::new(),
+                Vec::new(),
+            ],
+            "(1) (2) (3) (4) (5) (6) (7) (9) (11)"
+        );
+        assert_eq!(
+            cuts.iter()
+                .map(|cut| (cut.series, cut.run))
+                .collect::<Vec<_>>(),
+            (0..9_usize).map(|at| (0_usize, at)).collect::<Vec<_>>(),
+            "(8) every cut keeps its run's place and series"
+        );
+        assert!(
+            cuts.iter()
+                .flat_map(|cut| &cut.pieces)
+                .all(|piece| match piece {
+                    super::Piece::Cut {
+                        slot,
+                        lo,
+                        hi,
+                        entries,
+                        ..
+                    } => (*slot, *lo, *hi) == (0, whole.lo, whole.hi) && entries.is_none(),
+                    super::Piece::Indexed { slot, .. } | super::Piece::Read { slot, .. } => {
+                        *slot == 0
+                    }
+                }),
+            "(8) a cut piece carries its run's bound and no entries yet"
+        );
+        assert_eq!(
+            views.len(),
+            1,
+            "(10) nine runs of one month walk its index once"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What `plan`'s stretch reads left unread, drained: the rows, the months
+    /// and each month's line, in the order the reads met them.
+    fn unread_lines(plan: &mut super::SeriesPlan) -> (u64, usize, Vec<String>) {
+        let mut lines = Vec::new();
+        let left = plan.take_unread(&mut crate::fault_log::FaultLog::default(), |line| {
+            lines.push(line.to_owned());
+        });
+        (left.rows, left.months, lines)
+    }
+
+    /// **A CUT FOLD OF A SLOT THE PLAN DOES NOT HOLD IS NEVER HELD.** The
+    /// memo of cut stretches is keyed by the slot's bar file, and a slot past
+    /// the plan's has none. `page_once` and `extremes_of` fold only their own
+    /// pieces' slots, so no caller asks; the fold of no row there, nothing
+    /// missed and nothing to key, is asked here directly, beside the same
+    /// stretch of a slot the plan holds, which is held. Takes the false branch
+    /// of the memo key's `let` in `cut_extremes`.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) no row of
+    /// the slot one past the plan's: no extreme, no row read, nothing held;
+    /// (2) the same at slot `usize::MAX`; (3) no row at row 0; (4) ten rows of
+    /// a slot the plan does not hold: none read, nothing held, and the rows
+    /// named once in the plan's unread ledger; (5) no row of a slot the plan
+    /// does hold IS held, as an empty fold: the slot's file keys the memo, not
+    /// the rows; (6) rows `[120, 240)` of the held slot fold to the brute
+    /// force, 120 read, and are held; (7) asked again, from the memo, none
+    /// read; (8) asked for another series, from the memo, renamed to it.
+    /// Combined: (9) a slot the plan does not hold and a stretch past every
+    /// row the month holds: none read, its 100 rows named; (10) slot
+    /// `usize::MAX` and a stretch at `u64::MAX`: nothing. Out of the box:
+    /// (11) a client gone, with the stride's next look due: a fold of no row
+    /// takes no look and answers, and one row of the held slot is
+    /// `cancelled` and held nowhere.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one plan and every extreme its Extremes line names, in order"
+    )]
+    fn a_cut_fold_of_a_slot_the_plan_does_not_hold_is_never_held() {
+        let root = scratch("cut-fold-no-slot");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &rows, &rows);
+        let (mut plans, _) = plans_of(&root, &query(index(), month(1), month(1), SortKey::Close));
+        let plan = plans.first_mut().expect("one plan");
+        let past = plan.slots.len();
+        let never = super::Cancel::never();
+        let mut since = 0_u64;
+        let nothing: Result<(Extremes, u64), String> = Ok((Extremes::default(), 0));
+        let unopened = |slot: usize, rows: u64| {
+            format!(
+                "slot {slot} is not a month of this window; the month did not open, so none \
+                 of its {rows} kept rows in this window was read"
+            )
+        };
+        for (slot, stretch) in [(past, (5, 5)), (usize::MAX, (5, 5)), (past, (0, 0))] {
+            assert_eq!(
+                super::cut_extremes(&root, plan, slot, stretch, (0, false), &never, &mut since),
+                nothing,
+                "(1) (2) (3) slot {slot} {stretch:?}"
+            );
+            assert!(
+                !super::cut_extremes_held(plan, slot, stretch.0, stretch.1),
+                "(1) (2) (3) slot {slot} {stretch:?}"
+            );
+        }
+        assert_eq!(
+            unread_lines(plan),
+            (0, 0, Vec::new()),
+            "(1) (2) (3) no row, no line"
+        );
+        assert_eq!(
+            super::cut_extremes(&root, plan, past, (0, 10), (0, false), &never, &mut since),
+            nothing,
+            "(4)"
+        );
+        assert!(!super::cut_extremes_held(plan, past, 0, 10), "(4)");
+        assert_eq!(unread_lines(plan), (10, 1, vec![unopened(past, 10)]), "(4)");
+        assert!(!super::cut_extremes_held(plan, 0, 5, 5), "(5) before");
+        assert_eq!(
+            super::cut_extremes(&root, plan, 0, (5, 5), (0, false), &never, &mut since),
+            nothing,
+            "(5)"
+        );
+        assert!(
+            super::cut_extremes_held(plan, 0, 5, 5),
+            "(5) the slot's file keys the memo"
+        );
+        let kept = index_extremes(&rows[120..240]);
+        assert_eq!(
+            super::cut_extremes(&root, plan, 0, (120, 240), (0, false), &never, &mut since),
+            Ok((kept, 120)),
+            "(6)"
+        );
+        assert!(super::cut_extremes_held(plan, 0, 120, 240), "(6)");
+        assert_eq!(
+            super::cut_extremes(&root, plan, 0, (120, 240), (0, false), &never, &mut since),
+            Ok((kept, 0)),
+            "(7)"
+        );
+        let third = |at: Option<Extreme>| at.map(|at| Extreme { series: 3, ..at });
+        let renamed = Extremes {
+            close_max: third(kept.close_max),
+            close_min: third(kept.close_min),
+            high_max: third(kept.high_max),
+            low_min: third(kept.low_min),
+            range_max: third(kept.range_max),
+            volume_max: third(kept.volume_max),
+            ..kept
+        };
+        assert_eq!(
+            super::cut_extremes(&root, plan, 0, (120, 240), (3, false), &never, &mut since),
+            Ok((renamed, 0)),
+            "(8)"
+        );
+        assert_eq!(
+            super::cut_extremes(
+                &root,
+                plan,
+                past,
+                (400, 500),
+                (0, false),
+                &never,
+                &mut since
+            ),
+            nothing,
+            "(9)"
+        );
+        assert_eq!(
+            unread_lines(plan),
+            (100, 1, vec![unopened(past, 100)]),
+            "(9)"
+        );
+        let at_end = (u64::MAX, u64::MAX);
+        assert_eq!(
+            super::cut_extremes(
+                &root,
+                plan,
+                usize::MAX,
+                at_end,
+                (0, false),
+                &never,
+                &mut since
+            ),
+            nothing,
+            "(10)"
+        );
+        assert!(
+            !super::cut_extremes_held(plan, usize::MAX, u64::MAX, u64::MAX),
+            "(10)"
+        );
+        let (gone, guard) = super::Cancel::pair();
+        drop(guard);
+        let mut due = super::super::series::CANCEL_STRIDE - 1;
+        assert_eq!(
+            super::cut_extremes(&root, plan, past, (7, 7), (0, false), &gone, &mut due),
+            nothing,
+            "(11)"
+        );
+        assert_eq!(
+            due,
+            super::super::series::CANCEL_STRIDE - 1,
+            "(11) no row, no look"
+        );
+        assert_eq!(
+            super::cut_extremes(&root, plan, 0, (300, 301), (0, false), &gone, &mut due),
+            Err("cancelled: the client that asked went away, and the work stopped".to_owned()),
+            "(11)"
+        );
+        assert!(
+            !super::cut_extremes_held(plan, 0, 300, 301),
+            "(11) a fold cut short is never held"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A KEPT RUN ON A SLOT THE PLAN DOES NOT HOLD IS COUNTED UNREAD, BY ITS
+    /// SLOT, AND NAMED AS NO MONTH READ.** A plan's runs name its own slots;
+    /// set directly to name one it does not hold, a run has no index (its
+    /// view is refused), its rows are read and none opens, so they are
+    /// counted unread, and the months read have no month to name for them,
+    /// name none and offer no command. The month left as planned is served
+    /// from its index. Takes the false branch of the month lookup in
+    /// `page_once`'s list of months read.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) February's
+    /// run moved to the slot one past the plan's: its 360 rows are counted
+    /// unread, one month; (2) and not named as read, no month and no line in
+    /// `scanned_why`; (3) no build command is offered for it; (4) none of them
+    /// is counted as scanned, on the report or on the answer; (5) the unread
+    /// line names the slot and the rows; (6) the request's faults hold that
+    /// line once, standing for no refused record; (7) January is still
+    /// served from its three index runs; (8) the page is January's 37
+    /// smallest closes, the brute force over it alone. Combined: (9) both
+    /// runs on one slot the plan does not hold: one unread entry of 720 rows,
+    /// nothing indexed, an empty page; (10) each on its own such slot: two
+    /// entries. Out of the box: (11) January's run on slot `usize::MAX`: the
+    /// line names that slot in full, and February is served.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one store and every extreme its Extremes line names, in order"
+    )]
+    fn a_kept_run_on_a_slot_the_plan_does_not_hold_is_unread_and_names_no_month() {
+        let root = scratch("run-without-slot");
+        let jan: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let feb: Vec<Bar> = (0..360).map(|i| bar(month(2), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &jan, &jan);
+        write(&root, &index(), month(2), &feb, &feb);
+        let asked = query(index(), month(1), month(2), SortKey::Close);
+        let ask = |slots: [usize; 2]| {
+            let (mut plans, rules) = plans_of(&root, &asked);
+            let plan = plans.first_mut().expect("one plan");
+            for (run, slot) in plan.runs.iter_mut().zip(slots) {
+                run.slot = slot;
+            }
+            let mut faults = crate::fault_log::FaultLog::default();
+            let sorted = super::page(
+                &root,
+                &mut plans,
+                &rules,
+                &asked,
+                (0, 37),
+                &mut faults,
+                (&super::Cancel::never(), None),
+            )
+            .expect("a run on a slot the plan does not hold is read, never fatal");
+            let served: Vec<(i64, i64)> = sorted
+                .page
+                .iter()
+                .map(|row| (row.bar.close, row.bar.ts_micros))
+                .collect();
+            (
+                served,
+                sorted.scanned,
+                sorted.report,
+                faults.records(),
+                faults.sentences(),
+            )
+        };
+        let first37 = |months: &[&[Bar]]| {
+            let mut all: Vec<(i64, i64)> = months
+                .iter()
+                .flat_map(|rows| rows.iter().map(|bar| (bar.close, bar.ts_micros)))
+                .collect();
+            all.sort_unstable();
+            all.truncate(37);
+            all
+        };
+        let unopened = |slot: usize, rows: u64| {
+            format!(
+                "slot {slot} is not a month of this window; the month did not open, so none \
+                 of its {rows} kept rows in this window was read"
+            )
+        };
+        let key = index().text();
+        // AS PLANNED: both months from their indexes, nothing unread.
+        let (served, scanned, report, records, faults) = ask([0, 1]);
+        assert_eq!(served, first37(&[jan.as_slice(), feb.as_slice()]));
+        assert_eq!(
+            (report.indexed_rows, report.unread_rows, scanned, records),
+            (720, 0, 0, 0)
+        );
+        assert!(faults.is_empty(), "{faults:?}");
+        // FEBRUARY'S RUN ON THE SLOT ONE PAST THE PLAN'S.
+        let (served, scanned, report, records, faults) = ask([0, 2]);
+        assert_eq!((report.unread_rows, report.unread_months), (360, 1), "(1)");
+        assert_eq!(
+            (report.scanned_months, report.scanned_why.len()),
+            (0, 0),
+            "(2)"
+        );
+        assert!(report.build.is_empty(), "(3) {:?}", report.build);
+        assert_eq!((report.scanned_rows, scanned), (0, 0), "(4)");
+        assert_eq!(
+            report.unread_why,
+            [format!("{key} {}", unopened(2, 360))],
+            "(5)"
+        );
+        assert_eq!((faults, records), (vec![unopened(2, 360)], 0), "(6)");
+        assert_eq!((report.indexed_rows, report.indexed_runs), (360, 3), "(7)");
+        assert_eq!(served, first37(&[jan.as_slice()]), "(8)");
+        // BOTH RUNS ON ONE SLOT THE PLAN DOES NOT HOLD.
+        let (served, _, report, _, faults) = ask([5, 5]);
+        assert!(served.is_empty(), "(9) {served:?}");
+        assert_eq!(
+            (
+                report.indexed_rows,
+                report.unread_rows,
+                report.unread_months
+            ),
+            (0, 720, 1),
+            "(9)"
+        );
+        assert_eq!(faults, [unopened(5, 720)], "(9)");
+        // EACH ON ITS OWN SUCH SLOT.
+        let (served, _, report, _, faults) = ask([usize::MAX, 2]);
+        assert!(served.is_empty(), "(10) {served:?}");
+        assert_eq!((report.unread_rows, report.unread_months), (720, 2), "(10)");
+        assert_eq!(
+            faults,
+            [unopened(usize::MAX, 360), unopened(2, 360)],
+            "(10)"
+        );
+        // JANUARY'S RUN ON SLOT `usize::MAX`.
+        let (served, _, report, _, faults) = ask([usize::MAX, 1]);
+        assert_eq!(served, first37(&[feb.as_slice()]), "(11)");
+        assert_eq!(
+            report.unread_why,
+            [format!("{key} {}", unopened(usize::MAX, 360))],
+            "(11)"
+        );
+        assert!(
+            faults
+                .iter()
+                .all(|line| line.starts_with("slot 18446744073709551615 ")),
+            "(11) {faults:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A VALUE PAGE GIVEN NO RULES FOR A SERIES NEITHER READS NOR SERVES
+    /// IT.** `window` builds one `change::Rules` beside each plan; `page`,
+    /// asked directly with fewer, passes over every read stretch of a series
+    /// that has none (not read, so not counted unread) and every row of it
+    /// the indexes put on the page, which has no rules to decide its change
+    /// by. Takes the missing rules' `None` in the read loop and in the page's
+    /// plan-and-rules pair in `page_once`.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) no rules: no
+    /// row is served, though the index orders January's 360; (2) the read
+    /// month is passed over: nothing unread, no fault; (3) the report still
+    /// names it as read by the small-month rule and counts its 360 rows, as
+    /// the answer's `scanned` does; (4) January is still ordered from its
+    /// three index runs; (5) descending, the same; (6) a page at offset 300,
+    /// the same; (7) a page past every row, the same; (8) one rule for the one
+    /// series: the brute force over both months. Combined: (9) two series and
+    /// a rule for the first only: only the first series' rows are served,
+    /// from an order the second's read month never joined; (10) two series
+    /// and no rules at all: nothing served, both indexed months ordered and
+    /// both read months named. Out of the box: (11) three rules for one
+    /// series: the two past it are never asked, and the page is the brute
+    /// force.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one store and every extreme its Extremes line names, in order"
+    )]
+    fn a_value_page_given_no_rules_for_a_series_neither_reads_nor_serves_it() {
+        let root = scratch("no-rules");
+        let bank = SeriesKey::new("NSE", "INDEX", "BANKNIFTY", None);
+        let jan: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let feb: Vec<Bar> = (0..360).map(|i| bar(month(2), i, OI_NULL)).collect();
+        for key in [index(), bank.clone()] {
+            write(&root, &key, month(1), &jan, &jan);
+            unindexed(&root, &key, month(2));
+        }
+        let lineage = super::change::Lineage::read(&root, Vendor::Gdfl);
+        let ask = |asked: &WindowQuery, how_many: usize, offset: usize| {
+            let (mut plans, _) = plans_of(&root, asked);
+            let rules: Vec<super::change::Rules> = asked
+                .series
+                .iter()
+                .cycle()
+                .take(how_many)
+                .map(|key| super::change::Rules::of(&root, asked.timeframe, key, &lineage))
+                .collect();
+            let mut faults = crate::fault_log::FaultLog::default();
+            let sorted = super::page(
+                &root,
+                &mut plans,
+                &rules,
+                asked,
+                (offset, 37),
+                &mut faults,
+                (&super::Cancel::never(), None),
+            )
+            .expect("answers");
+            let served: Vec<(i64, i64, usize)> = sorted
+                .page
+                .iter()
+                .map(|row| (row.bar.close, row.bar.ts_micros, row.series))
+                .collect();
+            (served, sorted.scanned, sorted.report, faults.is_empty())
+        };
+        let first = |parts: &[(&[Bar], usize)]| {
+            let mut all: Vec<(i64, i64, usize)> = parts
+                .iter()
+                .flat_map(|&(rows, series)| {
+                    rows.iter()
+                        .map(move |bar| (bar.close, bar.ts_micros, series))
+                })
+                .collect();
+            all.sort_unstable();
+            all.truncate(37);
+            all
+        };
+        let small = format!(
+            "{} 2031-02: 360 rows read: {}",
+            index().text(),
+            super::SMALL_MONTH
+        );
+        let one = query(index(), month(1), month(2), SortKey::Close);
+        // THE WINDOW'S OWN RULE: the brute force over both months.
+        let (served, scanned, report, clean) = ask(&one, 1, 0);
+        assert_eq!(
+            served,
+            first(&[(jan.as_slice(), 0), (feb.as_slice(), 0)]),
+            "(8)"
+        );
+        assert_eq!(
+            (report.indexed_rows, report.scanned_rows, scanned, clean),
+            (360, 360, 360, true),
+            "(8)"
+        );
+        // NO RULES.
+        let (served, scanned, report, clean) = ask(&one, 0, 0);
+        assert!(served.is_empty(), "(1) {served:?}");
+        assert_eq!((report.unread_rows, clean), (0, true), "(2)");
+        assert_eq!(report.scanned_why, [small.as_str()], "(3)");
+        assert_eq!((report.scanned_rows, scanned), (360, 360), "(3)");
+        assert_eq!((report.indexed_rows, report.indexed_runs), (360, 3), "(4)");
+        let mut down = one.clone();
+        down.desc = true;
+        for (asked, offset) in [(&down, 0), (&one, 300), (&one, 720)] {
+            let (served, scanned, report, clean) = ask(asked, 0, offset);
+            assert!(served.is_empty(), "(5) (6) (7) offset {offset}: {served:?}");
+            assert_eq!(
+                (report.indexed_rows, report.scanned_rows, scanned, clean),
+                (360, 360, 360, true),
+                "(5) (6) (7) offset {offset}"
+            );
+        }
+        // TWO SERIES: a rule for the first only, then none.
+        let mut two = one.clone();
+        two.series.push(bank);
+        let (served, scanned, report, clean) = ask(&two, 1, 0);
+        let want: Vec<(i64, i64, usize)> = first(&[
+            (jan.as_slice(), 0),
+            (feb.as_slice(), 0),
+            (jan.as_slice(), 1),
+        ])
+        .into_iter()
+        .filter(|row| row.2 == 0)
+        .collect();
+        assert!(
+            !want.is_empty() && want.len() < 37,
+            "the fixture ties the two series"
+        );
+        assert_eq!(served, want, "(9)");
+        assert_eq!(
+            (report.indexed_rows, report.scanned_months, scanned, clean),
+            (720, 2, 720, true),
+            "(9)"
+        );
+        let (served, _, report, clean) = ask(&two, 0, 0);
+        assert!(served.is_empty(), "(10) {served:?}");
+        assert_eq!(
+            (
+                report.indexed_rows,
+                report.scanned_rows,
+                report.scanned_months,
+                clean
+            ),
+            (720, 720, 2, true),
+            "(10)"
+        );
+        // THREE RULES FOR ONE SERIES.
+        let (served, _, _, clean) = ask(&one, 3, 0);
+        assert_eq!(
+            served,
+            first(&[(jan.as_slice(), 0), (feb.as_slice(), 0)]),
+            "(11)"
+        );
+        assert!(clean, "(11)");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A PAGE ROW WHOSE SLOT THE PLAN'S KEPT RUNS CANNOT FIND IS NAMED AND
+    /// NEVER SERVED.** `run_of_slot` bisects a plan's runs by slot, and
+    /// `SeriesPlan::build` keeps them in slot order. Set out of that order,
+    /// the runs still cut and order every row, but the bisection loses a
+    /// slot, and each row the index puts on the page from it is named, the
+    /// series and the slot with no kept run, rather than served from a run
+    /// guessed. Takes the `None` of `run_of_slot` for an index-named row in
+    /// `page_once`.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) ascending,
+    /// each row of the slot the bisection loses is named; (2) once per such
+    /// row, in page order; (3) and none is served; (4) the rows of the slot
+    /// it finds are served, in the brute-force order with the others taken
+    /// out; (5) the order is still taken over every row: 720 indexed in six
+    /// runs, nothing read; (6) descending, the same; (7) a page lying wholly
+    /// in the lost slot: nothing served, eleven lines; (8) a page lying wholly
+    /// in the found slot: served whole, no line. Combined: (9) three months
+    /// reversed: only the middle slot is found, and the rows of both ends are
+    /// named; (10) descending and a page lying wholly in the lost slot:
+    /// nothing served, ten lines. Out of the box: (11) a page of `limit` 0
+    /// over the same runs serves nothing and names nothing.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one store and every extreme its Extremes line names, in order"
+    )]
+    fn a_page_row_whose_slot_the_kept_runs_cannot_find_is_named_and_not_served() {
+        let root = scratch("runs-out-of-order");
+        let months: Vec<Vec<Bar>> = (1..=3)
+            .map(|m| {
+                let rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, OI_NULL)).collect();
+                write(&root, &index(), month(m), &rows, &rows);
+                rows
+            })
+            .collect();
+        let ask = |to: u8, desc: bool, (offset, limit): (usize, usize)| {
+            let mut asked = query(index(), month(1), month(to), SortKey::Close);
+            asked.desc = desc;
+            let (mut plans, rules) = plans_of(&root, &asked);
+            plans.first_mut().expect("one plan").runs.reverse();
+            let mut faults = crate::fault_log::FaultLog::default();
+            let sorted = super::page(
+                &root,
+                &mut plans,
+                &rules,
+                &asked,
+                (offset, limit),
+                &mut faults,
+                (&super::Cancel::never(), None),
+            )
+            .expect("answers");
+            let served: Vec<(i64, i64)> = sorted
+                .page
+                .iter()
+                .map(|row| (row.bar.close, row.bar.ts_micros))
+                .collect();
+            (served, sorted.report, faults.sentences())
+        };
+        // THE BRUTE FORCE over the first `to` months: the rows of the page at
+        // `(offset, limit)` that lie in `found` slots, and one line for each
+        // row that does not, in page order.
+        let want = |to: usize, desc: bool, (offset, limit): (usize, usize), found: &[usize]| {
+            let mut all: Vec<(i64, i64, usize)> = months
+                .iter()
+                .take(to)
+                .enumerate()
+                .flat_map(|(slot, rows)| {
+                    rows.iter().map(move |bar| {
+                        let key = if desc { -bar.close } else { bar.close };
+                        (key, bar.ts_micros, slot)
+                    })
+                })
+                .collect();
+            all.sort_unstable();
+            let page: Vec<(i64, i64, usize)> = all.into_iter().skip(offset).take(limit).collect();
+            let served: Vec<(i64, i64)> = page
+                .iter()
+                .filter(|row| found.contains(&row.2))
+                .map(|row| (if desc { -row.0 } else { row.0 }, row.1))
+                .collect();
+            let named: Vec<String> = page
+                .iter()
+                .filter(|row| !found.contains(&row.2))
+                .map(|row| format!("{}: slot {} has no kept run", index().text(), row.2))
+                .collect();
+            (served, named)
+        };
+        let (served, report, faults) = ask(2, false, (0, 37));
+        let (rows, named) = want(2, false, (0, 37), &[0]);
+        assert!(
+            !rows.is_empty() && !named.is_empty(),
+            "the page holds both months: {named:?}"
+        );
+        assert_eq!(faults, named, "(1) (2)");
+        assert_eq!(served, rows, "(3) (4)");
+        assert_eq!(
+            (
+                report.indexed_rows,
+                report.indexed_runs,
+                report.scanned_rows
+            ),
+            (720, 6, 0),
+            "(5)"
+        );
+        let (served, _, faults) = ask(2, true, (0, 37));
+        assert_eq!((served, faults), want(2, true, (0, 37), &[0]), "(6)");
+        let (served, _, faults) = ask(2, false, (11, 11));
+        assert!(served.is_empty(), "(7) {served:?}");
+        assert_eq!(faults.len(), 11, "(7) {faults:?}");
+        assert_eq!((served, faults), want(2, false, (11, 11), &[0]), "(7)");
+        let (served, _, faults) = ask(2, false, (0, 11));
+        assert!(faults.is_empty(), "(8) {faults:?}");
+        assert_eq!(served.len(), 11, "(8)");
+        assert_eq!(served, want(2, false, (0, 11), &[0]).0, "(8)");
+        let (served, report, faults) = ask(3, false, (0, 37));
+        assert_eq!(report.indexed_rows, 1_080, "(9)");
+        assert_eq!((served, faults), want(3, false, (0, 37), &[1]), "(9)");
+        let (served, _, faults) = ask(2, true, (0, 10));
+        assert!(served.is_empty(), "(10) {served:?}");
+        assert_eq!(faults.len(), 10, "(10) {faults:?}");
+        let (served, _, faults) = ask(2, false, (0, 0));
+        assert!(
+            served.is_empty() && faults.is_empty(),
+            "(11) {served:?} {faults:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A VALUE PAGE ADMITTED WITH THE CHEAP READS ASKS FOR THE SCAN POOL
+    /// BEFORE IT READS A RECORD PAST ITS BUDGET, FOR ITS ORDER OR FOR ITS
+    /// EXTREMES** (R3-07, DB-061). `window_admitted` hands `page` the
+    /// cheap-read budget: rows no index orders past it, or cut rows the
+    /// extremes would fold past it, answer `needs_scan_pool` in the budget's
+    /// words before one is read, and exactly the budget is served. `window`
+    /// passes no budget, which is why no test reached either. Takes both
+    /// budget refusals in `page_once`.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) a page over
+    /// a month no index orders, one row past the budget: refused, naming the
+    /// order, 360 and 359; (2) exactly the budget: served, 37 rows, 360 read;
+    /// (3) a budget of 0: refused, naming 0; (4) no budget: served; (5) a page
+    /// wholly from an index under a budget of 0: served, nothing read; (6) a
+    /// day-cut page asking its extremes under a budget of 0: refused for the
+    /// extremes, naming its 120 cut rows; (7) at 119: refused, naming 119;
+    /// (8) at exactly 120: served, the extremes folded from the kept rows,
+    /// 120 read. Combined: (9) the cut rows once folded, the same day-cut page
+    /// under a budget of 0: served from the memo, nothing read; (10) a page
+    /// that would read 360 rows and owes 10 cut rows to its extremes, under
+    /// 9: refused for the order, which is weighed first. Out of the box: (11)
+    /// a time-of-day bound of the whole day over the indexed month excludes no
+    /// row and reads every one, index or not: refused at 359, naming 360.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one store and every extreme its Extremes line names, in order"
+    )]
+    fn a_value_page_past_the_cheap_read_budget_asks_for_the_scan_pool_first() {
+        let root = scratch("cheap-reads-value");
+        let jan: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &jan, &jan);
+        let feb = unindexed(&root, &index(), month(2));
+        let (lo, _) = month(1).ist_bounds_micros();
+        let needs = |what: &str, rows: u64, budget: u64| {
+            format!(
+                "needs_scan_pool: {what} would read {rows} records beyond the page, past the \
+                 {budget} a request admitted with the cheap reads may read"
+            )
+        };
+        let ask = |asked: &WindowQuery, budget: Option<u64>| {
+            super::super::window_admitted(&root, asked, &super::Cancel::never(), budget)
+        };
+        let refused = |asked: &WindowQuery, budget: u64| {
+            ask(asked, Some(budget)).expect_err("past the budget, the scan pool is asked")
+        };
+        let value = |from: u8, to: u8| query(index(), month(from), month(to), SortKey::Close);
+        // FEBRUARY: 360 rows no index orders.
+        let feb_page = value(2, 2);
+        assert_eq!(
+            refused(&feb_page, 359),
+            needs("ordering by c", 360, 359),
+            "(1)"
+        );
+        let served = ask(&feb_page, Some(360)).expect("(2) exactly the budget is served");
+        let mut closes: Vec<i64> = feb.iter().map(|bar| bar.close).collect();
+        closes.sort_unstable();
+        let page: Vec<i64> = served.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(
+            (page.as_slice(), served.scan_rows),
+            (&closes[..37], 360),
+            "(2)"
+        );
+        assert_eq!(refused(&feb_page, 0), needs("ordering by c", 360, 0), "(3)");
+        assert_eq!(
+            ask(&feb_page, None).expect("(4) no budget").bars.len(),
+            37,
+            "(4)"
+        );
+        // JANUARY: every row ordered by its index.
+        let indexed = ask(&value(1, 1), Some(0)).expect("(5) nothing is read");
+        assert_eq!((indexed.bars.len(), indexed.scan_rows), (37, 0), "(5)");
+        // FROM THE 3RD OF JANUARY TO THE END OF FEBRUARY, WITH THE EXTREMES:
+        // 360 rows read and the 10 rows of a cut run owed.
+        let mut both = value(1, 2);
+        both.filter.from = Some(lo + 2 * 86_400 * MICROS);
+        both.want_extremes = true;
+        assert_eq!(refused(&both, 9), needs("ordering by c", 360, 9), "(10)");
+        // THE 3RD OF JANUARY ALONE, WITH THE EXTREMES: two cut runs, 120 rows.
+        let mut cut = value(1, 1);
+        cut.filter.from = Some(lo + 2 * 86_400 * MICROS);
+        cut.filter.to = Some(lo + 3 * 86_400 * MICROS);
+        cut.want_extremes = true;
+        assert_eq!(refused(&cut, 0), needs("the extremes", 120, 0), "(6)");
+        assert_eq!(refused(&cut, 119), needs("the extremes", 120, 119), "(7)");
+        let folded = ask(&cut, Some(120)).expect("(8) exactly the budget is folded");
+        assert_eq!(
+            (folded.extremes, folded.extremes_why, folded.scan_rows),
+            (Some(index_extremes(&jan[120..240])), None, 120),
+            "(8)"
+        );
+        let held = ask(&cut, Some(0)).expect("(9) held, nothing is owed");
+        assert_eq!(
+            (held.extremes, held.scan_rows),
+            (Some(index_extremes(&jan[120..240])), 0),
+            "(9)"
+        );
+        // A TIME-OF-DAY BOUND OF THE WHOLE DAY.
+        let mut day = value(1, 1);
+        day.filter.tod = Some((0, 86_399));
+        assert_eq!(refused(&day, 359), needs("ordering by c", 360, 359), "(11)");
+        assert_eq!(
+            ask(&day, Some(360))
+                .expect("(11) exactly the budget")
+                .scan_rows,
+            360,
+            "(11)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A TIME-ORDERED PAGE ADMITTED WITH THE CHEAP READS ASKS FOR THE SCAN
+    /// POOL BEFORE ITS EXTREMES READ A RECORD PAST THE BUDGET** (R3-07,
+    /// DB-061). The extremes of a time-ordered window are the index runs'
+    /// summaries and a fold of every stretch no summary covers and no earlier
+    /// request held; `window_admitted` hands `extremes_of` the cheap-read
+    /// budget, and past it the answer is `needs_scan_pool` before a record is
+    /// read. Exactly the budget is folded and held, after which the same
+    /// window owes nothing. Takes the budget refusal in `extremes_of`.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) the extremes
+    /// of a month no index orders, one record past the budget: refused,
+    /// naming 360 and 359; (2) a budget of 0: refused, naming 0; (3) no
+    /// extremes asked: a time-ordered page reads nothing past itself and is
+    /// served under 0; (4) a month its index runs summarise: served under 0,
+    /// the summaries' extremes, nothing read; (5) a day bound that cuts an
+    /// index run owes only the cut rows: 20, refused at 19; (6) at exactly
+    /// 20: folded, 20 read, the brute force over the kept rows; (7) the
+    /// unindexed month at exactly 360: folded, 360 read; (8) held, under 0:
+    /// served from the memo, nothing read. Combined: (9) both months, one
+    /// summarised and one held, under 0: the extremes of both, nothing read;
+    /// (10) both months before either was folded, at 359: refused, naming
+    /// only the unindexed month's 360. Out of the box: (11) open interest over
+    /// an index, a time order served by seeking, owes its extremes the same
+    /// way: refused, naming 360 and 359.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one store and every extreme its Extremes line names, in order"
+    )]
+    fn a_time_ordered_pages_extremes_past_the_cheap_read_budget_ask_for_the_scan_pool() {
+        let root = scratch("cheap-reads-extremes");
+        let jan: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &jan, &jan);
+        let feb = unindexed(&root, &index(), month(2));
+        let (lo, _) = month(1).ist_bounds_micros();
+        let needs = |rows: u64, budget: u64| {
+            format!(
+                "needs_scan_pool: the extremes would read {rows} records beyond the page, past \
+                 the {budget} a request admitted with the cheap reads may read"
+            )
+        };
+        let window_of = |from: u8, to: u8, sort: SortKey, extremes: bool| {
+            let mut asked = query(index(), month(from), month(to), sort);
+            asked.want_extremes = extremes;
+            asked
+        };
+        let ask = |asked: &WindowQuery, budget: u64| {
+            super::super::window_admitted(&root, asked, &super::Cancel::never(), Some(budget))
+        };
+        let refused = |asked: &WindowQuery, budget: u64| {
+            ask(asked, budget).expect_err("past the budget, the scan pool is asked")
+        };
+        let feb_ts = window_of(2, 2, SortKey::Ts, true);
+        let plain = ask(&window_of(2, 2, SortKey::Ts, false), 0)
+            .expect("(3) a time order reads nothing past its page");
+        assert_eq!(
+            (plain.bars.len(), plain.scan_rows, plain.extremes),
+            (37, 0, None),
+            "(3)"
+        );
+        let summarised =
+            ask(&window_of(1, 1, SortKey::Ts, true), 0).expect("(4) summaries read nothing");
+        assert_eq!(
+            (summarised.extremes, summarised.scan_rows),
+            (Some(index_extremes(&jan)), 0),
+            "(4)"
+        );
+        // FEBRUARY, BEFORE ANYTHING FOLDED IT.
+        assert_eq!(refused(&feb_ts, 359), needs(360, 359), "(1)");
+        assert_eq!(refused(&feb_ts, 0), needs(360, 0), "(2)");
+        assert_eq!(
+            refused(&window_of(2, 2, SortKey::OpenInterest, true), 359),
+            needs(360, 359),
+            "(11)"
+        );
+        assert_eq!(
+            refused(&window_of(1, 2, SortKey::Ts, true), 359),
+            needs(360, 359),
+            "(10)"
+        );
+        // FROM THE 4TH OF JANUARY: the run [130, 260) is cut to its last 20.
+        let mut fourth = window_of(1, 1, SortKey::Ts, true);
+        fourth.filter.from = Some(lo + 3 * 86_400 * MICROS);
+        assert_eq!(refused(&fourth, 19), needs(20, 19), "(5)");
+        let cut = ask(&fourth, 20).expect("(6) exactly the budget is folded");
+        assert_eq!(
+            (cut.extremes, cut.scan_rows),
+            (Some(index_extremes(&jan[240..])), 20),
+            "(6)"
+        );
+        // FEBRUARY AT EXACTLY ITS 360, THEN HELD.
+        let whole = ask(&feb_ts, 360).expect("(7) exactly the budget is folded");
+        assert_eq!(
+            (whole.extremes, whole.scan_rows),
+            (Some(index_extremes(&feb)), 360),
+            "(7)"
+        );
+        let held = ask(&feb_ts, 0).expect("(8) held, nothing is owed");
+        assert_eq!(
+            (held.extremes, held.scan_rows),
+            (Some(index_extremes(&feb)), 0),
+            "(8)"
+        );
+        // BOTH MONTHS, ONE SUMMARISED AND ONE HELD.
+        let all: Vec<Bar> = jan.iter().chain(&feb).copied().collect();
+        let both = ask(&window_of(1, 2, SortKey::Ts, true), 0).expect("(9) nothing is owed");
+        assert_eq!(
+            (both.extremes, both.scan_rows),
+            (Some(index_extremes(&all)), 0),
+            "(9)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
