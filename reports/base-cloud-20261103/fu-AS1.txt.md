@@ -3,9 +3,9 @@
 Session BASE-COV-API-AS1 (third continuation, token BASE-COV-API-AS1-20261105-4). One fenced block below: every uncovered row of G1's files that is an (F) failing arm of an assert or panic in test code whose statement runs, or a (U) row with its proof in brackets (on every target unless the proof names one).
 
 `````text
-BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip 4325492338f45405d8ba4bea05f1e16fd4549a2f, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
-G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 61508/62240 (732 uncovered), branches 4342/5000 (658 uncovered sides)
-classified: GAP prod 342 lines 110 sides; GAP test 75 lines 81 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 10 sides; (F) 143 lines 400 sides; (U) 84 lines 57 sides
+BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip edead6e43595dda18f8cfb767eb84890f841b124, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
+G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 61511/62246 (735 uncovered), branches 4337/4998 (661 uncovered sides)
+classified: GAP prod 342 lines 111 sides; GAP test 78 lines 83 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 10 sides; (F) 143 lines 400 sides; (U) 84 lines 57 sides
 (F) LINE crates/api/src/assets.rs:1137  default_web_dir().display()
 (F) LINE crates/api/src/assets.rs:1453  assets.named().display()
 (F) LINE crates/api/src/assets.rs:1566  panic!(
@@ -14,7 +14,7 @@ classified: GAP prod 342 lines 110 sides; GAP test 75 lines 81 sides; GAP ignore
 (F) BRANCH crates/api/src/assets.rs:1565:13 False  let Build::Stale { ref newer, by_secs } = *built.build() else {
 (F) BRANCH crates/api/src/assets.rs:1582:13 False  note.contains("STALE") && note.contains("does not carry that edit"),
 (F) BRANCH crates/api/src/assets.rs:1582:39 False  note.contains("STALE") && note.contains("does not carry that edit"),
-(U) LINE crates/api/src/audit.rs:634  [(U) on every target: the wildcard arm of a match on pull::session::DropReason, a foreign #[non_exhaustive] _ => 0,
+(U) LINE crates/api/src/audit.rs:634  [(U) on every target: the wildcard arm of a match on pull::session::DropReason, a foreign #[non_exhaustive] enum with exactly five constructors, each matched above (the source comment says so)] _ => 0,
 (F) LINE crates/api/src/audit.rs:3566  panic!("three entries: {page:?}");
 (F) LINE crates/api/src/audit.rs:3635  &read[read.len().saturating_sub(40)..]
 (F) LINE crates/api/src/audit.rs:4041  kind.label(),
@@ -309,7 +309,7 @@ classified: GAP prod 342 lines 110 sides; GAP test 75 lines 81 sides; GAP ignore
 (U) LINE crates/api/src/facets.rs:1990  [(U) on every target: as facets.rs:1984 (compact cannot fail)] generation,
 (U) LINE crates/api/src/facets.rs:1991  [(U) on every target: as facets.rs:1984 (compact cannot fail)] );
 (U) BRANCH crates/api/src/facets.rs:757:44 False  [(U) on every target: moved_off_lock answers true whenever part_of(slot, segment) is None (facets.rs 1135-1148: it returns at 1138 or at 1148), so the right operand of the && at 757 is never false when it is evaluated] if part_of(slot, segment).is_none() && moved_off_lock(site, vendor, cell, segment, slot) {
-(U) BRANCH crates/api/src/facets.rs:2307:32 False  [(U) on every target: sides is a [Option<&Agg>; 2] if let Some(side) = sides.get_mut(usize::from(!call)) {
+(U) BRANCH crates/api/src/facets.rs:2307:32 False  [(U) on every target: sides is a [Option<&Agg>; 2] indexed by usize::from(!call), which is 0 or 1, so get_mut is always Some] if let Some(side) = sides.get_mut(usize::from(!call)) {
 (F) BRANCH crates/api/src/facets_tests.rs:652:13 False  assert!(EXCHANGES.is_sorted() && SEGMENTS.is_sorted());
 (F) BRANCH crates/api/src/facets_tests.rs:652:38 False  assert!(EXCHANGES.is_sorted() && SEGMENTS.is_sorted());
 (F) BRANCH crates/api/src/facets_tests.rs:1785:13 False  exchange.is_none() && keys.is_empty() && sums.is_empty(),
@@ -375,7 +375,7 @@ classified: GAP prod 342 lines 110 sides; GAP test 75 lines 81 sides; GAP ignore
 (F) BRANCH crates/api/src/folder.rs:606:62 False  why.contains("INDEX") && why.contains("CASH") && why.contains("FNO"),
 (F) LINE crates/api/src/gap_peer_route_tests.rs:398  panic!("the peer vote was still building after 1,000 asks");
 (U) BRANCH crates/api/src/import_journal.rs:417:28 False  [(U) on every target: runs_by_id holds only positions taken as self.runs.len() in the step that then pushes the run (lines 427-431) and runs never shrinks, so every held position answers] && let Some(run) = self.runs.get_mut(start)
-(U) BRANCH crates/api/src/import_journal.rs:536:16 False  [(U) on every target: last is [_; 3] if let Some(last) = self.last.get_mut(slot) {
+(U) BRANCH crates/api/src/import_journal.rs:536:16 False  [(U) on every target: last is [Option<(u64, Day, String)>; 3] (import_journal.rs 294) and slot is ImportKindOrder::of(kind).0, the kind's position in ImportKind::ALL (252-264), which lists all three of the enum's variants in order (pull/src/gdfl_import.rs 412-419, 423; the enum is not non_exhaustive), so slot is 0, 1 or 2, the u8::MAX fallback never applies, and last.get_mut(slot) is Some; the second continuation's list carried this proof cut short, restated here in full] if let Some(last) = self.last.get_mut(slot) {
 (F) BRANCH crates/api/src/import_journal.rs:1136:28 False  .all(|end| end.end_line.is_none() && end.fields.len() == 3),
 (F) BRANCH crates/api/src/import_journal.rs:1493:17 False  assert!(cut && kept.len() <= MAX_VALUE_BYTES && kept.is_char_boundary(kept.len()));
 (F) BRANCH crates/api/src/import_journal.rs:1493:24 False  assert!(cut && kept.len() <= MAX_VALUE_BYTES && kept.is_char_boundary(kept.len()));
@@ -581,7 +581,7 @@ classified: GAP prod 342 lines 110 sides; GAP test 75 lines 81 sides; GAP ignore
 (F) BRANCH crates/api/src/recovery.rs:2507:24 False  && line.contains(&format!("plan {} is IN FLIGHT", hex(id))),
 (F) BRANCH crates/api/src/recovery.rs:3320:28 False  .all(|row| row.status == Status::Queued && row.attempts == 0)
 (F) LINE crates/api/src/recovery_cover_tests.rs:704  panic!("{day} is an open day of the calendar of record");
-(F) LINE crates/api/src/recovery_cover_tests.rs:1876  unreachable!("no driver runs over a refused plan")
+(F) LINE crates/api/src/recovery_cover_tests.rs:1878  unreachable!("no driver runs over a refused plan")
 (F) BRANCH crates/api/src/recovery_cover_tests.rs:701:9 False  let pull::calendar::DayKind::Open(session) =
 (U) LINE crates/api/src/recovery_journal.rs:192  [(U) on every target: put writes 8 bytes at UNVERIFIED_OFFSET 856 into a RECORD_LEN 1,024 image, so the range is always in bounds] )?;
 (U) LINE crates/api/src/recovery_journal.rs:386  [(U) on every target: self.bytes is the journal's length, at most a file length (st_size is a signed 64-bit off_t), so adding one RECORD_LEN of 1,024 cannot overflow u64] io::Error::other("recovery journal length cannot fit its next record")
