@@ -8564,6 +8564,162 @@ mod tests {
         assert_eq!(outcomes, [PassOutcome::Clean, PassOutcome::Clean]);
     }
 
+    /// **A RUN WHOSE DOCUMENT HOLDS NO ROW FOR A FEED STILL RUNS ITS PASSES
+    /// AND COUNTS ITS RETRIES** (BASE-COV-API repair 3, D-8661). `run_pass`
+    /// over a document whose feed rows were cleared after the claim: each
+    /// edit of a feed's row finds none and changes nothing, and the pass and
+    /// the run's own counters still move. Extremes: a first pass whose one
+    /// feed fails while the other lands (`Retry` and `Clean`, no row made for
+    /// either); a second pass that retries the failed feed and lands it (both
+    /// `Clean`, the run's retries `1`, still no row); a third pass with both
+    /// clean (the retries unchanged); a feed failing again after it had
+    /// landed (`Retry`, no row); the retry after it (the run's retries `2`);
+    /// the run never finished by a pass (`finished` stays `None`); the pass
+    /// count left to the loop that calls `run_pass` (`0` here); a document of
+    /// one row for two feeds (the first feed's row moved, the second's
+    /// edits find none); and, at once, two feeds failing in one pass with no
+    /// rows (both `Retry`), and both retried in the next with no rows (one
+    /// retry for the run, not two); out of the box, a document with no row
+    /// while a feed's retry is counted (`retries` grows, `feeds` stays
+    /// empty).
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one run carried through every pass a feed row could be asked of"
+    )]
+    async fn a_run_whose_document_holds_no_row_for_a_feed_still_counts_its_passes_and_retries() {
+        let (held, groups) = pass_fixture(
+            "no-feed-rows",
+            vec![leg("zerodha", "1day"), leg("groww", "1day")],
+        );
+        edit_slot(&held, |progress| progress.feeds.clear());
+        let mut outcomes = vec![PassOutcome::Clean; 2];
+        let checkpoints = checkpoints_for(&groups);
+        let zerodha_fails = |_site: Loaded, leg: Leg| {
+            std::future::ready(if leg.vendor == "zerodha" {
+                receipt(503, "NOT STARTED")
+            } else {
+                receipt(200, "STORED")
+            })
+        };
+        let lands = |_site: Loaded, _leg: Leg| std::future::ready(receipt(200, "STORED"));
+        let both_fail = |_site: Loaded, _leg: Leg| std::future::ready(receipt(503, "NOT STARTED"));
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &zerodha_fails,
+        )
+        .await;
+        assert_eq!(outcomes, [PassOutcome::Retry, PassOutcome::Clean]);
+        let first = observed(&held);
+        assert!(first.feeds.is_empty(), "no row is made for a feed");
+        assert_eq!(first.retries, 0, "a failure is not yet a retry");
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &lands,
+        )
+        .await;
+        assert_eq!(outcomes, [PassOutcome::Clean, PassOutcome::Clean]);
+        let second = observed(&held);
+        assert_eq!(second.retries, 1, "the run's retry, with no feed row");
+        assert!(second.feeds.is_empty());
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &lands,
+        )
+        .await;
+        assert_eq!(observed(&held).retries, 1, "a clean pass retries nothing");
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &zerodha_fails,
+        )
+        .await;
+        assert_eq!(outcomes, [PassOutcome::Retry, PassOutcome::Clean]);
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &lands,
+        )
+        .await;
+        let fifth = observed(&held);
+        assert_eq!(fifth.retries, 2);
+        assert!(fifth.feeds.is_empty());
+        assert_eq!(fifth.finished, None, "a pass never finishes the run");
+        assert_eq!(fifth.passes, 0, "the passes are the loop's to count");
+
+        // AT ONCE: BOTH FEEDS FAIL, THEN BOTH ARE RETRIED, WITH NO ROWS.
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &both_fail,
+        )
+        .await;
+        assert_eq!(outcomes, [PassOutcome::Retry, PassOutcome::Retry]);
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &lands,
+        )
+        .await;
+        assert_eq!(outcomes, [PassOutcome::Clean, PassOutcome::Clean]);
+        assert_eq!(observed(&held).retries, 3, "one retry for the run");
+
+        // ONE ROW FOR TWO FEEDS: THE FIRST'S MOVES, THE SECOND'S FINDS NONE.
+        edit_slot(&held, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "zerodha".to_owned(),
+                legs: 1,
+                ..FeedReport::default()
+            }];
+        });
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &both_fail,
+        )
+        .await;
+        run_pass(
+            &held,
+            current(&held),
+            &groups,
+            &mut outcomes,
+            &checkpoints,
+            &lands,
+        )
+        .await;
+        let last = observed(&held);
+        assert_eq!(last.feeds.len(), 1, "no row is made for the second feed");
+        assert_eq!(last.feeds[0].retries, 1, "the first feed's row moved");
+        assert_eq!(last.retries, 4);
+    }
+
     #[tokio::test]
     async fn a_terminal_refusal_replaces_an_earlier_transient_cause_and_stays_halted() {
         type Answer = std::future::Ready<(axum::http::StatusCode, String)>;

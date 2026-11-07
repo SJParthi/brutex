@@ -134,6 +134,10 @@ fn pooled_doors() -> Vec<(Named, String)> {
                 "/folder.json?feed=gdfl".to_owned(),
                 "/provenance.json?feed=zerodha&instrument=NSE-INDEX-NIFTY&timeframe=1min&month=2024-01"
                     .to_owned(),
+                // BASE-COV-API repair 3 (D-8661): the option chain, read
+                // behind the same pool once admitted.
+                "/chain.json?feed=gdfl&underlying=NIFTY&timeframe=1s&expiry=2019-03-28&at=1537347495"
+                    .to_owned(),
             ],
         ),
         (

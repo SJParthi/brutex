@@ -1224,3 +1224,175 @@ fn the_chain_says_its_ledger_reads_a_listed_put_and_opens_a_spot_month_once() {
         );
     }
 }
+
+/// Changes the last byte of record `index` of the month file at `path`: a
+/// byte under the checksum block that covers that record, so a month whose
+/// damage lies outside its tail block still opens, and the block will not
+/// read.
+fn damage(path: &std::path::Path, index: u64) {
+    use std::os::unix::fs::FileExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("the month file");
+    let at = store::format::HEADER_LEN
+        + index * store::format::RECORD_STRIDE
+        + (store::format::RECORD_STRIDE - 1);
+    let mut byte = [0_u8; 1];
+    file.read_exact_at(&mut byte, at)
+        .expect("the record's last byte");
+    file.write_all_at(&[!byte[0]], at)
+        .expect("the byte changed");
+}
+
+/// The 1s month file of `contract` (an option of `symbol`, or the spot when
+/// `None`) of `at` under `root`.
+fn month_file(
+    root: &std::path::Path,
+    segment: &str,
+    symbol: &str,
+    contract: Option<&str>,
+    at: YearMonth,
+) -> std::path::PathBuf {
+    StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment,
+        symbol,
+        contract: contract.map(|text| Contract::parse(text).expect("a contract")),
+        timeframe: Timeframe::SECOND_1,
+        month: at,
+        file: FileKind::Bars,
+    })
+    .expect("a path")
+    .to_path_buf(root)
+}
+
+/// **A MONTH THAT OPENS AND THEN WILL NOT READ IS A NAMED FAULT, FOR AN
+/// OPTION'S FIRST STAMP AND FOR THE SPOT** (BASE-COV-API repair 3, D-8661).
+/// Month files written here, then one byte of a record past their tail block
+/// changed under its checksum: the month opens and the damaged block refuses
+/// every read that meets it. `first_stored_from` driven directly, the spot
+/// through `/chain.json`. Extremes: an option month's first stamp asked from
+/// before its first bar (the search meets the damage: none, the fault naming
+/// the file); one asked from inside its tail block, past the damage (that
+/// bar); one asked at its last bar's stamp (that bar); one asked after its
+/// last bar (none, no fault: the damage was never read); a spot instant whose
+/// read meets the damaged block (`spot_unreadable`, the fault naming the file
+/// and the instant, `206`); a spot instant past the damage (priced, `200`);
+/// September's undamaged spot month beside it (priced); a month whose only
+/// block, its tail, is the damaged one (refused, the fault named, nothing
+/// served); and, at once, one request asking September's instant, the
+/// damaged one and the one past it (priced, unreadable, priced, `206`), and a
+/// first stamp asked from October, a month with no file, over the damaged
+/// November (the absent month passed over, the damage named); out of the box,
+/// the changed byte is the record's open interest, a field no answer here
+/// reads (refused all the same: the checksum covers every byte).
+#[test]
+fn a_month_that_opens_and_will_not_read_is_a_named_fault_for_a_first_stamp_and_for_the_spot() {
+    // AN OPTION MONTH OF 150 BARS: BLOCKS 0 AND 1 ARE WHOLE, 146-149 ITS TAIL.
+    let root = crate::scratch::path("chain-damaged-block");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let pe = "2018-11-29-400000-PE";
+    let open = ist(2018, 11, 5, 9, 15, 0);
+    let bars: Vec<(i64, i64)> = (0..150).map(|n| (open + n, 1_000 + n)).collect();
+    write_option(&root, "ZEDCO", pe, month(2018, 11), &bars);
+    let path = month_file(&root, "FNO", "ZEDCO", Some(pe), month(2018, 11));
+    damage(&path, 0);
+    let key = |text: &str| OptionKey {
+        root: &root,
+        feed: Vendor::Gdfl,
+        exchange: "NSE",
+        underlying: "ZEDCO",
+        contract: Contract::parse(text).expect("a contract"),
+        timeframe: Timeframe::SECOND_1,
+    };
+    let expiry = Expiry::new(2018, 11, 29).expect("an expiry");
+    let named = |faults: &[String], file: &std::path::Path| {
+        faults.len() == 1 && faults[0].starts_with(&format!("{}: ", file.display()))
+    };
+    let mut faults = Vec::new();
+    assert_eq!(
+        first_stored_from(&key(pe), (open - 3_600) * MICROS, expiry, &mut faults),
+        None,
+        "the damage is met"
+    );
+    assert!(named(&faults, &path), "{faults:?}");
+    let mut clean = Vec::new();
+    for (from, answered) in [
+        (open + 146, Some(open + 146)),
+        (open + 149, Some(open + 149)),
+        (open + 150, None),
+    ] {
+        assert_eq!(
+            first_stored_from(&key(pe), from * MICROS, expiry, &mut clean),
+            answered.map(|secs| secs * MICROS),
+            "from {from}"
+        );
+    }
+    assert!(clean.is_empty(), "the damage was never read: {clean:?}");
+    let mut walked = Vec::new();
+    assert_eq!(
+        first_stored_from(
+            &key(pe),
+            ist(2018, 10, 15, 9, 15, 0) * MICROS,
+            expiry,
+            &mut walked
+        ),
+        None,
+        "October has no file; November's damage is met"
+    );
+    assert!(named(&walked, &path), "{walked:?}");
+
+    // A MONTH OF ONE BLOCK, THE TAIL, DAMAGED.
+    let ce = "2018-11-29-410000-CE";
+    write_option(
+        &root,
+        "ZEDCO",
+        ce,
+        month(2018, 11),
+        &[(open, 1_000), (open + 1, 1_001)],
+    );
+    damage(
+        &month_file(&root, "FNO", "ZEDCO", Some(ce), month(2018, 11)),
+        0,
+    );
+    let mut tail = Vec::new();
+    assert_eq!(
+        first_stored_from(&key(ce), (open - 3_600) * MICROS, expiry, &mut tail),
+        None,
+        "nothing is served from a damaged tail"
+    );
+    assert_eq!(tail.len(), 1, "the damage is named: {tail:?}");
+
+    // THE SPOT: NOVEMBER'S MONTH OF 160 BARS, ITS FIRST BLOCK DAMAGED.
+    let built = fixture("chain-damaged-spot", &census_rows());
+    let start = ist(2018, 11, 6, 10, 0, 0);
+    let spot: Vec<(i64, i64)> = (0..160).map(|n| (start + n, SPOT)).collect();
+    write_spot(&built.store_root, "INDEX", "NIFTY", month(2018, 11), &spot);
+    let spot_path = month_file(&built.store_root, "INDEX", "NIFTY", None, month(2018, 11));
+    damage(&spot_path, 0);
+    let (in_damage, past) = (start + 10, start + 150);
+    let (status, body) = ask(&built, &format!("{BASE}&expiry=2019-03-28&at={in_damage}"));
+    assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+    assert_eq!(body["chains"][0]["spot_why"], "spot_unreadable", "{body}");
+    let said = body["faults"].as_str().expect("the faults");
+    assert!(
+        said.contains(&format!("{} t={in_damage}: ", spot_path.display())),
+        "{said}"
+    );
+    let (status, body) = ask(&built, &format!("{BASE}&expiry=2019-03-28&at={past}"));
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["chains"][0]["spot"], SPOT, "{body}");
+    let (status, body) = ask(
+        &built,
+        &format!("{BASE}&expiry=2019-03-28&at={},{in_damage},{past}", t1()),
+    );
+    assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
+    assert_eq!(body["chains"][0]["spot"], SPOT, "September: {body}");
+    assert_eq!(body["chains"][1]["spot_why"], "spot_unreadable", "{body}");
+    assert_eq!(body["chains"][2]["spot"], SPOT, "past the damage: {body}");
+    let _ = std::fs::remove_dir_all(&root);
+}

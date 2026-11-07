@@ -2521,3 +2521,77 @@ fn a_second_builder_waits_for_the_first_and_a_refused_read_starts_no_build() {
         }
     }
 }
+
+/// **A REQUEST'S KICK WHILE A BUILD IS PENDING STARTS NO SECOND BUILD AND
+/// SAYS WHEN THE PENDING ONE BEGAN** (BASE-COV-API repair 3, D-8661). The
+/// pending hold of each segment's index is taken here BEFORE the census goes
+/// to the background, so the warm thread cannot take it first; `kick` then
+/// finds it held. Extremes: a kick before the census is in the background
+/// (none: no thread may build for the site); a kick on the FNO segment while
+/// its build is pending (that build's start, nothing spawned); the same on
+/// the INDEX segment; the same on the CASH segment, which the census holds
+/// no key of (the pending question is asked before any key is read); a
+/// second kick on each (the same start); the pending hold still the only one
+/// after the kicks (the same start); a kick with a read of the census taken
+/// after the background began (the same start); the holds released (nothing
+/// pending on any segment); and, at once, every segment held and kicked in
+/// turn (each answered its own start), and one segment kicked with the
+/// request's read and then a fresh one (the same start both times); out of
+/// the box, the three holds taken before the census's background thread
+/// exists, which then finds every build already pending.
+#[test]
+fn a_kick_while_a_build_is_pending_starts_none_and_names_when_the_pending_one_began() {
+    use super::super::census_cache;
+    let site: crate::server::Loaded = Arc::new(site_holding("facets-kick-pending", &chain()));
+    let (_stamps, now) = census_cache::vendor_census(&site, Vendor::Gdfl);
+    let slot = Arc::clone(now.slot());
+    let segments = [Segment::Fno, Segment::Index, Segment::Cash];
+    let fno = cell_of(&site, Vendor::Gdfl, Segment::Fno);
+    assert_eq!(
+        kick(&site, Vendor::Gdfl, Segment::Fno, &fno, &slot),
+        None,
+        "no background yet"
+    );
+    let held: Vec<(Segment, IndexCell, PendingHold)> = segments
+        .iter()
+        .map(|segment| {
+            let cell = cell_of(&site, Vendor::Gdfl, *segment);
+            let hold = PendingHold::if_idle(&cell).expect("nothing pending yet");
+            (*segment, cell, hold)
+        })
+        .collect();
+    census_cache::start(&site, &[]).expect("the warm starts");
+    for (segment, cell, hold) in &held {
+        let since = hold.since();
+        for _ in 0..2 {
+            assert_eq!(
+                kick(&site, Vendor::Gdfl, *segment, cell, &slot),
+                Some(since),
+                "{segment:?}: the pending build's start"
+            );
+        }
+        assert_eq!(
+            pending(&site, Vendor::Gdfl, cell),
+            Some(since),
+            "{segment:?}: still the one hold"
+        );
+    }
+    let (_stamps, fresh) = census_cache::vendor_census(&site, Vendor::Gdfl);
+    let (_, index_cell, index_hold) = &held[1];
+    assert_eq!(
+        kick(
+            &site,
+            Vendor::Gdfl,
+            Segment::Index,
+            index_cell,
+            fresh.slot()
+        ),
+        Some(index_hold.since()),
+        "a fresh read finds the same pending build"
+    );
+    let cells: Vec<IndexCell> = held.iter().map(|(_, cell, _)| Arc::clone(cell)).collect();
+    drop(held);
+    for cell in &cells {
+        assert!(pending(&site, Vendor::Gdfl, cell).is_none(), "released");
+    }
+}
