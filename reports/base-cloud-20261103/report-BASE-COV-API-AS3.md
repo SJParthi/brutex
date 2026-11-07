@@ -14,6 +14,25 @@ STATUS: IN PROGRESS
   `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`; llvm-cov and llvm-profdata `LLVM version 23.1.0-rust-1.99.0-nightly`.
   Every kit file's sha256 matched `MANIFEST.md`. Every figure here is this host's, the builder's: the Mac re-measures.
 
+## Continuation -5 (`BASE-COV-API-AS3-20261105-5`, 7 Nov), working notes until its measurement lands
+
+- OWNER `7694e19b`. NEXT 0 done (`32fbc1ab`): the autopilot tick test read the newest NOT STARTED record of a
+  journal read newest first and capped at 200 records a page, while the loop kept ticking dry Zerodha months with no
+  wait up to Groww's 2020-01; it now reads the journal's oldest page and asserts the first tick's window is
+  Zerodha's floor month (red before: 2 of 2 alone; green after: 3 of 3). The `logs::r3_24_tests` flake was the
+  refusal and the 200 noise lines sharing one millisecond on a tmpfs (5 of 12 red at `logs.rs:10249` alone); a 2 ms
+  sleep moves the clock first (20 of 20 green).
+- NEXT 5 done (`33fe1754`): `Extremes:` lines on the four tests; the feeds_route small-size wrapper now asserts its
+  own 8 singles / 2 combinations / 1 out of the box.
+- NEXT 3 done (`8b311fdc`): `bars_export.rs` 974 by a header zeroed in place with its stamp kept.
+- NEXT 1 in part (`042384a3`): `indexstopqualificationjson.rs` 236 (Rejected) by a forty-session training launch.
+  Admitted (235) and Refused (237) not reached: a permissive policy file still fails `worst_reward_risk` and
+  `worst_trade_loss` on the generated minutes, and a dropped minute is refused by the calendar receipt before any
+  metric, so Refused needs an incomplete execution the strict load admits.
+- NEXT 2 (`indexstopcandlesjson.rs` 117-120): not reachable through any production writer (the page stays under
+  2 MB: names from the vocabulary table, at most 1,151 instructions, at most 4,095 candles); only a hand-sealed
+  artifact chain could carry an 8 MiB condition name (L-BCA-5).
+
 ## Why IN PROGRESS
 
 Every uncovered row of a G3 file is now (F), (U) with its proof, (H), or a GAP row that names what it is owed to,
