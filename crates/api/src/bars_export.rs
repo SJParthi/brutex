@@ -1744,6 +1744,126 @@ mod tests {
         );
     }
 
+    /// **AN END READ THAT CANNOT OPEN ITS MONTH REFUSES THE EXPORT BEFORE A
+    /// BYTE** (BASE-COV-API-AS3, D-8664). Two series over three months, more
+    /// rows than a page: the first export memoizes every month's header by
+    /// its stamp. One series' July is then zeroed over its whole header in
+    /// place, its length, inode and modification time kept, so the plan takes
+    /// the memo's word and opens nothing, and the first page, ascending, reads
+    /// only May and June. The descending end read is the first read that
+    /// opens that July: it cannot, and the export is refused by the month's
+    /// name (a 400 naming the month), never written in part and never named
+    /// from a day it could not read. With July outside the window the same
+    /// store exports whole; with the damaged file's stamp moved, the plan
+    /// opens it itself and the first page refuses the export as not whole
+    /// (a 500 naming the month).
+    ///
+    /// Extremes: singles — two series over three months (2,400 rows, past
+    /// one 1,000-row page), a header zeroed whole in place, a stamp kept to
+    /// the nanosecond (length, inode, modification time), the descending end
+    /// read the only read that opens the damaged month, the damaged month
+    /// left out of the window (1,600 rows written whole); combinations — a
+    /// kept stamp and a first page that never reaches the damaged month at
+    /// once (refused by the end read), the damaged month outside the window
+    /// and the other series' July still inside it at once; out of the box —
+    /// the damaged file's stamp moved, so the memo no longer vouches for it
+    /// and the plan itself refuses it by name.
+    #[tokio::test]
+    async fn an_end_read_that_cannot_open_its_month_refuses_the_export_by_name() {
+        let store = Store::new("end-unopenable");
+        let future = "2025-07-31-FUT";
+        for month in [5, 6, 7] {
+            store.write("INDEX", None, month, 0, 400);
+            store.write("FNO", Some(future), month, 0, 400);
+        }
+        let query = format!(
+            "feed=gdfl&timeframe=1min&key=NSE-INDEX-NIFTY&key=NSE-FNO-NIFTY-{future}\
+             &from=2025-05&to=2025-07&dir=asc"
+        );
+        let (status, headers, body) = store.export(&query).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(headers["x-export-rows"], "2400");
+        assert_eq!(headers["x-export-last-day"], "2025-07-03");
+        assert_eq!(records(&body.expect("a whole stream")).len(), 2_400);
+        // JULY OF THE FUTURE, ZEROED OVER ITS HEADER IN PLACE, ITS STAMP KEPT.
+        let july = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "FNO",
+            symbol: "NIFTY",
+            contract: Some(brutex_core::instrument::Contract::parse(future).expect("a contract")),
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2025, 7).expect("July"),
+            file: FileKind::Bars,
+        })
+        .expect("a path")
+        .to_path_buf(&store.root);
+        let before = std::fs::metadata(&july).expect("July is held");
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&july)
+                .expect("an owned month");
+            file.write_all(&vec![
+                0;
+                usize::try_from(store::format::HEADER_LEN)
+                    .expect("32 KiB")
+            ])
+            .expect("the header zeroed in place");
+            file.set_modified(before.modified().expect("a modification time"))
+                .expect("the modification time kept");
+        }
+        let after = std::fs::metadata(&july).expect("July is still there");
+        // THE FIELDS THE HEADER MEMO STAMPS A FILE BY (`bars::series::Stamp`).
+        let stamp = |meta: &std::fs::Metadata| {
+            use std::os::unix::fs::MetadataExt as _;
+            (meta.len(), meta.mtime(), meta.mtime_nsec(), meta.ino())
+        };
+        assert_eq!(
+            stamp(&after),
+            stamp(&before),
+            "the premise: the memo's stamp still matches"
+        );
+        let (status, headers, body) = store.export(&query).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+        assert!(headers.get("x-export-rows").is_none(), "no file is named");
+        let body: serde_json::Value =
+            serde_json::from_str(&body.expect("a refusal")).expect("JSON");
+        assert_eq!(body["code"], "bad_query", "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("words")
+                .starts_with("2025-07: "),
+            "the month that would not open, by name: {body}"
+        );
+        // JULY OUTSIDE THE WINDOW: the same store exports whole.
+        let (status, headers, body) = store
+            .export(&query.replace("to=2025-07", "to=2025-06"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(headers["x-export-rows"], "1600");
+        assert_eq!(headers["x-export-last-day"], "2025-06-03");
+        // THE STAMP MOVED: the plan opens the damaged month itself, so the
+        // first page carries the month's fault and the export is refused as
+        // not whole, before any end is read.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&july)
+            .expect("an owned month")
+            .set_modified(std::time::SystemTime::now())
+            .expect("a new modification time");
+        let (status, headers, body) = store.export(&query).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body:?}");
+        assert!(headers.get("x-export-rows").is_none(), "no file is named");
+        let body = body.expect("a refusal");
+        assert!(
+            body.contains("export_not_whole") && body.contains("first: 2025-07: "),
+            "{body}"
+        );
+    }
+
     /// A MONTH MISSING IN THE MIDDLE is skipped exactly as the window skips
     /// it -- an absent month is an expected answer, not damage -- so the
     /// file is May's rows then July's, in order, and its count says so.
