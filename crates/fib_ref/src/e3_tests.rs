@@ -361,3 +361,40 @@ fn e3s_skips_an_incomplete_arming_candle_and_a_quiet_second() {
     let out = run3(&holed, &secs, &[true; 8], &p, &r);
     assert!(out.events.iter().all(|e| e.candle != 3));
 }
+
+#[test]
+fn e3s_the_data_window_is_read_at_the_arming_close_plus_latency() {
+    // armed at 09:19:00; data starting at 09:19:14 is in time (the order
+    // could start then), at 09:19:15 it is not: no_fill_data_window
+    let day = orb_day();
+    let candles = fold(&day, 1);
+    let top = vec![true; candles.len()];
+    let secs: Vec<Sec> = (0..60)
+        .map(|k| {
+            let px = if k >= 20 { 10_110 } else { 10_090 };
+            Sec {
+                t: OPEN + 4 * 60 + k,
+                o: px,
+                h: px,
+                l: px,
+                c: px,
+                v: 5,
+            }
+        })
+        .collect();
+    let p = E3Params {
+        reading: E3Reading::Second,
+        ..seed(Side::Long, 2)
+    };
+    for (start, want) in [(14, Status::Ok), (15, Status::NoFillDataWindow)] {
+        let feed = SecondFeed {
+            minutes: &day,
+            secs: &secs,
+            step: 5,
+            data_start: OPEN + 4 * 60 + start,
+        };
+        let out = e3(&candles, &top, &feed, &p, &Readings::HEADLINE);
+        let at3 = out.events.iter().find(|e| e.candle == 3).map(|e| e.status);
+        assert_eq!(at3, Some(want), "{start}");
+    }
+}

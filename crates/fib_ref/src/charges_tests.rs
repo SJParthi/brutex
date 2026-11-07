@@ -167,3 +167,40 @@ fn edge_orders_price_without_dividing_by_zero() {
     assert_eq!(brokerage_of(5_000_000), 1_500);
     assert_eq!(Breakdown::default().total(), 0);
 }
+
+#[test]
+fn stt_is_on_the_smaller_quantity_at_the_days_vwap() {
+    // COSTS.md section 5 step 4: 0.025% x min(BQTY, SQTY) x VWAP, to the
+    // paisa, then the day's total to the rupee. Bought 100 at Rs 1,000, sold
+    // 60 at Rs 1,010: VWAP Rs 1,003.75; 60 x 1,003.75 x 0.025% = Rs 15.05625,
+    // Rs 15.06 to the paisa, Rs 15 to the rupee (100 shares would be Rs 25).
+    let orders = vec![
+        Order {
+            side: OrderSide::Buy,
+            fills: vec![(100, 100_000)],
+            square_off: false,
+        },
+        Order {
+            side: OrderSide::Sell,
+            fills: vec![(60, 101_000)],
+            square_off: false,
+        },
+    ];
+    let r = Readings::HEADLINE;
+    let d = date("2026-11-06");
+    assert_eq!(official(d, &orders, &dated(d), &r).stt, 1_500);
+    // the same with the sides swapped: still the smaller quantity
+    let swapped = vec![
+        Order {
+            side: OrderSide::Buy,
+            fills: vec![(60, 101_000)],
+            square_off: false,
+        },
+        Order {
+            side: OrderSide::Sell,
+            fills: vec![(100, 100_000)],
+            square_off: false,
+        },
+    ];
+    assert_eq!(official(d, &swapped, &dated(d), &r).stt, 1_500);
+}

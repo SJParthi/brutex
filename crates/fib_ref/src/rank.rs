@@ -83,8 +83,9 @@ pub fn frame(pool: &[Mover], stale_limit: Option<u32>) -> Vec<Ranked> {
         .filter(|s| s.c > 0 && stale_limit.is_none_or(|lim| s.stale_min <= lim))
         .collect();
     let mut order: Vec<usize> = (0..kept.len()).collect();
-    // descending by move: the gainers' order
-    order.sort_by(|&a, &b| cmp_move(&kept[b], &kept[a]).then(kept[a].sym.cmp(&kept[b].sym)));
+    // descending by move: the gainers' order. Equal moves share one rank,
+    // so their order inside the sort is never seen.
+    order.sort_by(|&a, &b| cmp_move(&kept[b], &kept[a]));
     let mut gainer = vec![0u32; kept.len()];
     let mut loser = vec![0u32; kept.len()];
     let n = kept.len();

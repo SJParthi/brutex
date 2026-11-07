@@ -372,18 +372,27 @@ fn an_outside_bar_return_leaves_no_rung_target() {
 
 #[test]
 fn a_return_after_1507_59_is_after_the_last_entry() {
-    // 355 flat minutes inside the day's coming range, then the touch day
-    let mut day: Vec<Minute> = (0..355)
-        .map(|m| minute(m, 10_250, 10_250, 10_250, 10_250))
-        .collect();
-    for (k, mut m) in touch_day().into_iter().enumerate() {
-        m.m = 355 + u32::try_from(k).unwrap_or(0);
-        day.push(m);
+    // flat minutes inside the day's coming range, then the touch day: the
+    // return candle closes at 15:07:00 (343 flat minutes) or 15:08:00 (344)
+    for (filler, want) in [(343u32, Status::Ok), (344, Status::AfterLastEntry)] {
+        let mut day: Vec<Minute> = (0..filler)
+            .map(|m| minute(m, 10_250, 10_250, 10_250, 10_250))
+            .collect();
+        for (k, mut m) in touch_day().into_iter().enumerate() {
+            m.m = filler + u32::try_from(k).unwrap_or(0);
+            day.push(m);
+        }
+        let top = vec![true; day.len()];
+        let out = run(&day, &[], &top, &seed(Side::Long), &Readings::HEADLINE);
+        let s: Vec<(u32, Option<String>, Status)> = out
+            .signals
+            .iter()
+            .filter(|s| s.n == 2)
+            .map(|s| (s.candle, s.t.map(hms), s.status))
+            .collect();
+        let close = hms(OPEN + 60 * (filler + 9));
+        assert_eq!(s, [(filler + 8, Some(close), want)], "{filler}");
     }
-    let top = vec![true; day.len()];
-    let out = run(&day, &[], &top, &seed(Side::Long), &Readings::HEADLINE);
-    let s: Vec<(u32, Status)> = out.signals.iter().map(|s| (s.n, s.status)).collect();
-    assert!(s.contains(&(2, Status::AfterLastEntry)), "{s:?}");
 }
 
 #[test]
@@ -445,4 +454,27 @@ fn e2s_refusals_and_its_ends() {
     hi[6] = minute(6, 10_175, 10_600, 10_150, 10_195);
     let out = run(&hi, &[], &top, &E2Params { bounce_m: 6, ..p }, &r);
     assert!(out.signals.iter().all(|s| s.trigger_s.is_none()));
+}
+
+#[test]
+fn e2s_the_data_window_is_read_at_the_arming_close_plus_latency() {
+    // armed at 09:22:00; data from 09:22:14 is in time, from 09:22:15 not
+    let day = touch_day();
+    let top = vec![true; day.len()];
+    let p = E2Params {
+        reading: Reading::Second,
+        ..seed(Side::Long)
+    };
+    let secs = prints(&[(7 * 60 + 20, 10_150), (7 * 60 + 40, 10_104)]);
+    for (start, want) in [(14, Status::Ok), (15, Status::NoFillDataWindow)] {
+        let feed = SecondFeed {
+            minutes: &day,
+            secs: &secs,
+            step: 5,
+            data_start: OPEN + 7 * 60 + start,
+        };
+        let out = e2(&fold(&day, 1), &top, &feed, &p, &Readings::HEADLINE);
+        let first = out.signals.first().map(|s| (s.candle, s.status));
+        assert_eq!(first, Some((6, want)), "{start}");
+    }
 }

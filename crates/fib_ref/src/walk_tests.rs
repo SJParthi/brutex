@@ -444,3 +444,46 @@ fn the_1508_cut_and_a_market_decision_in_the_same_second() {
     assert_eq!((w.reason, w.entry_end), (Reason::NoFill, Some(CUT)));
     assert_ne!(w.flags & rule::ENTRY_CUT, 0);
 }
+
+#[test]
+fn the_square_off_reads_the_print_at_15_10_00_itself() {
+    // the worst print of the square-off window is its first second
+    let d = CUT - 24;
+    let long_secs = vec![
+        sec(d, 10_000, 10_000, 10),
+        sec(d + 14, 10_000, 10_000, 10_000),
+        sec(SQUARE_OFF, 9_850, 9_990, 1_000),
+        sec(SQUARE_OFF + 30, 9_950, 10_000, 1_000),
+    ];
+    let p = plan(Side::Long, d, 1_000_000, 9_000, Exit::StopOnly);
+    let w = walk(
+        &long_secs,
+        &p,
+        WithinSecond::EntryFirst,
+        RestingAfterCut::Acts,
+    );
+    assert_eq!(w.reason, Reason::SquareOff);
+    assert_eq!(
+        w.fills.last().map(|f| (f.t, f.px)),
+        Some((SQUARE_OFF, 9_850))
+    );
+    // a short buys back at the worst high, 15:10:00's included
+    let short_secs = vec![
+        sec(d, 10_000, 10_000, 10),
+        sec(d + 14, 10_000, 10_000, 10_000),
+        sec(SQUARE_OFF, 10_010, 10_150, 1_000),
+        sec(SQUARE_OFF + 30, 10_000, 10_050, 1_000),
+    ];
+    let ps = plan(Side::Short, d, 1_000_000, 11_000, Exit::StopOnly);
+    let ws = walk(
+        &short_secs,
+        &ps,
+        WithinSecond::EntryFirst,
+        RestingAfterCut::Acts,
+    );
+    assert_eq!(ws.reason, Reason::SquareOff);
+    assert_eq!(
+        ws.fills.last().map(|f| (f.t, f.px)),
+        Some((SQUARE_OFF, 10_150))
+    );
+}

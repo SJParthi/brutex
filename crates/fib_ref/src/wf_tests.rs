@@ -330,3 +330,14 @@ fn whole_lots_round_down() {
     assert_eq!(option_lots(0, 1, 1), Err(Status::LotAbovePremium));
     assert_eq!(option_lots(5, 0, 0), Ok(5));
 }
+
+#[test]
+fn a_trade_netting_exactly_zero_is_not_a_win() {
+    // win = net > 0: the zero-net trade counts as a trade, not a win
+    let s = Series {
+        id: 1,
+        trades: vec![t(0, 0, 60), t(0, 1, 60), t(0, -1, 60)],
+    };
+    let k = key(&s, 0, 0, &Readings::HEADLINE);
+    assert_eq!((k.trades, k.wins), (3, 1));
+}

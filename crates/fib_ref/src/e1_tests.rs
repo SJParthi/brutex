@@ -656,3 +656,29 @@ fn s42_e1s_refuses_a_trigger_deciding_after_15_07_59() {
     }
     assert_eq!(hms(crate::clock::LAST_ENTRY), "15:07:59");
 }
+
+#[test]
+fn e1s_the_data_window_is_read_at_the_arming_close_plus_latency() {
+    // armed at 09:21:00; data from 09:21:14 is in time, from 09:21:15 not
+    let day = flag_day();
+    let candles = fold(&day, 1);
+    let secs = secs_with(6, 8, 10_185, &[(6 * 60 + 20, 10_200)]);
+    let top = vec![true; 8];
+    for (start, want) in [(14, Status::Ok), (15, Status::NoFillDataWindow)] {
+        let feed = SecondFeed {
+            minutes: &day,
+            secs: &secs,
+            step: 5,
+            data_start: OPEN + 6 * 60 + start,
+        };
+        let ev = e1s(
+            &candles,
+            &top,
+            &feed,
+            &seed(Side::Long, 2),
+            &Readings::HEADLINE,
+        );
+        let at5 = ev.iter().find(|e| e.candle == 5).map(|e| e.status);
+        assert_eq!(at5, Some(want), "{start}");
+    }
+}
