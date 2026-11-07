@@ -2,7 +2,7 @@
 
 PREVIEW: an independent reference build on seeded synthetic data; not a result, says nothing about profit
 
-282 scenarios. Readings other than the headline are named (report section 4).
+283 scenarios. Readings other than the headline are named (report section 4).
 
 | Id | Kind | Readings | Outputs | Title |
 |---|---|---|---:|---|
@@ -189,6 +189,7 @@ PREVIEW: an independent reference build on seeded synthetic data; not a result, 
 | W036 | walk | headline | 11 | seeded walk 14 on generated seconds, short |
 | W037 | walk | headline | 11 | seeded walk 15 on generated seconds, long |
 | W038 | walk | headline | 20 | seeded walk 16 on generated seconds, short |
+| W039 | walk | headline | 10 | XF read as a trail armed at a rung: armed at the rung price 10,150, trail 30 (labelled reading) |
 | C001 | charges | headline | 9 | COSTS.md contract note CN01, 2018-09-03 |
 | C002 | charges | headline | 9 | COSTS.md contract note CN02, 2019-03-29 |
 | C003 | charges | headline | 9 | COSTS.md contract note CN03, 2019-04-01 |

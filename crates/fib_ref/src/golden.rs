@@ -3405,6 +3405,30 @@ fn walk_docs() -> Vec<Doc> {
             ),
         );
     }
+    // XF read as XE's trail armed at a rung price: the kit's words are "a
+    // trailing take-profit armed at a rung"; the grid::Ttp semantics it cites
+    // are not in the kit (report: a question)
+    next(
+        &mut out,
+        walk_doc(
+            "",
+            "XF read as a trail armed at a rung: armed at the rung price 10,150, trail 30 (labelled reading)",
+            7_040,
+            date,
+            &xe,
+            &plan(
+                Side::Long,
+                t0,
+                1_000_000,
+                9_900,
+                Exit::Trail {
+                    arm: 10_150,
+                    distance: 30,
+                },
+            ),
+            h,
+        ),
+    );
     out
 }
 
