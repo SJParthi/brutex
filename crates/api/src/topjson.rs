@@ -598,28 +598,35 @@ mod tests {
             Err("seal damaged".to_owned()),
             "the refresh refusal is the response and the handle is dropped"
         );
-        let mut opens = 0;
+        // ONE COUNTING OPENER THAT REFUSES, ONE REFRESH THAT PASSES AND ONE
+        // READ, each handed to the calls that run it and to calls that must not.
+        let opens = std::cell::Cell::new(0_u32);
+        let refusing = || {
+            opens.set(opens.get() + 1);
+            Err::<u32, _>("seal damaged".to_owned())
+        };
+        let keep = |_: &mut u32| Ok::<(), String>(());
+        let read = |v: &mut u32| *v;
         for _ in 0..100 {
-            let answer = cache.with_verified(
-                root,
-                || {
-                    opens += 1;
-                    Err::<u32, _>("seal damaged".to_owned())
-                },
-                |_| Ok(()),
-                |v| *v,
-            );
+            let answer = cache.with_verified(root, refusing, keep, read);
             assert_eq!(answer, Err("seal damaged".to_owned()));
         }
         assert_eq!(
-            opens, 100,
+            opens.get(),
+            100,
             "every request while the damage persists is cold"
         );
         assert_eq!(
-            cache.with_verified(root, || Ok(3), |_| Ok(()), |v| *v),
+            cache.with_verified(root, || Ok(3), keep, read),
             Ok(3),
             "the first request after a repair is served"
         );
+        assert_eq!(
+            cache.with_verified(root, refusing, keep, read),
+            Ok(3),
+            "a held handle whose refresh passes is served, never opened again"
+        );
+        assert_eq!(opens.get(), 100, "the held handle was not opened again");
 
         let bullet = crate::booleanjson::tests::d0951_bullet("W1-api6-3");
         for word in [
@@ -640,5 +647,119 @@ mod tests {
         assert!(
             verified.contains("*held = None;\n                }\n                return Err(why);")
         );
+    }
+
+    /// Commits one run under `dir`: its frontier block of `rows` rows, each
+    /// naming every one of a mask's 384 positions, the receipt for exactly
+    /// those rows, and the ledger parent last.
+    fn commit_every_position(dir: &std::path::Path, record: cli::results::Record, rows: u16) {
+        let block: Vec<cli::frontier::Row> = (1..=rows)
+            .map(|rank| cli::frontier::Row {
+                identity: record.identity,
+                rank,
+                direction: cli::frontier::Direction::Short,
+                rules: cli::Rules::elite(400, 25),
+                mask_words: [u64::MAX; 6],
+                hits: 1_194,
+                n: 868,
+                mean_milli_paisa: 345_939,
+                t_milli: 2_706,
+                payoff_bp: 129,
+                wins: 445,
+                trades: 868,
+                cell_wins: 3,
+                pessimistic: -272_749,
+                worst_trade: -3_035,
+                max_drawdown: 329_165,
+                min_win: 295,
+                gross_win: 900,
+                gross_loss: -273_649,
+            })
+            .collect();
+        cli::frontier::Frontier::open(dir)
+            .expect("a frontier")
+            .append_all(&block)
+            .expect("one run's block");
+        cli::result_set::Receipts::open(dir)
+            .expect("receipts")
+            .append_exact(cli::result_set::Receipt {
+                identity: record.identity,
+                frontier_rows: u64::from(rows),
+                trade_rows: 0,
+                direction: cli::trades::Direction::Long,
+                trade_policy: cli::result_set::TradePolicy::ChosenGridV1,
+            })
+            .expect("the receipt before its parent");
+        cli::results::Results::open(dir)
+            .expect("a ledger")
+            .append(&record)
+            .expect("the parent last");
+    }
+
+    /// **A TOP REPORT PAST THE RESPONSE CEILING IS REFUSED WHOLE, NEVER CUT TO
+    /// A PREFIX** (BASE-COV-API-AS2): a committed run whose frontier rows each
+    /// name every position a mask can hold renders a report whose JSON is past
+    /// `detail::MAX_RESPONSE_BYTES`, and the route answers 503 in its own words
+    /// with no report at all.
+    /// Extremes: 11 (7 single, 2 combined, 2 out of the box): (1) 1,536
+    /// frontier rows of all 384 mask positions: the route answers 503; (2) its
+    /// body is the refusal alone, with `"report":null`; (3) the refusal says no
+    /// prefix was exposed; (4) the renderer itself answers the whole report, so
+    /// the 503 is the size check's and not a render failure; (5) that report's
+    /// JSON is past the ceiling; (6) one such row is served 200, under the
+    /// ceiling; (7) the served report names the first position by its name.
+    /// Combined: (8) the oversized run asked by its own pair (`zerodha`,
+    /// `NIFTY`): refused alike; (9) the oversized store asked for a pair that
+    /// names no run: the absence sentence, 200, under the ceiling. Out of the
+    /// box: (10) mask positions past the vocabulary are named `?370` to `?383`,
+    /// never dropped; (11) the refusal is served as JSON, never as text.
+    #[test]
+    fn a_top_report_past_the_response_ceiling_is_refused_whole() {
+        let base = crate::scratch::path("top-past-the-ceiling");
+        let _ = std::fs::remove_dir_all(&base);
+        let refusal = r#"{"report":null,"refusal":"top report exceeds the bounded JSON response size; no prefix was exposed"}"#;
+        // (1)-(5), (8), (10), (11).
+        let wide = base.join("wide");
+        let run = row(0x51, "NIFTY", 700);
+        commit_every_position(&wide, run, 1_536);
+        let whole = report(&wide, None).expect("the renderer answers the whole report");
+        assert!(
+            whole.contains(&run.identity_hex()),
+            "the report is the run's"
+        );
+        assert!(whole.contains("?370") && whole.contains("?383"), "(10)");
+        assert!(
+            crate::render::json_string(&whole).len() > crate::detail::MAX_RESPONSE_BYTES,
+            "(5) premise: past the ceiling"
+        );
+        let pair = ("zerodha".to_owned(), "NIFTY".to_owned());
+        for asked in [None, Some(&pair)] {
+            let (status, headers, body) = respond(Ok(wide.clone()), asked);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{asked:?}"
+            );
+            assert_eq!(
+                headers.first().map(|(_, value)| *value),
+                Some("application/json; charset=utf-8"),
+                "(11)"
+            );
+            assert_eq!(body, refusal, "{asked:?}");
+        }
+        // (9): a pair that names no run.
+        let other = ("zerodha".to_owned(), "BANKNIFTY".to_owned());
+        let (status, _, body) = respond(Ok(wide.clone()), Some(&other));
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body.contains("NO COMPLETE RUN"), "{body}");
+        // (6), (7): one such row is served.
+        let narrow = base.join("narrow");
+        commit_every_position(&narrow, row(0x52, "NIFTY", 700), 1);
+        let (status, _, body) = respond(Ok(narrow.clone()), None);
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(body.len() <= crate::detail::MAX_RESPONSE_BYTES);
+        assert!(body.contains("close_above_ema20"), "(7)");
+        assert!(body.contains("?383"), "(10)");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

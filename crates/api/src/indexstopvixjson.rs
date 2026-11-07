@@ -330,11 +330,14 @@ mod tests {
         clippy::default_trait_access,
         reason = "API receives the native candle through CLI's stamp type without an indicators dependency"
     )]
-    fn complete_reference_candle_keeps_exact_signed_integer_values_and_null_open_interest()
-    -> Result<(), String> {
+    #[allow(
+        clippy::panic,
+        reason = "an exact stamp built the line above that holds no candle is a broken fixture, and the test fails on it"
+    )]
+    fn complete_reference_candle_keeps_exact_signed_integer_values_and_null_open_interest() {
         let mut original = Stamp::Exact(Default::default());
         let Stamp::Exact(candle) = &mut original else {
-            return Err("generated exact reference fixture must contain a candle".into());
+            panic!("generated exact reference fixture must contain a candle");
         };
         candle.ts_micros = 1_700_000_040_000_000;
         candle.open = 1_500;
@@ -349,7 +352,6 @@ mod tests {
                 "high_paisa":"1550","low_paisa":"1490","close_paisa":"1530",
                 "volume":"9223372036854775807","open_interest":"-9223372036854775808"}})
         );
-        Ok(())
     }
     #[test]
     fn invalid_vix_pages_keep_current_admission_but_changed_or_busy_owners_evict() {
@@ -372,19 +374,26 @@ mod tests {
             assert_eq!(failed, Err(reason.into()));
             assert_eq!(cached, Some(41));
         }
-        let mut rechecked = false;
+        // ONE RECORDING CHECK, handed to a good page and then to a refused
+        // one: the good page never runs it, and the refused page runs it once.
+        let rechecks = std::cell::Cell::new(0_u32);
+        let recheck = |_: &u64| -> Result<(), String> {
+            rechecks.set(rechecks.get() + 1);
+            Ok(())
+        };
         assert_eq!(
-            project_cached(
-                &mut cached,
-                |reader| Ok(*reader),
-                |_| {
-                    rechecked = true;
-                    Ok(())
-                }
-            ),
+            project_cached(&mut cached, |reader| Ok(*reader), recheck),
             Ok(41)
         );
-        assert!(!rechecked);
+        assert_eq!(rechecks.get(), 0, "a good page is not checked again");
+        let refused: Result<u64, String> = project_cached(
+            &mut cached,
+            |_| Err("limit outside saved extent".into()),
+            recheck,
+        );
+        assert_eq!(refused, Err("limit outside saved extent".into()));
+        assert_eq!(rechecks.get(), 1, "a refused page is checked again, once");
+        assert_eq!(cached, Some(41), "kept after a refused page");
         for failure in ["owner busy", "completion generation changed"] {
             let failed: Result<(), String> = project_cached(
                 &mut cached,

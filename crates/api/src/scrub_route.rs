@@ -2662,4 +2662,115 @@ mod tests {
             let _ = std::fs::remove_dir_all(&root);
         }
     }
+
+    /// **WHAT AN INDEX HOLDS OUT OF STEP IS FILED WITHOUT A COUNT TO TAKE
+    /// FROM, AND A STEP OF NO BYTES READS NOTHING** (BASE-COV-API-AS2): the
+    /// index's maps are set by hand into states `extend` never leaves them in,
+    /// and the private steps are called directly.
+    /// Extremes: 12 (8 single, 2 combined, 2 out of the box): (1) a busy mark
+    /// the per-pass count never heard of is taken away, and no count is taken
+    /// or made; (2) the series' months for that pass go with it; (3) asked
+    /// again, there is no mark to take; (4) a mark whose pass counts two is
+    /// taken, leaving one; (5) a finding filed under a pass when `at` names an
+    /// older pass that holds no map moves to the new pass; (6) a series the
+    /// index never named is not counted; (7) a series named with no count for
+    /// the older pass is counted under the new pass alone; (8) a step of no
+    /// bytes over a ledger with lines takes none and leaves the bytes for the
+    /// next request. Combined: (9) a stale `at` AND an unnamed series: filed,
+    /// nothing counted, no map made for the stale pass; (10) a step of no
+    /// bytes AND an empty ledger: settled, not truncated. Out of the box:
+    /// (11) pass `u64::MAX` as a busy mark's pass; (12) a one-byte step over a
+    /// ledger whose first line is longer: the line is marked too long and its
+    /// byte passed over, never held against the next request.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test walks every index state its Extremes: line names, in order"
+    )]
+    fn an_index_out_of_step_files_without_a_count_and_a_step_of_no_bytes_reads_nothing() {
+        let name: Arc<str> = Arc::from("bars/groww/NSE/INDEX/AS2/1min");
+        // (1), (2), (3), (11): a busy mark with no count beside it.
+        let mut index = Index::default();
+        for pass in [3, u64::MAX] {
+            index
+                .busy
+                .entry(Arc::clone(&name))
+                .or_default()
+                .entry(pass)
+                .or_default()
+                .insert("2024-01".to_owned(), 7);
+            assert!(index.unmark(&name, pass, "2024-01"), "pass {pass}");
+            assert!(!index.busy[&name].contains_key(&pass), "pass {pass}");
+            assert!(index.busy_in.is_empty(), "pass {pass}: no count");
+            assert!(!index.unmark(&name, pass, "2024-01"), "pass {pass}");
+        }
+        // (4): a pass that counts two marks, one taken.
+        index
+            .busy
+            .entry(Arc::clone(&name))
+            .or_default()
+            .entry(5)
+            .or_default()
+            .insert("2024-02".to_owned(), 8);
+        index.busy_in.insert(5, 2);
+        assert!(index.unmark(&name, 5, "2024-02"));
+        assert_eq!(index.busy_in.get(&5), Some(&1));
+        // (5), (6), (9): `at` names pass 2, which holds no map; no series.
+        let key: Key = (Arc::clone(&name), "2024-03".to_owned(), Some(4), "bad");
+        let finding = |pass: u64| Finding {
+            kind: "bad",
+            month: "2024-03".to_owned(),
+            block: Some((4, 292, 364)),
+            pass,
+            run: 9,
+            kept: None,
+            why: "block 4 does not match".to_owned(),
+        };
+        let mut stale = Index::default();
+        stale.at.insert(key.clone(), 2);
+        stale.file(key.clone(), finding(3), 3);
+        assert_eq!(stale.at.get(&key), Some(&3));
+        assert_eq!(stale.by_pass[&3][&key].pass, 3);
+        assert!(!stale.by_pass.contains_key(&2), "no map for the stale pass");
+        assert!(stale.series.is_empty(), "an unnamed series is not counted");
+        // (7): the series named, with no count for the older pass.
+        let mut named = Index::default();
+        let _shared = named.name_of(&name);
+        named.at.insert(key.clone(), 2);
+        named.file(key.clone(), finding(3), 3);
+        assert_eq!(named.series[&name].get(&3), Some(&1));
+        assert_eq!(named.series[&name].get(&2), None);
+        assert_eq!(named.standing_in(&name, 3), 1);
+        // (8): a step of no bytes over a ledger with lines.
+        let root = root_of("as2-scrub-zero-step");
+        let path = root.join(cli::scrub_ledger_name(Vendor::Gdfl));
+        let ledger = two_passes();
+        std::fs::write(&path, &ledger).unwrap();
+        let len = u64::try_from(ledger.len()).unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut kept = Kept::new(path.clone(), (0, 0));
+        kept.advance(&mut file, (len, None), 0).unwrap();
+        assert_eq!(kept.consumed, 0, "a step of no bytes takes no line");
+        assert!(!kept.in_long_line, "and marks none too long");
+        assert_eq!(kept.index.indexed_bytes, 0);
+        assert!(kept.index.truncated, "the bytes are the next request's");
+        assert_eq!(kept.settled, None, "and the ledger is not settled");
+        assert_eq!(kept.index.standing_count(0), 0);
+        // (10): a step of no bytes over an empty ledger.
+        let empty = root.join("empty.log");
+        std::fs::write(&empty, "").unwrap();
+        let mut file = std::fs::File::open(&empty).unwrap();
+        let mut nothing = Kept::new(empty.clone(), (0, 0));
+        nothing.advance(&mut file, (0, None), 0).unwrap();
+        assert!(!nothing.index.truncated, "nothing is left behind");
+        assert_eq!(nothing.settled, Some((0, None)));
+        // (12): a one-byte step over a longer first line.
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut one = Kept::new(path.clone(), (0, 0));
+        one.advance(&mut file, (len, None), 1).unwrap();
+        assert!(one.in_long_line, "a whole step with no newline is too long");
+        assert_eq!(one.consumed, 1, "its byte is passed over");
+        assert!(one.index.truncated);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

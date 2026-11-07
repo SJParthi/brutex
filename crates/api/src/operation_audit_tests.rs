@@ -1094,3 +1094,123 @@ async fn a_full_detail_pool_refuses_the_audits_start_before_its_handler() {
     let record = journal::read(&root.0, id).unwrap().unwrap();
     assert_eq!(record.phase, Phase::Completed, "(8)");
 }
+/// **AN AUDIT WHOSE BLOCKING POOL IS GONE IS SAID IN ITS OWN WORDS, AT THE
+/// START AND AT THE TERMINAL** (BASE-COV-API-AS2): both journal writes run on
+/// the blocking pool of the runtime the request is polled under, and a pool
+/// that has shut down cancels the task instead of running it. A pool shut
+/// before the audit refuses the start and never dispatches the handler; a
+/// pool shut by the handler itself refuses the terminal after the handler ran.
+/// Extremes: 12 (8 single, 2 combined, 2 out of the box): (1) a pool shut
+/// before the audit's start: a 503; (2) the refusal names the start that
+/// could not run and the cancelled task; (3) it says the handler did not
+/// complete; (4) the handler is never polled; (5) no journal is made, not even
+/// its folder; (6) a pool shut by the handler after the start: a 503 although
+/// the handler answered 200; (7) that refusal names the terminal that could
+/// not settle and says the handler already ran; (8) the handler ran exactly
+/// once. Combined: (9) a write route's label AND a pool gone at the start:
+/// the start's 503, never the full pool's 429, since the pool is gone, not
+/// full; (10) a read route's handler that answers 200 AND whose terminal
+/// cannot settle: the 503 replaces the 200 and carries no audit header. Out of
+/// the box: (11) the attempt the pool would not take records itself as it is
+/// dropped: the journal holds the invocation cancelled with status 0 although
+/// the handler answered 200; (12) the runtime is shut from inside the very
+/// handler the audit wraps.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks both ends its Extremes: line names, in order"
+)]
+fn an_audit_whose_blocking_pool_is_gone_is_said_at_the_start_and_at_the_terminal() {
+    // Taken before any runtime of this test exists: `blocking_lock` panics in one.
+    let _apart = crate::detail::apart_from_slot_owners_blocking();
+    let driver = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let answered = |response: axum::response::Response| {
+        driver.block_on(async move {
+            let status = response.status();
+            let stamped = response.headers().contains_key("x-brutex-request-audit");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (status, stamped, body)
+        })
+    };
+
+    // (1)-(5), (9): the pool is shut before the start is asked for.
+    let early = Scratch::new();
+    let gone = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let pool = gone.handle().clone();
+    gone.shutdown_background();
+    let called = AtomicUsize::new(0);
+    let refused = driver.block_on(async {
+        let _inside = pool.enter();
+        request_audited(
+            early.0.clone(),
+            "POST /backtest/run".to_owned(),
+            Counted {
+                called: &called,
+                status: StatusCode::ACCEPTED,
+            },
+        )
+        .await
+    });
+    let (status, stamped, body) = answered(refused);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "(1)(9) {body}");
+    assert!(!stamped, "no record, no header");
+    let said = body["refusal"].as_str().unwrap();
+    assert!(
+        said.starts_with("bounded request audit could not start: Join(\"task "),
+        "(2) {said}"
+    );
+    assert!(said.ends_with(" was cancelled\")"), "(2) {said}");
+    assert_eq!(body["handler_completed"], false, "(3) {body}");
+    assert_eq!(called.load(Ordering::Relaxed), 0, "(4)");
+    assert!(!early.0.join("audit").exists(), "(5) the start never ran");
+
+    // (6)-(8), (10)-(12): the handler shuts the pool after the start.
+    let late = Scratch::new();
+    let shut = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let pool = shut.handle().clone();
+    let ran = AtomicUsize::new(0);
+    let ran_once = &ran;
+    let served = driver.block_on(async {
+        let _inside = pool.enter();
+        request_audited(
+            late.0.clone(),
+            "GET /backtest.json".to_owned(),
+            async move {
+                ran_once.fetch_add(1, Ordering::Relaxed);
+                // THE POOL THIS HANDLER'S TERMINAL WOULD RUN ON is shut by the
+                // handler itself, after the start has run on it.
+                shut.shutdown_background();
+                StatusCode::OK.into_response()
+            },
+        )
+        .await
+    });
+    let (status, stamped, body) = answered(served);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "(6)(10) {body}");
+    assert!(!stamped, "(10)");
+    let said = body["refusal"].as_str().unwrap();
+    assert!(
+        said.starts_with("bounded terminal audit could not settle: Join(\"task "),
+        "(7) {said}"
+    );
+    assert!(said.ends_with(" was cancelled\")"), "(7) {said}");
+    assert_eq!(body["handler_completed"], true, "(7) {body}");
+    assert!(body["why"].as_str().unwrap().contains("already ran"), "(7)");
+    assert_eq!(ran.load(Ordering::Relaxed), 1, "(8)");
+    let record = journal::read(&late.0, ID_BASE + 1).unwrap().unwrap();
+    assert_eq!(record.phase, Phase::Cancelled, "(11)");
+    assert_eq!(record.response_status, 0, "(11)");
+    assert_eq!(record.origin, Origin::Http);
+}

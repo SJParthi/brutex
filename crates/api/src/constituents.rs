@@ -1898,4 +1898,95 @@ mod tests {
             );
         }
     }
+
+    /// **A CLAIM TAKES AN ID ONLY WHEN THERE IS ONE, AND ONLY A MASTERED
+    /// VENDOR'S ID CORROBORATES** (BASE-COV-API-AS2): `push` is called with
+    /// `None` directly, the empty arm no caller in this file takes any more.
+    /// Extremes: 12 (8 single, 2 combined, 2 out of the box): (1) no id for a
+    /// mastered vendor leaves its slot empty; (2) and nothing corroborates;
+    /// (3) an id fills its vendor's slot; (4) that vendor then corroborates;
+    /// (5) a later `None` removes nothing; (6) `None` for every vendor leaves
+    /// every slot empty; (7) every vendor its own id: each slot holds exactly
+    /// its own, and only the three mastered vendors corroborate; (8) the same id
+    /// twice is held twice: the dedup is `index_by_isin`'s, never `push`'s.
+    /// Combined: (9) no id for Dhan AND an id for Groww: only Groww
+    /// corroborates; (10) an id from a feed that publishes no master AND none
+    /// from any mastered one: held, and nothing corroborates. Out of the box:
+    /// (11) an id at the full 48-byte capacity is held whole; (12) a push never
+    /// marks the claim ambiguous.
+    #[test]
+    fn a_claim_takes_an_id_only_when_there_is_one() {
+        let id = |text: &str| VendorId::new(text).expect("a legal id");
+        let held = |claim: &Claim, vendor: Vendor| -> Vec<String> {
+            claim
+                .of(vendor)
+                .iter()
+                .map(|kept| kept.as_str().to_owned())
+                .collect()
+        };
+        // (1), (2), (6).
+        let mut claim = Claim::default();
+        claim.push(Vendor::Dhan, None);
+        assert!(claim.of(Vendor::Dhan).is_empty(), "(1)");
+        assert_eq!(claim.corroboration(), VendorSet::EMPTY, "(2)");
+        for vendor in Vendor::ALL {
+            claim.push(vendor, None);
+        }
+        for vendor in Vendor::ALL {
+            assert!(claim.of(vendor).is_empty(), "(6) {vendor:?}");
+        }
+        // (3), (4), (5), (8).
+        claim.push(Vendor::Dhan, Some(id("2885")));
+        claim.push(Vendor::Dhan, None);
+        assert_eq!(held(&claim, Vendor::Dhan), ["2885"], "(3)(5)");
+        assert_eq!(
+            claim.corroboration(),
+            VendorSet::EMPTY.with(Vendor::Dhan),
+            "(4)"
+        );
+        claim.push(Vendor::Dhan, Some(id("2885")));
+        assert_eq!(held(&claim, Vendor::Dhan), ["2885", "2885"], "(8)");
+        // (7).
+        let mut every = Claim::default();
+        for vendor in Vendor::ALL {
+            every.push(vendor, Some(id(vendor.as_str())));
+        }
+        for vendor in Vendor::ALL {
+            assert_eq!(held(&every, vendor), [vendor.as_str()], "(7) {vendor:?}");
+        }
+        assert_eq!(
+            every.corroboration(),
+            Vendor::MASTERED
+                .into_iter()
+                .fold(VendorSet::EMPTY, VendorSet::with),
+            "(7)"
+        );
+        // (9).
+        let mut one = Claim::default();
+        one.push(Vendor::Dhan, None);
+        one.push(Vendor::Groww, Some(id("NSE-RELIANCE")));
+        assert_eq!(
+            one.corroboration(),
+            VendorSet::EMPTY.with(Vendor::Groww),
+            "(9)"
+        );
+        // (10).
+        let mut unmastered = Claim::default();
+        unmastered.push(Vendor::Gdfl, Some(id("RELIANCE")));
+        for vendor in Vendor::MASTERED {
+            unmastered.push(vendor, None);
+        }
+        assert_eq!(held(&unmastered, Vendor::Gdfl), ["RELIANCE"], "(10)");
+        assert_eq!(unmastered.corroboration(), VendorSet::EMPTY, "(10)");
+        // (11), (12).
+        let longest = "9".repeat(brutex_core::vendor::VENDOR_ID_CAPACITY);
+        let mut wide = Claim::default();
+        wide.push(Vendor::Zerodha, Some(id(&longest)));
+        assert_eq!(
+            held(&wide, Vendor::Zerodha),
+            std::slice::from_ref(&longest),
+            "(11)"
+        );
+        assert_eq!(wide.ambiguous, VendorSet::EMPTY, "(12)");
+    }
 }

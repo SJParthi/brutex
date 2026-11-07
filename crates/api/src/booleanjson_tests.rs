@@ -587,3 +587,381 @@ fn the_cold_admission_bound_is_stated_and_both_renderers_take_the_shared_decisio
         );
     }
 }
+/// An [`Asked`] the parser never builds: a page selector handed straight to
+/// the projection, for the projection's own refusals.
+fn unparsed(kind: &str, side: Option<Side>, axis: Option<&str>, offset: usize) -> Asked {
+    Asked {
+        identity: [0x42; 32],
+        completion: None,
+        kind: kind.to_owned(),
+        candidate: None,
+        side,
+        axis: axis.map(str::to_owned),
+        offset,
+        limit: 1,
+    }
+}
+
+/// **EVERY SAVED GRID AXIS IS PAGED, AND A KIND, AXIS OR RUNG NO CATALOG HOLDS
+/// IS REFUSED BY ITS OWN WORDS** (BASE-COV-API-AS2): the requested trail ladder
+/// and the resolved target and trail ladders are served as pages; a page kind,
+/// a requested axis or a resolved axis the parser never hands the projection
+/// is refused by name when the projection is called with it; a coordinate's
+/// selected rung is read off its side's ladder and a rung past it is refused;
+/// and a second identity asked under the root whose catalog is held is a cold
+/// admission of its own, never the held one.
+/// Extremes: 12 (8 single, 2 combined, 2 out of the box): (1) the long grid's
+/// requested trail ladder pages its one rung, 1/2; (2) the short grid's
+/// resolved target ladder pages 1000 ppm; (3) the long grid's resolved trail
+/// ladder likewise; (4) a page kind no parser admits is "unsupported catalog
+/// page"; (5) a requested axis outside stop, target and trail is "saved
+/// requested axis missing"; (6) a resolved one is "saved resolved axis
+/// missing"; (7) a selected stop rung 0 reads the ladder's 1000 ppm and every
+/// unselected axis reads null; (8) a target rung past the one-rung ladder is
+/// "coordinate ladder index missing". Combined: (9) a stop rung that resolves
+/// AND a target rung past its ladder in one cell: the cell is refused whole,
+/// never half read; (10) a second identity under the held root: a cold
+/// admission, refused naming that identity and the root, and the held catalog
+/// asked again is opened again and is the same page. Out of the box:
+/// (11) `usize::MAX` as a rung is the same refusal, never a wrap; (12) an
+/// offset past a one-rung resolved ladder is "catalog page outside saved
+/// extent".
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test walks every case its Extremes: line names, in order"
+)]
+fn every_saved_axis_is_paged_and_a_kind_axis_or_rung_no_catalog_holds_is_refused_by_name() {
+    let _cache = CACHE_TEST.lock().unwrap();
+    let root = fixture("boolean-api-axes");
+    // (1), (2), (3): the three axes no earlier test pages.
+    for (suffix, field, value) in [
+        (
+            "kind=grid&side=long&axis=requested-trail",
+            "denominator",
+            "2",
+        ),
+        ("kind=grid&side=short&axis=target", "ppm", "1000"),
+        ("kind=grid&side=long&axis=trail", "ppm", "1000"),
+    ] {
+        let served = page_of(&root, suffix);
+        assert_eq!(served["total"], "1", "{suffix}");
+        assert_eq!(served["rows"][0]["index"], "0", "{suffix}");
+        assert_eq!(served["rows"][0][field], value, "{suffix}");
+    }
+    let reader = Reader::open(&root, [0x42; 32], crate::detail::MAX_SCAN_BYTES).unwrap();
+    let pin = reader.completion_digest();
+    // (4): a page kind no parser admits.
+    assert_eq!(
+        page(&reader, &unparsed("everything", None, None, 0), pin)
+            .err()
+            .as_deref(),
+        Some("unsupported catalog page")
+    );
+    // (5), (6), (12): axes and an extent no saved grid holds.
+    for (side, axis, offset, said) in [
+        (
+            Side::Long,
+            "requested-sideways",
+            0,
+            "saved requested axis missing",
+        ),
+        (Side::Short, "sideways", 0, "saved resolved axis missing"),
+        (Side::Short, "stop", 2, "catalog page outside saved extent"),
+    ] {
+        assert_eq!(
+            grid_page(&reader, &unparsed("grid", Some(side), Some(axis), offset))
+                .err()
+                .as_deref(),
+            Some(said),
+            "{axis} at {offset}"
+        );
+    }
+    // (7), (8), (9), (11): a coordinate's selected rungs.
+    let long = &reader.grids()[0];
+    let levels = selected_levels(
+        &Cell {
+            stop: Some(0),
+            ..Cell::default()
+        },
+        long,
+    )
+    .unwrap();
+    assert_eq!(levels["stop_ppm"], "1000");
+    for unselected in ["target_ppm", "tsl_ppm", "ttp_arm_ppm", "ttp_trail_ppm"] {
+        assert_eq!(levels[unselected], Value::Null, "{unselected}");
+    }
+    for cell in [
+        Cell {
+            target: Some(1),
+            ..Cell::default()
+        },
+        Cell {
+            stop: Some(0),
+            target: Some(1),
+            ..Cell::default()
+        },
+        Cell {
+            tsl: Some(usize::MAX),
+            ..Cell::default()
+        },
+    ] {
+        assert_eq!(
+            selected_levels(&cell, long).err().as_deref(),
+            Some("coordinate ladder index missing"),
+            "{cell:?}"
+        );
+    }
+    // (10): a second identity under the root whose catalog is held.
+    let first = Asked::parse(&format!("identity={ID}")).unwrap();
+    let held = render(&root, &first).unwrap();
+    let other = [0x24; 32];
+    let before = cold();
+    let why = render(
+        &root,
+        &Asked {
+            identity: other,
+            ..unparsed("coordinates", None, None, 0)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(cold(), before + 1, "a second identity is a cold admission");
+    assert!(why.contains(&crate::server::hex32(other)), "{why}");
+    assert!(why.contains(&root.display().to_string()), "{why}");
+    assert_eq!(
+        render(&root, &first).unwrap(),
+        held,
+        "the held catalog again"
+    );
+    assert_eq!(cold(), before + 2, "opened again, never lost");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// [`fixture`] with each grid's saved forced stop replaced, long grid then
+/// short, by a `(kind, level)` pair, and the receipt sealed again over the
+/// changed body. Every other byte is the fixture's.
+fn fixture_forced(name: &str, forced: [(u64, i64); 2]) -> PathBuf {
+    let root = fixture(name);
+    let directory = root.join("boolean-candidates-v1").join(ID);
+    let mut body = fs::read(directory.join("body.bin")).unwrap();
+    // Each grid writes its cost model, `[7; 32]`, and then a disabled forced
+    // stop, kind 0 and level 0: sixteen zero bytes. Nothing else in the body
+    // is a run of thirty-two sevens.
+    let mut disabled = vec![7_u8; 32];
+    disabled.extend_from_slice(&[0; 16]);
+    let kinds: Vec<usize> = body
+        .windows(disabled.len())
+        .enumerate()
+        .filter(|(_, window)| *window == disabled.as_slice())
+        .map(|(start, _)| start + 32)
+        .collect();
+    assert_eq!(kinds.len(), 2, "premise: one forced stop per grid");
+    for (at, (kind, level)) in kinds.into_iter().zip(forced) {
+        body[at..at + 8].copy_from_slice(&kind.to_le_bytes());
+        body[at + 8..at + 16].copy_from_slice(&level.to_le_bytes());
+    }
+    let mut receipt = b"BRBLCM01".to_vec();
+    receipt.extend_from_slice(&[0x42; 32]);
+    receipt.extend_from_slice(&hash(&body));
+    words(&mut receipt, &[body.len() as u64]);
+    receipt.extend_from_slice(&hash(&receipt));
+    fs::write(directory.join("body.bin"), body).unwrap();
+    fs::write(directory.join("complete.bin"), receipt).unwrap();
+    root
+}
+
+/// **A GRID'S FORCED STOP IS SERVED BY ITS KIND AND ITS EXACT LEVEL, AND ONE
+/// NO POLICY HOLDS REFUSES THE CATALOG** (BASE-COV-API-AS2): the saved policy
+/// of each grid is written with an include-exact or a require-exact forced
+/// stop, and every page's grid summaries say which, and at what level.
+/// Extremes: 11 (7 single, 2 combined, 2 out of the box): (1) an include-exact
+/// forced stop is served `include-exact-observed`; (2) a require-exact one is
+/// served `require-exact-observed`; (3) a level of 1 ppm, the least a policy
+/// takes, is served "1"; (4) a level of `i64::MAX` is served exact, as text;
+/// (5) a pinned grid page carries the same summaries as the first page;
+/// (6) the summary read straight off the reader is the served one; (7) the
+/// fixture's own disabled forced stop is still `disabled` with a null level.
+/// Combined: (8) include on the long grid AND require on the short: each grid
+/// says its own; (9) a require-exact kind AND a level of 0: the catalog is
+/// refused in the policy's own words and no page is served. Out of the box:
+/// (10) a disabled kind that carries a level is no encoding and is refused;
+/// (11) a kind no build writes, 3, is refused the same way.
+#[test]
+fn a_forced_stop_is_served_by_its_kind_and_its_exact_level() {
+    let _cache = CACHE_TEST.lock().unwrap();
+    let first = Asked::parse(&format!("identity={ID}")).unwrap();
+    // (1)-(6), (8).
+    let root = fixture_forced("boolean-api-forced", [(1, 1), (2, i64::MAX)]);
+    let served = render(&root, &first).unwrap();
+    assert_eq!(served["grids"][0]["side"], "long");
+    assert_eq!(
+        served["grids"][0]["forced_stop"],
+        json!({"kind":"include-exact-observed","ppm":"1"})
+    );
+    assert_eq!(
+        served["grids"][1]["forced_stop"],
+        json!({"kind":"require-exact-observed","ppm":i64::MAX.to_string()})
+    );
+    let pin = served["completion"].as_str().unwrap();
+    let grid = render(
+        &root,
+        &Asked::parse(&format!(
+            "identity={ID}&completion={pin}&kind=grid&side=short&axis=stop"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(grid["grids"], served["grids"]);
+    let reader = Reader::open(&root, [0x42; 32], crate::detail::MAX_SCAN_BYTES).unwrap();
+    assert_eq!(grid_summary(&reader.grids()[1]), served["grids"][1]);
+    // (7).
+    let plain = fixture("boolean-api-forced-disabled");
+    assert_eq!(
+        render(&plain, &first).unwrap()["grids"][0]["forced_stop"],
+        json!({"kind":"disabled","ppm":null})
+    );
+    // (9), (10), (11).
+    for (name, long, said) in [
+        (
+            "boolean-api-forced-zero",
+            (2, 0),
+            "exit-grid V1 refusal: InvalidForcedStop(0)",
+        ),
+        (
+            "boolean-api-forced-level",
+            (0, 5),
+            "Boolean forced-stop encoding unknown",
+        ),
+        (
+            "boolean-api-forced-three",
+            (3, 1),
+            "Boolean forced-stop encoding unknown",
+        ),
+    ] {
+        let refused = fixture_forced(name, [long, (0, 0)]);
+        let why = render(&refused, &first).unwrap_err();
+        assert!(why.contains(said), "{name}: {why}");
+        assert!(
+            why.contains("no other folder was searched"),
+            "{name}: {why}"
+        );
+        fs::remove_dir_all(refused).unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(plain).unwrap();
+}
+
+/// Names the handler child's catalog root.
+const HANDLER_CHILD: &str = "BRUTEX_TEST_BOOLEAN_HANDLER_CHILD";
+
+/// **THE PUBLIC HANDLER SERVES A SAVED PAGE WHOLE FROM THE ROOT `BRUTEX_STORE`
+/// NAMES, AND REFUSES BY NAME WHAT THAT ROOT CANNOT ANSWER**
+/// (BASE-COV-API-AS2). Run in a child, because the handler finds its root only
+/// through the process environment; the child proves it ran by the file it
+/// leaves.
+/// Extremes: 11 (7 single, 2 combined, 2 out of the box): (1) the first page,
+/// with no pin, is a 200 the catalog saved; (2) it is served as
+/// `application/json`; (3) whole, under the response ceiling; (4) it is the
+/// page `render` makes for the same question; (5) a pinned programs page is a
+/// 200; (6) a pin the catalog does not hold is a 503 that says the completion
+/// changed, with no rows; (7) an identity the root does not hold is a 503
+/// naming it, the root and `BRUTEX_STORE`. Combined: (8) a pinned page AND an
+/// offset past both coordinates: a 503 in the reader's words, no rows; (9) a
+/// pinned trades page AND the short side's coordinate: a 200 with that
+/// coordinate selected. Out of the box: (10) a limit of 256 over a catalog of
+/// two coordinates: both rows and no next page; (11) a selector the parser
+/// refuses is a 400 before the root is read at all.
+#[test]
+fn the_public_handler_serves_a_saved_page_whole_from_the_configured_root() {
+    if let Some(root) = std::env::var_os(HANDLER_CHILD) {
+        let root = PathBuf::from(root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ask = |query: &str| {
+            let (status, headers, body) = runtime.block_on(boolean_json(
+                format!("/boolean-candidates.json?{query}").parse().unwrap(),
+            ));
+            let value: Value = serde_json::from_str(&body).unwrap();
+            (status, headers[0].1, body.len(), value)
+        };
+        // (1)-(4): the first page, whole.
+        let (status, kind, bytes, first) = ask(&format!("identity={ID}"));
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(kind, "application/json");
+        assert!(bytes <= crate::detail::MAX_RESPONSE_BYTES, "{bytes}");
+        assert_eq!(first["status"], "saved");
+        assert_eq!(first["total"], "2");
+        assert_eq!(
+            first,
+            render(&root, &Asked::parse(&format!("identity={ID}")).unwrap()).unwrap()
+        );
+        let pin = first["completion"].as_str().unwrap().to_owned();
+        // (5): a pinned later page.
+        let (status, _, _, programs) =
+            ask(&format!("identity={ID}&completion={pin}&kind=programs"));
+        assert_eq!(status, StatusCode::OK, "{programs}");
+        assert_eq!(programs["rows"][0]["expression"], "(0 | !(1))");
+        // (9): the short side's coordinate.
+        let (status, _, _, trades) = ask(&format!(
+            "identity={ID}&completion={pin}&kind=trades&candidate=1"
+        ));
+        assert_eq!(status, StatusCode::OK, "{trades}");
+        assert_eq!(trades["selected"]["index"], "1");
+        assert_eq!(trades["selected"]["side"], "short");
+        // (10): a limit past the catalog.
+        let (status, _, _, all) = ask(&format!("identity={ID}&limit=256"));
+        assert_eq!(status, StatusCode::OK, "{all}");
+        assert_eq!(all["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(all["next"], Value::Null);
+        // (6), (8): refusals in their own words.
+        for (query, said) in [
+            (
+                format!("identity={ID}&completion={}&kind=programs", "7".repeat(64)),
+                "catalog completion changed; no replacement page returned",
+            ),
+            (
+                format!("identity={ID}&completion={pin}&offset=5"),
+                "Boolean page bounds refused",
+            ),
+        ] {
+            let (status, _, _, refused) = ask(&query);
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{query}: {refused}"
+            );
+            assert_eq!(refused["refusal"], said, "{query}");
+            assert_eq!(refused["rows"], json!([]), "{query}");
+        }
+        // (7): an identity the root does not hold.
+        let absent = "24".repeat(32);
+        let (status, _, _, missing) = ask(&format!("identity={absent}"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{missing}");
+        let why = missing["refusal"].as_str().unwrap();
+        let shown = root.display().to_string();
+        for part in [absent.as_str(), shown.as_str(), "BRUTEX_STORE"] {
+            assert!(why.contains(part), "{part}: {why}");
+        }
+        // (11): a selector the parser refuses.
+        let (status, _, _, bad) = ask("identity=bad");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        fs::write(root.join("child-ran"), b"served").unwrap();
+        return;
+    }
+    let root = fixture("boolean-api-handler");
+    let _ = crate::isolated::rerun(
+        "booleanjson::tests::the_public_handler_serves_a_saved_page_whole_from_the_configured_root",
+        &[
+            (HANDLER_CHILD, root.as_os_str()),
+            ("BRUTEX_STORE", root.as_os_str()),
+        ],
+    );
+    assert_eq!(
+        fs::read(root.join("child-ran")).ok().as_deref(),
+        Some(&b"served"[..]),
+        "the child asked the handler"
+    );
+    fs::remove_dir_all(root).unwrap();
+}

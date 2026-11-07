@@ -572,4 +572,165 @@ mod tests {
         assert!(said.contains("could not be read"), "{said}");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// Writes a counter for `vendor` holding one NSE INDEX NIFTY daily entry
+    /// for each `(year, month)` in `months`, with no bar file behind any of
+    /// them, and reads it back as the census `/verify.json` scrubs.
+    #[allow(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
+    fn held_census(root: &Path, vendor: Vendor, months: &[(u16, u8)]) -> VendorCensus {
+        let mut manifest =
+            pull::manifest::Manifest::open(vendor, &[], &[]).expect("a genesis manifest");
+        for &(year, month) in months {
+            let month = store::path::YearMonth::new(year, month).expect("a legal month");
+            let day = pull::session::Day::new(year, month.month(), 2).expect("a legal day");
+            let ts = i64::from(day.days_from_epoch()) * 86_400_000_000 + 21_600_000_000;
+            manifest
+                .record(pull::manifest::Entry {
+                    key: pull::manifest::EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                        timeframe: store::path::Timeframe::DAY_1,
+                        month,
+                    },
+                    rows: 1,
+                    first_ts_micros: ts,
+                    last_ts_micros: ts,
+                })
+                .expect("one held month");
+        }
+        let path = pull::manifest::manifest_path(root, vendor);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the manifest folder");
+        std::fs::write(&path, manifest.image()).expect("a manifest");
+        crate::census::read_vendor(root, vendor)
+    }
+
+    /// `stage:vendor scrub`'s counts since this process started.
+    fn scrub_stage() -> crate::speed::Figures {
+        crate::speed::global()
+            .report(crate::speed::now_ms())
+            .rows
+            .into_iter()
+            .find(|row| row.route == "stage:vendor scrub")
+            .map_or_else(crate::speed::Figures::default, |row| row.since_start)
+    }
+
+    /// **A SCRUB THAT SEES ITS READER LEAVE IS REFUSED AS CANCELLED AND COUNTS
+    /// ITS STAGE CANCELLED** (BASE-COV-API-AS2): the flag is armed on the one
+    /// blocking thread the scrub runs on, so the reader "leaves" at a look the
+    /// test chose while the request still waits for its answer, and the report
+    /// the work counted comes back to be read.
+    /// Extremes: 11 (7 single, 2 combined, 2 out of the box): (1) the flag
+    /// reads set at the first look: refused as cancelled after none of the
+    /// held months; (2) nothing is tallied; (3) such a report is never
+    /// verified; (4) its sentence leads with "not verified"; (5) the scrub's own
+    /// work counts the stage cancelled; (6) the flag reads set at the second
+    /// look: cancelled after one month; (7) armed past the walk, the scrub
+    /// checks every month and is answered, not cancelled. Combined: (8) a flag
+    /// set at the first look AND months with no file: cancelled before any file
+    /// is asked for, nothing named; (9) armed past the walk AND two months with
+    /// no file: both are named, with looks to spare. Out of the box: (10) the
+    /// look armed on the pool's thread is never the request's: this thread's
+    /// own look is unarmed; (11) the scrub asked inline, with no reader at all,
+    /// never consults a look armed on its own thread.
+    #[test]
+    #[allow(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
+    fn a_scrub_that_sees_its_reader_leave_is_refused_and_counts_its_stage_cancelled() {
+        // Taken before this test's runtime exists: `blocking_lock` panics in one.
+        let _apart = crate::detail::apart_from_slot_owners_blocking();
+        let root = crate::scratch::path(&format!("verify-left-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch store");
+        let census = held_census(&root, Vendor::Zerodha, &[(2024, 1), (2024, 2)]);
+        assert!(matches!(census.state, Census::Held { .. }), "premise: held");
+        // ONE blocking thread, kept alive across calls: a look armed on it is
+        // the scrub's own.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .thread_keep_alive(std::time::Duration::from_mins(1))
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let arm = |looks: u64| {
+            runtime
+                .block_on(runtime.spawn_blocking(move || crate::bars::cancel_trip::arm(looks)))
+                .expect("armed on the pool's one thread");
+        };
+        let disarm = || {
+            runtime
+                .block_on(runtime.spawn_blocking(crate::bars::cancel_trip::disarm))
+                .expect("disarmed on the pool's one thread")
+        };
+        let scrub = || {
+            runtime
+                .block_on(vendor_off_worker(root.clone(), census.clone()))
+                .expect("admitted")
+        };
+        let before = scrub_stage();
+        // (1)-(5), (8): set at the first look.
+        arm(0);
+        let first = scrub();
+        assert_eq!(disarm(), Some(0), "the scrub looked on the armed thread");
+        let why = first.refused.as_deref().unwrap_or_default();
+        assert!(
+            why.starts_with("cancelled: the reader left after 0 of zerodha's"),
+            "(1) {why}"
+        );
+        assert!(
+            why.ends_with("a stopped check verifies nothing"),
+            "(1) {why}"
+        );
+        assert_eq!(first.tally.seen(), 0, "(2)");
+        assert!(first.named.is_empty(), "(8)");
+        assert!(!first.verified(), "(3)");
+        assert!(
+            first.say().starts_with("not verified"),
+            "(4) {}",
+            first.say()
+        );
+        let counted = scrub_stage();
+        assert!(counted.cancelled > before.cancelled, "(5) {counted:?}");
+        // (6): set at the second look.
+        arm(1);
+        let second = scrub();
+        assert_eq!(disarm(), Some(0));
+        let why = second.refused.as_deref().unwrap_or_default();
+        assert!(
+            why.starts_with("cancelled: the reader left after 1 of zerodha's"),
+            "(6) {why}"
+        );
+        assert_eq!(second.tally.seen(), 1, "(6)");
+        assert_eq!(second.named.len(), 1, "(6) the month it checked is named");
+        // (7), (9): armed past the walk.
+        arm(5);
+        let whole = scrub();
+        assert_eq!(disarm(), Some(3), "(9) two looks of the five");
+        assert_eq!(whole.refused, None, "(7)");
+        assert_eq!(whole.tally.seen(), 2, "(7)");
+        assert_eq!(
+            whole
+                .named
+                .iter()
+                .filter(|said| said.contains("NSE-INDEX-NIFTY"))
+                .count(),
+            2,
+            "(9) {:?}",
+            whole.named
+        );
+        assert!(scrub_stage().answered > counted.answered, "(7)");
+        // (10): this thread's own look was never armed.
+        assert_eq!(crate::bars::cancel_trip::disarm(), None, "(10)");
+        // (11): inline, with no reader, on a thread armed to trip.
+        crate::bars::cancel_trip::arm(0);
+        let inline = vendor(&root, &census);
+        assert_eq!(
+            crate::bars::cancel_trip::disarm(),
+            Some(0),
+            "(11) a flag with no reader never looked"
+        );
+        assert_eq!(inline.tally.seen(), 2, "(11)");
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
