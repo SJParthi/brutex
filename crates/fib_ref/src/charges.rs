@@ -419,32 +419,10 @@ pub fn estimator(buy_value: i128, sell_value: i128, option: bool) -> (ScreenSide
     (side(buy_value, true), side(sell_value, false))
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-
-    fn date(s: &str) -> Date {
-        Date::parse(s).unwrap_or(Date {
-            y: 2026,
-            m: 1,
-            d: 1,
-        })
-    }
-
-    fn rt(qty: i64, buy: i64, sell: i64) -> Vec<Order> {
-        vec![
-            Order {
-                side: OrderSide::Buy,
-                fills: vec![(qty, buy)],
-                square_off: false,
-            },
-            Order {
-                side: OrderSide::Sell,
-                fills: vec![(qty, sell)],
-                square_off: false,
-            },
-        ]
-    }
+/// COSTS.md's 24 contract-note vectors, public so the golden files can
+/// write them as scenarios.
+pub mod vectors {
+    use super::{Order, OrderSide};
 
     /// COSTS.md's 24 contract notes: (date, orders, dated P, today P,
     /// dated W, today W), all in paise.
@@ -452,7 +430,7 @@ pub(crate) mod tests {
         clippy::too_many_lines,
         reason = "twenty-four contract notes, one row each"
     )]
-    pub(crate) fn contract_notes() -> Vec<(&'static str, Vec<Order>, [i128; 4])> {
+    pub fn contract_notes() -> Vec<(&'static str, Vec<Order>, [i128; 4])> {
         let o = |side, fills: Vec<(i64, i64)>, sq| Order {
             side,
             fills,
@@ -656,10 +634,47 @@ pub(crate) mod tests {
         ]
     }
 
+    /// A one-fill round trip.
+    fn rt(qty: i64, buy: i64, sell: i64) -> Vec<Order> {
+        vec![
+            Order { side: OrderSide::Buy, fills: vec![(qty, buy)], square_off: false },
+            Order { side: OrderSide::Sell, fills: vec![(qty, sell)], square_off: false },
+        ]
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    fn date(s: &str) -> Date {
+        Date::parse(s).unwrap_or(Date {
+            y: 2026,
+            m: 1,
+            d: 1,
+        })
+    }
+
+    fn rt(qty: i64, buy: i64, sell: i64) -> Vec<Order> {
+        vec![
+            Order {
+                side: OrderSide::Buy,
+                fills: vec![(qty, buy)],
+                square_off: false,
+            },
+            Order {
+                side: OrderSide::Sell,
+                fills: vec![(qty, sell)],
+                square_off: false,
+            },
+        ]
+    }
+
+
     #[test]
     fn all_24_contract_notes_match_on_both_clocks_and_both_readings() {
         let r = Readings::HEADLINE;
-        for (k, (d, orders, want)) in contract_notes().into_iter().enumerate() {
+        for (k, (d, orders, want)) in vectors::contract_notes().into_iter().enumerate() {
             let p = price_equity(date(d), &orders, &r);
             let got = [
                 p.dated_p.total(),

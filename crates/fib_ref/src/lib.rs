@@ -19,6 +19,7 @@ pub mod e2;
 pub mod e3;
 pub mod gates;
 pub mod golden;
+pub mod golden_format;
 pub mod ladder;
 pub mod model;
 pub mod money;

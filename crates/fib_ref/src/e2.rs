@@ -376,7 +376,11 @@ fn step(
     {
         book.phase = Phase::Ended;
         book.frozen = None;
-        out.event = "ended";
+        // a touch on this candle still happened: its record stands, and the
+        // count ends at its close (S29b, labelled)
+        if !matches!(out.event, "first_touch" | "return") {
+            out.event = "ended";
+        }
     }
     out
 }
