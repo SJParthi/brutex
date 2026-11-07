@@ -1,202 +1,83 @@
 # gaps-AS2.txt.md
 
-Source: this shard's Route B whole:api readout of tip `b3d5321c` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
+Source: this shard's Route B whole:api readout of tip `b0b3a034` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
 
 `````text
-BASE-COV-API-AS2 (repair round 3, shard G2), Route B on tip b3d5321cf1b4fe9365f09b7976f35312b1080661, whole:api (the kit's set file deep-BASE-COV-API-6ea46e59c074-set.txt, 205 coverage files), host Linux x86_64, root, 4 cores; test api rc=101 END 2026-11-06 11:12:26 IST (5 min); tests passed 3119 failed 14 ignored 16
+BASE-COV-API-AS2 (repair round 3, shard G2), Route B on tip b0b3a034cbee945e99d426918546cba074e69e77, whole:api (the kit's set file deep-BASE-COV-API-6ea46e59c074-set.txt, 205 coverage files), host Linux x86_64, root, 4 cores; test api rc=101 END 2026-11-07 19:50:39 IST (6 min); tests passed 3195 failed 15 ignored 16
 NOT PROVED lines of the run: 23 files, every one of them crates/api/benches/** or crates/api/src/lib.rs (no object holds them: L-BCA-2)
-TOTAL (whole api, this host) lines 174184/178766 (4582 uncovered), branches 12706/15370 (2664 uncovered sides)
-G2 (58 files of SHARDS.md's G2) lines 64277/65655 (1378 uncovered), branches 4518/5382 (864 uncovered sides): (F) 144 lines 474 sides; (U) 56 lines 35 sides; GAP 1178 lines 355 sides (production 950 lines 269 sides; test code 118 lines 74 sides; inside #[ignore]d tests 110 lines 12 sides)
-Classes: a row on a line unchanged since START keeps repair r2's hand-read class (base-cov-api-gaps-r2.txt, base-cov-api-fu.txt); (U) rows carry their proof (fu-AS2.txt); every other row was classed by recipe v4 step 4 as r2 read it and read by hand in this session. Other groups' files were measured in the same run and are their shards' to list.
+TOTAL (whole api, this host) lines 180141/184389 (4248 uncovered), branches 12948/15498 (2550 uncovered sides)
+G2 (58 files of SHARDS.md's G2) lines 70235/71278 (1043 uncovered), branches 4757/5510 (753 uncovered sides): (F) 173 lines 545 sides; (U) 123 lines 90 sides; GAP 747 lines 118 sides (production 541 lines 78 sides; test code 96 lines 28 sides; inside #[ignore]d tests 110 lines 12 sides)
+Classes: a row whose line the predecessor's lists (tip b3d5321c) classed keeps that class, its line mapped through git diff; (U) rows carry their proof (fu-AS2.txt); every other row was classed by recipe v4 step 4 (test code only: a panic/unreachable line, a message argument of an assert whose statement ran, the false side of an && operand inside an assert whose line ran, the false arm of a matches! inside an assert whose statement ran (as the previous lists read the same rows), the else of a let-else that panics whose line ran) and read by hand in session -5. Other groups' files were measured in the same run and are their shards' to list.
 per file (lines a/b, branches c/d; GAP lines/sides):
-  crates/api/src/bars_sort.rs: lines 3060/3107, branches 420/470; GAP 46/41
-  crates/api/src/bars_sort_tests.rs: lines 1263/1266, branches 73/112; GAP 0/0
-  crates/api/src/bars_unknown_series_tests.rs: lines 516/516, branches 2/2; GAP 0/0
-  crates/api/src/boolean_observation_budget.rs: lines 79/79, branches 17/22; GAP 0/0
-  crates/api/src/boolean_search_budget.rs: lines 47/47, branches 8/8; GAP 0/0
-  crates/api/src/booleancampaignjson.rs: lines 102/111, branches 16/24; GAP 9/8
-  crates/api/src/booleancampaignjson_tests.rs: lines 318/318, branches 2/2; GAP 0/0
-  crates/api/src/booleanjson.rs: lines 305/326, branches 39/42; GAP 21/3
-  crates/api/src/booleanjson_tests.rs: lines 428/428, branches 10/12; GAP 0/0
-  crates/api/src/booleanlaunch.rs: lines 376/393, branches 85/88; GAP 17/2
-  crates/api/src/booleanlaunch_tests.rs: lines 711/711, branches 18/22; GAP 0/0
+  crates/api/src/server.rs: lines 19213/19540, branches 1235/1468; GAP 220/30
+  crates/api/src/indexstoprankingjson.rs: lines 308/502, branches 24/48; GAP 194/21
+  crates/api/src/sources.rs: lines 2759/2766, branches 532/542; GAP 0/0
+  crates/api/src/sources_day_truth_tests.rs: lines 596/596, branches 7/10; GAP 0/0
+  crates/api/src/sources_tests.rs: lines 2802/2804, branches 9/12; GAP 0/0
+  crates/api/src/provenance.rs: lines 1160/1171, branches 158/166; GAP 0/0
+  crates/api/src/provenance_tests.rs: lines 2204/2210, branches 28/50; GAP 0/0
   crates/api/src/booleanqualification_projection.rs: lines 44/143, branches 6/12; GAP 99/6
   crates/api/src/booleanqualification_projection_tests.rs: lines 71/71, branches 0/0; GAP 0/0
-  crates/api/src/calendar_of.rs: lines 1647/1702, branches 103/128; GAP 52/19
-  crates/api/src/calendar_record.rs: lines 654/669, branches 82/90; GAP 7/4
-  crates/api/src/calendar_record_tests.rs: lines 469/471, branches 18/24; GAP 0/1
-  crates/api/src/calendar_route.rs: lines 772/813, branches 86/94; GAP 41/7
-  crates/api/src/calendar_route_tests.rs: lines 730/735, branches 24/46; GAP 4/1
-  crates/api/src/census_cache.rs: lines 1028/1100, branches 110/138; GAP 61/23
-  crates/api/src/census_tail_tests.rs: lines 376/378, branches 4/8; GAP 0/0
-  crates/api/src/constituents.rs: lines 875/875, branches 54/62; GAP 0/1
-  crates/api/src/dayflags_rules.rs: lines 940/941, branches 186/188; GAP 1/1
-  crates/api/src/dayflags_rules_tests.rs: lines 3657/3706, branches 53/82; GAP 19/9
+  crates/api/src/bars_sort.rs: lines 3795/3819, branches 447/488; GAP 7/2
+  crates/api/src/bars_sort_tests.rs: lines 1263/1266, branches 73/112; GAP 0/0
+  crates/api/src/census_cache.rs: lines 1708/1772, branches 168/200; GAP 36/12
+  crates/api/src/calendar_of.rs: lines 1989/2033, branches 117/134; GAP 40/6
+  crates/api/src/calendar_route.rs: lines 874/878, branches 96/100; GAP 2/1
+  crates/api/src/calendar_route_tests.rs: lines 1170/1175, branches 36/66; GAP 3/3
+  crates/api/src/booleanlaunch.rs: lines 376/393, branches 85/88; GAP 17/2
+  crates/api/src/booleanlaunch_tests.rs: lines 711/711, branches 18/22; GAP 0/0
+  crates/api/src/expressionsearchjson.rs: lines 148/181, branches 18/36; GAP 33/18
   crates/api/src/disk_route.rs: lines 1413/1418, branches 143/156; GAP 3/0
   crates/api/src/disk_route_seal_tests.rs: lines 631/631, branches 10/14; GAP 0/0
-  crates/api/src/expressionsearchjson.rs: lines 148/181, branches 18/36; GAP 33/18
-  crates/api/src/fault_log.rs: lines 403/403, branches 39/40; GAP 0/0
-  crates/api/src/fno_boundary_tests.rs: lines 1239/1241, branches 26/28; GAP 0/0
-  crates/api/src/head_deadline_body_tests.rs: lines 635/694, branches 35/60; GAP 51/7
-  crates/api/src/indexstoprankingjson.rs: lines 308/502, branches 24/48; GAP 194/21
-  crates/api/src/indexstopvixjson.rs: lines 264/275, branches 22/26; GAP 11/4
-  crates/api/src/instruments_route.rs: lines 824/824, branches 48/64; GAP 0/0
-  crates/api/src/livejson.rs: lines 405/407, branches 22/36; GAP 0/0
-  crates/api/src/master.rs: lines 654/661, branches 43/58; GAP 5/1
-  crates/api/src/operation_audit.rs: lines 216/223, branches 45/46; GAP 7/0
-  crates/api/src/operation_audit_tests.rs: lines 699/700, branches 6/8; GAP 0/0
-  crates/api/src/provenance.rs: lines 1109/1170, branches 136/164; GAP 58/25
-  crates/api/src/provenance_tests.rs: lines 1414/1416, branches 5/6; GAP 0/0
-  crates/api/src/quarantine_route.rs: lines 126/126, branches 12/12; GAP 0/0
-  crates/api/src/quarantine_route_tests.rs: lines 556/560, branches 13/14; GAP 2/1
-  crates/api/src/recovery_control.rs: lines 386/386, branches 26/26; GAP 0/0
-  crates/api/src/render.rs: lines 2654/2661, branches 245/278; GAP 1/1
-  crates/api/src/research_doors_tests.rs: lines 96/97, branches 2/2; GAP 0/0
-  crates/api/src/scrub_route.rs: lines 1590/1597, branches 175/186; GAP 6/10
-  crates/api/src/server.rs: lines 18671/19101, branches 1242/1524; GAP 354/89
-  crates/api/src/server_cloud_mutant_tests_e.rs: lines 585/587, branches 11/12; GAP 0/0
-  crates/api/src/sources.rs: lines 2719/2766, branches 500/542; GAP 42/37
-  crates/api/src/sources_day_truth_tests.rs: lines 490/490, branches 4/4; GAP 0/0
-  crates/api/src/sources_tests.rs: lines 2008/2010, branches 9/12; GAP 0/0
-  crates/api/src/speed.rs: lines 535/557, branches 73/82; GAP 21/6
-  crates/api/src/speed_tests.rs: lines 766/767, branches 32/60; GAP 0/0
-  crates/api/src/store_wire.rs: lines 427/431, branches 18/18; GAP 2/0
-  crates/api/src/topjson.rs: lines 468/478, branches 21/24; GAP 10/3
+  crates/api/src/operation_audit.rs: lines 223/223, branches 45/46; GAP 0/0
+  crates/api/src/operation_audit_tests.rs: lines 781/782, branches 6/8; GAP 0/0
+  crates/api/src/speed.rs: lines 551/557, branches 76/82; GAP 4/2
+  crates/api/src/speed_tests.rs: lines 1003/1005, branches 42/72; GAP 1/1
+  crates/api/src/dayflags_rules.rs: lines 940/941, branches 186/188; GAP 1/1
+  crates/api/src/dayflags_rules_tests.rs: lines 3663/3712, branches 52/78; GAP 18/0
   crates/api/src/trades.rs: lines 1061/1073, branches 40/46; GAP 0/0
-  crates/api/src/verify.rs: lines 246/250, branches 28/30; GAP 1/1
-  crates/api/tests/cloud_mutants_bars.rs: lines 1773/1775, branches 19/34; GAP 0/5
+  crates/api/src/booleanjson.rs: lines 324/326, branches 41/42; GAP 0/0
+  crates/api/src/booleanjson_tests.rs: lines 679/679, branches 12/14; GAP 0/0
+  crates/api/src/calendar_record.rs: lines 666/675, branches 86/92; GAP 0/0
+  crates/api/src/calendar_record_tests.rs: lines 533/535, branches 17/22; GAP 0/0
+  crates/api/src/scrub_route.rs: lines 1669/1673, branches 181/186; GAP 0/0
+  crates/api/src/topjson.rs: lines 537/544, branches 24/28; GAP 6/1
+  crates/api/src/quarantine_route.rs: lines 126/126, branches 12/12; GAP 0/0
+  crates/api/src/quarantine_route_tests.rs: lines 563/564, branches 14/14; GAP 0/0
+  crates/api/src/booleancampaignjson.rs: lines 109/111, branches 23/24; GAP 0/0
+  crates/api/src/booleancampaignjson_tests.rs: lines 564/564, branches 10/10; GAP 0/0
+  crates/api/src/recovery_control.rs: lines 386/386, branches 26/26; GAP 0/0
+  crates/api/src/indexstopvixjson.rs: lines 271/278, branches 22/26; GAP 6/3
+  crates/api/src/head_deadline_body_tests.rs: lines 634/694, branches 35/60; GAP 51/7
+  crates/api/src/render.rs: lines 2654/2661, branches 245/278; GAP 1/1
   crates/api/tests/logs_r3_24.rs: lines 240/241, branches 10/10; GAP 0/0
+  crates/api/src/verify.rs: lines 356/360, branches 29/30; GAP 0/0
+  crates/api/src/master.rs: lines 654/661, branches 43/58; GAP 5/1
+  crates/api/src/store_wire.rs: lines 426/429, branches 18/18; GAP 0/0
+  crates/api/src/instruments_route.rs: lines 824/824, branches 48/64; GAP 0/0
+  crates/api/src/fault_log.rs: lines 403/403, branches 39/40; GAP 0/0
+  crates/api/src/server_cloud_mutant_tests_e.rs: lines 585/587, branches 11/12; GAP 0/0
+  crates/api/tests/cloud_mutants_bars.rs: lines 1779/1781, branches 16/28; GAP 0/0
+  crates/api/src/constituents.rs: lines 932/932, branches 55/62; GAP 0/0
+  crates/api/src/boolean_observation_budget.rs: lines 79/79, branches 17/22; GAP 0/0
+  crates/api/src/fno_boundary_tests.rs: lines 1295/1297, branches 28/32; GAP 0/0
+  crates/api/src/bars_unknown_series_tests.rs: lines 516/516, branches 2/2; GAP 0/0
+  crates/api/src/census_tail_tests.rs: lines 376/378, branches 4/8; GAP 0/0
   crates/api/tests/store_step_forms.rs: lines 50/50, branches 0/0; GAP 0/0
+  crates/api/src/boolean_search_budget.rs: lines 47/47, branches 8/8; GAP 0/0
+  crates/api/src/livejson.rs: lines 405/407, branches 22/36; GAP 0/0
+  crates/api/src/research_doors_tests.rs: lines 96/97, branches 2/2; GAP 0/0
 
 rows:
-GAP prod LINE crates/api/src/bars_sort.rs:518  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:1054  ends.push(None);
-GAP prod LINE crates/api/src/bars_sort.rs:1055  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:1064  return Ok(None);
-GAP prod LINE crates/api/src/bars_sort.rs:1070  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:1099  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:1291  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:1401  return Err("no valued row to order".to_owned());
-GAP prod LINE crates/api/src/bars_sort.rs:1422  return Err(format!(
-GAP prod LINE crates/api/src/bars_sort.rs:1423  "the value bisection found {vk} for row {k} and no row holds it"
-GAP prod LINE crates/api/src/bars_sort.rs:1424  ));
-GAP prod LINE crates/api/src/bars_sort.rs:1461  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:1568  }
-GAP prod LINE crates/api/src/bars_sort.rs:1960  }
-GAP prod LINE crates/api/src/bars_sort.rs:1998  return Err(Attempt::Refused(super::needs_scan_sentence(
-GAP prod LINE crates/api/src/bars_sort.rs:1999  &format!("ordering by {}", column.as_str()),
-GAP prod LINE crates/api/src/bars_sort.rs:2000  read_rows,
-GAP prod LINE crates/api/src/bars_sort.rs:2001  budget,
-GAP prod LINE crates/api/src/bars_sort.rs:2002  )));
-GAP prod LINE crates/api/src/bars_sort.rs:2070  continue;
 GAP prod LINE crates/api/src/bars_sort.rs:2075  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2085  continue;
 GAP prod LINE crates/api/src/bars_sort.rs:2145  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2172  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2175  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2178  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2216  Some(None) => continue,
-GAP prod LINE crates/api/src/bars_sort.rs:2220  || (Arc::from(""), Arc::from("")),
-GAP prod LINE crates/api/src/bars_sort.rs:2275  return Err(Attempt::Refused(super::needs_scan_sentence(
-GAP prod LINE crates/api/src/bars_sort.rs:2276  "the extremes",
-GAP prod LINE crates/api/src/bars_sort.rs:2277  owed,
-GAP prod LINE crates/api/src/bars_sort.rs:2278  budget,
-GAP prod LINE crates/api/src/bars_sort.rs:2279  )));
-GAP prod LINE crates/api/src/bars_sort.rs:2303  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2381  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2384  continue;
 GAP prod LINE crates/api/src/bars_sort.rs:2388  Err(why) => {
 GAP prod LINE crates/api/src/bars_sort.rs:2389  faults.push_once(why);
 GAP prod LINE crates/api/src/bars_sort.rs:2390  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2407  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2410  faults.push(format!("{}: slot {slot} has no kept run", plan.key.text()));
-GAP prod LINE crates/api/src/bars_sort.rs:2411  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2456  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2531  continue;
-GAP prod LINE crates/api/src/bars_sort.rs:2549  return Err(super::needs_scan_sentence("the extremes", owed, budget));
-GAP prod LINE crates/api/src/bars_sort.rs:2566  continue;
-GAP prod BRANCH crates/api/src/bars_sort.rs:517:17 False  let Some(run) = plan.runs.get(run_at).copied() else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:582:32 False  if until > from {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1053:16 True  if len == 0 {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1063:12 True  if tlo > thi {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1069:21 False  let Some((first, last)) = *end else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1098:17 False  let Some((first, last)) = *end else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1290:17 False  let Some(run) = self.runs.get_mut(array) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1333:20 False  if let Some(run) = self.runs.get(array)
-GAP prod BRANCH crates/api/src/bars_sort.rs:1347:16 False  if time.end > time.start {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1400:13 False  let Some((lo, hi)) = arrays.domain() else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1421:13 False  let Some((ts, series)) = arrays.select_in(root, plans, &slices, k - before)? else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1460:13 False  let Some(run) = arrays.runs.get_mut(array) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1492:16 False  if let Some(run) = arrays.runs.get_mut(array)
-GAP prod BRANCH crates/api/src/bars_sort.rs:1559:16 False  if let Some(Some((_, found))) = heads.get(at) {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1562:16 False  if let Some(cursor) = cursors.get_mut(at) {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1565:20 False  if let Some(slot) = heads.get_mut(at) {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1719:16 False  && let Some(key) = key
-GAP prod BRANCH crates/api/src/bars_sort.rs:1898:28 False  if let Piece::Cut { entries, .. } = piece {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1946:28 False  if let Some(month) = month {
-GAP prod BRANCH crates/api/src/bars_sort.rs:1997:12 True  if let Some(budget) = budget.filter(|&budget| read_rows > budget) {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2069:13 False  let Some(series_rules) = rules.get(cut.series) else {
+GAP test LINE crates/api/src/bars_sort.rs:4755  super::Slice::Run { array, lo, hi } => {
+GAP test LINE crates/api/src/bars_sort.rs:4756  format!("run {array} {lo}..{hi} ({len})")
 GAP prod BRANCH crates/api/src/bars_sort.rs:2074:13 False  let Ok(series) = u32::try_from(cut.series) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2084:17 False  let Some(plan) = plans.get_mut(cut.series) else {
 GAP prod BRANCH crates/api/src/bars_sort.rs:2144:13 False  let Ok(series) = u32::try_from(cut.series) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2151:20 False  && let Some(run) = plans
-GAP prod BRANCH crates/api/src/bars_sort.rs:2171:17 False  let Some((found, stamp)) = views.get(&(cut.series, slot)).cloned() else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2174:17 False  let Ok(view) = found.as_ref() else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2177:17 False  let Some(info) = view.walked.runs.get(run).copied() else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2274:16 True  if let Some(budget) = budget.filter(|&budget| owed > budget) {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2302:25 False  let Some(plan) = plans.get_mut(cut.series) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2315:28 False  if let Some(kept) = extremes.as_mut() {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2380:21 False  let Some(plan) = plans.get_mut(series as usize) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2383:21 False  let Some(slot) = plan.runs.get(run).map(|at| at.slot) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2406:21 False  let Some(plan) = plans.get_mut(series as usize) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2409:21 False  let Some(run) = run_of_slot(plan, slot) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2455:13 False  let (Some(plan), Some(series_rules)) = (plans.get_mut(series), rules.get(series)) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2515:28 False  if let Some(summary) = summary {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2530:17 False  let Some(plan) = plans.get(cut.series) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2548:12 True  if let Some(budget) = budget.filter(|&budget| owed > budget) {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2565:13 False  let Some(plan) = plans.get_mut(series) else {
-GAP prod BRANCH crates/api/src/bars_sort.rs:2593:20 False  && let Some(at) = plan.slots.get(slot)
-GAP prod LINE crates/api/src/booleancampaignjson.rs:71  Ok(body) => {
-GAP prod LINE crates/api/src/booleancampaignjson.rs:72  let reply = response(StatusCode::OK, &body);
-GAP prod LINE crates/api/src/booleancampaignjson.rs:73  if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-GAP prod LINE crates/api/src/booleancampaignjson.rs:74  reply
-GAP prod LINE crates/api/src/booleancampaignjson.rs:76  refused(
-GAP prod LINE crates/api/src/booleancampaignjson.rs:78  "campaign comparison exceeds response byte ceiling; no partial rows returned",
-GAP prod LINE crates/api/src/booleancampaignjson.rs:107  "completed"
-GAP prod LINE crates/api/src/booleancampaignjson.rs:109  "refused"
-GAP prod LINE crates/api/src/booleancampaignjson.rs:111  "running"
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:73:16 True  if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:73:16 False  if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:105:162 True  let rows:Vec<_>=selected.iter().map(|(index,(slot,rung))|json!({"rung":rung,"rung_index":index.to_string(),"unit":crate::server::hex32(slot.
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:105:206 True  let rows:Vec<_>=selected.iter().map(|(index,(slot,rung))|json!({"rung":rung,"rung_index":index.to_string(),"unit":crate::server::hex32(slot.
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:105:248 True  let rows:Vec<_>=selected.iter().map(|(index,(slot,rung))|json!({"rung":rung,"rung_index":index.to_string(),"unit":crate::server::hex32(slot.
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:106:20 True  let state = if selected.iter().all(|(_, (s, _))| s.complete.is_some()) {
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:108:15 True  } else if selected.iter().any(|(_, (s, _))| !s.reason.is_empty()) {
-GAP prod BRANCH crates/api/src/booleancampaignjson.rs:110:15 True  } else if selected.iter().any(|(_, (s, _))| s.started) {
-GAP prod LINE crates/api/src/booleanjson.rs:136  Ok(body) => {
-GAP prod LINE crates/api/src/booleanjson.rs:137  let result = response(StatusCode::OK, &body);
-GAP prod LINE crates/api/src/booleanjson.rs:138  if result.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-GAP prod LINE crates/api/src/booleanjson.rs:139  result
-GAP prod LINE crates/api/src/booleanjson.rs:141  refused(
-GAP prod LINE crates/api/src/booleanjson.rs:143  "catalog response exceeds byte admission; no prefix returned",
-GAP prod LINE crates/api/src/booleanjson.rs:286  _ => return Err("unsupported catalog page".to_owned()),
-GAP prod LINE crates/api/src/booleanjson.rs:364  values
-GAP prod LINE crates/api/src/booleanjson.rs:365  .get(n)
-GAP prod LINE crates/api/src/booleanjson.rs:366  .map(ToString::to_string)
-GAP prod LINE crates/api/src/booleanjson.rs:367  .ok_or("coordinate ladder index missing".to_owned())
-GAP prod LINE crates/api/src/booleanjson.rs:368  })
-GAP prod LINE crates/api/src/booleanjson.rs:380  ForcedStopV1::IncludeExactObserved(ppm) => {
-GAP prod LINE crates/api/src/booleanjson.rs:381  json!({"kind":"include-exact-observed","ppm":ppm.to_string()})
-GAP prod LINE crates/api/src/booleanjson.rs:383  ForcedStopV1::RequireExactObserved(ppm) => {
-GAP prod LINE crates/api/src/booleanjson.rs:384  json!({"kind":"require-exact-observed","ppm":ppm.to_string()})
-GAP prod LINE crates/api/src/booleanjson.rs:407  "trail" => grid.policy.rungs().trail(),
-GAP prod LINE crates/api/src/booleanjson.rs:408  _ => return Err("saved requested axis missing".to_owned()),
-GAP prod LINE crates/api/src/booleanjson.rs:414  "target" => &grid.targets,
-GAP prod LINE crates/api/src/booleanjson.rs:415  "trail" => &grid.trails,
-GAP prod LINE crates/api/src/booleanjson.rs:416  _ => return Err("saved resolved axis missing".to_owned()),
-GAP prod BRANCH crates/api/src/booleanjson.rs:138:16 True  if result.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-GAP prod BRANCH crates/api/src/booleanjson.rs:138:16 False  if result.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-GAP prod BRANCH crates/api/src/booleanjson.rs:194:30 False  held.root == root && held.identity == asked.identity && held.budget == budget
 GAP prod LINE crates/api/src/booleanlaunch.rs:277  status.observe(next)?;
 GAP prod LINE crates/api/src/booleanlaunch.rs:278  let mut held = site
 GAP prod LINE crates/api/src/booleanlaunch.rs:279  .sweep
@@ -321,143 +202,61 @@ GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:21:8 True  [L-
 GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:21:8 False  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  if rows.len() != observations.len() {
 GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:124:24 True  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  let folds = if let Some(folds) = &row.folds {
 GAP prod BRANCH crates/api/src/booleanqualification_projection.rs:124:24 False  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  let folds = if let Some(folds) = &row.folds {
-GAP prod LINE crates/api/src/calendar_of.rs:554  }
-GAP prod LINE crates/api/src/calendar_of.rs:616  Err(why) => report.unreadable.push(why),
-GAP prod LINE crates/api/src/calendar_of.rs:671  return;
-GAP prod LINE crates/api/src/calendar_of.rs:690  return;
-GAP prod LINE crates/api/src/calendar_of.rs:831  Err(_) => unreadable = unreadable.saturating_add(1),
-GAP prod LINE crates/api/src/calendar_of.rs:836  return Err(format!(
-GAP prod LINE crates/api/src/calendar_of.rs:837  "{unreadable} minute record(s) in {month} could not be read, so the \
-GAP prod LINE crates/api/src/calendar_of.rs:838  session windows this month would report are not the ones it traded. \
-GAP prod LINE crates/api/src/calendar_of.rs:839  A minute that did not decode splits a run, and a split run is a \
-GAP prod LINE crates/api/src/calendar_of.rs:840  midday break the exchange never took."
-GAP prod LINE crates/api/src/calendar_of.rs:841  ));
-GAP ignored LINE crates/api/src/calendar_of.rs:2159  fn it_reproduces_the_operators_store() {
-GAP ignored LINE crates/api/src/calendar_of.rs:2160  let Some(home) = std::env::var_os("HOME") else {
-GAP ignored LINE crates/api/src/calendar_of.rs:2161  panic!("no HOME");
-GAP ignored LINE crates/api/src/calendar_of.rs:2163  let root = std::path::PathBuf::from(home).join(".brutex/store");
-GAP ignored LINE crates/api/src/calendar_of.rs:2164  assert!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2165  root.join("bars").is_dir(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2168  root.display()
-GAP ignored LINE crates/api/src/calendar_of.rs:2171  let mut months = Vec::new();
-GAP ignored LINE crates/api/src/calendar_of.rs:2172  for year in 2019..=2026_u16 {
-GAP ignored LINE crates/api/src/calendar_of.rs:2173  for month in 1..=12_u8 {
-GAP ignored LINE crates/api/src/calendar_of.rs:2174  if let Ok(ym) = YearMonth::new(year, month) {
-GAP ignored LINE crates/api/src/calendar_of.rs:2175  months.push(ym);
-GAP ignored LINE crates/api/src/calendar_of.rs:2176  }
-GAP ignored LINE crates/api/src/calendar_of.rs:2180  let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
-GAP ignored LINE crates/api/src/calendar_of.rs:2182  println!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2184  cal.span(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2185  cal.sessions(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2188  report.unreadable.len()
-GAP ignored LINE crates/api/src/calendar_of.rs:2191  assert_eq!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2192  cal.sessions(),
-GAP ignored LINE crates/api/src/calendar_of.rs:2198  let mut owed = 0_u32;
-GAP ignored LINE crates/api/src/calendar_of.rs:2199  let mut unmeasured = 0_u32;
-GAP ignored LINE crates/api/src/calendar_of.rs:2200  for day in cal.first_day()..=cal.last_day() {
-GAP ignored LINE crates/api/src/calendar_of.rs:2201  match cal.expected_bars(day) {
-GAP ignored LINE crates/api/src/calendar_of.rs:2202  Some(n) => owed = owed.saturating_add(u32::from(n)),
-GAP ignored LINE crates/api/src/calendar_of.rs:2204  if matches!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2205  cal.kind_of(day),
-GAP ignored LINE crates/api/src/calendar_of.rs:2207  ) {
-GAP ignored LINE crates/api/src/calendar_of.rs:2208  unmeasured = unmeasured.saturating_add(1);
-GAP ignored LINE crates/api/src/calendar_of.rs:2209  }
-GAP ignored LINE crates/api/src/calendar_of.rs:2213  assert_eq!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2218  println!("minute bars owed: {owed}");
-GAP ignored LINE crates/api/src/calendar_of.rs:2219  assert_eq!(
-GAP ignored LINE crates/api/src/calendar_of.rs:2225  }
-GAP prod LINE crates/api/src/calendar_of.rs:2672  out.push(',');
-GAP prod LINE crates/api/src/calendar_of.rs:2685  flush(&mut out, done);
-GAP prod LINE crates/api/src/calendar_of.rs:2936  out.push(',');
-GAP prod LINE crates/api/src/calendar_of.rs:2947  if n > 0 {
-GAP prod LINE crates/api/src/calendar_of.rs:2948  out.push(',');
-GAP prod LINE crates/api/src/calendar_of.rs:2949  }
-GAP prod LINE crates/api/src/calendar_of.rs:2950  out.push_str(&crate::pullrun::quote_for_json(name));
-GAP prod BRANCH crates/api/src/calendar_of.rs:385:16 False  if let Some(key) = self.key.take() {
-GAP prod BRANCH crates/api/src/calendar_of.rs:549:28 False  if let std::collections::btree_map::Entry::Vacant(slot) = traded.entry(day) {
+GAP test LINE crates/api/src/calendar_of.rs:2473  landed = flight
+GAP test LINE crates/api/src/calendar_of.rs:2474  .ready
+GAP test LINE crates/api/src/calendar_of.rs:2475  .wait(landed)
+GAP test LINE crates/api/src/calendar_of.rs:2476  .unwrap_or_else(PoisonError::into_inner);
+GAP test LINE crates/api/src/calendar_of.rs:2477  }
+GAP test LINE crates/api/src/calendar_of.rs:2510  Landed::Deriving | Landed::Abandoned => None,
+GAP ignored LINE crates/api/src/calendar_of.rs:2551  fn it_reproduces_the_operators_store() {
+GAP ignored LINE crates/api/src/calendar_of.rs:2552  let Some(home) = std::env::var_os("HOME") else {
+GAP ignored LINE crates/api/src/calendar_of.rs:2553  panic!("no HOME");
+GAP ignored LINE crates/api/src/calendar_of.rs:2555  let root = std::path::PathBuf::from(home).join(".brutex/store");
+GAP ignored LINE crates/api/src/calendar_of.rs:2556  assert!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2557  root.join("bars").is_dir(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2560  root.display()
+GAP ignored LINE crates/api/src/calendar_of.rs:2563  let mut months = Vec::new();
+GAP ignored LINE crates/api/src/calendar_of.rs:2564  for year in 2019..=2026_u16 {
+GAP ignored LINE crates/api/src/calendar_of.rs:2565  for month in 1..=12_u8 {
+GAP ignored LINE crates/api/src/calendar_of.rs:2566  if let Ok(ym) = YearMonth::new(year, month) {
+GAP ignored LINE crates/api/src/calendar_of.rs:2567  months.push(ym);
+GAP ignored LINE crates/api/src/calendar_of.rs:2568  }
+GAP ignored LINE crates/api/src/calendar_of.rs:2572  let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+GAP ignored LINE crates/api/src/calendar_of.rs:2574  println!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2576  cal.span(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2577  cal.sessions(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2580  report.unreadable.len()
+GAP ignored LINE crates/api/src/calendar_of.rs:2583  assert_eq!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2584  cal.sessions(),
+GAP ignored LINE crates/api/src/calendar_of.rs:2590  let mut owed = 0_u32;
+GAP ignored LINE crates/api/src/calendar_of.rs:2591  let mut unmeasured = 0_u32;
+GAP ignored LINE crates/api/src/calendar_of.rs:2592  for day in cal.first_day()..=cal.last_day() {
+GAP ignored LINE crates/api/src/calendar_of.rs:2593  match cal.expected_bars(day) {
+GAP ignored LINE crates/api/src/calendar_of.rs:2594  Some(n) => owed = owed.saturating_add(u32::from(n)),
+GAP ignored LINE crates/api/src/calendar_of.rs:2596  if matches!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2597  cal.kind_of(day),
+GAP ignored LINE crates/api/src/calendar_of.rs:2599  ) {
+GAP ignored LINE crates/api/src/calendar_of.rs:2600  unmeasured = unmeasured.saturating_add(1);
+GAP ignored LINE crates/api/src/calendar_of.rs:2601  }
+GAP ignored LINE crates/api/src/calendar_of.rs:2605  assert_eq!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2610  println!("minute bars owed: {owed}");
+GAP ignored LINE crates/api/src/calendar_of.rs:2611  assert_eq!(
+GAP ignored LINE crates/api/src/calendar_of.rs:2617  }
 GAP prod BRANCH crates/api/src/calendar_of.rs:551:32 False  if let Some(civil) = day_month(day) {
-GAP prod BRANCH crates/api/src/calendar_of.rs:585:28 False  if let Some(slot) = traded.get_mut(day) {
-GAP prod BRANCH crates/api/src/calendar_of.rs:666:9 False  let Some(mut month) = u32::try_from(calendar.first_day())
-GAP prod BRANCH crates/api/src/calendar_of.rs:677:15 True  while ahead.next_if(|held| **held < key).is_some() {}
-GAP prod BRANCH crates/api/src/calendar_of.rs:689:13 False  let Ok(next) = end.succ() else {
 GAP prod BRANCH crates/api/src/calendar_of.rs:827:35 True  Some(last) if last.1 == minute => {}
-GAP prod BRANCH crates/api/src/calendar_of.rs:835:8 True  if unreadable > 0 {
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2160:13 True  let Some(home) = std::env::var_os("HOME") else {
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2160:13 False  let Some(home) = std::env::var_os("HOME") else {
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2174:24 True  if let Ok(ym) = YearMonth::new(year, month) {
-GAP ignored BRANCH crates/api/src/calendar_of.rs:2174:24 False  if let Ok(ym) = YearMonth::new(year, month) {
-GAP prod BRANCH crates/api/src/calendar_of.rs:2413:12 False  if let Some(at) = entry {
-GAP prod BRANCH crates/api/src/calendar_of.rs:2671:12 True  if !first {
-GAP prod BRANCH crates/api/src/calendar_of.rs:2684:12 True  if let Some(done) = run {
-GAP prod BRANCH crates/api/src/calendar_of.rs:2935:12 True  if position > 0 {
-GAP prod BRANCH crates/api/src/calendar_of.rs:2947:16 True  if n > 0 {
-GAP prod BRANCH crates/api/src/calendar_of.rs:2947:16 False  if n > 0 {
-GAP test LINE crates/api/src/calendar_record.rs:317  DayKind::Unmeasured => None,
-GAP prod LINE crates/api/src/calendar_record.rs:644  return None;
-GAP prod LINE crates/api/src/calendar_record.rs:754  None => {}
-GAP prod LINE crates/api/src/calendar_record.rs:838  walked
-GAP prod LINE crates/api/src/calendar_record.rs:839  .withheld
-GAP prod LINE crates/api/src/calendar_record.rs:840  .push(serde_json::json!({ "from": start, "to": end }));
-GAP prod LINE crates/api/src/calendar_record.rs:881  "the series asked".to_owned()
-GAP prod BRANCH crates/api/src/calendar_record.rs:180:20 True  || session != Session::full()
-GAP prod BRANCH crates/api/src/calendar_record.rs:643:17 False  let DayKind::Open(session) = pull::calendar::exchange_kind_of(day) else {
-GAP prod BRANCH crates/api/src/calendar_record.rs:837:23 True  } else if let Some((start, end)) = run.take() {
-GAP prod BRANCH crates/api/src/calendar_record.rs:880:20 True  if names.is_empty() {
-GAP test BRANCH crates/api/src/calendar_record_tests.rs:476:56 False  if record_code(day).is_some_and(is_session) && day != at(2022, 3, 1) {
-GAP prod LINE crates/api/src/calendar_route.rs:311  Joined::Full => return builds_full(),
-GAP prod LINE crates/api/src/calendar_route.rs:768  Err(crate::calendar_of::MonthFault::Unreadable(why)) => {
-GAP prod LINE crates/api/src/calendar_route.rs:769  unreadable.push(format!("{}: {why}", symbol.as_str()));
-GAP prod LINE crates/api/src/calendar_route.rs:770  months.push((*month, None));
-GAP prod LINE crates/api/src/calendar_route.rs:771  }
-GAP prod LINE crates/api/src/calendar_route.rs:1044  Err(refused) => return refused,
-GAP prod LINE crates/api/src/calendar_route.rs:1155  return;
-GAP prod LINE crates/api/src/calendar_route.rs:1159  None => warmed.unqueued = warmed.unqueued.saturating_add(1),
-GAP prod LINE crates/api/src/calendar_route.rs:1167  self.site.calendars.builds.abandon(
-GAP prod LINE crates/api/src/calendar_route.rs:1168  &key,
-GAP prod LINE crates/api/src/calendar_route.rs:1169  &build,
-GAP prod LINE crates/api/src/calendar_route.rs:1170  crate::calendar_of::KeptAnswer {
-GAP prod LINE crates/api/src/calendar_route.rs:1171  status: axum::http::StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-GAP prod LINE crates/api/src/calendar_route.rs:1172  body: serde_json::json!({
-GAP prod LINE crates/api/src/calendar_route.rs:1173  "status": "refused",
-GAP prod LINE crates/api/src/calendar_route.rs:1174  "feed": key.0.as_str(),
-GAP prod LINE crates/api/src/calendar_route.rs:1175  "refusal": "the start-up build stopped before this answer was built; \
-GAP prod LINE crates/api/src/calendar_route.rs:1176  ask again, and the request leads a build of its own",
-GAP prod LINE crates/api/src/calendar_route.rs:1177  })
-GAP prod LINE crates/api/src/calendar_route.rs:1178  .to_string(),
-GAP prod LINE crates/api/src/calendar_route.rs:1179  },
-GAP prod LINE crates/api/src/calendar_route.rs:1180  );
-GAP prod LINE crates/api/src/calendar_route.rs:1181  }
-GAP prod LINE crates/api/src/calendar_route.rs:1226  (
-GAP prod LINE crates/api/src/calendar_route.rs:1227  axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-GAP prod LINE crates/api/src/calendar_route.rs:1228  [(
-GAP prod LINE crates/api/src/calendar_route.rs:1229  axum::http::header::CONTENT_TYPE,
-GAP prod LINE crates/api/src/calendar_route.rs:1230  "application/json; charset=utf-8",
-GAP prod LINE crates/api/src/calendar_route.rs:1231  )],
-GAP prod LINE crates/api/src/calendar_route.rs:1232  serde_json::json!({
-GAP prod LINE crates/api/src/calendar_route.rs:1233  "status": "refused",
-GAP prod LINE crates/api/src/calendar_route.rs:1234  "refusal": format!("the start-up build could not spell {text:?} as a request: {why}"),
-GAP prod LINE crates/api/src/calendar_route.rs:1235  })
-GAP prod LINE crates/api/src/calendar_route.rs:1236  .to_string(),
-GAP prod LINE crates/api/src/calendar_route.rs:1237  )
-GAP prod LINE crates/api/src/calendar_route.rs:1238  })
-GAP prod LINE crates/api/src/calendar_route.rs:1298  Err(refused) => refused,
-GAP prod LINE crates/api/src/calendar_route.rs:1302  warmed.refused = warmed.refused.saturating_add(1);
-GAP prod LINE crates/api/src/calendar_route.rs:1311  Ok(Err(why)) => Err(why),
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2552:13 True  let Some(home) = std::env::var_os("HOME") else {
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2552:13 False  let Some(home) = std::env::var_os("HOME") else {
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2566:24 True  if let Ok(ym) = YearMonth::new(year, month) {
+GAP ignored BRANCH crates/api/src/calendar_of.rs:2566:24 False  if let Ok(ym) = YearMonth::new(year, month) {
 GAP prod LINE crates/api/src/calendar_route.rs:1312  Err(_) => Err("the pull journal's walk at start unwound".to_owned()),
 GAP prod LINE crates/api/src/calendar_route.rs:1314  Err(why) => Err(format!("the pull journal's walk could not start: {why}")),
-GAP prod BRANCH crates/api/src/calendar_route.rs:276:16 False  && let Some(marked) = crate::calendar_of::record::not_widened(&answer.2)
-GAP prod BRANCH crates/api/src/calendar_route.rs:491:20 True  Some(_) if progress.owed > 0 => format!(
-GAP prod BRANCH crates/api/src/calendar_route.rs:901:13 False  *exchange == brutex_core::instrument::Exchange::Nse
-GAP prod BRANCH crates/api/src/calendar_route.rs:981:43 True  if read.contains_key(identity) || !rungs.contains_key(&rung) {
-GAP prod BRANCH crates/api/src/calendar_route.rs:1080:28 False  if keep && let Some(at) = stamp {
-GAP prod BRANCH crates/api/src/calendar_route.rs:1154:12 True  if self.builds.iter().any(|(queued, _)| *queued == key) {
-GAP prod BRANCH crates/api/src/calendar_route.rs:1301:12 True  if answer.0 != axum::http::StatusCode::OK {
-GAP test LINE crates/api/src/calendar_route_tests.rs:654  }
-GAP test LINE crates/api/src/calendar_route_tests.rs:655  assert_eq!(
-GAP test LINE crates/api/src/calendar_route_tests.rs:660  assert_eq!(answer["status"], "building", "{query}: {answer}");
-GAP test LINE crates/api/src/calendar_route_tests.rs:661  tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-GAP test BRANCH crates/api/src/calendar_route_tests.rs:652:16 False  if status == axum::http::StatusCode::OK {
-GAP prod LINE crates/api/src/census_cache.rs:639  }
+GAP test BRANCH crates/api/src/calendar_route.rs:1351:13 False  let Err((status, headers, body)) = question(&(Vendor::Gdfl, None, "NIFTY 50".to_owned()))
+GAP test LINE crates/api/src/calendar_route_tests.rs:1577  asked.set(asked.get() + 1);
+GAP test LINE crates/api/src/calendar_route_tests.rs:1578  census_now_stamped(site)
+GAP test LINE crates/api/src/calendar_route_tests.rs:1579  });
+GAP test BRANCH crates/api/src/calendar_route_tests.rs:1119:12 False  if let Some(one) = byte.first_mut() {
+GAP test BRANCH crates/api/src/calendar_route_tests.rs:1586:35 False  assert!(not.is_empty() || !body.contains(not), "{query}: {body}");
+GAP test BRANCH crates/api/src/calendar_route_tests.rs:1593:16 False  if let Some(at) = stamps.manifests.get_mut(Vendor::Gdfl as usize) {
 GAP prod LINE crates/api/src/census_cache.rs:643  cell.refreshing.store(false, Ordering::Release);
 GAP prod LINE crates/api/src/census_cache.rs:644  note_warmth(
 GAP prod LINE crates/api/src/census_cache.rs:645  vendors,
@@ -467,32 +266,9 @@ GAP prod LINE crates/api/src/census_cache.rs:649  Some(format!(
 GAP prod LINE crates/api/src/census_cache.rs:650  "the background re-read could not be started ({why}); readers read it themselves"
 GAP prod LINE crates/api/src/census_cache.rs:651  )),
 GAP prod LINE crates/api/src/census_cache.rs:653  return false;
-GAP prod LINE crates/api/src/census_cache.rs:945  }
 GAP prod LINE crates/api/src/census_cache.rs:1010  vendors
 GAP prod LINE crates/api/src/census_cache.rs:1011  .warm_running
 GAP prod LINE crates/api/src/census_cache.rs:1012  .store(false, std::sync::atomic::Ordering::Release);
-GAP prod LINE crates/api/src/census_cache.rs:1042  }
-GAP prod LINE crates/api/src/census_cache.rs:1043  let rows = vendors
-GAP prod LINE crates/api/src/census_cache.rs:1044  .warmth
-GAP prod LINE crates/api/src/census_cache.rs:1045  .lock()
-GAP prod LINE crates/api/src/census_cache.rs:1046  .unwrap_or_else(PoisonError::into_inner);
-GAP prod LINE crates/api/src/census_cache.rs:1047  rows.iter()
-GAP prod LINE crates/api/src/census_cache.rs:1048  .find(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming)
-GAP prod LINE crates/api/src/census_cache.rs:1049  .map(|row| row.since)
-GAP prod LINE crates/api/src/census_cache.rs:1091  for name in [JOURNAL, INDEX_MAP, FACETS] {
-GAP prod LINE crates/api/src/census_cache.rs:1092  note_warmth(
-GAP prod LINE crates/api/src/census_cache.rs:1093  vendors,
-GAP prod LINE crates/api/src/census_cache.rs:1094  name,
-GAP prod LINE crates/api/src/census_cache.rs:1095  vendor,
-GAP prod LINE crates/api/src/census_cache.rs:1096  WarmState::Failed,
-GAP prod LINE crates/api/src/census_cache.rs:1097  Some(format!(
-GAP prod LINE crates/api/src/census_cache.rs:1098  "not built: the census read was not kept, because the manifest's stamps \
-GAP prod LINE crates/api/src/census_cache.rs:1099  contradict it ({}); the first request that needs it builds it",
-GAP prod LINE crates/api/src/census_cache.rs:1100  slot.census.note()
-GAP prod LINE crates/api/src/census_cache.rs:1101  )),
-GAP prod LINE crates/api/src/census_cache.rs:1102  );
-GAP prod LINE crates/api/src/census_cache.rs:1103  }
-GAP prod LINE crates/api/src/census_cache.rs:1104  }
 GAP prod LINE crates/api/src/census_cache.rs:1132  Err(why) => {
 GAP prod LINE crates/api/src/census_cache.rs:1133  warn_line!(
 GAP prod LINE crates/api/src/census_cache.rs:1137  None
@@ -500,7 +276,6 @@ GAP prod LINE crates/api/src/census_cache.rs:1199  Err(_) => warm_one(site, vend
 GAP prod LINE crates/api/src/census_cache.rs:1210  // A WARM THAT PANICKED leaves its rows as they were (`warming`,
 GAP prod LINE crates/api/src/census_cache.rs:1211  // or the last state it reached), and readers read for themselves.
 GAP prod LINE crates/api/src/census_cache.rs:1212  warn_line!("a census warm thread panicked; its caches are read by their first request");
-GAP prod LINE crates/api/src/census_cache.rs:1250  Some(why) => note_warmth(vendors, JOURNAL, vendor, WarmState::Failed, Some(why)),
 GAP prod LINE crates/api/src/census_cache.rs:1290  // NOT "READY" OVER A READ IT DOES NOT ANSWER: an index another
 GAP prod LINE crates/api/src/census_cache.rs:1291  // thread moved meanwhile to a read this one cannot stand for.
 GAP prod LINE crates/api/src/census_cache.rs:1292  note_warmth(
@@ -515,63 +290,41 @@ GAP prod LINE crates/api/src/census_cache.rs:1300  behind.join(", ")
 GAP prod LINE crates/api/src/census_cache.rs:1301  )),
 GAP prod LINE crates/api/src/census_cache.rs:1302  );
 GAP prod LINE crates/api/src/census_cache.rs:1303  }
-GAP prod LINE crates/api/src/census_cache.rs:1842  Err(why) => return SegmentStamp::Faulted(why.kind()),
-GAP prod LINE crates/api/src/census_cache.rs:1850  None => None,
-GAP prod LINE crates/api/src/census_cache.rs:1854  ))?;
-GAP prod BRANCH crates/api/src/census_cache.rs:635:20 False  if again.manifests.get(vendor as usize) == Some(&stamp)
-GAP prod BRANCH crates/api/src/census_cache.rs:636:24 False  && again.root_is_dir == root_is_dir
+GAP test LINE crates/api/src/census_cache.rs:3180  reads.set(reads.get() + 1);
+GAP test LINE crates/api/src/census_cache.rs:3181  (census::read_all(root), None)
+GAP test LINE crates/api/src/census_cache.rs:3182  });
 GAP prod BRANCH crates/api/src/census_cache.rs:642:12 True  if let Err(why) = spawned {
-GAP prod BRANCH crates/api/src/census_cache.rs:774:58 False  if matches!(census.state, census::Census::Absent) && !freshness.is_stale() {
-GAP prod BRANCH crates/api/src/census_cache.rs:879:12 False  if row.state != state {
 GAP prod BRANCH crates/api/src/census_cache.rs:918:16 False  if let Some(row) = rows
-GAP prod BRANCH crates/api/src/census_cache.rs:930:8 False  if telemetry::admits(telemetry::Level::Info, "api.census") {
 GAP prod BRANCH crates/api/src/census_cache.rs:1009:8 True  if spawned.is_err() {
-GAP prod BRANCH crates/api/src/census_cache.rs:1037:8 False  if !vendors
-GAP prod BRANCH crates/api/src/census_cache.rs:1048:21 True  .find(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming)
-GAP prod BRANCH crates/api/src/census_cache.rs:1048:21 False  .find(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming)
-GAP prod BRANCH crates/api/src/census_cache.rs:1048:41 True  .find(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming)
-GAP prod BRANCH crates/api/src/census_cache.rs:1048:41 False  .find(|row| row.name == name && row.vendor == vendor && row.state == WarmState::Warming)
-GAP prod BRANCH crates/api/src/census_cache.rs:1088:8 False  if keeps(site, vendor, &slot) {
-GAP prod BRANCH crates/api/src/census_cache.rs:1090:15 True  } else if derived_feeds(vendors).contains(&vendor) {
-GAP prod BRANCH crates/api/src/census_cache.rs:1090:15 False  } else if derived_feeds(vendors).contains(&vendor) {
 GAP prod BRANCH crates/api/src/census_cache.rs:1141:12 False  if let Some(sender) = sender {
 GAP prod BRANCH crates/api/src/census_cache.rs:1209:12 True  if handle.join().is_err() {
 GAP prod BRANCH crates/api/src/census_cache.rs:1287:8 False  if behind.is_empty() {
-GAP prod BRANCH crates/api/src/census_cache.rs:1607:16 False  if let Some(at) = stamps.manifests.get_mut(vendor) {
-GAP prod BRANCH crates/api/src/census_cache.rs:1629:20 False  if let Some(at) = again.manifests.get_mut(vendor) {
-GAP prod BRANCH crates/api/src/census_cache.rs:1839:29 False  Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
-GAP prod BRANCH crates/api/src/census_cache.rs:2170:20 False  if stamp_could_read(stamp, self.root_is_dir, &row.state) =>
-GAP prod BRANCH crates/api/src/constituents.rs:533:16 False  if let Some(id) = id
+GAP test BRANCH crates/api/src/census_cache.rs:2564:16 False  if !rows.is_empty()
+GAP test BRANCH crates/api/src/census_cache.rs:2604:20 False  if let Some(row) = found
+GAP test BRANCH crates/api/src/census_cache.rs:2824:20 False  && now
+GAP test BRANCH crates/api/src/census_cache.rs:3259:13 False  row.state == WarmState::Ready && row.entries == Some(2)
+GAP test BRANCH crates/api/src/census_cache.rs:3584:13 False  let Err(looped) = std::fs::metadata(&index)
+GAP test BRANCH crates/api/src/census_cache.rs:3632:16 False  if let Some(at) = manifests.get_mut(Vendor::Gdfl as usize) {
 GAP prod LINE crates/api/src/dayflags_rules.rs:320  return Ok(kept);
 GAP prod BRANCH crates/api/src/dayflags_rules.rs:319:16 True  if let Some(kept) = flags().get(&key) {
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:2709  fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:2710  [inside an #[ignore]d test]  let _ = day_band_timed(&[1, 10, 100], [20, 200, 60], 300);
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:2711  }
-GAP test LINE crates/api/src/dayflags_rules_tests.rs:2971  _ => panic!("the month opens"),
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3055  fn the_cold_auction_era_share_page_is_timed() {
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3056  let root = std::path::PathBuf::from(
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3057  std::env::var_os("BRUTEX_DAYFLAGS_STORE")
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3058  .expect("BRUTEX_DAYFLAGS_STORE names a store root"),
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3060  cold_share_pages_timed(
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3061  &root,
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3062  &[
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3063  ("NSE-CASH-DALBHARAT", "2026-08-10", "2026-09-30"),
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3064  ("NSE-CASH-RELIANCE", "2026-08-03", "2026-09-30"),
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3065  ],
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3067  [20, 10],
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3069  }
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3289  fn the_day_band_pages_for_a_profiler() {
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3290  [inside an #[ignore]d test]  let _ = profiled_pages("r3-13-profile", 10, &TIMED);
-GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3291  }
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:1603:60 False  [inside a closure whose false side does not fail the check]  says(record(&got, "2024-10-03")).iter().any(|said| said
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:1981:9 False  [an operand followed by ||: neither side fails the check by itself]  from >= resume_hm.as_str() || from < "09:15",
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:1981:39 True  from >= resume_hm.as_str() || from < "09:15",
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:1981:39 False  from >= resume_hm.as_str() || from < "09:15",
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:3495:9 False  let super::super::Opened::File(file) =
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:3523:9 False  let super::super::Opened::File(file) =
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:3800:9 False  let super::super::Opened::File(file) =
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:4049:9 False  let super::super::Opened::File(file) =
-GAP test BRANCH crates/api/src/dayflags_rules_tests.rs:4093:13 False  let super::super::Opened::File(file) =
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:2715  fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:2716  let _ = day_band_timed(&[1, 10, 100], [20, 200, 60], 300);
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:2717  }
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3062  fn the_cold_auction_era_share_page_is_timed() {
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3063  let root = std::path::PathBuf::from(
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3064  std::env::var_os("BRUTEX_DAYFLAGS_STORE")
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3065  .expect("BRUTEX_DAYFLAGS_STORE names a store root"),
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3067  cold_share_pages_timed(
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3068  &root,
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3069  &[
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3070  ("NSE-CASH-DALBHARAT", "2026-08-10", "2026-09-30"),
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3071  ("NSE-CASH-RELIANCE", "2026-08-03", "2026-09-30"),
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3072  ],
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3074  [20, 10],
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3076  }
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3296  fn the_day_band_pages_for_a_profiler() {
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3297  let _ = profiled_pages("r3-13-profile", 10, &TIMED);
+GAP ignored LINE crates/api/src/dayflags_rules_tests.rs:3298  }
 GAP ignored LINE crates/api/src/disk_route.rs:2456  fn the_call_at_its_p99_costs_less_than_the_df_child_at_its_p50() {
 GAP ignored LINE crates/api/src/disk_route.rs:2457  timed_against_the_child("disk-route-timing", 1_000, 1);
 GAP ignored LINE crates/api/src/disk_route.rs:2458  }
@@ -630,22 +383,22 @@ GAP test LINE crates/api/src/head_deadline_body_tests.rs:68  return std::task::P
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:97  tokio::time::sleep(T * 3).await;
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:98  "slow"
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:99  }),
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:304  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  assert_eq!(body.len(), length);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:305  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  assert_pattern(&body);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:306  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  assert!(
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:307  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  took >= T * 4,
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:310  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  let said = drain(&mut client, T * 10).await;
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:311  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  assert!(
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:312  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:518  [host red here (this kernel cuts the paced reader, proved on START): pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is passes on the Mac, whose Route B owes this row]  assert_eq!(body.len(), length);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:519  [host red here (this kernel cuts the paced reader, proved on START): pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is passes on the Mac, whose Route B owes this row]  assert_pattern(&body);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:520  [host red here (this kernel cuts the paced reader, proved on START): pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is passes on the Mac, whose Route B owes this row]  });
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:543  [host red here (this kernel cuts the paced reader, proved on START): pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is passes on the Mac, whose Route B owes this row]  assert!(lines(from, "response cut", "test=pauses-under").is_empty());
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:544  [host red here (this kernel cuts the paced reader, proved on START): pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is passes on the Mac, whose Route B owes this row]  assert_eq!(lines(from, "response cut", "test=pause-over").len(), 1);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:572  [host red here (this kernel cuts the paced reader, proved on START): a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole passes on the Mac, whose Route B owes this row]  assert_pattern(&body);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:573  [host red here (this kernel cuts the paced reader, proved on START): a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole passes on the Mac, whose Route B owes this row]  let said = drain(&mut client, T * 20).await;
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:574  [host red here (this kernel cuts the paced reader, proved on START): a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole passes on the Mac, whose Route B owes this row]  assert!(
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:575  [host red here (this kernel cuts the paced reader, proved on START): a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole passes on the Mac, whose Route B owes this row]  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:304  assert_eq!(body.len(), length);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:305  assert_pattern(&body);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:306  assert!(
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:307  took >= T * 4,
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:310  let said = drain(&mut client, T * 10).await;
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:311  assert!(
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:312  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:518  assert_eq!(body.len(), length);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:519  assert_pattern(&body);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:520  });
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:543  assert!(lines(from, "response cut", "test=pauses-under").is_empty());
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:544  assert_eq!(lines(from, "response cut", "test=pause-over").len(), 1);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:572  assert_pattern(&body);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:573  let said = drain(&mut client, T * 20).await;
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:574  assert!(
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:575  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:626  fn unchunk(mut framed: &[u8]) -> Vec<u8> {
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:627  let mut body = Vec::new();
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:629  let line = framed
@@ -663,26 +416,26 @@ GAP test LINE crates/api/src/head_deadline_body_tests.rs:640  body.extend_from_s
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:641  assert_eq!(&framed[size..size + 2], b"\r\n");
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:642  framed = &framed[size + 2..];
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:644  }
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:685  [host red here (this kernel cuts the paced reader, proved on START): a_chunked_body_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  let body = unchunk(&framed);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:686  [host red here (this kernel cuts the paced reader, proved on START): a_chunked_body_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  assert_eq!(body.len(), length);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:687  [host red here (this kernel cuts the paced reader, proved on START): a_chunked_body_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  assert_pattern(&body);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:688  [host red here (this kernel cuts the paced reader, proved on START): a_chunked_body_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row]  assert!(began.elapsed() >= T * 4);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:797  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  assert_pattern(&body);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:798  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  let done = began.elapsed();
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:799  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  drop(client);
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:800  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  done
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:801  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  }));
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:815  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  assert!(
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:816  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  answered + EARLY >= first_done,
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:819  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  assert!(
-GAP test LINE crates/api/src/head_deadline_body_tests.rs:820  [host red here (this kernel cuts the paced reader, proved on START): slow_readers_at_the_cap_are_served_whole_and_the_next_waits passes on the Mac, whose Route B owes this row]  first_done >= T * 4,
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:685  let body = unchunk(&framed);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:686  assert_eq!(body.len(), length);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:687  assert_pattern(&body);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:688  assert!(began.elapsed() >= T * 4);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:797  assert_pattern(&body);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:798  let done = began.elapsed();
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:799  drop(client);
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:800  done
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:801  }));
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:815  assert!(
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:816  answered + EARLY >= first_done,
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:819  assert!(
+GAP test LINE crates/api/src/head_deadline_body_tests.rs:820  first_done >= T * 4,
 GAP test LINE crates/api/src/head_deadline_body_tests.rs:996  Poll::Pending => panic!("the stall deadline passed and the write still waited"),
-GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:67:12 True  [the true side of a condition is a passing path]  if self.sent >= self.total {
-GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:312:9 True  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row] [the true side of a condition is a passing path]  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
-GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:312:48 True  [host red here (this kernel cuts the paced reader, proved on START): a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole passes on the Mac, whose Route B owes this row] [the true side of a condition is a passing path]  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
-GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:575:9 True  [host red here (this kernel cuts the paced reader, proved on START): a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole passes on the Mac, whose Route B owes this row] [the true side of a condition is a passing path]  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
-GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:575:48 True  [host red here (this kernel cuts the paced reader, proved on START): a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole passes on the Mac, whose Route B owes this row] [the true side of a condition is a passing path]  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
-GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:636:12 True  [the true side of a condition is a passing path]  if size == 0 {
+GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:67:12 True  if self.sent >= self.total {
+GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:312:9 True  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
+GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:312:48 True  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),
+GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:575:9 True  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
+GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:575:48 True  said.starts_with("HTTP/1.1 200 OK") && said.ends_with("slow"),
+GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:636:12 True  if size == 0 {
 GAP test BRANCH crates/api/src/head_deadline_body_tests.rs:636:12 False  if size == 0 {
 GAP prod LINE crates/api/src/indexstoprankingjson.rs:22  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  const fn label(self) -> &'static str {
 GAP prod LINE crates/api/src/indexstoprankingjson.rs:23  [L-BCA-5: past the parse, a saved index-stop search or Boolean qualification no fixture here writes; the operator's fixture decision]  match self {
@@ -905,147 +658,21 @@ GAP prod LINE crates/api/src/indexstopvixjson.rs:107  if result.2.len() <= crate
 GAP prod LINE crates/api/src/indexstopvixjson.rs:108  result
 GAP prod LINE crates/api/src/indexstopvixjson.rs:110  refused(
 GAP prod LINE crates/api/src/indexstopvixjson.rs:112  "saved-VIX response exceeds byte admission; no prefix returned",
-GAP test LINE crates/api/src/indexstopvixjson.rs:337  return Err("generated exact reference fixture must contain a candle".into());
-GAP test LINE crates/api/src/indexstopvixjson.rs:380  [read: a closure passed inside the compared expression and never called: not the failing arm]  |_| {
-GAP test LINE crates/api/src/indexstopvixjson.rs:381  rechecked = true;
-GAP test LINE crates/api/src/indexstopvixjson.rs:382  Ok(())
-GAP test LINE crates/api/src/indexstopvixjson.rs:383  }
 GAP prod BRANCH crates/api/src/indexstopvixjson.rs:107:16 True  if result.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
 GAP prod BRANCH crates/api/src/indexstopvixjson.rs:107:16 False  if result.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
 GAP prod BRANCH crates/api/src/indexstopvixjson.rs:151:16 False  && cached.identity == asked.identity
-GAP test BRANCH crates/api/src/indexstopvixjson.rs:336:13 False  let Stamp::Exact(candle) = &mut original else {
 GAP prod LINE crates/api/src/master.rs:357  return Err(format!(
 GAP prod LINE crates/api/src/master.rs:358  "{}: grew past {MAX_MASTER_BYTES} bytes while it was read; this \
 GAP prod LINE crates/api/src/master.rs:359  reader holds at most {MAX_MASTER_BYTES}",
 GAP prod LINE crates/api/src/master.rs:360  path.display()
 GAP prod LINE crates/api/src/master.rs:361  ));
 GAP prod BRANCH crates/api/src/master.rs:356:8 True  if text.len() as u64 > MAX_MASTER_BYTES {
-GAP prod LINE crates/api/src/operation_audit.rs:196  Err(why) => {
-GAP prod LINE crates/api/src/operation_audit.rs:197  return failure(
-GAP prod LINE crates/api/src/operation_audit.rs:198  &format!("bounded request audit could not start: {why:?}"),
-GAP prod LINE crates/api/src/operation_audit.rs:201  .into_response();
-GAP prod LINE crates/api/src/operation_audit.rs:234  Err(why) => failure(
-GAP prod LINE crates/api/src/operation_audit.rs:235  &format!("bounded terminal audit could not settle: {why:?}"),
-GAP prod LINE crates/api/src/operation_audit.rs:238  .into_response(),
-GAP prod LINE crates/api/src/provenance.rs:422  Err(why) => {
-GAP prod LINE crates/api/src/provenance.rs:423  return Answer::refused(
-GAP prod LINE crates/api/src/provenance.rs:425  asked,
-GAP prod LINE crates/api/src/provenance.rs:426  &format!("{} {}: {why}", asked.key(), asked.month),
-GAP prod LINE crates/api/src/provenance.rs:427  Value::Null,
-GAP prod LINE crates/api/src/provenance.rs:475  Err(why @ StoreError::Missing { .. }) => {
-GAP prod LINE crates/api/src/provenance.rs:476  return Answer::refused(
-GAP prod LINE crates/api/src/provenance.rs:478  asked,
-GAP prod LINE crates/api/src/provenance.rs:479  &format!("{why}: this month is not held"),
-GAP prod LINE crates/api/src/provenance.rs:480  json!({ "held": false, "path": relative }),
-GAP prod LINE crates/api/src/provenance.rs:523  Err(why) => {
-GAP prod LINE crates/api/src/provenance.rs:524  return Answer::refused(
-GAP prod LINE crates/api/src/provenance.rs:526  asked,
-GAP prod LINE crates/api/src/provenance.rs:527  &why,
-GAP prod LINE crates/api/src/provenance.rs:528  json!({ "path": relative }),
-GAP prod LINE crates/api/src/provenance.rs:954  (Err(why), _) => json!({ "source": "imports/gdfl.journal", "error": why }),
-GAP prod LINE crates/api/src/provenance.rs:955  (Ok(_), None) => json!({
-GAP prod LINE crates/api/src/provenance.rs:956  "source": "imports/gdfl.journal",
-GAP prod LINE crates/api/src/provenance.rs:957  "error": format!("{} is not a day the calendar can name", record.day),
-GAP prod LINE crates/api/src/provenance.rs:976  return Value::Null;
-GAP prod LINE crates/api/src/provenance.rs:994  Err(fault) => json!({
-GAP prod LINE crates/api/src/provenance.rs:995  "source": "audit/pull.journal",
-GAP prod LINE crates/api/src/provenance.rs:996  "ordinal": entry.ordinal,
-GAP prod LINE crates/api/src/provenance.rs:997  "error": fault.to_string(),
-GAP prod LINE crates/api/src/provenance.rs:1000  None => json!({
-GAP prod LINE crates/api/src/provenance.rs:1001  "source": "audit/pull.journal",
-GAP prod LINE crates/api/src/provenance.rs:1002  "error": format!("record {} was not read", record.journal_ordinal),
-GAP prod LINE crates/api/src/provenance.rs:1005  Err(why) => json!({ "source": "audit/pull.journal", "error": why }),
-GAP prod LINE crates/api/src/provenance.rs:1034  Some(Err(why)) => return json!({ "source": source, "error": why }),
-GAP prod LINE crates/api/src/provenance.rs:1035  None => return json!({ "source": source, "error": "the import journal was not read" }),
-GAP prod LINE crates/api/src/provenance.rs:1038  return json!({ "source": source, "error": "the month names no calendar day" });
-GAP prod LINE crates/api/src/provenance.rs:1079  Some(_) => {}
-GAP prod LINE crates/api/src/provenance.rs:1151  Err(why) => json!({ "error": why }),
-GAP prod LINE crates/api/src/provenance.rs:1237  Err(_) => (bars, errors.saturating_add(1)),
-GAP prod LINE crates/api/src/provenance.rs:1300  Segment::Fno => None,
-GAP prod LINE crates/api/src/provenance.rs:1372  }
-GAP prod LINE crates/api/src/provenance.rs:1539  Err(why) => return Err(format!("{}: {why}", path.display())),
-GAP prod LINE crates/api/src/provenance.rs:1577  return Err(format!(
-GAP prod LINE crates/api/src/provenance.rs:1578  "{}: the file ended before record {} of {whole}",
-GAP prod LINE crates/api/src/provenance.rs:1579  path.display(),
-GAP prod LINE crates/api/src/provenance.rs:1580  tail.upto
-GAP prod LINE crates/api/src/provenance.rs:1581  ));
-GAP prod LINE crates/api/src/provenance.rs:1621  _ => index.faults = index.faults.saturating_add(1),
-GAP prod LINE crates/api/src/provenance.rs:1645  Segment::Fno => audit::Scope::Fno,
-GAP prod LINE crates/api/src/provenance.rs:1664  Err(why) => return json!({ "source": source, "error": why }),
-GAP prod LINE crates/api/src/provenance.rs:1667  notes.push(format!(
-GAP prod LINE crates/api/src/provenance.rs:1668  "the pull journal keeps no index of its runs, so this process's first read of it \
-GAP prod LINE crates/api/src/provenance.rs:1669  decoded {} records in {} ms; later requests read only what is appended",
-GAP prod LINE crates/api/src/provenance.rs:1670  read.read_now,
-GAP prod LINE crates/api/src/provenance.rs:1671  read.read_micros / 1_000
-GAP prod LINE crates/api/src/provenance.rs:1672  ));
-GAP prod LINE crates/api/src/provenance.rs:1675  return json!({ "source": source, "error": "the month names no calendar day" });
-GAP prod LINE crates/api/src/provenance.rs:1793  continue;
-GAP prod LINE crates/api/src/provenance.rs:1820  ) {
-GAP prod LINE crates/api/src/provenance.rs:1821  excluded.not_run = excluded.not_run.saturating_add(1);
-GAP prod LINE crates/api/src/provenance.rs:1946  return Value::Null;
-GAP prod LINE crates/api/src/provenance.rs:1956  pull::vendor::SpanStanding::Measured => "measured",
-GAP prod LINE crates/api/src/provenance.rs:1963  Some(PARTLY_OUTSIDE_WINDOW)
-GAP prod BRANCH crates/api/src/provenance.rs:409:20 False  if let Value::Object(more) = extra {
-GAP prod BRANCH crates/api/src/provenance.rs:975:9 False  let Some((journal, records)) = &journals.pull else {
-GAP prod BRANCH crates/api/src/provenance.rs:1037:9 False  let Some((from, to)) = asked.days() else {
-GAP prod BRANCH crates/api/src/provenance.rs:1071:25 False  Some(id) if named.iter().all(|seen| *seen != id) => {
-GAP prod BRANCH crates/api/src/provenance.rs:1211:35 True  Some((last, span)) if *last == day => return span.clone(),
-GAP prod BRANCH crates/api/src/provenance.rs:1212:43 False  Some((last, Ok((_, end)))) if *last < day => Some(*end),
-GAP prod BRANCH crates/api/src/provenance.rs:1363:8 False  if !fresh {
-GAP prod BRANCH crates/api/src/provenance.rs:1448:25 False  if from == 0 && to == 0 {
-GAP prod BRANCH crates/api/src/provenance.rs:1452:46 False  (Some(first), Some(last)) if first <= last && last - first < MAX_INDEXED_MONTHS => {
-GAP prod BRANCH crates/api/src/provenance.rs:1528:21 False  Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
-GAP prod BRANCH crates/api/src/provenance.rs:1555:37 True  if tail.identity != identity || whole < tail.upto {
-GAP prod BRANCH crates/api/src/provenance.rs:1576:16 True  if got == 0 {
-GAP prod BRANCH crates/api/src/provenance.rs:1616:23 False  Ok(record) if record.kind == audit::Kind::Run => index.push(PullRun {
-GAP prod BRANCH crates/api/src/provenance.rs:1666:8 True  if read.read_now > FIRST_WALK_RECORDS {
-GAP prod BRANCH crates/api/src/provenance.rs:1674:9 False  let Some((from, to)) = asked.days() else {
-GAP prod BRANCH crates/api/src/provenance.rs:1792:13 False  let Some(run) = index.runs.get(position) else {
-GAP prod BRANCH crates/api/src/provenance.rs:1796:55 True  if record.to_days < from.days_from_epoch() || record.from_days > to.days_from_epoch() {
-GAP prod BRANCH crates/api/src/provenance.rs:1822:66 True  } else if record.outcome == audit::Outcome::Empty || record.bars_stored == 0 {
-GAP prod BRANCH crates/api/src/provenance.rs:1849:20 False  && close.ordinal > open.ordinal
-GAP prod BRANCH crates/api/src/provenance.rs:1850:20 False  && close.record.from_days == open.record.from_days
-GAP prod BRANCH crates/api/src/provenance.rs:1851:20 False  && close.record.to_days == open.record.to_days
-GAP prod BRANCH crates/api/src/provenance.rs:1852:20 False  && close.ran_at(Some(open.record.at_unix_secs))
-GAP prod BRANCH crates/api/src/provenance.rs:1941:9 False  let Some((first, last)) = (Asked {
-GAP prod BRANCH crates/api/src/provenance.rs:1949:19 False  let touches = first.days_from_epoch() <= span.to.days_from_epoch()
-GAP prod BRANCH crates/api/src/provenance.rs:1962:19 True  } else if touches {
-GAP test LINE crates/api/src/quarantine_route_tests.rs:134  }
-GAP test LINE crates/api/src/quarantine_route_tests.rs:135  tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-GAP test BRANCH crates/api/src/quarantine_route_tests.rs:132:12 False  if status != StatusCode::TOO_MANY_REQUESTS {
 GAP prod LINE crates/api/src/render.rs:3284  continue;
 GAP prod BRANCH crates/api/src/render.rs:3283:13 False  let Ok(kind) = e.file_type() else {
-GAP prod LINE crates/api/src/scrub_route.rs:518  }
-GAP prod LINE crates/api/src/scrub_route.rs:551  continue;
-GAP prod LINE crates/api/src/scrub_route.rs:568  }
-GAP prod LINE crates/api/src/scrub_route.rs:576  }
-GAP prod LINE crates/api/src/scrub_route.rs:652  continue;
-GAP prod LINE crates/api/src/scrub_route.rs:836  break;
-GAP prod BRANCH crates/api/src/scrub_route.rs:513:16 False  if let Some(count) = self.busy_in.get_mut(&pass) {
-GAP prod BRANCH crates/api/src/scrub_route.rs:546:17 False  let Some(mut finding) = self
-GAP prod BRANCH crates/api/src/scrub_route.rs:563:20 False  if let Some(held) = self.by_pass.get_mut(&older) {
-GAP prod BRANCH crates/api/src/scrub_route.rs:569:20 False  if let Some(counts) = self.series.get_mut(&*key.0)
-GAP prod BRANCH crates/api/src/scrub_route.rs:570:24 False  && let Some(count) = counts.get_mut(&older)
-GAP prod BRANCH crates/api/src/scrub_route.rs:579:20 False  && let Some(counts) = self.series.get_mut(&*key.0)
-GAP prod BRANCH crates/api/src/scrub_route.rs:647:21 False  let Some(mut finding) = self
-GAP prod BRANCH crates/api/src/scrub_route.rs:835:13 False  let (Some(slot), Some(range)) = (next.get_mut(at), ranges.get_mut(at)) else {
-GAP prod BRANCH crates/api/src/scrub_route.rs:838:16 False  if let Some(taken) = slot.take() {
-GAP prod BRANCH crates/api/src/scrub_route.rs:985:51 False  None if full && !self.in_long_line && from < fresh.len() => {
-GAP prod LINE crates/api/src/server.rs:1923  return (
-GAP prod LINE crates/api/src/server.rs:1924  axum::http::StatusCode::SERVICE_UNAVAILABLE,
-GAP prod LINE crates/api/src/server.rs:1925  headers,
-GAP prod LINE crates/api/src/server.rs:1926  no_such_feed_json(&asked),
-GAP prod LINE crates/api/src/server.rs:1927  );
-GAP prod LINE crates/api/src/server.rs:1991  body.push('\n');
-GAP prod LINE crates/api/src/server.rs:4102  return Some(format!("{}: {why}", dir.display()));
-GAP prod LINE crates/api/src/server.rs:5020  telemetry::now_millis().unsigned_abs()
-GAP prod LINE crates/api/src/server.rs:5825  Err(pull::session::SessionError::SessionLengthUnmeasured { .. }) => false,
-GAP prod LINE crates/api/src/server.rs:5826  Err(why) => return Err(why.to_string()),
-GAP prod LINE crates/api/src/server.rs:6174  None => None,
-GAP prod LINE crates/api/src/server.rs:6177  pull::ingest::landing_run::Mode::Repair
 GAP prod LINE crates/api/src/server.rs:6435  break;
-GAP prod LINE crates/api/src/server.rs:6614  || spot_audit_origin(asked.cash_identity, &run.origin),
 GAP prod LINE crates/api/src/server.rs:6633  return Err(why);
+GAP prod LINE crates/api/src/server.rs:6864  return Err(match settled {
+GAP prod LINE crates/api/src/server.rs:6865  Err(why) if asked.window.to() == today => format!("{refusal} Today: {why}."),
 GAP prod LINE crates/api/src/server.rs:8997  [L-BCA-6: read_credential ends at a real host (Parameter Store or the index host); the operator's seam decision]  async fn read_credential(
 GAP prod LINE crates/api/src/server.rs:8998  [L-BCA-6: read_credential ends at a real host (Parameter Store or the index host); the operator's seam decision]  identity: &pull::ssm::AwsIdentity,
 GAP prod LINE crates/api/src/server.rs:8999  [L-BCA-6: read_credential ends at a real host (Parameter Store or the index host); the operator's seam decision]  config: &pull::config::CredentialConfig,
@@ -1081,525 +708,230 @@ GAP prod LINE crates/api/src/server.rs:9126  [L-BCA-6: credentialed_source ends 
 GAP prod LINE crates/api/src/server.rs:9134  [L-BCA-6: credentialed_source ends at a real host (Parameter Store or the index host); the operator's seam decision]  let source = pull::http::HttpSource::new(*spec, credential)
 GAP prod LINE crates/api/src/server.rs:9135  [L-BCA-6: credentialed_source ends at a real host (Parameter Store or the index host); the operator's seam decision]  .map_err(|why| Unreadable::configuration(why.to_string()))?;
 GAP prod LINE crates/api/src/server.rs:9137  [L-BCA-6: credentialed_source ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok((source, vendor))
-GAP prod LINE crates/api/src/server.rs:9884  format!(
-GAP prod LINE crates/api/src/server.rs:9888  feed.display()
-GAP prod LINE crates/api/src/server.rs:9890  })?;
-GAP prod LINE crates/api/src/server.rs:10097  pull::ingest::landing_run::kind_of(brutex_core::vendor::Vendor::Zerodha)
 GAP prod LINE crates/api/src/server.rs:10114  return (
 GAP prod LINE crates/api/src/server.rs:10115  axum::http::StatusCode::CONFLICT,
 GAP prod LINE crates/api/src/server.rs:10116  json_headers(),
 GAP prod LINE crates/api/src/server.rs:10117  run_refusal_json(&crate::pullrun::Refusal::AlreadyRunning.why()),
 GAP prod LINE crates/api/src/server.rs:10118  );
-GAP prod LINE crates/api/src/server.rs:10122  Err(fault) => {
-GAP prod LINE crates/api/src/server.rs:10123  let why =
-GAP prod LINE crates/api/src/server.rs:10124  format!("{fault}; the run took no id, so it did not start and no vendor was asked");
-GAP prod LINE crates/api/src/server.rs:10125  progress.finished = Some(why.clone());
-GAP prod LINE crates/api/src/server.rs:10126  return (
-GAP prod LINE crates/api/src/server.rs:10127  axum::http::StatusCode::SERVICE_UNAVAILABLE,
-GAP prod LINE crates/api/src/server.rs:10128  json_headers(),
-GAP prod LINE crates/api/src/server.rs:10129  run_refusal_json(&why),
-GAP prod LINE crates/api/src/server.rs:10130  );
 GAP prod LINE crates/api/src/server.rs:10594  Err(why) => (
 GAP prod LINE crates/api/src/server.rs:10595  axum::http::StatusCode::INTERNAL_SERVER_ERROR,
 GAP prod LINE crates/api/src/server.rs:10596  refusal_html("Spot pull", &why),
 GAP prod LINE crates/api/src/server.rs:10597  ),
-GAP prod LINE crates/api/src/server.rs:11550  note_price_refusal(&mut out, "the chunk's first day names no month file");
-GAP prod LINE crates/api/src/server.rs:11551  return out;
-GAP prod LINE crates/api/src/server.rs:11929  return page.say(
-GAP prod LINE crates/api/src/server.rs:11930  facts,
-GAP prod LINE crates/api/src/server.rs:11932  audit::Outcome::NotStarted,
-GAP prod LINE crates/api/src/server.rs:11933  "this feed declares no expired-derivative history at all, so there \
-GAP prod LINE crates/api/src/server.rs:11934  is nothing to ask it for",
 GAP prod LINE crates/api/src/server.rs:11993  Ok(chain) => fno_report(&page, facts, &chain, asked, site, &wire).await,
-GAP prod LINE crates/api/src/server.rs:12949  Err(why) => return Some(format!("the Greek-file month could not be named: {why}")),
-GAP prod LINE crates/api/src/server.rs:13020  out.refused = out.refused.saturating_add(1);
-GAP prod LINE crates/api/src/server.rs:13021  note_price_refusal(
-GAP prod LINE crates/api/src/server.rs:13022  &mut out,
-GAP prod LINE crates/api/src/server.rs:13023  "the bar's stamp is not a moment any calendar places",
-GAP prod LINE crates/api/src/server.rs:13025  continue;
-GAP prod LINE crates/api/src/server.rs:14360  }
-GAP prod LINE crates/api/src/server.rs:14361  let last_settled = match ingest::last_settled_day(page.today) {
-GAP prod LINE crates/api/src/server.rs:14362  Ok(day) => day,
-GAP prod LINE crates/api/src/server.rs:14363  Err(why) => {
-GAP prod LINE crates/api/src/server.rs:14364  return page.say(
-GAP prod LINE crates/api/src/server.rs:14365  facts,
-GAP prod LINE crates/api/src/server.rs:14367  audit::Outcome::NotStarted,
-GAP prod LINE crates/api/src/server.rs:14368  &why.to_string(),
-GAP prod LINE crates/api/src/server.rs:14375  let planned = off_the_workers(|| {
-GAP prod LINE crates/api/src/server.rs:14376  let book = masters_dir().and_then(|dir| {
-GAP prod LINE crates/api/src/server.rs:14377  pull::master_snapshots::Book::open(&dir.join(pull::master_snapshots::SNAPSHOT_DIR))
-GAP prod LINE crates/api/src/server.rs:14378  })?;
-GAP prod LINE crates/api/src/server.rs:14379  pull::fnowork::futures_plan(
-GAP prod LINE crates/api/src/server.rs:14380  &book,
-GAP prod LINE crates/api/src/server.rs:14381  route,
-GAP prod LINE crates/api/src/server.rs:14382  asked.underlying.as_str(),
-GAP prod LINE crates/api/src/server.rs:14383  asked.window,
-GAP prod LINE crates/api/src/server.rs:14384  page.today,
-GAP prod LINE crates/api/src/server.rs:14385  last_settled,
-GAP prod LINE crates/api/src/server.rs:14387  });
-GAP prod LINE crates/api/src/server.rs:14388  let plan = match planned {
-GAP prod LINE crates/api/src/server.rs:14389  Ok(plan) => plan,
-GAP prod LINE crates/api/src/server.rs:14390  Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
-GAP prod LINE crates/api/src/server.rs:14392  let plan = match narrowed_to_expiry(plan, asked) {
-GAP prod LINE crates/api/src/server.rs:14393  Ok(plan) => plan,
-GAP prod LINE crates/api/src/server.rs:14394  Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
-GAP prod LINE crates/api/src/server.rs:14396  facts.push(("Dated master snapshot", plan.newest.to_string()));
-GAP prod LINE crates/api/src/server.rs:14397  facts.push(("Series asked", plan.asks.len().to_string()));
-GAP prod LINE crates/api/src/server.rs:14398  if let Some(ref why) = plan.rebuilt {
-GAP prod LINE crates/api/src/server.rs:14399  facts.push(("Futures index rebuilt", why.clone()));
-GAP prod LINE crates/api/src/server.rs:14400  }
-GAP prod LINE crates/api/src/server.rs:14406  if !plan.incomplete.is_empty() {
-GAP prod LINE crates/api/src/server.rs:14407  facts.push((
-GAP prod LINE crates/api/src/server.rs:14408  "Incomplete master-snapshot entries",
-GAP prod LINE crates/api/src/server.rs:14409  plan.incomplete.join(" · "),
-GAP prod LINE crates/api/src/server.rs:14410  ));
-GAP prod LINE crates/api/src/server.rs:14411  }
-GAP prod LINE crates/api/src/server.rs:14412  if !plan.refused.is_empty() {
-GAP prod LINE crates/api/src/server.rs:14413  facts.push(("Not asked", plan.refused.join(" · ")));
-GAP prod LINE crates/api/src/server.rs:14414  }
-GAP prod LINE crates/api/src/server.rs:14415  let governed = Governed {
-GAP prod LINE crates/api/src/server.rs:14416  inner: &wire.source,
-GAP prod LINE crates/api/src/server.rs:14417  feed: asked.feed,
-GAP prod LINE crates/api/src/server.rs:14418  site,
-GAP prod LINE crates/api/src/server.rs:14419  };
-GAP prod LINE crates/api/src/server.rs:14420  let origin = wire.source.endpoint(route.granularity);
-GAP prod LINE crates/api/src/server.rs:14421  let landed = pull::fnowork::pull_futures_day(
-GAP prod LINE crates/api/src/server.rs:14422  &governed,
-GAP prod LINE crates/api/src/server.rs:14423  &wire.spec,
-GAP prod LINE crates/api/src/server.rs:14424  &plan,
-GAP prod LINE crates/api/src/server.rs:14425  &site.store_root,
-GAP prod LINE crates/api/src/server.rs:14426  wire.store_vendor,
-GAP prod LINE crates/api/src/server.rs:14427  &origin,
-GAP prod LINE crates/api/src/server.rs:14428  )
-GAP prod LINE crates/api/src/server.rs:14429  .await;
-GAP prod LINE crates/api/src/server.rs:14430  futures_answer(page, facts, &plan, &landed)
-GAP prod LINE crates/api/src/server.rs:14661  Err(refused) => return refused,
 GAP prod LINE crates/api/src/server.rs:14899  Err(why) => (
 GAP prod LINE crates/api/src/server.rs:14900  axum::http::StatusCode::INTERNAL_SERVER_ERROR,
 GAP prod LINE crates/api/src/server.rs:14901  refusal_html("Expired F&O pull", &why),
 GAP prod LINE crates/api/src/server.rs:14902  ),
-GAP prod LINE crates/api/src/server.rs:15926  Err(why) => return unlocatable(site, &symbol, &Unlocated::Refused(why)),
 GAP prod LINE crates/api/src/server.rs:18323  Poll::Ready(Err(why)) => {
 GAP prod LINE crates/api/src/server.rs:18324  let _left = self.report(
 GAP prod LINE crates/api/src/server.rs:18325  telemetry::Level::Info,
 GAP prod LINE crates/api/src/server.rs:18326  "response closed by the client",
 GAP prod LINE crates/api/src/server.rs:18327  &format!("a write failed: {}", why.kind()),
 GAP prod LINE crates/api/src/server.rs:18329  Poll::Ready(Err(why))
-GAP test LINE crates/api/src/server.rs:18926  Ok(())
-GAP test LINE crates/api/src/server.rs:18927  }),
-GAP test LINE crates/api/src/server.rs:18952  Err(_elapsed) => return (String::from_utf8_lossy(&got).into_owned(), false),
-GAP test LINE crates/api/src/server.rs:19078  Ok(())
-GAP test LINE crates/api/src/server.rs:19079  }),
-GAP test LINE crates/api/src/server.rs:19129  break;
-GAP test LINE crates/api/src/server.rs:19397  break;
-GAP prod LINE crates/api/src/server.rs:20530  }
-GAP prod LINE crates/api/src/server.rs:20534  let (program, args) = browser_handler(CURRENT_BROWSER_HOST);
-GAP prod LINE crates/api/src/server.rs:20535  std::process::Command::new(program)
-GAP prod LINE crates/api/src/server.rs:20536  .args(args)
-GAP prod LINE crates/api/src/server.rs:20537  .arg(url)
-GAP prod LINE crates/api/src/server.rs:20538  // DETACHED. The child is the operator's browser and outlives this
-GAP prod LINE crates/api/src/server.rs:20539  // process; inheriting stdout would interleave its noise with the
-GAP prod LINE crates/api/src/server.rs:20540  // banner, and waiting on it would block the server behind a window.
-GAP prod LINE crates/api/src/server.rs:20541  .stdout(std::process::Stdio::null())
-GAP prod LINE crates/api/src/server.rs:20542  .stderr(std::process::Stdio::null())
-GAP prod LINE crates/api/src/server.rs:20543  .spawn()
-GAP prod LINE crates/api/src/server.rs:20544  .map_err(|why| format!("{program}: {why}"))
-GAP prod LINE crates/api/src/server.rs:20545  .and_then(|child| {
-GAP prod LINE crates/api/src/server.rs:20546  reap_detached(child)
-GAP prod LINE crates/api/src/server.rs:20547  .map(drop)
-GAP prod LINE crates/api/src/server.rs:20548  .map_err(|why| format!("{program}: the child cannot be reaped: {why}"))
-GAP prod LINE crates/api/src/server.rs:20549  })
-GAP prod LINE crates/api/src/server.rs:20830  Err(why) => {
-GAP prod LINE crates/api/src/server.rs:20831  warn_line!(
-GAP prod LINE crates/api/src/server.rs:20834  return FAILED;
-GAP prod LINE crates/api/src/server.rs:20875  Err(why) => {
-GAP prod LINE crates/api/src/server.rs:20876  warn_line!(
-GAP prod LINE crates/api/src/server.rs:20880  return FAILED;
-GAP prod LINE crates/api/src/server.rs:20954  Loading::Failed(why) => return load_failed(&why),
-GAP prod LINE crates/api/src/server.rs:20999  say!("  NO WRITES: {why}");
-GAP prod LINE crates/api/src/server.rs:21002  say!(
-GAP prod LINE crates/api/src/server.rs:21003  "  autopilot: starting in {}s — http://{addr}/autopilot.json",
-GAP prod LINE crates/api/src/server.rs:21004  autopilot::GRACE_SECS
-GAP prod LINE crates/api/src/server.rs:21005  );
-GAP prod LINE crates/api/src/server.rs:21071  Ok(()) => say!("  opening: {home}"),
-GAP prod LINE crates/api/src/server.rs:21086  warn_line!("Calendars NOT warmed at start: {why}");
-GAP prod LINE crates/api/src/server.rs:21092  warn_line!("Census caches NOT warmed at start: {why}");
-GAP ignored LINE crates/api/src/server.rs:22119  fn pull_runtime_costs() {
-GAP ignored LINE crates/api/src/server.rs:22120  costs_of_the_pull_runtime("pull-runtime-costs-store", 200, 100_000, 8_000);
-GAP ignored LINE crates/api/src/server.rs:22121  }
-GAP ignored LINE crates/api/src/server.rs:22342  fn the_pull_order_on_a_real_census() {
-GAP ignored LINE crates/api/src/server.rs:22343  let masters = std::env::var("BRUTEX_WP62_MASTERS")
-GAP ignored LINE crates/api/src/server.rs:22344  .expect("BRUTEX_WP62_MASTERS names the masters directory");
-GAP ignored LINE crates/api/src/server.rs:22345  let store =
-GAP ignored LINE crates/api/src/server.rs:22346  std::env::var("BRUTEX_WP62_STORE").expect("BRUTEX_WP62_STORE names a shadow store");
-GAP ignored LINE crates/api/src/server.rs:22347  let site = Site::load(Path::new(&masters), Path::new(&store));
-GAP ignored LINE crates/api/src/server.rs:22348  println!(
-GAP ignored LINE crates/api/src/server.rs:22350  site.restart.word(),
-GAP ignored LINE crates/api/src/server.rs:22351  site.restart.words()
-GAP ignored LINE crates/api/src/server.rs:22353  let censuses = census::read_all(&site.store_root);
-GAP ignored LINE crates/api/src/server.rs:22354  for target in ["indices", "fno"] {
-GAP ignored LINE crates/api/src/server.rs:22355  let asked = ingest::parse_spot(
-GAP ignored LINE crates/api/src/server.rs:22356  &format!(
-GAP ignored LINE crates/api/src/server.rs:22357  "vendor=zerodha&target={target}&cash_identity=zerodha_nse_checked\
-GAP ignored LINE crates/api/src/server.rs:22358  &granularity=1min&from=2018-01-01&to=2026-09-30"
-GAP ignored LINE crates/api/src/server.rs:22359  ),
-GAP ignored LINE crates/api/src/server.rs:22360  day(2026, 10, 12),
-GAP ignored LINE crates/api/src/server.rs:22362  .expect("the operator's own window");
-GAP ignored LINE crates/api/src/server.rs:22363  let mut targets = spot_targets(&asked, &site);
-GAP ignored LINE crates/api/src/server.rs:22364  targets.sort_unstable();
-GAP ignored LINE crates/api/src/server.rs:22365  let asked_for = targets.len();
-GAP ignored LINE crates/api/src/server.rs:22366  assert!(asked_for > 0, "{target}: the masters name no instrument");
-GAP ignored LINE crates/api/src/server.rs:22367  let whole = ladder_refusal(&asked, &targets, &censuses);
-GAP ignored LINE crates/api/src/server.rs:22368  let began = std::time::Instant::now();
-GAP ignored LINE crates/api/src/server.rs:22369  let gate = order_gate(&asked, &mut targets, &censuses);
-GAP ignored LINE crates/api/src/server.rs:22370  let took = began.elapsed();
-GAP ignored LINE crates/api/src/server.rs:22371  let whole = whole.unwrap_or_else(|| {
-GAP ignored LINE crates/api/src/server.rs:22372  panic!("{target}: the whole-run gate is open, so this store shows nothing")
-GAP ignored LINE crates/api/src/server.rs:22374  println!(
-GAP ignored LINE crates/api/src/server.rs:22376  whole.chars().take(160).collect::<String>()
-GAP ignored LINE crates/api/src/server.rs:22378  let withheld = gate
-GAP ignored LINE crates/api/src/server.rs:22379  .unwrap_or_else(|why| panic!("{target}: still refused whole in {took:?}: {why}"));
-GAP ignored LINE crates/api/src/server.rs:22380  println!(
-GAP ignored LINE crates/api/src/server.rs:22382  withheld.len(),
-GAP ignored LINE crates/api/src/server.rs:22383  targets.len()
-GAP ignored LINE crates/api/src/server.rs:22385  assert!(
-GAP ignored LINE crates/api/src/server.rs:22386  !withheld.is_empty() && withheld.len() < asked_for,
-GAP ignored LINE crates/api/src/server.rs:22388  withheld.len()
-GAP ignored LINE crates/api/src/server.rs:22390  assert_eq!(
-GAP ignored LINE crates/api/src/server.rs:22391  targets.len() + withheld.len(),
-GAP ignored LINE crates/api/src/server.rs:22395  let mut named: Vec<_> = withheld.iter().map(|(key, _)| *key).collect();
-GAP ignored LINE crates/api/src/server.rs:22396  named.sort_unstable();
-GAP ignored LINE crates/api/src/server.rs:22397  named.dedup();
-GAP ignored LINE crates/api/src/server.rs:22398  assert_eq!(
-GAP ignored LINE crates/api/src/server.rs:22399  named.len(),
-GAP ignored LINE crates/api/src/server.rs:22400  withheld.len(),
-GAP ignored LINE crates/api/src/server.rs:22403  for (key, why) in withheld {
-GAP ignored LINE crates/api/src/server.rs:22404  assert!(
-GAP ignored LINE crates/api/src/server.rs:22405  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
-GAP ignored LINE crates/api/src/server.rs:22409  println!(
-GAP ignored LINE crates/api/src/server.rs:22412  why.chars().take(150).collect::<String>()
-GAP ignored LINE crates/api/src/server.rs:22416  }
-GAP test LINE crates/api/src/server.rs:28347  [read: the second operand of an || in the condition, never reached: not the failing arm]  || !std::fs::read_to_string(format!("/proc/{pid}/stat"))
-GAP test LINE crates/api/src/server.rs:28348  [read: part of that never-reached operand]  .unwrap_or_default()
-GAP test LINE crates/api/src/server.rs:28349  [read: part of that never-reached operand]  .contains(") Z "),
-GAP test LINE crates/api/src/server.rs:29576  let lock_path = root.join("serve.lock");
-GAP test LINE crates/api/src/server.rs:29577  let busy = std::fs::OpenOptions::new()
-GAP test LINE crates/api/src/server.rs:29578  .read(true)
-GAP test LINE crates/api/src/server.rs:29579  .write(true)
-GAP test LINE crates/api/src/server.rs:29580  .open(&lock_path)
-GAP test LINE crates/api/src/server.rs:29581  .is_ok_and(|file| store::flock::Flock::try_lock(file, lock_path.clone()).is_err());
-GAP test LINE crates/api/src/server.rs:29582  if busy {
-GAP test LINE crates/api/src/server.rs:29588  assert_eq!(
-GAP test LINE crates/api/src/server.rs:29589  run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
-GAP test LINE crates/api/src/server.rs:29593  let refused =
-GAP test LINE crates/api/src/server.rs:29594  crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
-GAP test LINE crates/api/src/server.rs:29595  assert!(
-GAP test LINE crates/api/src/server.rs:29596  refused.iter().any(|record| {
-GAP test LINE crates/api/src/server.rs:29597  record.level == telemetry::Level::Error
-GAP test LINE crates/api/src/server.rs:29598  && crate::emitted::says(record, "why", "already serving this store")
-GAP test LINE crates/api/src/server.rs:29599  }),
-GAP test LINE crates/api/src/server.rs:29602  return;
-GAP test LINE crates/api/src/server.rs:29603  }
-GAP test LINE crates/api/src/server.rs:29605  let expected =
-GAP test LINE crates/api/src/server.rs:29606  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
-GAP test LINE crates/api/src/server.rs:29612  assert_eq!(
-GAP test LINE crates/api/src/server.rs:29613  run(&argv(&["serve", "127.0.0.1:0"]), after_the_load(&root)).await,
-GAP test LINE crates/api/src/server.rs:29618  let listening = crate::emitted::landed(from, "api.serve", "listening");
-GAP test LINE crates/api/src/server.rs:29619  let mine = listening
-GAP test LINE crates/api/src/server.rs:29620  .iter()
-GAP test LINE crates/api/src/server.rs:29621  .find(|record| crate::emitted::says(record, "addr", "127.0.0.1:"))
-GAP test LINE crates/api/src/server.rs:29622  .expect("the process's own configuration is the first thing it writes");
-GAP test LINE crates/api/src/server.rs:29623  assert_eq!(mine.level, telemetry::Level::Info);
-GAP test LINE crates/api/src/server.rs:29627  assert!(
-GAP test LINE crates/api/src/server.rs:30010  [read: the second operand of an || in the condition, never reached: not the failing arm]  || whole_body.contains(r#""reason":"unmeasured""#),
-GAP test LINE crates/api/src/server.rs:30191  matches!(
-GAP test LINE crates/api/src/server.rs:30778  feed.display()
-GAP test LINE crates/api/src/server.rs:31802  (axum::http::StatusCode::OK, String::new())
-GAP test LINE crates/api/src/server.rs:31803  })
-GAP test LINE crates/api/src/server.rs:32146  assert!(
-GAP test LINE crates/api/src/server.rs:32147  spec.window_caps.is_empty(),
-GAP test LINE crates/api/src/server.rs:32152  feed.display()
-GAP test LINE crates/api/src/server.rs:32154  continue;
-GAP test LINE crates/api/src/server.rs:32545  || "null".to_owned(),
-GAP test LINE crates/api/src/server.rs:34845  key("NIFTYCHEMICALS", m)
-GAP test LINE crates/api/src/server.rs:34846  })
-GAP prod LINE crates/api/src/server.rs:36802  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let feed = vendor.as_str().to_owned();
-GAP prod LINE crates/api/src/server.rs:36818  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let owned = {
-GAP prod LINE crates/api/src/server.rs:36819  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let held = site.universe();
-GAP prod LINE crates/api/src/server.rs:36820  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  resolved_master_rows(&held.read.merged, vendor)
-GAP prod LINE crates/api/src/server.rs:36822  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let master: Vec<pull::universe::VendorInstrument<'_>> = owned
-GAP prod LINE crates/api/src/server.rs:36823  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .iter()
-GAP prod LINE crates/api/src/server.rs:36824  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .map(|(id, symbol, isin)| pull::universe::VendorInstrument {
-GAP prod LINE crates/api/src/server.rs:36825  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  vendor_id: id,
-GAP prod LINE crates/api/src/server.rs:36826  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  trading_symbol: symbol,
-GAP prod LINE crates/api/src/server.rs:36827  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  isin,
-GAP prod LINE crates/api/src/server.rs:36828  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  })
-GAP prod LINE crates/api/src/server.rs:36829  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .collect();
-GAP prod LINE crates/api/src/server.rs:36831  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let source = match pull::resolve::HttpDocuments::new() {
-GAP prod LINE crates/api/src/server.rs:36832  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(client) => client,
-GAP prod LINE crates/api/src/server.rs:36833  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
-GAP prod LINE crates/api/src/server.rs:36834  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
-GAP prod LINE crates/api/src/server.rs:36835  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
-GAP prod LINE crates/api/src/server.rs:36836  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
-GAP prod LINE crates/api/src/server.rs:36837  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(r#"{{"ok":false,"why":{}}}"#, render::json_string(&why)),
-GAP prod LINE crates/api/src/server.rs:36838  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
-GAP prod LINE crates/api/src/server.rs:36844  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let today = match crate::ingest::today_ist() {
-GAP prod LINE crates/api/src/server.rs:36845  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(day) => day,
-GAP prod LINE crates/api/src/server.rs:36846  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
-GAP prod LINE crates/api/src/server.rs:36847  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
-GAP prod LINE crates/api/src/server.rs:36848  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
-GAP prod LINE crates/api/src/server.rs:36849  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
-GAP prod LINE crates/api/src/server.rs:36850  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(
-GAP prod LINE crates/api/src/server.rs:36851  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  r#"{{"ok":false,"why":{}}}"#,
-GAP prod LINE crates/api/src/server.rs:36852  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  render::json_string(&why.to_string())
-GAP prod LINE crates/api/src/server.rs:36853  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  ),
-GAP prod LINE crates/api/src/server.rs:36854  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
-GAP prod LINE crates/api/src/server.rs:36858  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let snap = pull::resolve::crawl(
-GAP prod LINE crates/api/src/server.rs:36859  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &source,
-GAP prod LINE crates/api/src/server.rs:36860  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  INDEX_HOST,
-GAP prod LINE crates/api/src/server.rs:36861  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  today,
-GAP prod LINE crates/api/src/server.rs:36862  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &feed,
-GAP prod LINE crates/api/src/server.rs:36863  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // ASKED OF THE VENDOR, NOT ASSUMED -- and this line used to assume.
-GAP prod LINE crates/api/src/server.rs:36864  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
-GAP prod LINE crates/api/src/server.rs:36865  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // It was the literal `JoinKey::Isin`, under a comment reading "EVERY
-GAP prod LINE crates/api/src/server.rs:36866  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for the
-GAP prod LINE crates/api/src/server.rs:36867  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // one that does not, and asking the descriptor rather than assuming is
-GAP prod LINE crates/api/src/server.rs:36868  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // what keeps that true when it lands." **It landed on 14 Aug 2026.**
-GAP prod LINE crates/api/src/server.rs:36869  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha's master has twelve columns and none is an ISIN, so this
-GAP prod LINE crates/api/src/server.rs:36870  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // literal joined its rows on an EMPTY field -- and `universe::resolve`
-GAP prod LINE crates/api/src/server.rs:36871  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // skips an empty key deliberately, so nothing would have errored. Every
-GAP prod LINE crates/api/src/server.rs:36872  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha instrument would have landed in `Verdict::Lacks`, which reads
-GAP prod LINE crates/api/src/server.rs:36873  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // exactly like a vendor that lists nothing.
-GAP prod LINE crates/api/src/server.rs:36874  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
-GAP prod LINE crates/api/src/server.rs:36875  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // `JoinKey::for_vendor` derives it from `master_columns().isin`, which
-GAP prod LINE crates/api/src/server.rs:36876  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // already spells Zerodha's as empty, so there is no second table to
-GAP prod LINE crates/api/src/server.rs:36877  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // fall behind the first.
-GAP prod LINE crates/api/src/server.rs:36878  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  pull::universe::JoinKey::for_vendor(vendor),
-GAP prod LINE crates/api/src/server.rs:36879  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &master,
-GAP prod LINE crates/api/src/server.rs:36880  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
-GAP prod LINE crates/api/src/server.rs:36881  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .await;
-GAP prod LINE crates/api/src/server.rs:36883  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let verdict = snap.admits_publication(None);
-GAP prod LINE crates/api/src/server.rs:36884  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  (
-GAP prod LINE crates/api/src/server.rs:36885  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::OK,
-GAP prod LINE crates/api/src/server.rs:36886  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
-GAP prod LINE crates/api/src/server.rs:36887  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  universe_snapshot_json(&snap, &verdict),
-GAP prod LINE crates/api/src/server.rs:36888  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
-GAP prod LINE crates/api/src/server.rs:37593  break;
-GAP prod BRANCH crates/api/src/server.rs:1922:9 False  let Some(census) = now.census() else {
-GAP prod BRANCH crates/api/src/server.rs:1990:8 True  if !body.ends_with('\n') {
-GAP prod BRANCH crates/api/src/server.rs:2758:31 False  if counted && let Some(n) = targets.get_mut(slot) {
-GAP prod BRANCH crates/api/src/server.rs:4100:12 True  && why.kind() != std::io::ErrorKind::AlreadyExists
-GAP prod BRANCH crates/api/src/server.rs:4521:16 False  && let Ok(one) = pull::session::Window::new(day, day)
-GAP prod BRANCH crates/api/src/server.rs:5019:21 True  let id = if run == 0 {
-GAP prod BRANCH crates/api/src/server.rs:6075:12 True  if vendor != Vendor::Zerodha
-GAP prod BRANCH crates/api/src/server.rs:6176:27 True  let mode = if asked.repair.is_some() {
+GAP prod LINE crates/api/src/server.rs:20811  Err(why) => {
+GAP prod LINE crates/api/src/server.rs:20812  warn_line!(
+GAP prod LINE crates/api/src/server.rs:20815  return FAILED;
+GAP prod LINE crates/api/src/server.rs:20856  Err(why) => {
+GAP prod LINE crates/api/src/server.rs:20857  warn_line!(
+GAP prod LINE crates/api/src/server.rs:20861  return FAILED;
+GAP prod LINE crates/api/src/server.rs:20935  Loading::Failed(why) => return load_failed(&why),
+GAP prod LINE crates/api/src/server.rs:20980  say!("  NO WRITES: {why}");
+GAP prod LINE crates/api/src/server.rs:20983  say!(
+GAP prod LINE crates/api/src/server.rs:20984  "  autopilot: starting in {}s — http://{addr}/autopilot.json",
+GAP prod LINE crates/api/src/server.rs:20985  autopilot::GRACE_SECS
+GAP prod LINE crates/api/src/server.rs:20986  );
+GAP prod LINE crates/api/src/server.rs:21052  Ok(()) => say!("  opening: {home}"),
+GAP prod LINE crates/api/src/server.rs:21067  warn_line!("Calendars NOT warmed at start: {why}");
+GAP prod LINE crates/api/src/server.rs:21073  warn_line!("Census caches NOT warmed at start: {why}");
+GAP ignored LINE crates/api/src/server.rs:22114  fn pull_runtime_costs() {
+GAP ignored LINE crates/api/src/server.rs:22115  costs_of_the_pull_runtime("pull-runtime-costs-store", 200, 100_000, 8_000);
+GAP ignored LINE crates/api/src/server.rs:22116  }
+GAP ignored LINE crates/api/src/server.rs:22337  fn the_pull_order_on_a_real_census() {
+GAP ignored LINE crates/api/src/server.rs:22338  let masters = std::env::var("BRUTEX_WP62_MASTERS")
+GAP ignored LINE crates/api/src/server.rs:22339  .expect("BRUTEX_WP62_MASTERS names the masters directory");
+GAP ignored LINE crates/api/src/server.rs:22340  let store =
+GAP ignored LINE crates/api/src/server.rs:22341  std::env::var("BRUTEX_WP62_STORE").expect("BRUTEX_WP62_STORE names a shadow store");
+GAP ignored LINE crates/api/src/server.rs:22342  let site = Site::load(Path::new(&masters), Path::new(&store));
+GAP ignored LINE crates/api/src/server.rs:22343  println!(
+GAP ignored LINE crates/api/src/server.rs:22345  site.restart.word(),
+GAP ignored LINE crates/api/src/server.rs:22346  site.restart.words()
+GAP ignored LINE crates/api/src/server.rs:22348  let censuses = census::read_all(&site.store_root);
+GAP ignored LINE crates/api/src/server.rs:22349  for target in ["indices", "fno"] {
+GAP ignored LINE crates/api/src/server.rs:22350  let asked = ingest::parse_spot(
+GAP ignored LINE crates/api/src/server.rs:22351  &format!(
+GAP ignored LINE crates/api/src/server.rs:22352  "vendor=zerodha&target={target}&cash_identity=zerodha_nse_checked\
+GAP ignored LINE crates/api/src/server.rs:22353  &granularity=1min&from=2018-01-01&to=2026-09-30"
+GAP ignored LINE crates/api/src/server.rs:22354  ),
+GAP ignored LINE crates/api/src/server.rs:22355  day(2026, 10, 12),
+GAP ignored LINE crates/api/src/server.rs:22357  .expect("the operator's own window");
+GAP ignored LINE crates/api/src/server.rs:22358  let mut targets = spot_targets(&asked, &site);
+GAP ignored LINE crates/api/src/server.rs:22359  targets.sort_unstable();
+GAP ignored LINE crates/api/src/server.rs:22360  let asked_for = targets.len();
+GAP ignored LINE crates/api/src/server.rs:22361  assert!(asked_for > 0, "{target}: the masters name no instrument");
+GAP ignored LINE crates/api/src/server.rs:22362  let whole = ladder_refusal(&asked, &targets, &censuses);
+GAP ignored LINE crates/api/src/server.rs:22363  let began = std::time::Instant::now();
+GAP ignored LINE crates/api/src/server.rs:22364  let gate = order_gate(&asked, &mut targets, &censuses);
+GAP ignored LINE crates/api/src/server.rs:22365  let took = began.elapsed();
+GAP ignored LINE crates/api/src/server.rs:22366  let whole = whole.unwrap_or_else(|| {
+GAP ignored LINE crates/api/src/server.rs:22367  panic!("{target}: the whole-run gate is open, so this store shows nothing")
+GAP ignored LINE crates/api/src/server.rs:22369  println!(
+GAP ignored LINE crates/api/src/server.rs:22371  whole.chars().take(160).collect::<String>()
+GAP ignored LINE crates/api/src/server.rs:22373  let withheld = gate
+GAP ignored LINE crates/api/src/server.rs:22374  .unwrap_or_else(|why| panic!("{target}: still refused whole in {took:?}: {why}"));
+GAP ignored LINE crates/api/src/server.rs:22375  println!(
+GAP ignored LINE crates/api/src/server.rs:22377  withheld.len(),
+GAP ignored LINE crates/api/src/server.rs:22378  targets.len()
+GAP ignored LINE crates/api/src/server.rs:22380  assert!(
+GAP ignored LINE crates/api/src/server.rs:22381  !withheld.is_empty() && withheld.len() < asked_for,
+GAP ignored LINE crates/api/src/server.rs:22383  withheld.len()
+GAP ignored LINE crates/api/src/server.rs:22385  assert_eq!(
+GAP ignored LINE crates/api/src/server.rs:22386  targets.len() + withheld.len(),
+GAP ignored LINE crates/api/src/server.rs:22390  let mut named: Vec<_> = withheld.iter().map(|(key, _)| *key).collect();
+GAP ignored LINE crates/api/src/server.rs:22391  named.sort_unstable();
+GAP ignored LINE crates/api/src/server.rs:22392  named.dedup();
+GAP ignored LINE crates/api/src/server.rs:22393  assert_eq!(
+GAP ignored LINE crates/api/src/server.rs:22394  named.len(),
+GAP ignored LINE crates/api/src/server.rs:22395  withheld.len(),
+GAP ignored LINE crates/api/src/server.rs:22398  for (key, why) in withheld {
+GAP ignored LINE crates/api/src/server.rs:22399  assert!(
+GAP ignored LINE crates/api/src/server.rs:22400  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
+GAP ignored LINE crates/api/src/server.rs:22404  println!(
+GAP ignored LINE crates/api/src/server.rs:22407  why.chars().take(150).collect::<String>()
+GAP ignored LINE crates/api/src/server.rs:22411  }
+GAP test LINE crates/api/src/server.rs:29908  let lock_path = root.join("serve.lock");
+GAP test LINE crates/api/src/server.rs:29909  let busy = std::fs::OpenOptions::new()
+GAP test LINE crates/api/src/server.rs:29910  .read(true)
+GAP test LINE crates/api/src/server.rs:29911  .write(true)
+GAP test LINE crates/api/src/server.rs:29912  .open(&lock_path)
+GAP test LINE crates/api/src/server.rs:29913  .is_ok_and(|file| store::flock::Flock::try_lock(file, lock_path.clone()).is_err());
+GAP test LINE crates/api/src/server.rs:29914  if busy {
+GAP test LINE crates/api/src/server.rs:29920  assert_eq!(
+GAP test LINE crates/api/src/server.rs:29921  run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+GAP test LINE crates/api/src/server.rs:29925  let refused =
+GAP test LINE crates/api/src/server.rs:29926  crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
+GAP test LINE crates/api/src/server.rs:29927  assert!(
+GAP test LINE crates/api/src/server.rs:29928  refused.iter().any(|record| {
+GAP test LINE crates/api/src/server.rs:29929  record.level == telemetry::Level::Error
+GAP test LINE crates/api/src/server.rs:29930  && crate::emitted::says(record, "why", "already serving this store")
+GAP test LINE crates/api/src/server.rs:29931  }),
+GAP test LINE crates/api/src/server.rs:29934  return;
+GAP test LINE crates/api/src/server.rs:29935  }
+GAP test LINE crates/api/src/server.rs:29937  let expected =
+GAP test LINE crates/api/src/server.rs:29938  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+GAP test LINE crates/api/src/server.rs:29944  assert_eq!(
+GAP test LINE crates/api/src/server.rs:29945  run(&argv(&["serve", "127.0.0.1:0"]), after_the_load(&root)).await,
+GAP test LINE crates/api/src/server.rs:29950  let listening = crate::emitted::landed(from, "api.serve", "listening");
+GAP test LINE crates/api/src/server.rs:29951  let mine = listening
+GAP test LINE crates/api/src/server.rs:29952  .iter()
+GAP test LINE crates/api/src/server.rs:29953  .find(|record| crate::emitted::says(record, "addr", "127.0.0.1:"))
+GAP test LINE crates/api/src/server.rs:29954  .expect("the process's own configuration is the first thing it writes");
+GAP test LINE crates/api/src/server.rs:29955  assert_eq!(mine.level, telemetry::Level::Info);
+GAP test LINE crates/api/src/server.rs:29959  assert!(
+GAP test LINE crates/api/src/server.rs:31925  });
+GAP prod LINE crates/api/src/server.rs:37505  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let feed = vendor.as_str().to_owned();
+GAP prod LINE crates/api/src/server.rs:37521  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let owned = {
+GAP prod LINE crates/api/src/server.rs:37522  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let held = site.universe();
+GAP prod LINE crates/api/src/server.rs:37523  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  resolved_master_rows(&held.read.merged, vendor)
+GAP prod LINE crates/api/src/server.rs:37525  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let master: Vec<pull::universe::VendorInstrument<'_>> = owned
+GAP prod LINE crates/api/src/server.rs:37526  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .iter()
+GAP prod LINE crates/api/src/server.rs:37527  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .map(|(id, symbol, isin)| pull::universe::VendorInstrument {
+GAP prod LINE crates/api/src/server.rs:37528  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  vendor_id: id,
+GAP prod LINE crates/api/src/server.rs:37529  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  trading_symbol: symbol,
+GAP prod LINE crates/api/src/server.rs:37530  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  isin,
+GAP prod LINE crates/api/src/server.rs:37531  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  })
+GAP prod LINE crates/api/src/server.rs:37532  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .collect();
+GAP prod LINE crates/api/src/server.rs:37534  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let source = match pull::resolve::HttpDocuments::new() {
+GAP prod LINE crates/api/src/server.rs:37535  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(client) => client,
+GAP prod LINE crates/api/src/server.rs:37536  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
+GAP prod LINE crates/api/src/server.rs:37537  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
+GAP prod LINE crates/api/src/server.rs:37538  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
+GAP prod LINE crates/api/src/server.rs:37539  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
+GAP prod LINE crates/api/src/server.rs:37540  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(r#"{{"ok":false,"why":{}}}"#, render::json_string(&why)),
+GAP prod LINE crates/api/src/server.rs:37541  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
+GAP prod LINE crates/api/src/server.rs:37547  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let today = match crate::ingest::today_ist() {
+GAP prod LINE crates/api/src/server.rs:37548  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Ok(day) => day,
+GAP prod LINE crates/api/src/server.rs:37549  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  Err(why) => {
+GAP prod LINE crates/api/src/server.rs:37550  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  return (
+GAP prod LINE crates/api/src/server.rs:37551  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::SERVICE_UNAVAILABLE,
+GAP prod LINE crates/api/src/server.rs:37552  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
+GAP prod LINE crates/api/src/server.rs:37553  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  format!(
+GAP prod LINE crates/api/src/server.rs:37554  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  r#"{{"ok":false,"why":{}}}"#,
+GAP prod LINE crates/api/src/server.rs:37555  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  render::json_string(&why.to_string())
+GAP prod LINE crates/api/src/server.rs:37556  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  ),
+GAP prod LINE crates/api/src/server.rs:37557  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  );
+GAP prod LINE crates/api/src/server.rs:37561  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let snap = pull::resolve::crawl(
+GAP prod LINE crates/api/src/server.rs:37562  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &source,
+GAP prod LINE crates/api/src/server.rs:37563  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  INDEX_HOST,
+GAP prod LINE crates/api/src/server.rs:37564  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  today,
+GAP prod LINE crates/api/src/server.rs:37565  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &feed,
+GAP prod LINE crates/api/src/server.rs:37566  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // ASKED OF THE VENDOR, NOT ASSUMED -- and this line used to assume.
+GAP prod LINE crates/api/src/server.rs:37567  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
+GAP prod LINE crates/api/src/server.rs:37568  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // It was the literal `JoinKey::Isin`, under a comment reading "EVERY
+GAP prod LINE crates/api/src/server.rs:37569  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for the
+GAP prod LINE crates/api/src/server.rs:37570  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // one that does not, and asking the descriptor rather than assuming is
+GAP prod LINE crates/api/src/server.rs:37571  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // what keeps that true when it lands." **It landed on 14 Aug 2026.**
+GAP prod LINE crates/api/src/server.rs:37572  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha's master has twelve columns and none is an ISIN, so this
+GAP prod LINE crates/api/src/server.rs:37573  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // literal joined its rows on an EMPTY field -- and `universe::resolve`
+GAP prod LINE crates/api/src/server.rs:37574  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // skips an empty key deliberately, so nothing would have errored. Every
+GAP prod LINE crates/api/src/server.rs:37575  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // Zerodha instrument would have landed in `Verdict::Lacks`, which reads
+GAP prod LINE crates/api/src/server.rs:37576  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // exactly like a vendor that lists nothing.
+GAP prod LINE crates/api/src/server.rs:37577  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  //
+GAP prod LINE crates/api/src/server.rs:37578  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // `JoinKey::for_vendor` derives it from `master_columns().isin`, which
+GAP prod LINE crates/api/src/server.rs:37579  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // already spells Zerodha's as empty, so there is no second table to
+GAP prod LINE crates/api/src/server.rs:37580  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  // fall behind the first.
+GAP prod LINE crates/api/src/server.rs:37581  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  pull::universe::JoinKey::for_vendor(vendor),
+GAP prod LINE crates/api/src/server.rs:37582  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  &master,
+GAP prod LINE crates/api/src/server.rs:37583  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
+GAP prod LINE crates/api/src/server.rs:37584  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  .await;
+GAP prod LINE crates/api/src/server.rs:37586  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let verdict = snap.admits_publication(None);
+GAP prod LINE crates/api/src/server.rs:37587  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  (
+GAP prod LINE crates/api/src/server.rs:37588  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  axum::http::StatusCode::OK,
+GAP prod LINE crates/api/src/server.rs:37589  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  json,
+GAP prod LINE crates/api/src/server.rs:37590  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  universe_snapshot_json(&snap, &verdict),
+GAP prod LINE crates/api/src/server.rs:37591  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  )
 GAP prod BRANCH crates/api/src/server.rs:6434:12 True  if out.store_unavailable.is_some() {
 GAP prod BRANCH crates/api/src/server.rs:6632:12 True  if let Some(why) = run.ledger.refused.clone() {
-GAP prod BRANCH crates/api/src/server.rs:6855:68 False  if asked.window.to() > today || (asked.window.to() == today && !closed) {
-GAP prod BRANCH crates/api/src/server.rs:10093:19 True  let kind = if legs
+GAP prod BRANCH crates/api/src/server.rs:6855:68 True  if asked.window.to() > today || (asked.window.to() == today && !closed) {
+GAP prod BRANCH crates/api/src/server.rs:6865:25 True  Err(why) if asked.window.to() == today => format!("{refusal} Today: {why}."),
+GAP prod BRANCH crates/api/src/server.rs:6865:25 False  Err(why) if asked.window.to() == today => format!("{refusal} Today: {why}."),
 GAP prod BRANCH crates/api/src/server.rs:10113:9 False  let Some(progress) = held.as_mut().filter(|progress| progress.generation == run) else {
-GAP prod BRANCH crates/api/src/server.rs:11549:9 False  let Ok(month) = month_of.chunk.from().year_month() else {
-GAP prod BRANCH crates/api/src/server.rs:11928:8 True  if !spec.fno.serves() {
-GAP prod BRANCH crates/api/src/server.rs:13019:13 False  let Ok(at) = pull::session::IstMoment::from_epoch_secs(ts.div_euclid(1_000_000)) else {
-GAP prod BRANCH crates/api/src/server.rs:14332:32 False  if plan.asks.is_empty() && plan.refused.is_empty() {
-GAP prod BRANCH crates/api/src/server.rs:14358:12 False  if let Some(why) = futures_refusal(asked, route) {
-GAP prod BRANCH crates/api/src/server.rs:14398:12 True  if let Some(ref why) = plan.rebuilt {
-GAP prod BRANCH crates/api/src/server.rs:14398:12 False  if let Some(ref why) = plan.rebuilt {
-GAP prod BRANCH crates/api/src/server.rs:14406:8 True  if !plan.incomplete.is_empty() {
-GAP prod BRANCH crates/api/src/server.rs:14406:8 False  if !plan.incomplete.is_empty() {
-GAP prod BRANCH crates/api/src/server.rs:14412:8 True  if !plan.refused.is_empty() {
-GAP prod BRANCH crates/api/src/server.rs:14412:8 False  if !plan.refused.is_empty() {
 GAP prod BRANCH crates/api/src/server.rs:18229:43 True  HeadState::Awaiting { .. } if entered > finished => self.deliver(),
-GAP test BRANCH crates/api/src/server.rs:19128:16 True  if began.elapsed() > T * 3 {
-GAP test BRANCH crates/api/src/server.rs:19133:17 False  [an operand followed by ||: neither side fails the check by itself]  assert!(cut || closed, "a dripping client outlived the deadline");
-GAP test BRANCH crates/api/src/server.rs:19133:24 True  assert!(cut || closed, "a dripping client outlived the deadline");
-GAP test BRANCH crates/api/src/server.rs:19133:24 False  assert!(cut || closed, "a dripping client outlived the deadline");
-GAP test BRANCH crates/api/src/server.rs:19278:13 False  [an operand followed by ||: neither side fails the check by itself]  said.starts_with("HTTP/1.1 431") || said.starts_with("HTTP/1.1 408") || said.is_empty(),
-GAP test BRANCH crates/api/src/server.rs:19278:49 True  said.starts_with("HTTP/1.1 431") || said.starts_with("HTTP/1.1 408") || said.is_empty(),
-GAP test BRANCH crates/api/src/server.rs:19278:49 False  said.starts_with("HTTP/1.1 431") || said.starts_with("HTTP/1.1 408") || said.is_empty(),
-GAP test BRANCH crates/api/src/server.rs:19278:85 True  said.starts_with("HTTP/1.1 431") || said.starts_with("HTTP/1.1 408") || said.is_empty(),
-GAP test BRANCH crates/api/src/server.rs:19278:85 False  said.starts_with("HTTP/1.1 431") || said.starts_with("HTTP/1.1 408") || said.is_empty(),
-GAP test BRANCH crates/api/src/server.rs:19396:16 True  if began.elapsed() > T * 3 {
-GAP test BRANCH crates/api/src/server.rs:19401:17 False  [an operand followed by ||: neither side fails the check by itself]  assert!(cut || closed, "a dripping body outlived the deadline");
-GAP test BRANCH crates/api/src/server.rs:19401:24 True  assert!(cut || closed, "a dripping body outlived the deadline");
-GAP test BRANCH crates/api/src/server.rs:19401:24 False  assert!(cut || closed, "a dripping body outlived the deadline");
-GAP prod BRANCH crates/api/src/server.rs:20528:8 False  if suppressed.is_some() {
-GAP prod BRANCH crates/api/src/server.rs:20998:24 True  if let Some(why) = gate.unstamped {
-GAP prod BRANCH crates/api/src/server.rs:21001:20 True  if flying_on_start {
-GAP prod BRANCH crates/api/src/server.rs:21085:24 True  if let Err(why) = calendar_route::warm_at_start(&site) {
-GAP prod BRANCH crates/api/src/server.rs:21091:24 True  if let Err(why) = census_cache::start(&site, &calendar_route::offered_feeds()) {
-GAP test BRANCH crates/api/src/server.rs:21730:30 False  [read: the body of an .any() closure opened on the line above: not the failing arm]  |record| crate::emitted::says(record, "instrument", "BANKNIFTY")
-GAP ignored BRANCH crates/api/src/server.rs:22386:17 True  !withheld.is_empty() && withheld.len() < asked_for,
-GAP ignored BRANCH crates/api/src/server.rs:22386:17 False  !withheld.is_empty() && withheld.len() < asked_for,
-GAP ignored BRANCH crates/api/src/server.rs:22386:41 True  !withheld.is_empty() && withheld.len() < asked_for,
-GAP ignored BRANCH crates/api/src/server.rs:22386:41 False  !withheld.is_empty() && withheld.len() < asked_for,
-GAP ignored BRANCH crates/api/src/server.rs:22405:21 True  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
-GAP ignored BRANCH crates/api/src/server.rs:22405:21 False  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
-GAP ignored BRANCH crates/api/src/server.rs:22405:59 True  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
-GAP ignored BRANCH crates/api/src/server.rs:22405:59 False  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
-GAP test BRANCH crates/api/src/server.rs:24580:28 False  [read: an operand inside an .any() closure opened above: not the failing arm]  && f.why.contains("(it ends on 2026-12-31): 2027-01-08")
-GAP test BRANCH crates/api/src/server.rs:24586:34 False  [inside a closure whose false side does not fail the check]  .any(|f| !f.why.starts_with("request minute coverage")
-GAP test BRANCH crates/api/src/server.rs:25369:17 False  record.level == telemetry::Level::Error
-GAP test BRANCH crates/api/src/server.rs:26621:28 False  && record.message == "listening"
-GAP test BRANCH crates/api/src/server.rs:27288:17 False  [an operand followed by ||: neither side fails the check by itself]  over.contains("no vendor was contacted") || over.contains("no vendor is contacted"),
-GAP test BRANCH crates/api/src/server.rs:27288:61 True  over.contains("no vendor was contacted") || over.contains("no vendor is contacted"),
-GAP test BRANCH crates/api/src/server.rs:27288:61 False  over.contains("no vendor was contacted") || over.contains("no vendor is contacted"),
-GAP test BRANCH crates/api/src/server.rs:28346:13 False  [read: the first operand of an || continued on the next line: not the failing arm]  !std::path::Path::new(&format!("/proc/{pid}")).exists()
-GAP test BRANCH crates/api/src/server.rs:28347:20 True  || !std::fs::read_to_string(format!("/proc/{pid}/stat"))
-GAP test BRANCH crates/api/src/server.rs:28347:20 False  || !std::fs::read_to_string(format!("/proc/{pid}/stat"))
-GAP test BRANCH crates/api/src/server.rs:29556:13 True  let Some(root) = root else {
-GAP test BRANCH crates/api/src/server.rs:29566:21 False  record.level == telemetry::Level::Error
-GAP test BRANCH crates/api/src/server.rs:29582:12 True  if busy {
-GAP test BRANCH crates/api/src/server.rs:29582:12 False  if busy {
-GAP test BRANCH crates/api/src/server.rs:29597:21 True  record.level == telemetry::Level::Error
-GAP test BRANCH crates/api/src/server.rs:29597:21 False  record.level == telemetry::Level::Error
-GAP test BRANCH crates/api/src/server.rs:29606:51 True  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
-GAP test BRANCH crates/api/src/server.rs:29606:51 False  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
-GAP test BRANCH crates/api/src/server.rs:29628:13 True  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-GAP test BRANCH crates/api/src/server.rs:29628:13 False  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-GAP test BRANCH crates/api/src/server.rs:29628:50 True  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-GAP test BRANCH crates/api/src/server.rs:29628:50 False  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-GAP test BRANCH crates/api/src/server.rs:30009:13 False  [read: the first operand of an || continued on the next line: not the failing arm]  whole_body.contains(r#""reason":"closed""#)
-GAP test BRANCH crates/api/src/server.rs:30010:20 True  || whole_body.contains(r#""reason":"unmeasured""#),
-GAP test BRANCH crates/api/src/server.rs:30010:20 False  || whole_body.contains(r#""reason":"unmeasured""#),
-GAP test BRANCH crates/api/src/server.rs:32124:17 False  let Some(cap) = spec.window_cap_days(pull::vendor::Granularity::Minute1) else {
-GAP test BRANCH crates/api/src/server.rs:34437:24 False  if let Some(bytes) = answer {
-GAP test BRANCH crates/api/src/server.rs:34913:17 False  record.level == telemetry::Level::Warn
-GAP test BRANCH crates/api/src/server.rs:34914:24 False  && crate::emitted::says(record, "instrument", "NIFTYWAVES")
-GAP test BRANCH crates/api/src/server.rs:35200:17 False  record.level == telemetry::Level::Warn
-GAP test BRANCH crates/api/src/server.rs:35201:24 False  && crate::emitted::says(record, "instrument", "NSE:NIFTY")
-GAP test BRANCH crates/api/src/server.rs:35217:17 False  record.level == telemetry::Level::Info
-GAP test BRANCH crates/api/src/server.rs:35218:24 False  && crate::emitted::counts(record, "days", 25)
-GAP test BRANCH crates/api/src/server.rs:35219:24 False  && crate::emitted::counts(record, "instruments", 208)
-GAP test BRANCH crates/api/src/server.rs:35957:17 False  crate::emitted::counts(record, "instruments", 0)
-GAP prod BRANCH crates/api/src/server.rs:36785:9 True  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let Some(vendor) = named else {
-GAP prod BRANCH crates/api/src/server.rs:37592:13 False  let Some(def) = vocab::table::definition(position) else {
-GAP prod LINE crates/api/src/sources.rs:217  return Self::gone(why);
-GAP prod LINE crates/api/src/sources.rs:706  Refusal::store(format!(
-GAP prod LINE crates/api/src/sources.rs:708  open.file.path().display()
-GAP prod LINE crates/api/src/sources.rs:710  });
-GAP prod LINE crates/api/src/sources.rs:721  Refusal::store(format!(
-GAP prod LINE crates/api/src/sources.rs:723  file.path().display()
-GAP prod LINE crates/api/src/sources.rs:725  })
-GAP prod LINE crates/api/src/sources.rs:846  }
-GAP prod LINE crates/api/src/sources.rs:1100  Self::Unexpected => "unexpected",
-GAP prod LINE crates/api/src/sources.rs:1428  Sessions::default()
-GAP prod LINE crates/api/src/sources.rs:1767  "unexpected"
-GAP prod LINE crates/api/src/sources.rs:2044  }
-GAP prod LINE crates/api/src/sources.rs:2267  notes.push(format!(
-GAP prod LINE crates/api/src/sources.rs:2268  "no offered feed holds {} at {} or a finer rung that folds to it",
-GAP prod LINE crates/api/src/sources.rs:2269  asked.inst.key(),
-GAP prod LINE crates/api/src/sources.rs:2270  asked.rung.as_str()
-GAP prod LINE crates/api/src/sources.rs:2271  ));
-GAP prod LINE crates/api/src/sources.rs:2762  return Err(Refusal::store(format!(
-GAP prod LINE crates/api/src/sources.rs:2763  "pull::fold made {} day bars of one IST day's records",
-GAP prod LINE crates/api/src/sources.rs:2764  folded.len()
-GAP prod LINE crates/api/src/sources.rs:2765  )));
-GAP prod LINE crates/api/src/sources.rs:2942  return Ok(None);
-GAP prod LINE crates/api/src/sources.rs:2976  return Ok(Vec::new());
-GAP prod LINE crates/api/src/sources.rs:3013  return Err(Refusal::store(format!(
-GAP prod LINE crates/api/src/sources.rs:3014  "{} holds {} day records on {day}; a day rung holds one",
-GAP prod LINE crates/api/src/sources.rs:3015  inst.key(),
-GAP prod LINE crates/api/src/sources.rs:3016  zerodha_day.len()
-GAP prod LINE crates/api/src/sources.rs:3017  )));
-GAP prod LINE crates/api/src/sources.rs:3091  Err(why) => {
-GAP prod LINE crates/api/src/sources.rs:3092  return Auction::Unreadable {
-GAP prod LINE crates/api/src/sources.rs:3093  file: String::new(),
-GAP prod LINE crates/api/src/sources.rs:3094  ordinal: None,
-GAP prod LINE crates/api/src/sources.rs:3095  why,
-GAP prod LINE crates/api/src/sources.rs:3096  };
-GAP prod LINE crates/api/src/sources.rs:3132  continue;
-GAP prod LINE crates/api/src/sources.rs:3252  kept
-GAP prod LINE crates/api/src/sources.rs:3281  Err(why) => Eligibility::Unverified(why),
-GAP prod LINE crates/api/src/sources.rs:3543  }
-GAP prod LINE crates/api/src/sources.rs:3753  return Value::Null;
-GAP prod LINE crates/api/src/sources.rs:3856  (true, false) => tally.zerodha_only += 1,
-GAP prod LINE crates/api/src/sources.rs:4108  flags.push("open_mismatch");
-GAP prod LINE crates/api/src/sources.rs:4117  flags.push("gdfl_extremes_outside_day");
-GAP prod BRANCH crates/api/src/sources.rs:216:12 True  if pull::gdfl_lineage::is_contract_refused(&why) {
-GAP prod BRANCH crates/api/src/sources.rs:264:12 False  && inst.contract.is_some()
-GAP prod BRANCH crates/api/src/sources.rs:841:16 False  if !pending.is_empty() {
-GAP prod BRANCH crates/api/src/sources.rs:983:51 False  pull::calendar::DayKind::Open(session) if session.count > 0 => session
-GAP prod BRANCH crates/api/src/sources.rs:1416:48 False  if rung.rung == Timeframe::SECOND_1 && rung.kind == Kind::Stored {
-GAP prod BRANCH crates/api/src/sources.rs:1509:8 True  if !status.is_success() || answer.get("status").and_then(Value::as_str) != Some("ok") {
-GAP prod BRANCH crates/api/src/sources.rs:1543:16 False  whole: !truncated && u64::try_from(days.len()).is_ok_and(|named| named == count),
-GAP prod BRANCH crates/api/src/sources.rs:1573:25 False  if derived.whole && minutes.whole {
-GAP prod BRANCH crates/api/src/sources.rs:1695:16 False  if uncounted.len() < MAX_NAMED {
-GAP prod BRANCH crates/api/src/sources.rs:1739:37 True  (!missing.is_empty() || days.is_some_and(|d| d > 0) || sessions_short).then(|| {
-GAP prod BRANCH crates/api/src/sources.rs:1765:40 True  held.kind == Kind::Derived && (sessions.not_held.is_none() || minute.not_held.is_none());
-GAP prod BRANCH crates/api/src/sources.rs:1766:20 True  let state = if held.kind == Kind::Unexpected {
-GAP prod BRANCH crates/api/src/sources.rs:1770:31 True  } else if !census_held || uncounted_count > 0 {
-GAP prod BRANCH crates/api/src/sources.rs:2036:16 False  if !held.is_empty() {
-GAP prod BRANCH crates/api/src/sources.rs:2129:20 False  if let Some(i) = at.get_mut(n)
-GAP prod BRANCH crates/api/src/sources.rs:2266:8 True  if sources.is_empty() {
-GAP prod BRANCH crates/api/src/sources.rs:2761:13 False  let [only] = folded.as_slice() else {
-GAP prod BRANCH crates/api/src/sources.rs:2941:17 False  let Some((_, vendor)) = feed_holding(rung) else {
-GAP prod BRANCH crates/api/src/sources.rs:2975:9 False  let Some((series, months)) = held else {
-GAP prod BRANCH crates/api/src/sources.rs:3012:8 True  if zerodha_day.len() > 1 {
-GAP prod BRANCH crates/api/src/sources.rs:3127:12 True  if t < month_lo || t >= month_hi {
-GAP prod BRANCH crates/api/src/sources.rs:3131:12 True  if t < lo || t >= hi {
-GAP prod BRANCH crates/api/src/sources.rs:3131:22 True  if t < lo || t >= hi {
-GAP prod BRANCH crates/api/src/sources.rs:3139:17 False  bar.close == record.price_paisa
-GAP prod BRANCH crates/api/src/sources.rs:3251:25 True  let master = if let Some(kept) = MASTERS.get(&memo) {
-GAP prod BRANCH crates/api/src/sources.rs:3537:12 False  if let Some(records) = flags.get("days").and_then(Value::as_array) {
-GAP prod BRANCH crates/api/src/sources.rs:3539:20 False  if let Some(day) = record.get("day").and_then(Value::as_str) {
-GAP prod BRANCH crates/api/src/sources.rs:3681:12 False  if let Some(flag_notes) = flag_notes {
-GAP prod BRANCH crates/api/src/sources.rs:3752:9 False  let Some((tables, symbol)) = &context.measured else {
-GAP prod BRANCH crates/api/src/sources.rs:3884:19 False  shares && bases == Some(true) && factor_pair.is_some_and(|(g, z)| basis_differs(g, z));
-GAP prod BRANCH crates/api/src/sources.rs:3891:40 False  .map(|(before, now)| shares && bases == Some(true) && factor_stepped(before, now));
-GAP prod BRANCH crates/api/src/sources.rs:3955:35 True  .is_some_and(|(d, g)| g.bar.high > d.high || g.bar.low < d.low);
-GAP prod BRANCH crates/api/src/sources.rs:4071:17 False  scaled > 0 && (zv * zc - scaled).abs() * 1_000 > VOLUME_TOLERANCE_PERMILLE * scaled
-GAP prod BRANCH crates/api/src/sources.rs:4087:17 False  gc > 0 && zg > (gg * zc + gc - 1) / gc
-GAP prod BRANCH crates/api/src/sources.rs:4107:8 True  if open_mismatch {
-GAP prod BRANCH crates/api/src/sources.rs:4116:8 True  if gdfl_outside {
-GAP prod BRANCH crates/api/src/sources.rs:4130:22 False  if minute_off && !index {
+GAP prod BRANCH crates/api/src/server.rs:20979:24 True  if let Some(why) = gate.unstamped {
+GAP prod BRANCH crates/api/src/server.rs:20982:20 True  if flying_on_start {
+GAP prod BRANCH crates/api/src/server.rs:21066:24 True  if let Err(why) = calendar_route::warm_at_start(&site) {
+GAP prod BRANCH crates/api/src/server.rs:21072:24 True  if let Err(why) = census_cache::start(&site, &calendar_route::offered_feeds()) {
+GAP ignored BRANCH crates/api/src/server.rs:22381:17 True  !withheld.is_empty() && withheld.len() < asked_for,
+GAP ignored BRANCH crates/api/src/server.rs:22381:17 False  !withheld.is_empty() && withheld.len() < asked_for,
+GAP ignored BRANCH crates/api/src/server.rs:22381:41 True  !withheld.is_empty() && withheld.len() < asked_for,
+GAP ignored BRANCH crates/api/src/server.rs:22381:41 False  !withheld.is_empty() && withheld.len() < asked_for,
+GAP ignored BRANCH crates/api/src/server.rs:22400:21 True  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
+GAP ignored BRANCH crates/api/src/server.rs:22400:21 False  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
+GAP ignored BRANCH crates/api/src/server.rs:22400:59 True  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
+GAP ignored BRANCH crates/api/src/server.rs:22400:59 False  why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
+GAP test BRANCH crates/api/src/server.rs:29888:13 True  let Some(root) = root else {
+GAP test BRANCH crates/api/src/server.rs:29914:12 True  if busy {
+GAP test BRANCH crates/api/src/server.rs:29914:12 False  if busy {
+GAP test BRANCH crates/api/src/server.rs:29929:21 True  record.level == telemetry::Level::Error
+GAP test BRANCH crates/api/src/server.rs:29929:21 False  record.level == telemetry::Level::Error
+GAP test BRANCH crates/api/src/server.rs:29938:51 True  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+GAP test BRANCH crates/api/src/server.rs:29938:51 False  masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+GAP test BRANCH crates/api/src/server.rs:29960:13 True  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
+GAP test BRANCH crates/api/src/server.rs:29960:50 True  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
+GAP test BRANCH crates/api/src/server.rs:32069:13 False  let pull::vendor::Transport::Http(shipped) =
+GAP prod BRANCH crates/api/src/server.rs:37488:9 True  [L-BCA-6: universe_resolve ends at a real host (Parameter Store or the index host); the operator's seam decision]  let Some(vendor) = named else {
 GAP prod LINE crates/api/src/speed.rs:586  return Handle(Arc::clone(row));
-GAP prod LINE crates/api/src/speed.rs:756  let _said = telemetry::emit(
-GAP prod LINE crates/api/src/speed.rs:757  &telemetry::Event::error("api.speed", "the minute thread did not start")
-GAP prod LINE crates/api/src/speed.rs:758  .with("why", telemetry::Value::Str(&why.to_string())),
-GAP prod LINE crates/api/src/speed.rs:759  );
-GAP prod LINE crates/api/src/speed.rs:775  }
 GAP prod LINE crates/api/src/speed.rs:888  Ok::<(), std::io::Error>(())
-GAP prod LINE crates/api/src/speed.rs:889  };
-GAP prod LINE crates/api/src/speed.rs:895  std::future::pending::<()>().await;
 GAP prod LINE crates/api/src/speed.rs:896  }
 GAP prod LINE crates/api/src/speed.rs:897  })
-GAP prod LINE crates/api/src/speed.rs:900  Err(why) => {
-GAP prod LINE crates/api/src/speed.rs:901  let _said = telemetry::emit(
-GAP prod LINE crates/api/src/speed.rs:902  &telemetry::Event::error("api.speed", "SIGTERM cannot be caught")
-GAP prod LINE crates/api/src/speed.rs:903  .with("why", telemetry::Value::Str(&why.to_string())),
-GAP prod LINE crates/api/src/speed.rs:905  ctrl_c.await
-GAP prod LINE crates/api/src/speed.rs:908  }
-GAP prod LINE crates/api/src/speed.rs:930  pub fn stage(name: &str, micros: u64, outcome: Outcome) {
-GAP prod LINE crates/api/src/speed.rs:931  let now = now_ms();
-GAP prod LINE crates/api/src/speed.rs:932  global().record(&format!("stage:{name}"), Kind::Stage, micros, outcome, now);
-GAP prod LINE crates/api/src/speed.rs:933  }
 GAP prod BRANCH crates/api/src/speed.rs:585:16 True  if let Some(row) = rows.by_name.get(name) {
-GAP prod BRANCH crates/api/src/speed.rs:640:20 False  if let Some((figures, window_ms)) = figures
-GAP prod BRANCH crates/api/src/speed.rs:755:16 True  if let Err(why) = spawned {
-GAP prod BRANCH crates/api/src/speed.rs:771:16 False  if let Some(table) = TABLE.get() {
-GAP prod BRANCH crates/api/src/speed.rs:894:24 True  if term.recv().await.is_none() {
 GAP prod BRANCH crates/api/src/speed.rs:894:24 False  if term.recv().await.is_none() {
-GAP test LINE crates/api/src/store_wire.rs:477  [read: a builder closure inside the condition, never called because the cache refused first: not the failing arm]  "[]".into()
-GAP test LINE crates/api/src/store_wire.rs:522  || -> Result<u64, String> { panic!("derived twice") },
-GAP prod LINE crates/api/src/topjson.rs:137  return refusal(
-GAP prod LINE crates/api/src/topjson.rs:139  "top report exceeds the bounded JSON response size; no prefix was exposed",
+GAP test LINE crates/api/src/speed_tests.rs:1517  boundary + MINUTE_MS
+GAP test BRANCH crates/api/src/speed_tests.rs:1516:24 True  let woken = if boundary - at < 2_000 {
 GAP prod LINE crates/api/src/topjson.rs:180  return Ok(cli::render_top_record(
 GAP prod LINE crates/api/src/topjson.rs:181  &row,
 GAP prod LINE crates/api/src/topjson.rs:182  &[],
 GAP prod LINE crates/api/src/topjson.rs:183  None,
 GAP prod LINE crates/api/src/topjson.rs:184  "No committed result-set receipt exists; no orphan frontier rows are displayed.",
 GAP prod LINE crates/api/src/topjson.rs:185  ));
-GAP prod LINE crates/api/src/topjson.rs:194  return Err(why);
-GAP test LINE crates/api/src/topjson.rs:609  |_| Ok(()),
-GAP prod BRANCH crates/api/src/topjson.rs:136:16 True  if body.len() > crate::detail::MAX_RESPONSE_BYTES {
 GAP prod BRANCH crates/api/src/topjson.rs:179:9 False  let Some(receipt) = receipt else {
-GAP prod BRANCH crates/api/src/topjson.rs:193:12 True  if let Some(why) = partial {
-GAP prod LINE crates/api/src/verify.rs:326  crate::speed::Outcome::Cancelled
-GAP prod BRANCH crates/api/src/verify.rs:321:26 True  let outcome = if report
-GAP test BRANCH crates/api/tests/cloud_mutants_bars.rs:460:28 False  |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && matches!(k.month.month(), 1 | 3);
-GAP test BRANCH crates/api/tests/cloud_mutants_bars.rs:496:28 False  |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && matches!(k.month.month(), 1 | 3);
-GAP test BRANCH crates/api/tests/cloud_mutants_bars.rs:503:13 False  let Gate::RungFirst {
-GAP test BRANCH crates/api/tests/cloud_mutants_bars.rs:612:13 False  let Gate::RungFirst {
-GAP test BRANCH crates/api/tests/cloud_mutants_bars.rs:1487:30 False  [inside a closure whose false side does not fail the check]  .any(|fault| fault.contains("2025-05") && fault.contains("another writer holds")),
 `````

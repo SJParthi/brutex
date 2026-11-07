@@ -1,6 +1,6 @@
 STATUS: IN PROGRESS
 
-# report-BASE-COV-API-AS2 (BASE-COV-API repair round 3, shard G2, 5-6 Nov 2026)
+# report-BASE-COV-API-AS2 (BASE-COV-API repair round 3, shard G2, 5-7 Nov 2026)
 
 Branch `cloud/cov-api-as2-20261105`, cut from the kit commit
 `f4111a0132473d8771d8624a9538b1362926f70b`; START `6ea46e59c07488eeccff388407976041852aae2c`.
@@ -676,8 +676,98 @@ naming it; `RUNNER_TEMP` and `SOURCE_SCAN` pointing at them). Both exit 1 (BASE-
 here; the print-surface section is the same 56 lines on both and names no `api/src/sources_tests.rs`
 site (`grep -c sources_tests` of this tree's output: 0), and no clause-C site of this session's.
 
-NEXT (session -5): Route B whole:api on the code tip `b0b3a034` (running), the lists and the FIX
-json.
+### Final measurement (session -5): Route B whole:api on `b0b3a034`, the code tip (7 Nov, 19:41-20:09 IST)
+
+`d3-route-b-cloud.sh /home/user/rb5 /home/user/tgt /home/user/prof/rb5-B /home/user/logs/rb5
+deep-BASE-COV-API-6ea46e59c074-set.txt api -- --skip
+a_full_calendar_pool_refuses_the_census_and_the_audit` (a scratch worktree at `b0b3a034`, clean,
+every red round restored; the kit's set file whole, 205 coverage files; OPS-10's touch of every
+tracked file first): build rc 0 in 2 min (170 artifacts, 148 reused); `== test api rc=101 END
+2026-11-07 19:50:39 IST (6 min); tests passed 3195 failed 15 ignored 16`; lib `test result:
+FAILED. 3111 passed; 14 failed; 16 ignored; 0 measured; 1 filtered out; finished in 241.53s`. The
+15 reds are the baseline's 14 (the eight lib tests of other shards' files named under the
+previous final measurement, G2's five head-deadline host reds, and `tests/pool_load.rs`'s
+`the_feed_list_stays_fast_while_32_clients_loop_each_route`, here "/feeds.json p99 23.0234ms
+beside the file-reading routes is more than twice the control's 10.993146ms": L-BCA-4) and G1's
+`server::stop_tests::a_stop_during_a_slow_load_ends_within_the_stop_bound` ("the whole stop,
+signal to end, is inside STOP_BOUND 6s: 6.584833358s" under the run's load: L-BCA-4's stop bound,
+as in `dev-full1`). Every test this shard added or changed passed. `ROUTE-B DONE 2026-11-07
+20:09:05 IST WITH NOT PROVED lines above`, the 23 NOT PROVED files being the 22
+`crates/api/benches/**` files and `crates/api/src/lib.rs` (L-BCA-2).
+
+- Whole api, this host: lines 180,141/184,389 (4,248 uncovered), branches 12,948/15,498 (2,550
+  uncovered sides).
+- G2 (the same 58 files): lines 70,235/71,278 (1,043 uncovered), branches 4,757/5,510 (753
+  uncovered sides): (F) 173 lines 545 sides; (U) 123 lines 90 sides; GAP 747 lines 118 sides
+  (production 541 lines 78 sides; test code 96 lines 28 sides; inside `#[ignore]`d tests 110
+  lines 12 sides).
+- Against this shard's previous final (`b3d5321c`, same host and classifier): GAP production
+  950/269 to 541/78, test code 118/74 to 96/28, inside `#[ignore]`d tests 110/12 unchanged; (U)
+  56/35 to 123/90 (session -5's proofs, each in `fu-AS2.txt.md`); (F) 144/474 to 173/545. **The
+  bar is not met** for G2.
+- Production, 541 lines and 78 sides, by kind:
+  - named by an L-BCA tag on the row, 389 lines 28 sides: L-BCA-5's saved-research projections
+    (`indexstoprankingjson.rs` 194/21, `booleanqualification_projection.rs` 99/6) and L-BCA-6's
+    `server.rs` paths (`universe_resolve` 61/1, `read_credential` 24/0, `credentialed_source`
+    11/0);
+  - named as L-BCA-5's by D-8663's draft, 50 lines 20 sides: `expressionsearchjson.rs` 33/18 (past
+    `Reader::open`) and `booleanlaunch.rs` 17/2 (the launched search's observer);
+  - left, 102 lines 30 sides, every one named: `server.rs` 39/11 (6434:12 T and 6435, the store
+    breaker in the spot loop, which other shards' `a_store_that_takes_no_write_trips_the_store_breaker`
+    reaches on a non-root host and which is red on this root host; 6632:12 T and 6633, a recovery
+    journal that refuses a member's note, not built here; 6855:68 T, 6864-6865 and 6865:25 T/F,
+    the wall clock of `finished_day_only`, which this Saturday evening run did not take and a
+    weekday run before the close does; 10113:9 F and 10114-10118, a race; 10594-10597 and
+    14899-14902, the machine's clock before 1970 or past 9999; 11993, the Groww name walk that
+    ends at the vendor's real host (D-8663 item 1); 18229:43 T and 18323-18329, the slow-reader
+    paths that the five head-deadline host reds reach on the Mac; 20811-20815 and 20856-20861, a
+    bound listener whose address or kept port the host refuses; 20935, 20979:24 T, 20980,
+    20982:20 T, 20983-20986, 21052, 21066:24 T, 21067, 21072:24 T and 21073, the serve start-up
+    lines of an unstamped build, a flying autopilot, an opened browser and warm-ups that fail),
+    `census_cache.rs` 33/6 (a warm thread the host does not start, 642-653 and 1009-1012; a warm
+    thread that panicked, 1209-1212; a reply channel gone, 1132-1141; a refresh that cannot spawn,
+    1199; the two races, 918:16 F and 1287-1303), `indexstopvixjson.rs` 6/3 (105-112 and 151:16 F:
+    the tests belong in G1's `indexstopvix_projection_tests.rs`, and 107:16 F, 110, 112 need a
+    native catalog of 171 or more trades), `topjson.rs` 6/1 (179-185) and `dayflags_rules.rs` 1/1
+    (319-320), race-only windows; `bars_sort.rs` 5/2 (2074-2075 and 2144-2145, more than 2^32
+    series plans; 2388-2390, a file changed between two reads of one call); `master.rs` 5/1
+    (356-361, a master that grows past the bound while it is read); `speed.rs` 4/2 (585-586, the
+    insert race; 888, 894:24 F, 896-897, the signal arms); `calendar_route.rs` 2/0 (1312 and 1314,
+    the journal walk's thread that does not start or unwinds); `calendar_of.rs` 0/2 (551:32 F and
+    827:35 T, a hand-crafted bar file); `render.rs` 1/1 (3283:13 F and 3284, a directory entry
+    whose type the host cannot read).
+- Test code, 96 lines and 28 sides: `head_deadline_body_tests.rs` 51/7 (the five host reds stop
+  before these lines: the Mac's); `server.rs`'s `run_serves_until_the_signal_and_exits_zero` 29
+  lines 9 sides (the store already held or not, the masters folder's answer: drafted as four
+  children, not applied); and 16 lines, 12 sides in this continuation's own new tests, which
+  D-8662's forms close next: `census_cache.rs` 3/6 (a read counter in a closure no case calls,
+  3180-3182, and six sides of guards on fixtures that always hold), `calendar_of.rs` 6/0 (a wait
+  loop a fast thread never enters, 2473-2477; an arm no case meets, 2510),
+  `calendar_route_tests.rs` 3/3 and `calendar_route.rs` 0/1 (a never-called reader closure, guards
+  on fixtures that always hold, the last operand of an `||` inside an assert, which recipe v4 step
+  4 does not name), `bars_sort.rs` 2/0 (a naming closure's arm no case meets, 4755-4756),
+  `speed_tests.rs` 1/1 (1516:24 T and 1517, the wall clock: a run that starts within 2 s of a
+  minute boundary takes it), `server.rs` 31925 (the closing line of a vendor task that never ends)
+  and 32069:13 F (a let-else whose `else` rustfmt put on its own line).
+- Inside `#[ignore]`d tests, 110 lines 12 sides (L-BCA-3's real-data tests): `server.rs` 55/8,
+  `calendar_of.rs` 34/4, `dayflags_rules_tests.rs` 18/0, `disk_route.rs` 3/0.
+- Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, both rewritten from this readout. A row whose line
+  the previous lists (`b3d5321c`) classed keeps that class, its line mapped through `git diff`; the
+  (U) rows carry their proofs; every other row was classed by recipe v4 step 4. The (F) rows of the
+  new tests were read here: the panic lines, the elses of one-line let-elses that panic, the false
+  sides of conditions inside asserts whose lines ran, the message arguments of asserts whose
+  statements ran, and the `_ => false` arm of a `matches!` inside an assert whose statement ran
+  (the `matches!(` line's only region; seven such lines in `census_cache.rs`'s new tests, read as
+  the previous lists read the same rows, e.g. `sources_tests.rs` 1365).
+
+8-extremes on `b0b3a034`: the table under "The 8-extremes counts of verify r3's named G2 files"
+stands, and every test this continuation added in a named file carries an `Extremes:` line of at
+least 8 numbered cases with a Combined part (2 or more) and an Out-of-the-box part (1 or more),
+each asserted: `server.rs` 3 (9, 10, 10), `sources_tests.rs` 8 (11 to 13 each; 13 such tests in
+the file now). The other files' new tests are in the tables above (`sources_day_truth_tests.rs` 2,
+`speed_tests.rs` 5, 11 or 12 cases each).
+
+Gate 23 on `b0b3a034`: as "Gate 23 by hand (session -5)" above (this measurement changed no code).
 
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
@@ -754,16 +844,19 @@ json.
   is Linux-only (a sysfs attribute that reports more bytes than it holds), so provenance.rs
   1576:16 T and 1577-1581 are reached here and, on aarch64-apple-darwin, are a (U) candidate (no
   file there reports more bytes than it holds without a concurrent writer): the Mac to confirm or
-  name its own input. server.rs 6855:68 F reads the wall clock (`finished_day_only`): a run on a
-  settled day or after the close takes it, as this Saturday run does. The spawning-arm child links
-  the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
+  name its own input. server.rs's `finished_day_only` reads the wall clock: a run on a settled day
+  or after the close takes 6855:68 F (as this Saturday run did), a weekday run before the close
+  takes 6855:68 T, 6864-6865 and 6865:25 T/F (as Friday's runs did), and no one run takes both;
+  whichever side the Mac's run takes, the other stays the wall clock's. The spawning-arm child
+  links the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
 
-NEXT: G2's production rows left in the final lists, file by file, largest first: server.rs's
-`fno_futures` past its refusal (a `Credentials::Scripted` site and a loopback vendor reach it,
-as `credential_law_tests.rs` does), `open_unless_suppressed`, `run_in_over`, `pull_run`;
-`provenance.rs`'s journal and import-record arms; `calendar_of.rs`, `calendar_route.rs`;
-`bars_sort.rs`'s index guards (reachable by direct calls with mismatched slices: tests, not
-(U)); `sources.rs`'s two-feed comparison arms; `census_cache.rs`'s warm rows (thread-spawn
-failures and joins that panicked stay host-bound GAP); `speed.rs`; `topjson.rs` 179-185 and
-`dayflags_rules.rs` 319-320 (race-only windows: say so, or a seam); then Route B whole:api on
-the code tip again, the lists, and the FIX json. The Mac's items above stay the Mac's.
+NEXT: (1) the 16 lines and 12 sides of test code this continuation's own new tests left (named
+under "Final measurement (session -5)"), closed by D-8662's forms; (2)
+`run_serves_until_the_signal_and_exits_zero`'s 29 lines and 9 sides, by the drafted form of four
+children, one per store state; (3) the production rows left that a test can reach: `server.rs`
+6632-6633 (a recovery journal that refuses a member's note) and the serve start-up lines
+20935-21073 (a serve in a child per state: an unstamped build's gate, a flying autopilot, a
+warm-up that fails), `calendar_of.rs` 551:32 F and 827:35 T (a hand-crafted bar file, its checksum
+block recomputed); (4) the two indexstopvix tests for G1's `indexstopvix_projection_tests.rs` (G1
+or ASA); then Route B whole:api on the code tip again, the lists, and the FIX json. The rows named
+as host, race, clock or real-host rows stay named; the Mac's items above stay the Mac's.
