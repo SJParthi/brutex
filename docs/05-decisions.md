@@ -88719,3 +88719,213 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+### D-7400 — Gate 8 reads a whole month the way a client must, page by page through `/bars/window.json`, and the 60,000-row `/bars.json` cap is kept, its refusal timed as O(1) (BASE-BENCH-1028) — 2026-10-29
+
+**Context** (BASE-BENCH-1028). The quiet-Mac re-run of CI gate 8 on 28 Oct
+2026 (`state/decisions-20261027/slow-checks-a32722c4.result`, line
+`gate8-bench-quiet FAIL`; its `run.log` line 3450) stopped in the api ratio
+bench: the `reads` row "bars, the whole month" asked `/bars.json` for NIFTY's
+one-second June at 1,024, 10,240 and 102,400 bars, and since R3-08 (merged
+18 Oct 2026) one `/bars.json` answer serves at most `MAX_MONTH_ANSWER_ROWS`
+= 60,000 rows and refuses more `400 too_many_rows`, pointing at
+`/bars/window.json`. The 100x case measured nothing and the bench exited 1,
+so the complexity job's step "Per-operation cost at 1x / 10x / 100x" was red
+on the base. The earlier gate-8 run of 27 Oct timed out under load before it
+reached the row, which hid it.
+
+**Decision.** The cap stays at 60,000 and the 102,400 size stays. A whole
+one-second month of real data is 36 to 71 MB of JSON; the cap is what keeps
+one request from carrying it, and raising it to fit a bench would make the
+bench the reason a client can ask for 71 MB again. The bench now reads the
+whole month the way a client must: `crates/api/benches/ratio/paged.rs`
+`read_month` asks page 0 of `/bars/window.json` oldest first at
+`MAX_WINDOW_LIMIT` (1,000) rows, learns the month's `total` from it, and asks
+each next page until it holds every row; every page must answer `200`, keep
+the same `total`, report no missing month and no faulted record, hold no more
+rows than asked or than the month holds, be full unless it is the last, and
+continue the stamps of the page before it. One timed sample is the whole
+read; its p50 per row read is gated at the shared 3.0x ceiling 1x→10x and
+1x→100x, as the one-answer row was. The refusal is its own gated case: three
+stores of one month each, 60,001, 102,400 and 2,592,000 rows (every second of
+June, the fullest one-second month), each asked `/bars.json` whole, each
+required to answer `400 too_many_rows` naming the 60,000 cap, the p50 per
+request gated from the smallest to each larger one at 3.0x. Labels name the
+sizes, because no refused month can be 100x the smallest refused one
+(`docs/06-limits.md` L-BBENCH-2).
+
+**Rejected.** Raising or removing the cap, dropping or shrinking the 102,400
+size, loosening a ceiling, or skipping the case: each turns the gate green by
+measuring less. Reading through `/bars/export.csv`: one export writes at
+most 20,000 rows and refuses more, so it cannot read the month whole either
+(L-BBENCH-4). Exposing `MAX_MONTH_ANSWER_ROWS` to the bench: the bench mirrors
+the number and checks it against the route's own refusal sentence each run
+(L-BBENCH-3).
+
+**Proof.** `crates/api/tests/bench_paged_month.rs` mounts the same module and
+proves it against the production router. Written first against a port of
+the one-answer read, all nine tests failed (0 passed, 9 failed); on the pager
+all nine pass: `the_benchs_whole_month_read_answers_every_size_it_times`
+(1,024, 10,240 and 102,400 rows, largest first, the 102,400 the one-answer
+read lost to `400 too_many_rows`); the page edges 1, 999, 1,000, 1,001,
+2,000, 2,001; an empty month; 60,000 and 60,001 rows with the cap kept; a
+window across a month edge on and inside a page edge; a missing month
+mid-range refused; two readers at once; a query with its own paging keys
+refused; eleven wrong answers from a fake server each refused by name.
+Invariants BBENCH-01 to BBENCH-04; limits L-BBENCH-1 to L-BBENCH-4.
+
+**Measured** (CI's complexity step run whole on the final tip, 29 Oct 2026,
+load 35 to 40; `state/fix/round2/logs-BENCH1028/complexity2.log`): the gate-8
+count (46 bench files), the planted probe caught (C-09 508.546x BREACH, the
+file restored), then `cargo bench --workspace --locked`, whose api bench
+printed `all ratios within the ceiling`: the paged whole month p50 1.119 ms
+at 1,024 rows, 9.899 ms at 10,240, 95.092 ms at 102,400, per row 0.884x and
+0.849x; the refusal p50 79.833 µs at 60,001 rows, 80.375 µs at 102,400 and
+80.125 µs at 2,592,000, ratios 1.006x and 1.003x, n = 200 each. The refusal
+case was first timed one store after another, straight after each server
+started, and its 60,001-row p50 came out 9.1 ms against 0.12 ms for the
+others: start-up and load, which would have let any refusal pass. It now
+builds all three, asks each 200 times untimed, and times 200 rounds that ask
+every store once. On the real store through a shadow server (GETs only):
+NIFTY 1s 2018-09 holds 400,200 rows, `/bars.json` refuses it naming the
+60,000 cap (200 refusals: p50 0.588 ms, p99 0.952 ms, max 4.691 ms) and the
+pager reads all 400,200 in 401 pages (a page p50 2.220 ms, p99 2.828 ms);
+BANKNIFTY, a NIFTY option, an illiquid strike and an F&O share the same
+(`docs/06-limits.md` L-BBENCH-1). The workspace run did NOT exit 0: past the api bench it stopped on `crates/telemetry`'s C-AU-01 (48.705x, then 6.341x BREACH), a red the api one hid, in a file this part does not own (L-BBENCH-5).
+
+**Cost.** No served route changes and no store file changes: the change is
+the bench and a test. The bench's own run grows by the paged reads (about
+103 requests a sample at 100x, 200 samples) and three lone-month stores, the
+largest 2,592,000 rows built once.
+
+### D-7401 — What the ratio bench decides off its timed path lives where a test can reach it (BASE-BENCH-1028, repair 1) — 2026-11-01
+
+**Context.** The D3 check of BASE-BENCH-1028 at 954ca59bb measured its D2 set
+short of the bar: 43 lines and 14 branch sides in 10 items
+(`state/fix/round2/verify-BASE-BENCH-1028-r1-deep.json`). The bench target is
+`test = false`, and a run over a healthy store never takes its failing or
+waiting paths, so no run reached the arm of `sample` that turns a refused
+paged read into an answer, the wait in `warmed` for a route still building, or
+the four set-up refusals of `lone_month`. The test file held a retry no test
+drove, a chunked decoder for an answer no route here sends, and a closure
+never called.
+
+**Decision.** The logic moves, it is not excused. `benches/ratio/paged.rs`,
+which the bench and `tests/bench_paged_month.rs` both mount, gains
+`sample_month`, `answered_in_full`, `until_in_full`, `write_census` and
+`or_stop`; `served.rs` keeps thin calls and its own checks of what it timed.
+Each is driven by the input that really reaches it: a server that refuses on
+page one or on a later page, answers still building, a patience of zero, a
+root that is a file, a start image that is no census, an entry of no rows, a
+directory where the census file goes. `write_census` takes the image it starts
+from, so a refused start is an input and not an unreachable arm of a constant
+call. `or_stop` takes the stop as a function, so the bench hands it `refuse`,
+which ends the process, and a test hands it a stand-in that panics. The test
+file's retry becomes `patient`, driven by fakes down to its two-second panic;
+its closure is shared with a control query, a key merely spelled like a paging
+key, which is asked exactly once. The chunked decoder is removed: the test asks
+with `Connection: close` and reads to the close, D3 measured that no answer in
+any test was chunked, the 60,000-row `/bars.json` answer included.
+
+**Rejected.** Ruling the set-up refusals failing sides of a self-checking
+bench: the D3 bar names `refuse()` helpers and `?` as needing a test that
+drives them. Writing them as `?` or `.unwrap_or_else(|why| refuse(&why))`: the
+line count would read covered while the region stays unreached, which is the
+gap with its label removed. A self-test mode in the bench binary: CI's
+`cargo bench` would never run it.
+
+**Proof.** Invariant BBENCH-05. `bench_paged_month`: 28 tests. Five faults
+planted at once (a `503` no longer busy, building ignored, the cold figure
+taken from the last ask, a refused sample answering `200`, a census entry's
+refusal dropped) failed seven of the 27 then written
+(`state/fix/round2/logs-BENCH1028/r1/planted-faults.log`), restored after.
+
+**Measured** with the recipe's flags (instrumented, opt-level 0, test object
+and the bench's `--served-only` run; `r1/cov-b`, 1 Nov 2026): `paged.rs` lines
+185/185, branches 30/30; `lone_month` 16/16 and 0/0; `sample` 20/20 and 2/2;
+`bench_paged_month.rs` 619/621 and 16/20, its uncovered lines the two after
+`axum::serve`, which never returns, and its uncovered branch sides the failing
+arms of two asserts. `paged_rows`, `warmed`, `flat` and `refusals_are_flat`
+hold only the bench's own failing checks and the two arms whose array lengths
+are fixed, as the check at 954ca59bb listed them.
+
+**Gate 8 stays RED here, and this part does not claim it green.** The whole
+complexity step on the final tree exits 1 on `C-T-04` in
+`crates/telemetry/benches/ratio.rs` (4,898.774 floors, budget 1,000). Alone,
+the same row went over budget on `feat/db-fix` without this part's commits
+(2,525.759 floors) as on this tip (3,853.093), one run in five on each side,
+so it stays RED by name in L-BBENCH-5 and no ceiling moves. Gate 8 green
+belongs to the part that takes that file.
+
+**Cost.** No served route and no store file changes. The bench's timed path
+makes the same requests and does the same work per page; only where the code
+lives moved. D-7402 to D-7409 are unused.
+
+### D-7402 — The whole-month refusal's O(1) claim names its proof, the bench file and BBENCH-03, so gate 12 reads it proven (BASE-BENCH-1028, repair 2) — 2026-11-06
+
+**Context.** The landing gate of 6 Nov 2026 merged this part into
+`feat/db-fix` 146031905, and gate 12 refused one block:
+`crates/api/benches/ratio/reads.rs:136 (refusals_are_flat) — a cost claim that
+names no proof`. The block opens "THE CAP IS KEPT, AND ITS REFUSAL IS O(1)
+(BASE-BENCH-1028, D-7400)", and a part's name or a decision's number is no
+proof gate 12 reads. It takes a `crate::module::name` token that resolves to a
+test or a bench, a tracked `crates/**/tests/*.rs` or `crates/**/benches/*.rs`
+path, or an invariant row id whose row names such a token in backticks. The
+merge did not cause it. Gate 12 as this part's own tip 37d7f9866 carried it
+refused the same block there, the first of 86 refusals; the 85 others are in
+files this part never touched, the base's own reds, which BASE-REDS-1023
+cleared before this landing. A gate already red on its base hid the one new
+refusal.
+
+**Decision.** The block names its proof, as its module's header already did:
+the bench file `crates/api/benches/ratio.rs`, whose `main` runs
+`refusals_are_flat` and exits 1 when it returns `false`; invariant row
+BBENCH-03, read in the bench's `reads /bars.json refusal p50` lines; and, for
+the answer itself, `crates/api/tests/bench_paged_month.rs` (BBENCH-02). The
+claim, the 60,000-row cap, the three refused sizes, the 3.0x ceiling, gate
+12's tool and its allowlist are unchanged.
+
+**Rejected.** Writing UNVERIFIED: the claim is measured and gated at every
+run of the bench, so the word would understate it. An allowlist entry: that
+list excuses a claim with no proof beside it, and this one has one; it is CI's
+file besides, which this part does not edit.
+
+**Also corrected here**, each a follow-up the second check of 2 and 3 Nov 2026
+left in this part's own files:
+
+- D-7400 and the comment on `REFUSED_SIZES` call June "the fullest one-second
+  month". A 31-day month holds 2,678,400 rows, 44.6x the smallest refused
+  month, so the comment now says what June holds, and L-BBENCH-2 names the
+  31-day month. Its conclusion stands: no refused month can be 100x the
+  smallest.
+- The test file's header called its 12,345.00 a level "no real index printed
+  in June 2024". The second check read only NIFTY's and BANKNIFTY's June 2024
+  in the store, so the header now says NIFTY, the one index its fixtures
+  name, and calls the rest UNVERIFIED.
+- D-7400's red run, "0 passed, 9 failed", kept no log:
+  `state/fix/round2/logs-BENCH1028/red-v0.log` holds only a queue line and
+  `EXIT 143`, a later start cut while it waited for a build slot. The red that
+  survives for the same point is the second check's,
+  `logs-BENCH1028-v1/red-v0.log` of 30 Oct 2026: 1 passed, 8 failed, with
+  `the_benchs_whole_month_read_answers_every_size_it_times` failing on
+  `too_many_rows`.
+- L-BBENCH-5 named `feat/db-fix`'s commit of 2 Nov 2026 by its hash. That
+  commit is no ancestor of `main`, and `NOT_ON_MAIN` in
+  `crates/store/tests/cited_commits.rs` does not list it, so that test read
+  the row red. The row now names it as this part's merge base of that day,
+  and it gains the one quiet whole run: the second check's of 30 Oct 2026 on
+  this part's first build, started at load 8.9, exit 0, `C-T-04` 334.653
+  floors. L-BBENCH-1, -2 and -5 say "this part's tree of 2 Nov 2026" where
+  they said "the final tree", which stopped being true at this merge.
+
+**Proof.** Gate 12, run by `state/fix/ci-shell-gates.sh` with `--jobs
+language-purity --fast --only 12` (logs `state/fix/round2/logs-BENCH1028/r2/`):
+on this part's tip merged with `feat/db-fix` 146031905, the landing gate's
+tree byte for byte, `GATE 12 rc=1`, 779 claims, 3 naming nothing, `REFUSED
+crates/api/benches/ratio/reads.rs:136`; with this change `GATE 12 rc=0`, 779
+claims, 75 naming a tracked test or bench file where 74 did, 2 naming nothing,
+both allowed, and "OK — every cost claim names its proof or says UNVERIFIED."
+The documents' citations are `cited_commits`' to read.
+
+**Cost.** Comments and documents only: no compiled line changes, no served
+route, no store file, no bench row. D-7403 to D-7409 are unused.

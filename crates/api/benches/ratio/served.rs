@@ -66,6 +66,7 @@ use pull::manifest::{Entry, EntryKey, Manifest};
 use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe};
 
+use super::paged::{self, MonthRead, Page};
 use super::{MONTH_SIZES, RATIO_CEILING_PERMILLE, bench_month, ratio, refuse};
 
 /// The census sizes beside the asked series: 1x / 10x / 100x.
@@ -338,6 +339,33 @@ fn serve(bars: usize, census: usize, root: PathBuf) -> Served {
     }
 }
 
+/// A served store holding ONE month and no census: NIFTY's one-second index
+/// June 2024 of `rows` bars, one a second from 1 June 00:00 IST
+/// ([`super::month_file`], indexed or the bench stops), recorded in the
+/// census so a route reads it as a held series (BASE-BENCH-1028, D-7400).
+///
+/// For a month past what the session layout of [`stores`] can file in June
+/// (22,500 seconds a weekday): the refused `/bars.json` month is timed at
+/// up to 2,592,000 rows, every second of the month.
+pub(crate) fn lone_month(rows: usize) -> Served {
+    let started = Instant::now();
+    let (file, root) = super::month_file("lone", rows);
+    drop(file);
+    let held = Entry {
+        key: nifty(Segment::Index, None),
+        rows: u64::try_from(rows).unwrap_or(u64::MAX),
+        first_ts_micros: super::second(0),
+        last_ts_micros: super::second(rows.saturating_sub(1)),
+    };
+    paged::or_stop(paged::write_census(&root, &[], [held]), refuse);
+    let served = serve(rows, 0, root);
+    println!(
+        "  lone month: {rows} bars, no other series, built and loaded in {} ms",
+        started.elapsed().as_millis()
+    );
+    served
+}
+
 /// The three served stores, 1x / 10x / 100x.
 pub(crate) fn stores() -> Vec<Served> {
     MONTH_SIZES
@@ -481,6 +509,64 @@ pub(crate) enum Per {
     /// Each bar of the asked month: a route that reads the whole month by
     /// design (the gap audit). Its cost per bar must not grow.
     MonthBar,
+    /// Each row of a whole window read THE WAY A CLIENT MUST, page by page
+    /// through `/bars/window.json` ([`paged::read_month`]; the target's
+    /// `path` is the window's query, not a request): one sample is every
+    /// page of the month, and its cost per row read must not grow
+    /// (BASE-BENCH-1028, D-7400). `/bars.json` serves a month whole only up
+    /// to 60,000 rows, so a 102,400-bar month is read like this or not at all.
+    Paged,
+}
+
+/// One sample of `target`: its answer, and for [`Per::Paged`] what the
+/// paged read took. A paged read that refuses answers status 0 with the
+/// refusal's sentence as its body, so the caller's status check names it.
+fn sample(served: &mut Served, target: &Target) -> (Answer, Option<MonthRead>) {
+    if !matches!(target.per, Per::Paged) {
+        return (served.ask(&target.path, &target.extra), None);
+    }
+    let sampled = paged::sample_month(&target.path, |path| {
+        let answer = served.ask(path, &target.extra);
+        Page {
+            status: answer.status,
+            body: answer.body,
+        }
+    });
+    (
+        Answer {
+            status: sampled.status,
+            head: String::new(),
+            body: sampled.body,
+        },
+        sampled.read,
+    )
+}
+
+/// The rows a paged read divides by: every row of the asked month, from its
+/// first second to its last, or the bench stops.
+fn paged_rows(served: &Served, target: &Target, read: Option<&MonthRead>) -> usize {
+    let Some(read) = read else {
+        refuse(&format!("{} was read without a page", target.label))
+    };
+    let ends = (
+        Some(session_second(0)),
+        Some(session_second(served.bars.saturating_sub(1))),
+    );
+    if read.rows != served.bars || (read.first_t, read.last_t) != ends {
+        refuse(&format!(
+            "{} at {} bars read {} rows from {:?} to {:?} in {} pages, not the month's {} from {:?} to {:?}",
+            target.label,
+            served.bars,
+            read.rows,
+            read.first_t,
+            read.last_t,
+            read.pages,
+            served.bars,
+            ends.0,
+            ends.1
+        ));
+    }
+    read.rows
 }
 
 /// p50, p99 and max of `times`, ns.
@@ -496,46 +582,50 @@ fn spread(times: &mut [u128]) -> (u128, u128, u128) {
 /// Asks `target` until it answers in full, at most a minute; the first
 /// answer's time in µs, and what the gated figure is divided by.
 fn warmed(served: &mut Served, target: &Target) -> (u128, u128) {
-    let started = Instant::now();
-    let mut first = None;
-    loop {
-        let asked = Instant::now();
-        let answer = served.ask(&target.path, &target.extra);
-        let took = asked.elapsed().as_micros();
-        let _ = first.get_or_insert(took);
-        let building = answer.body.contains("\"building\"") || answer.head.contains("retry-after");
-        if answer.status == target.status && !building && answer.body.contains(&target.needle) {
-            let per = match target.per {
-                Per::Request => 1,
-                Per::Row(row) => answer.body.matches(row).count(),
-                Per::MonthBar => served.bars,
-            };
-            if per == 0 {
-                refuse(&format!("{} answered no row to divide by", target.label));
-            }
-            if served.census == CENSUS_SIZES[0] {
-                // WHAT WAS TIMED, SHOWN: the answer's first bytes at 1x, so a
-                // reader sees a full answer and not a refusal wearing its
-                // status.
-                let shown: String = answer.body.chars().take(220).collect();
-                println!(
-                    "  {} answers {} ({} bytes): {shown}",
-                    target.label,
-                    answer.status,
-                    answer.body.len()
-                );
-            }
-            return (first.unwrap_or(took), u128::try_from(per).unwrap_or(1));
-        }
-        if started.elapsed() > Duration::from_mins(1) {
-            let shown: String = answer.body.chars().take(600).collect();
-            refuse(&format!(
-                "{} at {} bars answered {} without {:?} after a minute: {shown}",
-                target.label, served.bars, answer.status, target.needle
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let waited = paged::until_in_full(
+        Duration::from_mins(1),
+        Duration::from_millis(50),
+        || sample(served, target),
+        |(answer, _)| {
+            paged::answered_in_full(
+                answer.status,
+                &answer.head,
+                &answer.body,
+                target.status,
+                &target.needle,
+            )
+        },
+    );
+    let (answer, read) = waited.last;
+    if !waited.in_full {
+        let shown: String = answer.body.chars().take(600).collect();
+        refuse(&format!(
+            "{} at {} bars answered {} without {:?} after a minute: {shown}",
+            target.label, served.bars, answer.status, target.needle
+        ));
     }
+    let per = match target.per {
+        Per::Request => 1,
+        Per::Row(row) => answer.body.matches(row).count(),
+        Per::MonthBar => served.bars,
+        Per::Paged => paged_rows(served, target, read.as_ref()),
+    };
+    if per == 0 {
+        refuse(&format!("{} answered no row to divide by", target.label));
+    }
+    if served.census == CENSUS_SIZES[0] {
+        // WHAT WAS TIMED, SHOWN: the answer's first bytes at 1x, so a
+        // reader sees a full answer and not a refusal wearing its
+        // status.
+        let shown: String = answer.body.chars().take(220).collect();
+        println!(
+            "  {} answers {} ({} bytes): {shown}",
+            target.label,
+            answer.status,
+            answer.body.len()
+        );
+    }
+    (waited.first_micros, u128::try_from(per).unwrap_or(1))
 }
 
 /// Times every target of a family at every size and gates each p50 ratio.
@@ -562,13 +652,17 @@ pub(crate) fn flat(
             let mut times = Vec::with_capacity(N);
             for _ in 0..N {
                 let asked = Instant::now();
-                let answer = served.ask(&target.path, &target.extra);
+                let (answer, read) = sample(served, target);
                 times.push(asked.elapsed().as_nanos());
                 if answer.status != target.status {
+                    let shown: String = answer.body.chars().take(600).collect();
                     refuse(&format!(
-                        "{} answered {} while timed at {} bars",
+                        "{} answered {} while timed at {} bars: {shown}",
                         target.label, answer.status, served.bars
                     ));
+                }
+                if matches!(target.per, Per::Paged) {
+                    let _rows = paged_rows(served, target, read.as_ref());
                 }
             }
             let (p50, p99, max) = spread(&mut times);
@@ -593,7 +687,7 @@ pub(crate) fn flat(
             .and_then(|asked| asked.get(index))
             .map(|t| t.per)
         {
-            Some(Per::Row(_)) => " per row",
+            Some(Per::Row(_) | Per::Paged) => " per row",
             Some(Per::MonthBar) => " per bar",
             _ => "",
         };
