@@ -1077,6 +1077,47 @@ lines each) is the one line `993 tracked source file(s)` on f01d7a0e4 against `9
 print-surface section is the same on both and names no `api/src/sources_tests.rs` site (`grep -c
 sources_tests` of this tree's output: 0) and no site of this shard's.
 
+### A serve on a host that starts no thread (`edd467b0`): 21067:24 T, 21068, 21073:24 T, 21074
+
+Session -5 named the serve's two warm-up refusals ("warm-ups that fail") as the host's to decide.
+They are a child's to decide, in session -5's own no-thread shape (`census_cache.rs`'
+`a_host_that_starts_no_thread_is_said_and_nothing_waits_on_one`):
+
+| test | extremes (single / combined / out of the box) | rows (tip numbering) |
+|---|---|---|
+| `a_serve_on_a_host_that_starts_no_thread_says_each_warm_up_it_could_not_start` | 9 (6 / 2 / 1) | server.rs 21067:24 T, 21068 (`Calendars NOT warmed at start`), 21073:24 T, 21074 (`Census caches NOT warmed at start`) |
+
+The child's `RUST_MIN_STACK` asks for 1 EiB, so every thread started without a stack size of its
+own is refused (the child asserts it first: case (9)), and libtest runs its one test on its main
+thread. Its current-thread runtime gives its blocking pool a stack size of its own (8 MiB), so the
+start-up load, which `loaded_or_stopped` runs on that pool, starts. It serves a named port with
+`BRUTEX_NO_OPEN` set, and its stop asks that port once for `/health`, which only `serve` answers,
+after both warm-ups were asked for; it asserts the answer `HTTP/1.1 200` and the exit `OK`. The
+parent spawns the child itself (as G3's `rerun_child` does, because `warn_line!` writes stderr and
+`isolated::rerun` returns stdout only) and asserts each warm-up's line once with the host's own OS
+error, the banner's named port, the opener's variable line and `universe: ok`. Here the refusals
+read `Resource temporarily unavailable (os error 11)`; the test asserts only `(os error `, which
+holds for any host's refusal. Filtered instrumented run (`nt2`): `2 passed` (with the opening
+test); `21067:24 True: 1`, `21073:24 True: 1`; the test code 208/208 lines, its four uncovered
+sides the false sides of `&&` operands of asserts whose lines ran, (F). fmt rc 0; clippy rc 0
+(1.97.1). Red round 11: the calendars' line reworded by hand (`Calendars not warmed: {why}`):
+`test result: FAILED. 0 passed; 1 failed`, at its own `(1)(3) Calendars` assertion; restored with
+`git checkout`. Gate 23 by hand on `edd467b0`: exit 1, its output equal to `8e94e0b8`'s line for
+line (so the one-line difference from f01d7a0e4, no `sources_tests.rs` site, no site of this
+shard's).
+
+**A Route B readout discarded, and why (OPS-10's hazard, met).** Route B on `8e94e0b8` ran in the
+worktree `/home/user/rb6` from 16:00:59 IST: build rc 0 in 2 min (170 artifacts, 148 reused); `==
+test api rc=101 END 2026-11-08 16:09:31 IST (5 min); tests passed 3200 failed 14 ignored 16`,
+exactly the baseline's 14 reds, every test of this session green. During its `llvm-cov show` phase
+this session built the no-thread test in the main tree with the same `CARGO_TARGET_DIR`, and the
+api test object's path is the same for both trees
+(`/home/user/tgt/cov/debug/build/api/7b94fb89521800a1/out/api-7b94fb89521800a1`): the newer object
+replaced the one the profiles were written by, `llvm-cov` warned "profile data may be out of date -
+object is newer ... 10346 functions have mismatched data", and three G1 files read NOT PROVED. The
+run was stopped (`EXIT 143`) and its readout is not used; no figure of it is claimed. The
+measurement below is a fresh run on `edd467b0` during which nothing else was built.
+
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
 - **D-8662 (draft): how G2's test-code GAP rows are closed, and the lists the landing gate
@@ -1158,6 +1199,9 @@ sources_tests` of this tree's output: 0) and no site of this shard's.
   item (2)): the opener's spawning arm is now also reached through a whole serve on a named port,
   in a child whose `PATH` is one scratch folder, and `open_in_browser`'s doc says so (it said no
   test calls the function, which G3's banner child already did); ASA's note on D-1202 covers both.
+  (10) The serve's two warm-up refusals (`Calendars NOT warmed at start`, `Census caches NOT
+  warmed at start`) are reached in a child whose `RUST_MIN_STACK` refuses every thread started
+  without a stack size of its own; the rows session -5 listed as the host's are now a test's.
 
 ## NEEDS THE MAC
 
@@ -1180,11 +1224,12 @@ sources_tests` of this tree's output: 0) and no site of this shard's.
   whichever side the Mac's run takes, the other stays the wall clock's. The spawning-arm child
   links the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
 
-NEXT (session -6, after `8e94e0b8`): session -5's items (1), (2) and (3) are done (see "Session
+NEXT (session -6, after `edd467b0`): session -5's items (1), (2) and (3) are done (see "Session
 -6": (1) and (2) tested, a defect fixed in (2); (3) read and named a race-only row), (4) stays G1's
-or ASA's, and red round 10 and gate 23 by hand are done on the code tip `8e94e0b8`. Left: Route B
-whole:api on `8e94e0b8` (started 16:00:59 IST in the worktree `/home/user/rb6`), G2's lists from
-its readout, the report's figures and the FIX json. The rows named as host, race, clock, build or
+or ASA's; the serve's two warm-up refusals are tested too (`edd467b0`); red rounds 10 and 11 and
+gate 23 by hand are done on the code tip `edd467b0`. Left: Route B whole:api on `edd467b0`
+(started 16:21:32 IST in the worktree `/home/user/rb6`; build nothing else while it runs), G2's
+lists from its readout, the report's figures and the FIX json. The rows named as host, race, clock, build or
 real-host rows stay named (20935 is reached only by a load whose thread panics; 20979-20986 by an
 unstamped build or a flying autopilot, which would pull after its grace; master.rs 356-361 by a
 regular master that grows past 256 MiB during one read); the Mac's items above stay the Mac's.
