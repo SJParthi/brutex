@@ -3817,14 +3817,16 @@ const tableWithin = (boundMs, started = (/** @type {number} */ _pid) => undefine
  * this list: the sheet's own command and reading (`sheet.membersIn`), each
  * `ps` waited for up to `boundMs` ({@link tableWithin}).
  *
- * WHAT LATENESS CHANGES, AS MEASURED (check r7): a list that answers within
- * the bound delays the words and leaves them as they are, but for one case. A
- * process that joins the group after its first list (a fork racing the
- * signal, or the asker test's own) is asked only by a list that answers
- * inside the stop's wait, `COMMAND_STOP_MS` after the command left; a list
- * that answers after that finds it too late, its group is killed, and the
- * stop says KILLED (A7: every list after the first 6 s late). The asker test
- * names each list's time when that happens, and the edge is a test of its own.
+ * WHAT LATENESS CHANGES (check r7, with lists 2.1 s and 6 s late at every
+ * call): a list that answers within the bound delays the words and leaves
+ * them as they are, but for one case. A process that joins the group after its
+ * first list (a fork racing the signal, or the asker test's own) is asked only
+ * by a list that answers inside the stop's wait, `COMMAND_STOP_MS` after the
+ * command left; a list that answers after that finds it too late, its group is
+ * killed, and the stop says KILLED (A7: every list after the first 6 s late).
+ * The asker test names each list's time when that happens, and the edge is a
+ * test of its own. Read from the stop's code, not measured: a stall of this
+ * test process itself past the stop's wait can change the words too.
  * A list past the bound is cut, its `ps` and everything in that `ps`'s group
  * killed, and the stop says why after its words, so a test that meets it fails
  * by that name, and a `ps` that never answers ends a test that way (A5). A
@@ -6645,7 +6647,7 @@ test('a stop given a patient list says its processes\' words for any `ps` that a
 // 6's rows said a stall never does.
 // ---------------------------------------------------------------------------
 
-test('a patient list waits for `ps` at most its bound and takes no answer after it, ending that `ps` and every process of its group: one that never answers, one that ignores SIGTERM, one that stops itself, one that exits while its child holds its output, one that prints past 16 MiB and one that prints a table and never exits; it says a failing, missing or empty `ps` in the sheet\'s words, and a stop and a look that meet a `ps` that never answers end by name (BASE-STACK-1028 repair 7)', { timeout: 120_000 }, async () => {
+test('a patient list waits for `ps` at most its bound and takes no answer after it, ending that `ps` and every process of its group: one that never answers, one that ignores SIGTERM, one that stops itself, one that exits while its child holds its output, one that prints past 16 MiB and one that prints a table and never exits; it says a failing, missing or empty `ps` in the sheet\'s words, and a stop that meets a `ps` that never answers, or a look that meets one late at every call, ends by name (BASE-STACK-1028 repair 7)', { timeout: 120_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'stack1028-r7-bound-'));
   const path = process.env.PATH;
   /**
