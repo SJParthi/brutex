@@ -1567,3 +1567,79 @@ fn a_first_stamp_the_index_names_before_the_instant_asked_is_a_named_fault() {
     assert_eq!(faults, vec![fault(&just_path, asked, asked - 1)]);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **EVERY SPOT KEY THE CHAIN CAN NAME IS ONE THE STORE'S PATH ADMITS, AND AN
+/// INSTANT NO CALENDAR CAN PLACE IS REFUSED BY NAME** (BASE-COV-API repair 3,
+/// D-8661). `/chain.json`'s spot month is addressed by the underlying as the
+/// form parsed it, an index row's store key, or a lineage's newest name
+/// (`brutex_core::alias::option_underlying`), under `INDEX` or `CASH` and no
+/// contract; this test asserts those tables pass the store's own segment
+/// check exactly as written, so the reader's `Invalid` arm (`chain.rs` 819)
+/// is (U) beside it, and a later table that reaches the arm turns this test
+/// red (D-8661 item 6). Extremes: every index row's store key; every
+/// lineage row's new name and its old one; every index row's F&O name
+/// resolved; every lineage row's old name resolved to its newest; a parsed
+/// underlying of 24 bytes; one written in lower case (parsed to upper);
+/// `/chain.json` asked at an instant before IST's epoch (`400`, the instant
+/// named); and asked at the largest UTC second whose microseconds fit (`400`,
+/// named); and, at once, a request asking a sound instant and then one no
+/// calendar places (`400`, no partial answer), and an index row's store key
+/// resolved as an underlying itself (its own key); out of the box, the raw
+/// lower-case string a parse would upper-case is refused by the store's check
+/// (`NotCanonicalCase`), the gap the tables' own case is asserted against.
+#[test]
+fn every_spot_key_the_chain_names_is_one_the_store_admits_and_an_instant_no_calendar_places_is_refused()
+ {
+    use brutex_core::alias::{INDEX_ROWS, SYMBOL_CHANGES, option_underlying};
+    use store::path::{PathError, SegmentCase, check_segment};
+    let admitted = |key: &str| check_segment("symbol", key, SegmentCase::Upper);
+    for row in INDEX_ROWS {
+        assert_eq!(admitted(row.store_key), Ok(()), "{row:?}");
+        assert_eq!(option_underlying(row.store_key).key, row.store_key);
+        if let Some(fno) = row.fno {
+            let resolved = option_underlying(fno);
+            assert_eq!(resolved.segment.as_str(), "INDEX");
+            assert_eq!(admitted(resolved.key), Ok(()), "{fno}");
+        }
+    }
+    for change in SYMBOL_CHANGES {
+        assert_eq!(admitted(change.new), Ok(()), "{change:?}");
+        assert_eq!(admitted(change.old), Ok(()), "{change:?}");
+        assert_eq!(
+            admitted(option_underlying(change.old).key),
+            Ok(()),
+            "{change:?}"
+        );
+    }
+    for text in ["A&B-C_D0123456789EFGHIJK", "nifty"] {
+        let parsed = brutex_core::symbol::Symbol::new(text).expect("a symbol");
+        assert_eq!(admitted(parsed.as_str()), Ok(()), "{text}");
+        assert_eq!(admitted(option_underlying(parsed.as_str()).key), Ok(()));
+    }
+    assert_eq!(
+        admitted("nifty"),
+        Err(PathError::NotCanonicalCase {
+            field: "symbol",
+            byte: b'n'
+        }),
+        "the raw string a parse would upper-case"
+    );
+
+    // THE ROUTE, ASKED AT INSTANTS NO CALENDAR CAN PLACE.
+    let built = fixture("chain-unplaced", &census_rows());
+    let largest = i64::MAX / MICROS;
+    for at in [
+        "-86400".to_owned(),
+        largest.to_string(),
+        format!("{},-86400", t1()),
+    ] {
+        let (status, body) = ask(&built, &format!("{BASE}&expiry=2019-03-28&at={at}"));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{at}: {body}");
+        let said = body.to_string();
+        assert!(
+            said.contains("is not an instant any calendar can place"),
+            "{at}: {said}"
+        );
+        assert!(body.get("chains").is_none(), "no partial answer: {body}");
+    }
+}
