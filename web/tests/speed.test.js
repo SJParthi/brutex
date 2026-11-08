@@ -6821,9 +6821,11 @@ test('a process that joins a stopping group after its first list is asked in tim
   // KILLED under a patient list. A stop waits COMMAND_STOP_MS for its group once the command has left, and a
   // process that joined the group after the first list is asked only by a later list that sees it. This pins
   // that edge from both sides, with the asker test's own command, which on SIGTERM starts a process into its
-  // group and leaves. OUTSIDE IS EXACT: the late list's timer is due 1,000 ms after the stop's deadline, and
-  // timers run in the order they are due, so the stop's look past its deadline runs first and finds the joined
-  // process unasked. INSIDE leaves the joined process 2,500 ms to be asked and leave before the deadline.
+  // group and leaves. OUTSIDE is decided by the order of timers, not by the machine's speed: the late list's
+  // timer is due 1,000 ms after the stop's deadline, timers run in the order they are due however late they run,
+  // so the stop's look past its deadline runs first and finds the joined process unasked. Only a hold of this
+  // process of nearly that second inside one turn of its event loop, between the turn's clock and the list's
+  // timer, could reorder them. INSIDE leaves the joined process 2,500 ms to be asked and leave before the deadline.
   const dir = mkdtempSync(join(tmpdir(), 'stack1028-r7-edge-'));
   const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
   const script = join(dir, 'leaves-one.sh');

@@ -89098,3 +89098,96 @@ touch it.
 **Cost.** Four lines of `web/ci/speed-sheet.mjs`, which pass a list through, and
 their comments; the tests; and these rows. No Rust byte changes. D-7416 to
 D-7419 stay unused.
+
+### D-7416 — BASE-STACK-1028 repair 7: the speed tests' patient list waits for `ps` at most 15,000 ms and ends that `ps`'s whole process group; a real stop's words are its processes' only within that bound and, for a process that joins after the first list, inside the stop's wait; this corrects D-7415 — 2026-11-08
+
+**Context.** Check r7 of this part (`state/fix/round2/verify-BASE-STACK-1028-r7.json`,
+on repair 6's tip `0dab2b751`) failed it on three items in repair 6's speed tests
+and rows, each reproduced on that tip first
+(`state/fix/round2/logs-STACK1028/repair7/run-A5-before.txt`, `run-A4-before.txt`,
+`run-A7-before.txt`). A5: the patient list ran `ps` with no time bound, so under a
+`ps` that never answers the --restart test was cancelled at its 180 s timeout,
+the test file's process stayed alive under that `ps` (still at 253 s), and
+`node --test` never ended; `feat/db-fix` fails the same test by name in 2.3 s.
+L-STACK1028-13 said the test's own timeout ends such a `ps`; a timeout cancels a
+test and ends no process. A4: case A of repair 6's new test read the late `ps`'s
+own count, which that `ps` writes before its sleep; one stall past `LIST_WAIT_MS`
+before that line killed it uncounted, so the case said 1 list of 2. A7: under a
+`ps` that answers its first call at once and every later one 6 s late, the asker
+test's patient stop said `KILLED`: the process that joined the group after the
+first list was found by a list that answered after the stop's 5 s wait.
+STACK1028-17, D-7415 and the comment above `patiently()` said a stall delays the
+words and never changes them.
+
+**Decision.**
+
+1. **The patient list is bounded, and its bound ends the `ps`.**
+   `PATIENT_LIST_MS` is 15,000 ms: 3.9 times the largest answer measured on this
+   Mac (3,870.8 ms in 500 runs at load 100 to 109, check r7) and 7.5 times
+   `LIST_WAIT_MS`. The list starts the sheet's own `ps -A -o pid= -o pgid=` as the
+   leader of a process group of its own; past the bound it sends that group
+   SIGKILL, so a `ps` that ignores SIGTERM, has stopped or left a child holding
+   its output ends with all of it, and it answers "ps did not answer within 15000
+   ms, the speed tests' patient bound". The stop says that after its words, so a
+   test that meets the bound fails by that name, and the run ends: under a `ps`
+   that never answers, the --restart test fails by name at 15.5 s and
+   `node --test` ends at 17 s (`run-A5-after1.txt`). An answer after the bound is
+   never taken.
+2. **A stop's words change past the stop's wait, and this is stated.** A list
+   that answers within the bound leaves the words as they are, but for a process
+   that joins the group after the first list (a fork racing the signal, or the
+   asker test's own): only a list that sees it can ask it, and one that answers
+   after the stop's wait, `COMMAND_STOP_MS` after the command left, finds it too
+   late, so the group is killed and the stop says `KILLED`. A new test pins that
+   edge from both sides with the asker test's command: a late list due 1,000 ms
+   past the deadline gives `KILLED`, decided by the order in which timers run, so
+   the stop's look past its deadline comes first and finds the joined process
+   unasked; one due 2,500 ms inside it gives "was sent SIGTERM and left". The
+   asker test's failure names each list's time and this bound
+   (`run-A7-after1.txt`). STACK1028-18 narrows STACK1028-17; L-STACK1028-14
+   corrects L-STACK1028-13.
+3. **Case A counts on the test's side,** as the stop asks for each list, which no
+   kill can lose; under check r7's one stall the test passes
+   (`run-A4-after1.txt`).
+4. **The asker test's look is bounded in all.** It asks a late answer again for
+   `LOOK_MS`, 10,000 ms, then fails by name (check r7: under a `ps` late at every
+   call it asked 100 times, 2.05 s each, and ran past its 60 s timeout, which
+   named no reason).
+5. **Repair 6's test is renamed** from "however late `ps` answers" to "for any
+   `ps` that answers within the patient bound"; STACK1028-17 names it by its old
+   title.
+6. **Check r7's cheap follow-ups in this part's Rust test files.** The kept-rows
+   test's `git` runs with `GIT_NO_REPLACE_OBJECTS`, so a replace ref cannot make
+   the cut commit show a forged copy of the rows (E1); a clone that holds neither
+   the commit nor `main` is also told that the objects `git` reads may not be its
+   own (E3); a test any attribute stands above, `#[cfg(any())]` and `#[ignore]`
+   among them, is not read as declared; and the "SKIPPING" lines of the two
+   fixtures this part wrote go to stderr past the harness's capture, as `tell`
+   writes.
+
+**Why not the others.**
+
+- Ending the `ps` when the test ends, with no bound: a test's timeout cancels it
+  and runs nothing, so the run would still wait on the `ps`.
+- A bound by `execFile`'s `timeout`: it ends the `ps` alone, and it takes the
+  output of a `ps` that exited while its child held that output as a whole table
+  of what had been printed (probed: `scratch/repair-BASE-STACK-1028-r7/probe`).
+- Words that hold for any lateness: the stop's wait is the sheet's (D-7152).
+  Lengthening it for a test runs a stop the sheet never runs, and giving a
+  process found after the wait a wait of its own lets a group that keeps forking
+  hold the stop without end.
+
+**Not this part's.** The sheet's own bounded list, `groupMembers` in
+`web/ci/speed-sheet.mjs`, takes at its 2,000 ms bound the output of a `ps` that
+exited while a child held that output as the whole table
+(`probe/execfile-grandchild.mjs`). A real `ps` leaves no such child; this is
+filed for that file's owner, and this part does not change it. Check r7's
+follow-ups not taken: the kept-rows test's in-order match (E2), which needs a rule
+that still lets another part's line stand between the rows, and the checkpoint
+transition's encode of a boxed copy (optional, O(1) either way).
+
+**Cost.** `web/tests/speed.test.js` (the list, the look, the asker test's
+message, case A, comments, two tests), `crates/cli/tests/stack_rows_kept.rs`,
+the skip line of the fixture this part wrote in `crates/store/tests/cited_commits.rs`,
+and these rows. No byte of `web/ci` and none of any crate's `src` changes.
+D-7417 to D-7419 stay unused.

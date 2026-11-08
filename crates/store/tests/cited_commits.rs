@@ -936,7 +936,13 @@ fn git_runs() -> bool {
 /// than a branch no run reaches.
 fn with_history(git: bool, tag: &str, body: impl FnOnce(&Fixture)) {
     if !git {
-        println!("SKIPPING: git cannot run the synthetic history fixture");
+        // On this process's stderr, past the harness's capture (BASE-STACK-1028
+        // check r7: `println!` here was held back with a passing test's output).
+        std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"SKIPPING: git cannot run the synthetic history fixture\n",
+        )
+        .expect("stderr takes a line");
         return;
     }
     let root = scratch_root(tag);

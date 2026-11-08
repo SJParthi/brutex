@@ -90,7 +90,9 @@ struct Tree<'a> {
 impl Tree<'_> {
     /// `git` in this tree, not yet run. It is fenced by
     /// `GIT_CEILING_DIRECTORIES`, so it cannot walk up past a `.git` it cannot
-    /// read to a repository enclosing the tree.
+    /// read to a repository enclosing the tree, and by
+    /// `GIT_NO_REPLACE_OBJECTS`, so a replace ref cannot make a commit show a
+    /// copy of the rows it never held (check r7, E1).
     fn git(self) -> Command {
         let mut git = Command::new("git");
         if let Some(env) = self.env {
@@ -102,6 +104,7 @@ impl Tree<'_> {
                 .parent()
                 .map(|above| ("GIT_CEILING_DIRECTORIES", above)),
         );
+        git.env("GIT_NO_REPLACE_OBJECTS", "1");
         git
     }
 }
@@ -178,7 +181,9 @@ fn reference<'a>(tree: Tree, cut: &'a str) -> (&'a str, Option<String>) {
     assert!(
         holds(tree, MAIN),
         "{cut} is not in this clone and {MAIN} does not resolve, so nothing here can say \
-         what the rows were. Run `git fetch origin main`."
+         what the rows were. Run `git fetch origin main`; if this clone holds both, the \
+         objects `git` reads here are not its own (`GIT_OBJECT_DIRECTORY` or an alternate \
+         names another store) (check r7, E3)."
     );
     let said = format!(
         "{cut} is not in this clone, as after `main`'s squash merge: the rows are \
@@ -329,9 +334,11 @@ fn each_stale_figure_has_a_newer_row_that_names_it() {
         (&limits, "| L-STACK1028-09 |", "L-STACK1028-04", "this tip"),
         (&limits, "| L-STACK1028-10 |", "L-STACK1028-05", "D-7412"),
         (&limits, "| L-STACK1028-11 |", "L-STACK1028-01", "12,286 B"),
+        (&limits, "| L-STACK1028-14 |", "L-STACK1028-13", "15,000 ms"),
         (&invariants, "| STACK1028-08 |", "STACK1028-04", "736 KiB"),
         (&invariants, "| STACK1028-09 |", "STACK1028-05", "690,096 B"),
         (&invariants, "| STACK1028-14 |", "STACK1028-06", "22 cases"),
+        (&invariants, "| STACK1028-18 |", "STACK1028-17", "15,000 ms"),
     ] {
         let line = text
             .lines()
@@ -447,7 +454,12 @@ fn git_runs() -> bool {
 /// than a branch no run reaches.
 fn with_history(git: bool, tag: &str, body: impl FnOnce(&History)) {
     if !git {
-        println!("SKIPPING: git cannot build the synthetic history.");
+        // On this process's stderr, past the harness's capture, as `tell` writes
+        // (check r7: `println!` here was held back with a passing test's output).
+        tell(
+            &mut std::io::stderr(),
+            Some("SKIPPING: git cannot build the synthetic history."),
+        );
         return;
     }
     let root = scratch_root(tag);
@@ -615,6 +627,56 @@ fn a_clone_with_neither_the_commit_nor_main_fails_by_name() {
         rewrite(&history.root);
         let said = refused(&history.root, ABSENT, &[]);
         assert_says(&said, &["is not in this clone", "git fetch origin main"]);
+    });
+}
+
+/// **AN OBJECT STORE POINTED ELSEWHERE IS NAMED BESIDE THE FETCH** (check r7,
+/// E3): a clone that holds the commit and `main` reads as one holding neither
+/// when `git` reads another store, so the failure names that cause too.
+#[test]
+fn an_object_store_pointed_elsewhere_is_named_beside_the_fetch() {
+    with_history(git_runs(), "elsewhere", |history| {
+        let root = &history.root;
+        commit_to_main(root, AT_CUT);
+        assert!(compare(root, &history.cut, &[]).is_empty());
+        let empty = root.join("elsewhere-objects");
+        std::fs::create_dir(&empty).expect("an empty object store");
+        let store = empty.to_str().expect("the fixture's path is UTF-8");
+        let said = refused(root, &history.cut, &[("GIT_OBJECT_DIRECTORY", store)]);
+        assert_says(
+            &said,
+            &[
+                "is not in this clone",
+                "git fetch origin main",
+                "GIT_OBJECT_DIRECTORY",
+            ],
+        );
+    });
+}
+
+/// **A REPLACE REF CANNOT STAND FOR THE ROWS AT THE CUT POINT** (check r7, E1):
+/// `git replace` makes `git show <cut>:<ledger>` print any copy, one holding the
+/// rewritten row among them, and such a copy passes every compare. The
+/// compare's `git` reads the commit's own object, so the rewrite is still named.
+#[test]
+fn a_replace_ref_cannot_stand_for_the_rows_at_the_cut_point() {
+    with_history(git_runs(), "replaced", |history| {
+        let root = &history.root;
+        rewrite(root);
+        let forged = AT_CUT.replace(ROW, "| B | rewritten |");
+        std::fs::write(root.join("forged.md"), &forged).expect("the forged copy");
+        let copy = fixture_git(root, &["hash-object", "-w", "forged.md"]);
+        fixture_git(root, &["replace", &history.blob, &copy]);
+        // A `git` that honours replace refs now shows the forged copy for the cut.
+        let path = path();
+        let shown = ran(Command::new("git")
+            .env_clear()
+            .envs(fixture_env(&path, &[]))
+            .arg("-C")
+            .arg(root)
+            .args(["show", &format!("{}:{}", history.cut, LEDGER.0)]));
+        assert_eq!(String::from_utf8_lossy(&shown.stdout), forged);
+        assert_eq!(compare(root, &history.cut, &[]), [ROW]);
     });
 }
 
@@ -988,12 +1050,25 @@ fn the_ledger_holds_the_agreed_row_once_and_its_tests_exist() {
 /// its `fn` on the next. A line comment or a string spelling the name is no
 /// declaration. Gate 10 reads the same names from a lexed source; this keeps the
 /// row's own test from reading a planted name as one (D-7414).
+///
+/// No other attribute may stand above its `#[test]`, over blank and comment
+/// lines: `#[cfg(any())]` compiles the test out and `#[ignore]` keeps it out of
+/// a run, so a test one of them holds proves nothing there (check r7). The
+/// tests this part's rows name carry `#[test]` alone.
 fn declares(source: &str, test: &str) -> bool {
     let declared = format!("fn {test}(");
     let lines: Vec<&str> = source.lines().map(str::trim).collect();
-    lines
-        .windows(2)
-        .any(|pair| pair[0] == "#[test]" && pair[1].starts_with(&declared))
+    lines.iter().enumerate().any(|(at, line)| {
+        *line == "#[test]"
+            && lines
+                .get(at + 1)
+                .is_some_and(|next| next.starts_with(&declared))
+            && !lines[..at]
+                .iter()
+                .rev()
+                .find(|above| !above.is_empty() && !above.starts_with("//"))
+                .is_some_and(|above| above.starts_with("#[") || above.ends_with(']'))
+    })
 }
 
 /// A name planted in a comment or a string declares no test, and neither does
@@ -1018,5 +1093,32 @@ fn a_name_planted_in_a_comment_declares_no_test() {
         "",
     ] {
         assert!(!declares(source, "named"), "{source}");
+    }
+}
+
+/// **A TEST AN ATTRIBUTE CAN KEEP OUT OF A RUN IS NOT DECLARED** (check r7):
+/// `#[cfg(any())]`, `#[ignore]`, `#[cfg_attr(..)]` or any other attribute above
+/// its `#[test]`, over blank and comment lines, on one line or over several. One
+/// with only comments, blank lines or the end of the item before it is declared.
+#[test]
+fn a_test_an_attribute_can_keep_out_of_a_run_is_not_declared() {
+    for source in [
+        "#[cfg(any())]\n#[test]\nfn named() {}\n",
+        "#[ignore]\n#[test]\nfn named() {}\n",
+        "#[cfg_attr(unix, ignore)]\n#[test]\nfn named() {}\n",
+        "#[cfg(any())] // kept out\n#[test]\nfn named() {}\n",
+        "#[cfg(any())]\n\n// a note\n/// a doc line\n#[test]\nfn named() {}\n",
+        "#[cfg(\n    any()\n)]\n#[test]\nfn named() {}\n",
+        "#[allow(dead_code)]\n#[test]\nfn named() {}\n",
+    ] {
+        assert!(!declares(source, "named"), "{source}");
+    }
+    for source in [
+        "fn before() {}\n\n/// a doc line\n// a note\n#[test]\nfn named() {}\n",
+        "#[cfg(any())]\nfn before() {}\n\n#[test]\nfn named() {}\n",
+        "mod t {\n    #[test]\n    fn named() {}\n}\n",
+        "#[test]\nfn named() {}\n",
+    ] {
+        assert!(declares(source, "named"), "{source}");
     }
 }
