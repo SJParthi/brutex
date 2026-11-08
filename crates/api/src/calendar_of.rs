@@ -663,7 +663,14 @@ fn withhold_unproved(
         return;
     }
     let last = calendar.last_day();
-    let Some(mut month) = u32::try_from(calendar.first_day())
+    // A SPAN THAT BEGINS BEFORE THE EPOCH IS WALKED FROM THE EPOCH'S MONTH.
+    // No `Day` and no `YearMonth` is earlier, so no daily file proves a day
+    // before it and none can be named; those days are left as they are, as a
+    // span wholly before the epoch is. Returning here for such a span, as this
+    // did, withheld nothing at all: one daily bar stamped 1969 left every month
+    // after it `Closed`, decades of holidays no daily file had read
+    // (BASE-COV-API-AS2, D-8663).
+    let Some(mut month) = u32::try_from(calendar.first_day().max(0))
         .ok()
         .and_then(|days| pull::session::Day::from_days(days).ok())
         .and_then(|day| pull::session::Day::new(day.year(), day.month(), 1).ok())
@@ -2364,6 +2371,376 @@ pub(crate) mod tests {
         for day in epoch_day(2026, 1, 3)..=epoch_day(2026, 1, 4) {
             assert_eq!(unproved.kind_of(day), DayKind::Unmeasured, "day {day}");
         }
+    }
+
+    /// Writes `NSE/INDEX/NIFTY`'s `rung` file for `month` legally, one bar per
+    /// `legal` stamp, then gives record `i` the stamp `crafted[i]` in place and
+    /// seals every block again (BASE-COV-API-AS2), so the month reads clean and
+    /// holds what this store's writer refuses: two bars in one minute, a bar
+    /// out of order, a bar outside its month. A stamp is its record's first
+    /// eight bytes (`store::format`'s encoding), and a block's checksum is
+    /// `store::block::seal` over `Layout::covered_byte_range`, written at the
+    /// block's four bytes of the month's checksum file, as `store`'s own
+    /// off-grid test seals one.
+    fn write_restamped(
+        root: &Path,
+        rung: Timeframe,
+        month: YearMonth,
+        legal: &[i64],
+        crafted: &[i64],
+    ) {
+        assert_eq!(legal.len(), crafted.len(), "one crafted stamp per bar");
+        write_bars(root, rung, month, legal);
+        let at = |file| {
+            store::path::StorePath::new(store::path::PathParts {
+                vendor: Vendor::Zerodha,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: rung,
+                month,
+                file,
+            })
+            .expect("a legal path")
+            .to_path_buf(root)
+        };
+        let (bars, sums) = (
+            at(store::path::FileKind::Bars),
+            at(store::path::FileKind::Checksums),
+        );
+        let layout = store::layout::Layout::CURRENT;
+        let n_valid = u64::try_from(crafted.len()).expect("a count");
+        let in_memory = |offset: u64| usize::try_from(offset).expect("in memory");
+        let mut image = std::fs::read(&bars).expect("the bar file");
+        for (index, ts_micros) in (0_u64..).zip(crafted) {
+            let from = in_memory(layout.offset_of(index).expect("a committed record"));
+            image
+                .get_mut(from..from + 8)
+                .expect("the record's stamp")
+                .copy_from_slice(&ts_micros.to_le_bytes());
+        }
+        let mut seals = std::fs::read(&sums).expect("the month's checksums");
+        for block in 0..layout.blocks_for(n_valid) {
+            let (start, end) = layout
+                .covered_byte_range(block, n_valid)
+                .expect("a committed block");
+            let covered = image
+                .get(in_memory(start)..in_memory(end))
+                .expect("the block's bytes");
+            let seal = store::block::seal(layout, n_valid, block, covered).expect("sealed");
+            let entry = in_memory(block * 4);
+            seals
+                .get_mut(entry..entry + 4)
+                .expect("the block's seal")
+                .copy_from_slice(&seal.to_le_bytes());
+        }
+        std::fs::write(&bars, &image).expect("the restamped bars");
+        std::fs::write(&sums, &seals).expect("their seals");
+    }
+
+    /// **A MINUTE BAR STAMPED INSIDE THE MINUTE BEFORE IT NEITHER EXTENDS NOR
+    /// SPLITS ITS RUN** (BASE-COV-API-AS2; `read_minute_spans`).
+    ///
+    /// The writer refuses a bar off its rung's grid, so two bars of one IST
+    /// minute reach the walk only from a file written outside it: January's
+    /// minute file is written legally, then every record is restamped in place
+    /// and its blocks sealed again ([`write_restamped`]), so the month reads
+    /// clean. Ten days each hold one case, and 35 bars against ten days of 375
+    /// owed is no counter's match, so the month is walked.
+    ///
+    /// Extremes: 10 (7 single, 2 combined, 1 out of the box): (1) a bar 30 s
+    /// into the minute before it, inside a run: one run 09:15-09:17 from four
+    /// bars; (2) a bar at the last microsecond of the minute before it: one
+    /// run; (3) three bars in one minute: one run; (4) the session's last
+    /// minute twice: the run ends at 15:29; (5) the session's first minute
+    /// twice and nothing after: a one-minute session from two bars; (6) a
+    /// repeat right after a hole belongs to the new run; (7) the same
+    /// microsecond twice: one minute. Combined: (8) a repeat AND a hole right
+    /// after it: two runs, the repeat bridges nothing; (9) repeats in two runs
+    /// of one day AND each run going on past its repeat: two runs. Out of the
+    /// box: (10) a bar stamped BACKWARD inside its minute (out of order): one
+    /// run.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one restamped month, then every case its Extremes: line names"
+    )]
+    fn a_minute_bar_stamped_inside_the_minute_before_it_neither_extends_nor_splits_its_run() {
+        /// One case: its day, its bars' stamps, the windows and the bars owed.
+        type Case = (i64, Vec<i64>, Vec<(u16, u16)>, u16);
+        let root = crate::scratch::path("calendar-of-repeated-minutes");
+        let _ = std::fs::remove_dir_all(&root);
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let second = 1_000_000_i64;
+        let at = |day: i64, minute: u16, micros: i64| stamp(day, minute) + micros;
+        let days = [5, 6, 7, 8, 9, 12, 13, 14, 15, 16].map(|day| epoch_day(2026, 1, day));
+        let [d1, d2, d3, d4, d5, d6, d7, d8, d9, d10] = days;
+        let cases: [Case; 10] = [
+            (
+                d1,
+                vec![
+                    at(d1, OPEN, 0),
+                    at(d1, OPEN, 30 * second),
+                    at(d1, OPEN + 1, 0),
+                    at(d1, OPEN + 2, 0),
+                ],
+                vec![(OPEN, OPEN + 2)],
+                3,
+            ),
+            (
+                d2,
+                vec![
+                    at(d2, OPEN, 0),
+                    at(d2, OPEN, 60 * second - 1),
+                    at(d2, OPEN + 1, 0),
+                ],
+                vec![(OPEN, OPEN + 1)],
+                2,
+            ),
+            (
+                d3,
+                vec![
+                    at(d3, OPEN, 0),
+                    at(d3, OPEN, 20 * second),
+                    at(d3, OPEN, 40 * second),
+                    at(d3, OPEN + 1, 0),
+                ],
+                vec![(OPEN, OPEN + 1)],
+                2,
+            ),
+            (
+                d4,
+                vec![
+                    at(d4, LAST - 1, 0),
+                    at(d4, LAST, 0),
+                    at(d4, LAST, 30 * second),
+                ],
+                vec![(LAST - 1, LAST)],
+                2,
+            ),
+            (
+                d5,
+                vec![at(d5, OPEN, 0), at(d5, OPEN, 30 * second)],
+                vec![(OPEN, OPEN)],
+                1,
+            ),
+            (
+                d6,
+                vec![
+                    at(d6, OPEN, 0),
+                    at(d6, OPEN + 5, 0),
+                    at(d6, OPEN + 5, 30 * second),
+                    at(d6, OPEN + 6, 0),
+                ],
+                vec![(OPEN, OPEN), (OPEN + 5, OPEN + 6)],
+                3,
+            ),
+            (
+                d7,
+                vec![at(d7, OPEN, 0), at(d7, OPEN, 0), at(d7, OPEN + 1, 0)],
+                vec![(OPEN, OPEN + 1)],
+                2,
+            ),
+            (
+                d8,
+                vec![
+                    at(d8, OPEN, 0),
+                    at(d8, OPEN, 30 * second),
+                    at(d8, OPEN + 2, 0),
+                ],
+                vec![(OPEN, OPEN), (OPEN + 2, OPEN + 2)],
+                2,
+            ),
+            (
+                d9,
+                vec![
+                    at(d9, OPEN, 0),
+                    at(d9, OPEN, 30 * second),
+                    at(d9, OPEN + 1, 0),
+                    at(d9, 720, 0),
+                    at(d9, 720, 45 * second),
+                    at(d9, 721, 0),
+                ],
+                vec![(OPEN, OPEN + 1), (720, 721)],
+                4,
+            ),
+            (
+                d10,
+                vec![
+                    at(d10, OPEN, 30 * second),
+                    at(d10, OPEN, 0),
+                    at(d10, OPEN + 1, 0),
+                ],
+                vec![(OPEN, OPEN + 1)],
+                2,
+            ),
+        ];
+        let crafted: Vec<i64> = cases
+            .iter()
+            .flat_map(|(_, stamps, _, _)| stamps.iter().copied())
+            .collect();
+        assert_eq!(crafted.len(), 35, "the premise: 35 bars, not 10 x 375");
+        let legal: Vec<i64> = (0..35_u16).map(|minute| stamp(d1, OPEN + minute)).collect();
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            january,
+            &days.iter().map(|&day| stamp(day, OPEN)).collect::<Vec<_>>(),
+        );
+        write_restamped(&root, Timeframe::MINUTE_1, january, &legal, &crafted);
+        let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &[january]);
+        assert_eq!(
+            (report.months_walked, report.months_by_counter),
+            (1, 0),
+            "walked, not counted"
+        );
+        assert!(
+            report.unreadable.is_empty() && report.unopened.is_empty(),
+            "the restamped month reads clean: {report:?}"
+        );
+        for (case, (day, _, windows, bars)) in (1_u8..).zip(&cases) {
+            assert_eq!(windows_of(&cal, *day), *windows, "({case})");
+            assert_eq!(cal.expected_bars(*day), Some(*bars), "({case})");
+        }
+        assert_eq!(cal.sessions(), 10, "one session a case, none invented");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAILY BAR BEFORE THE EPOCH IS FILED UNDER NO MONTH, AND EVERY MONTH
+    /// AFTER IT THAT NO DAILY FILE PROVES IS WITHHELD, NOT CLOSED**
+    /// (BASE-COV-API-AS2; D-1443, R9-api-law-0).
+    ///
+    /// The writer refuses a bar outside its month, so a daily bar dated before
+    /// 1970 reaches `derive` only from a file written outside it: January
+    /// 2026's daily file, written legally, restamped in place and sealed again
+    /// ([`write_restamped`]). `day_month` names no month for that day, so it is
+    /// filed under none and the minute pass owes it no minute; the daily rung
+    /// still proves it traded, so it is an open day of unmeasured length. The
+    /// calendar's span then begins before the epoch, and every month from the
+    /// epoch's to the month before January is inside it, read by no daily
+    /// file: each is withheld and named, exactly as a span that begins after
+    /// the epoch withholds its unproved months.
+    ///
+    /// Extremes: 11 (8 single, 2 combined, 1 out of the box): (1) the
+    /// pre-epoch day is open, its length unmeasured; (2) it is filed under no
+    /// month: January's 375 minutes match January's one day and are not
+    /// walked; (3) the epoch's first day is withheld, not closed; (4) so is the
+    /// day before January; (5) every month from 1970-01 to 2025-12 is named
+    /// withheld, 672 in order; (6) January, proved, keeps its weekend closed;
+    /// (7) three sessions: the pre-epoch day's, January's, and 2021-02-24's,
+    /// the regulator-recorded day inside the span that withholding never
+    /// touches; (8) nothing is unreadable or unopened. Combined: (9) the
+    /// pre-epoch bar AND the epoch's
+    /// own month proved by a daily file: 1970-01-01 stays closed and 671 months
+    /// are named; (10) the pre-epoch bar AS the month's only bar: the span is
+    /// that one day, nothing is withheld or named, and January's minutes, owed
+    /// by no filed day, are walked into no session. Out of the box: (11) the
+    /// last microsecond before the epoch's IST midnight is that same day -1,
+    /// filed under no month.
+    #[test]
+    fn a_daily_bar_before_the_epoch_is_filed_under_no_month_and_the_months_after_it_are_withheld() {
+        let root = crate::scratch::path("calendar-of-pre-epoch-day");
+        let _ = std::fs::remove_dir_all(&root);
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let epoch_month = YearMonth::new(1970, 1).expect("the epoch's month");
+        let (jan5, jan6) = (epoch_day(2026, 1, 5), epoch_day(2026, 1, 6));
+        let derive_over = |root: &Path, months: &[YearMonth]| {
+            derive(root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", months)
+        };
+        let months_from = |first: YearMonth| -> Vec<YearMonth> {
+            (1970_u16..=2025)
+                .flat_map(|year| (1_u8..=12).map(move |month| (year, month)))
+                .filter_map(|(year, month)| YearMonth::new(year, month).ok())
+                .filter(|month| *month >= first)
+                .collect()
+        };
+        let full_january = |root: &Path| {
+            write_bars(
+                root,
+                Timeframe::MINUTE_1,
+                january,
+                &minutes_of(jan5, &[(OPEN, LAST)]),
+            );
+        };
+        // (1)-(8): January's daily file holds 1969-12-31 and 2026-01-05.
+        let whole = root.join("whole");
+        write_restamped(
+            &whole,
+            Timeframe::DAY_1,
+            january,
+            &[stamp(jan5, OPEN), stamp(jan6, OPEN)],
+            &[stamp(-1, OPEN), stamp(jan5, OPEN)],
+        );
+        full_january(&whole);
+        let (cal, report) = derive_over(&whole, &[january]);
+        assert_eq!(cal.kind_of(-1), DayKind::OpenLengthUnmeasured, "(1)");
+        assert_eq!(
+            (report.months_by_counter, report.months_walked),
+            (1, 0),
+            "(2)"
+        );
+        assert_eq!(cal.kind_of(jan5), DayKind::Open(Session::full()), "(2)");
+        assert_eq!(cal.kind_of(0), DayKind::Unmeasured, "(3)");
+        assert_eq!(
+            cal.kind_of(epoch_day(2025, 12, 31)),
+            DayKind::Unmeasured,
+            "(4)"
+        );
+        assert_eq!(report.withheld, months_from(epoch_month), "(5)");
+        assert_eq!(report.withheld.len(), 672, "(5)");
+        assert_eq!(cal.kind_of(epoch_day(2026, 1, 3)), DayKind::Closed, "(6)");
+        assert!(
+            matches!(
+                cal.kind_of(pull::calendar::SYSTEMS_OUTAGE_DAY),
+                DayKind::Open(_)
+            ),
+            "(7)"
+        );
+        assert_eq!(cal.sessions(), 3, "(7)");
+        assert!(
+            report.unreadable.is_empty() && report.unopened.is_empty(),
+            "(8) {report:?}"
+        );
+        // (9): and 1970-01's daily file proves 1970-01-02.
+        let proved = root.join("proved");
+        write_restamped(
+            &proved,
+            Timeframe::DAY_1,
+            january,
+            &[stamp(jan5, OPEN), stamp(jan6, OPEN)],
+            &[stamp(-1, OPEN), stamp(jan5, OPEN)],
+        );
+        full_january(&proved);
+        write_bars(&proved, Timeframe::DAY_1, epoch_month, &[stamp(1, OPEN)]);
+        let (cal, report) = derive_over(&proved, &[epoch_month, january]);
+        assert_eq!(cal.kind_of(0), DayKind::Closed, "(9)");
+        assert_eq!(cal.kind_of(1), DayKind::OpenLengthUnmeasured, "(9)");
+        let after_the_epoch = YearMonth::new(1970, 2).expect("a real month");
+        assert_eq!(report.withheld, months_from(after_the_epoch), "(9)");
+        assert_eq!(report.withheld.len(), 671, "(9)");
+        // (10), (11): the month's only bar, at the last microsecond of day -1.
+        let alone = root.join("alone");
+        write_restamped(
+            &alone,
+            Timeframe::DAY_1,
+            january,
+            &[stamp(jan5, OPEN)],
+            &[stamp(0, 0) - 1],
+        );
+        full_january(&alone);
+        let (cal, report) = derive_over(&alone, &[january]);
+        assert_eq!(cal.kind_of(-1), DayKind::OpenLengthUnmeasured, "(11)");
+        assert_eq!((cal.first_day(), cal.span()), (-1, 1), "(10)");
+        assert!(report.withheld.is_empty(), "(10) {report:?}");
+        assert_eq!(
+            (report.months_by_counter, report.months_walked),
+            (0, 1),
+            "(10) 375 minutes against no filed day is walked"
+        );
+        assert_eq!(cal.sessions(), 1, "(10)");
+        assert_eq!(cal.kind_of(jan5), DayKind::Unmeasured, "(10)");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A MONTH COUNTED WITH NO CENSUS ENTRY IS ANSWERED AND NEVER
