@@ -1930,3 +1930,1003 @@ async fn a_pointer_to_a_plan_that_is_gone_or_no_file_is_refused_and_a_page_under
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A DAY OUTSIDE THE WINDOW SAYS NOTHING ABOUT IT, A DAILY COUNT READS A
+/// WITHDRAWN DAY BY ITS OWN BARS, AND A REASSESSMENT RECORDS ONLY WHAT MOVED**
+/// (BASE-COV-API repair 3, D-8661). `qualify_lifecycle`, `assess_daily`,
+/// `reassessed` and `outside_session_count`, driven directly over the arms no
+/// whole audit reached. Extremes: a withdrawn day held before the window (no
+/// issue); a listed share holding a day before the window and one holding a
+/// day after it (no listing conflict either way); a share whose master row
+/// holds no date, with only a day missing (an issue, its retry kept); a
+/// withdrawn day held in the minutes alone (unverified) and one with nothing
+/// held (not counted); an unverified attempt whose unverified count moved
+/// (recorded, one diagnostic more) and one whose counts did not (nothing
+/// recorded); an attempt owed a retry at its limit (exhausted); two minutes of
+/// one open day handed out of order (refused: outside the audited shape) and
+/// the same two in order (read: one outside the session); and, at once, a
+/// listed share holding a day on each side of the window with its retry owed
+/// before the listing (no conflict, the retry dropped), and a daily count over
+/// two withdrawn days and the readmitted day (one unverified by its minutes,
+/// one not counted, one held); out of the box, an unverified attempt whose
+/// unverified count fell to nothing with nothing missing (still recorded
+/// unverified: a lost receipt is never made clean).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one master, every window-bounded arm beside the case it is read against"
+)]
+fn a_day_outside_the_window_says_nothing_and_a_reassessment_records_only_what_moved() {
+    let window = Window::new(on(2026, 8, 24), on(2026, 8, 27)).expect("a window");
+    let master = Some(lifecycle_of(
+        "recovery-cover-outside",
+        &[
+            ("RELIANCE", Some(on(2026, 8, 26)), None, None),
+            ("SBIN", None, None, None),
+        ],
+    ));
+    let (before, tue, wed, after) = (
+        on(2026, 8, 21),
+        on(2026, 8, 25),
+        on(2026, 8, 26),
+        on(2026, 8, 28),
+    );
+
+    // A WITHDRAWN DAY HELD BEFORE THE WINDOW is not this window's.
+    let withdrawn = Window::new(on(2024, 1, 2), on(2024, 1, 4)).expect("a window");
+    assert_eq!(
+        qualified(
+            assessment(0, 0, &[]),
+            &master,
+            "FORCEMOT",
+            withdrawn,
+            &[on(2023, 12, 29)],
+            &[]
+        ),
+        (0, vec![])
+    );
+    // A LISTED SHARE: a day held before the window, and one after it, conflict
+    // with no listing; the retry on the listing day stands.
+    assert_eq!(
+        qualified(
+            assessment(1, 1, &[wed]),
+            &master,
+            "RELIANCE",
+            window,
+            &[before],
+            &[]
+        ),
+        (0, vec![wed])
+    );
+    assert_eq!(
+        qualified(
+            assessment(1, 1, &[wed]),
+            &master,
+            "RELIANCE",
+            window,
+            &[],
+            &[after]
+        ),
+        (0, vec![wed])
+    );
+    // NO DATE IN THE MASTER ROW, ONLY A DAY MISSING: an issue, the retry kept.
+    assert_eq!(
+        qualified(assessment(0, 1, &[tue]), &master, "SBIN", window, &[], &[]),
+        (1, vec![tue])
+    );
+    // AT ONCE: a day on each side of the window, the retry before the listing.
+    assert_eq!(
+        qualified(
+            assessment(2, 1, &[tue]),
+            &master,
+            "RELIANCE",
+            window,
+            &[before],
+            &[after]
+        ),
+        (0, vec![])
+    );
+
+    // A DAILY COUNT OVER WITHDRAWN DAYS (FORCEMOT, withdrawn through
+    // 2024-02-13 and readmitted the next day).
+    let (feb_12, feb_13, feb_14) = (on(2024, 2, 12), on(2024, 2, 13), on(2024, 2, 14));
+    let set = |days: &[Day]| days.iter().copied().collect::<HashSet<Day>>();
+    let counts = |found: &Assessment| {
+        (
+            found.held,
+            found.missing,
+            found.unverified,
+            found.retry_days.len(),
+        )
+    };
+    let one = Window::new(feb_13, feb_13).expect("a day");
+    let found = assess_daily(one, &set(&[]), &set(&[feb_13]), "FORCEMOT").expect("counted");
+    assert_eq!(counts(&found), (0, 0, 1, 0), "held in the minutes alone");
+    let found = assess_daily(one, &set(&[]), &set(&[]), "FORCEMOT").expect("counted");
+    assert_eq!(
+        counts(&found),
+        (0, 0, 0, 0),
+        "nothing held, nothing counted"
+    );
+    let found = assess_daily(
+        Window::new(feb_12, feb_14).expect("a window"),
+        &set(&[feb_14]),
+        &set(&[feb_13]),
+        "FORCEMOT",
+    )
+    .expect("counted");
+    assert_eq!(
+        counts(&found),
+        (1, 0, 1, 0),
+        "one withdrawn day by its minutes, one not counted, the readmitted day held"
+    );
+
+    // A REASSESSMENT RECORDS ONLY WHAT MOVED.
+    let pending = Record {
+        status: Status::Unverified,
+        unverified: 5,
+        diagnostics: 2,
+        ..record(canonical(
+            "NIFTY",
+            "1min",
+            Window::new(tue, tue).expect("a day"),
+            "gap",
+        ))
+    };
+    let moved = Assessment {
+        unverified: 3,
+        evidence_issues: 1,
+        ..Assessment::default()
+    };
+    let next = reassessed(&pending, &moved).expect("recorded");
+    assert_eq!(
+        (next.status, next.missing, next.unverified, next.diagnostics),
+        (Status::Unverified, 0, 3, 4),
+        "the evidence issue and the lost receipt, one each"
+    );
+    let same = Assessment {
+        unverified: 5,
+        ..Assessment::default()
+    };
+    assert_eq!(reassessed(&pending, &same), None, "nothing moved");
+    let at_limit = Record {
+        status: Status::Queued,
+        attempts: ATTEMPT_LIMIT,
+        ..pending.clone()
+    };
+    let owed = Assessment {
+        missing: 7,
+        retry_days: vec![tue],
+        ..Assessment::default()
+    };
+    assert_eq!(
+        reassessed(&at_limit, &owed).map(|next| (next.status, next.missing)),
+        Some((Status::Exhausted, 7))
+    );
+    // OUT OF THE BOX: the count fell to nothing with nothing missing.
+    let cleared = reassessed(&pending, &Assessment::default()).expect("recorded");
+    assert_eq!(
+        (cleared.status, cleared.unverified, cleared.diagnostics),
+        (Status::Unverified, 0, 3),
+        "a lost receipt is never made clean"
+    );
+
+    // TWO MINUTES OF ONE OPEN DAY OUT OF ORDER: the second lies before the
+    // range the cursor already stands in. In order, both are read.
+    let day = on(2026, 8, 24);
+    let number = i64::from(day.days_from_epoch());
+    assert_eq!(
+        outside_session_count(
+            &[at(day, 600, 0), at(day, 300, 0)],
+            "NIFTY",
+            number,
+            number,
+            None
+        ),
+        Err("stored minute lies outside the audited session shape".to_owned())
+    );
+    assert_eq!(
+        outside_session_count(
+            &[at(day, 300, 0), at(day, 600, 0)],
+            "NIFTY",
+            number,
+            number,
+            None
+        ),
+        Ok(1),
+        "05:00 lies outside the session, 10:00 inside it"
+    );
+}
+
+/// A plan journal of its own under `root`, holding `scans`, and their keys in
+/// plan order.
+fn plan_of(root: &Path, name: &str, scans: &[Record]) -> (Journal, Vec<[u8; 32]>) {
+    let path = root.join(name);
+    let _ = std::fs::remove_file(&path);
+    let mut journal = Journal::open(&path).expect("a plan journal");
+    for scan in scans {
+        journal.append(scan.clone()).expect("a window");
+    }
+    (journal, scans.iter().map(|scan| scan.key).collect())
+}
+
+/// The site's shared attempt ledger, made again and holding `rows`.
+fn ledger_of(site: &Site, rows: &[Record]) -> Journal {
+    let path = super::root(site).join("attempts.bin");
+    let _ = std::fs::remove_file(&path);
+    let mut ledger = Journal::open(&path).expect("the shared ledger");
+    for row in rows {
+        ledger.append(row.clone()).expect("a ledger row");
+    }
+    ledger
+}
+
+/// A NIFTY minute-rung recovery body of `kind` over `from..=to`.
+fn nifty(from: Day, to: Day, kind: &str) -> Record {
+    record(canonical(
+        "NIFTY",
+        "1min",
+        Window::new(from, to).expect("a window"),
+        kind,
+    ))
+}
+
+/// **A RECONCILE JUDGES ONLY THE PENDING DAYS ITS OWN WINDOWS HOLD, REFUSES A
+/// ROW THAT IS NO DAY OF WORK BY NAME, AND A STOP ENDS IT AT THE NEXT
+/// BOUNDARY** (BASE-COV-API repair 3, D-8661). `reconcile_pending` and
+/// `execute`, driven directly over a mapped site's shared attempt ledger.
+/// Extremes: a blocked day inside the window on a pass that is not explicit
+/// (passed over, never read); the same day on an explicit pass (reassessed and
+/// recorded in the ledger and the plan); a pending attempt spanning two days
+/// (refused by name); a one-day attempt of kind `scan` (refused by name); a
+/// pending day before the window in the plan's month (passed over); one after
+/// it (passed over); a stop while a day waits (refused, nothing recorded); a
+/// stop with nothing pending, through `execute` (refused at the first window
+/// boundary, the window never assessed, the feed row published with nothing
+/// done); and, at once, an attempt spanning two days that also lies before the
+/// window (refused: the day scope is judged before the window), and a stop
+/// with only another scope's day waiting (refused: the stop is read before the
+/// scope); out of the box, the plan's own symbol and day asked at the daily
+/// rung (another scope, passed over).
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one plan over one ledger: every row's fate and both stops"
+)]
+async fn a_reconcile_judges_only_its_own_days_and_a_stop_ends_it_at_the_next_boundary() {
+    let (root, site) = mapped_site("recovery-cover-reconcile");
+    let (d1, d2, d6, d7, d8, d9) = (
+        on(2026, 7, 1),
+        on(2026, 7, 2),
+        on(2026, 7, 6),
+        on(2026, 7, 7),
+        on(2026, 7, 8),
+        on(2026, 7, 9),
+    );
+    let scan = nifty(d6, d8, "scan");
+    let (mut plan, keys) = plan_of(&root, "plan.bin", std::slice::from_ref(&scan));
+    let refused = Err("shared attempt has invalid identity or non-day scope".to_owned());
+
+    // A BLOCKED DAY INSIDE THE WINDOW, on a pass that is not explicit: never
+    // read. On an explicit pass: reassessed, and recorded in both journals.
+    let blocked = Record {
+        status: Status::Blocked,
+        ..nifty(d7, d7, "gap")
+    };
+    let mut ledger = ledger_of(&site, std::slice::from_ref(&blocked));
+    assert_eq!(
+        reconcile_pending(&site, &mut plan, &mut ledger, &keys, &None, false).await,
+        Ok(())
+    );
+    assert_eq!(ledger.latest[&blocked.key], blocked, "passed over");
+    assert!(!plan.latest.contains_key(&blocked.key), "nothing recorded");
+    assert_eq!(
+        reconcile_pending(&site, &mut plan, &mut ledger, &keys, &None, true).await,
+        Ok(())
+    );
+    assert_eq!(ledger.latest[&blocked.key].status, Status::Unverified);
+    assert_eq!(plan.latest[&blocked.key].status, Status::Unverified);
+    drop(ledger);
+
+    // AN ATTEMPT OF TWO DAYS AND ONE OF KIND `scan`, inside the plan's scope;
+    // and, at once, two days that also lie before the window.
+    for (row, what) in [
+        (nifty(d6, d7, "gap"), "two days"),
+        (nifty(d7, d7, "scan"), "a scan"),
+        (nifty(d1, d2, "gap"), "two days before the window"),
+    ] {
+        let mut ledger = ledger_of(&site, std::slice::from_ref(&row));
+        assert_eq!(
+            reconcile_pending(&site, &mut plan, &mut ledger, &keys, &None, true).await,
+            refused,
+            "{what}"
+        );
+        assert_eq!(ledger.latest[&row.key], row, "{what}: nothing recorded");
+    }
+
+    // A PENDING DAY BEFORE THE WINDOW AND ONE AFTER IT, in the plan's month;
+    // and, out of the box, the plan's own symbol and day at the daily rung.
+    let daily = record(canonical(
+        "NIFTY",
+        "1day",
+        Window::new(d7, d7).expect("a day"),
+        "gap",
+    ));
+    let passed = [nifty(d1, d1, "gap"), nifty(d9, d9, "gap"), daily];
+    let mut ledger = ledger_of(&site, &passed);
+    assert_eq!(
+        reconcile_pending(&site, &mut plan, &mut ledger, &keys, &None, true).await,
+        Ok(())
+    );
+    for row in &passed {
+        assert_eq!(&ledger.latest[&row.key], row, "passed over: {}", row.body);
+    }
+    drop(ledger);
+
+    // A STOP WHILE A DAY WAITS: refused before it is judged; and, at once, a
+    // stop with only another scope's day waiting, refused the same.
+    *site.run.lock().expect("the run slot") = Some(Progress {
+        stopping: true,
+        ..Progress::claimed()
+    });
+    let foreign = record(canonical(
+        "SBIN",
+        "1min",
+        Window::new(d7, d7).expect("a day"),
+        "gap",
+    ));
+    for waiting in [nifty(d7, d7, "gap"), foreign] {
+        let mut ledger = ledger_of(&site, std::slice::from_ref(&waiting));
+        assert_eq!(
+            reconcile_pending(&site, &mut plan, &mut ledger, &keys, &None, true).await,
+            Err("stopped while reconciling interrupted requests".to_owned()),
+            "{}",
+            waiting.body
+        );
+        assert_eq!(ledger.latest[&waiting.key], waiting, "nothing recorded");
+    }
+
+    // A STOP WITH NOTHING PENDING, THROUGH `execute`: refused at the first
+    // window boundary, the window never assessed, the feed row published.
+    let mut ledger = ledger_of(&site, &[]);
+    assert_eq!(
+        execute(&site, &mut plan, &mut ledger, true).await,
+        Err("stopped at a durable window boundary".to_owned())
+    );
+    assert_eq!(
+        plan.latest[&scan.key], scan,
+        "the window was never assessed"
+    );
+    let feeds = site
+        .run
+        .lock()
+        .expect("the run slot")
+        .as_ref()
+        .map(|progress| progress.feeds.clone())
+        .expect("the document");
+    assert_eq!(feeds.len(), 1, "{feeds:?}");
+    assert_eq!(
+        (feeds[0].legs, feeds[0].legs_done, feeds[0].doing.as_str()),
+        (1, 0, ""),
+        "{feeds:?}"
+    );
+    drop((plan, ledger));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The feed rows of the document in `site`'s run slot.
+fn feed_rows(site: &Site) -> Vec<FeedReport> {
+    site.run
+        .lock()
+        .expect("the run slot")
+        .as_ref()
+        .map(|progress| progress.feeds.clone())
+        .expect("a document")
+}
+
+/// **AN EXECUTE READS A RETRY ALREADY SPENT AGAIN WITHOUT A REQUEST, NAMES THE
+/// LIFECYCLE SNAPSHOT IT READ BY ITS PROOF, REFUSES AN AUDIT IT CANNOT FINISH,
+/// AND AUDITS EVERY WINDOW WHEN ITS FEED ROW IS GONE** (BASE-COV-API repair 3,
+/// D-8661). `execute`, `assess` and `load_lifecycle`, driven directly on a
+/// runtime whose blocking pool is one thread, so a window's source read can be
+/// held behind a task the test releases: the feed row is cleared while the
+/// first window's read waits, deterministically, never by timing. Extremes: a
+/// day whose retry the shared ledger holds spent (appended as it stands, no
+/// attempt charged); a blocked day on a pass that is not explicit (the same);
+/// the window assessed again after its retries (exhausted, fifteen minutes
+/// missing); a holed day held in the minutes with no daily bar (missing and
+/// owed a retry); a lifecycle master for the plan's last day (named by its
+/// day, digest and source); a plan ending on another day (unverified, named);
+/// an audit past its 4,096 runs (refused by name); a feed row cleared while a
+/// window is read (that window's count not published); the next window's
+/// doing (not published); and, at once, a spent day and a blocked day in one
+/// window (both answered without a request, the window read again once), and
+/// the feed row gone while both windows are still audited and summed; out of
+/// the box, a run slot holding no document at all (every window audited,
+/// nothing published).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one site, every read `execute` makes beside the others it is read against"
+)]
+fn an_execute_reads_a_spent_retry_again_names_its_snapshot_and_refuses_an_audit_it_cannot_finish() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("a runtime of one blocking thread");
+    runtime.block_on(async {
+        let (root, site) = mapped_site("recovery-cover-execute");
+        let (d1, d2, d6, d7) = (
+            on(2026, 7, 1),
+            on(2026, 7, 2),
+            on(2026, 7, 6),
+            on(2026, 7, 7),
+        );
+        let july = d1.year_month().expect("a month");
+        // d1: ten minutes missing, its daily bar held; d2: five missing and
+        // no daily bar.
+        let ten = at(d1, 600, 0)..at(d1, 610, 0);
+        let five = at(d2, 600, 0)..at(d2, 605, 0);
+        let mut minutes: Vec<i64> = session_of(d1)
+            .into_iter()
+            .filter(|stamp| !ten.contains(stamp))
+            .collect();
+        minutes.extend(
+            session_of(d2)
+                .into_iter()
+                .filter(|stamp| !five.contains(stamp)),
+        );
+        source_month(&root, "NIFTY", "1min", july, &minutes);
+        source_month(&root, "NIFTY", "1day", july, &[at(d1, 0, 0)]);
+        let scan = nifty(d1, d2, "scan");
+        let found = assess(&site, &scan.body, &None).await.expect("assessed");
+        assert_eq!(
+            (found.missing, found.retry_days.clone()),
+            (15, vec![d1, d2]),
+            "the day held in the minutes alone is owed too"
+        );
+
+        // A SPENT DAY AND A BLOCKED DAY IN ONE WINDOW, on a pass that is not
+        // explicit: both answered as they stand, the window read again once.
+        let spent = Record {
+            status: Status::Exhausted,
+            attempts: ATTEMPT_LIMIT,
+            ..nifty(d1, d1, "gap")
+        };
+        let blocked = Record {
+            status: Status::Blocked,
+            attempts: 1,
+            http_status: 503,
+            ..nifty(d2, d2, "gap")
+        };
+        let (mut plan, _) = plan_of(&root, "plan.bin", std::slice::from_ref(&scan));
+        let mut ledger = ledger_of(&site, &[spent.clone(), blocked.clone()]);
+        let summary = execute(&site, &mut plan, &mut ledger, false)
+            .await
+            .expect("finished");
+        assert!(
+            summary.contains(
+                "0 stored windows verified against measured schedule; 0 not applicable; \
+                 0 unverified; 1 missing/blocked"
+            ),
+            "{summary}"
+        );
+        let window = &plan.latest[&scan.key];
+        assert_eq!((window.status, window.missing), (Status::Exhausted, 15));
+        for row in [&spent, &blocked] {
+            assert_eq!(&plan.latest[&row.key], row, "appended as it stands");
+            assert_eq!(&ledger.latest[&row.key], row, "no attempt charged");
+        }
+        drop((plan, ledger));
+
+        // A LIFECYCLE MASTER FOR THE PLAN'S LAST DAY, named by its proof; a
+        // plan ending on another day finds none.
+        let isin = brutex_core::universe::nse_isin("RELIANCE").expect("an F&O share");
+        let csv = format!(
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n\
+             901,RELIANCE,EQ,{},1,{},0,0\n",
+            isin.as_str(),
+            since_1980(on(2001, 1, 2))
+        );
+        pull::cash_session_cache::install(
+            &root.join("session-masters"),
+            master_day(),
+            &stored_gzip(csv.as_bytes()),
+        )
+        .expect("the master lands");
+        let share = |to: Day| {
+            record(canonical(
+                "RELIANCE",
+                "1min",
+                Window::new(on(2026, 8, 24), to).expect("a window"),
+                "scan",
+            ))
+        };
+        let (mut shares, keys) = plan_of(&root, "shares.bin", &[share(master_day())]);
+        let loaded = load_lifecycle(&site, &mut shares, &keys)
+            .expect("read")
+            .expect("the master");
+        let proof = loaded.provenance();
+        assert_eq!(proof.master_day, master_day());
+        let said = format!(
+            "lifecycle snapshot ONLY: {} sha256={} source={}",
+            proof.master_day,
+            hex(proof.sha256),
+            proof.source_url
+        );
+        assert!(
+            shares
+                .latest
+                .values()
+                .any(|row| row.body == said && row.status == Status::Unverified),
+            "{said}"
+        );
+        assert!(said.starts_with("lifecycle snapshot ONLY: 2026-08-27 sha256="));
+        let (mut earlier, keys) = plan_of(&root, "earlier.bin", &[share(on(2026, 8, 26))]);
+        assert!(
+            load_lifecycle(&site, &mut earlier, &keys)
+                .expect("read")
+                .is_none()
+        );
+        assert!(
+            earlier
+                .latest
+                .values()
+                .any(|row| row.body.starts_with("lifecycle UNVERIFIED: ")),
+            "no master for 2026-08-26"
+        );
+        drop((shares, earlier));
+
+        // AN AUDIT PAST ITS 4,096 RUNS: every other minute of six open days.
+        let august = on(2026, 8, 3).year_month().expect("a month");
+        let crowded: Vec<i64> = [3, 4, 5, 6, 7, 10]
+            .into_iter()
+            .flat_map(|date| (0..720).map(move |half| at(on(2026, 8, date), 2 * half, 0)))
+            .collect();
+        source_month(&root, "NIFTY", "1min", august, &crowded);
+        let week = nifty(on(2026, 8, 3), on(2026, 8, 10), "scan");
+        assert_eq!(
+            assess(&site, &week.body, &None)
+                .await
+                .map(|found| found.held),
+            Err("source gap audit is truncated or has invalid timestamps".to_owned())
+        );
+
+        // THE FEED ROW CLEARED WHILE THE FIRST WINDOW'S READ WAITS behind the
+        // runtime's one blocking thread; and, at once, both windows audited.
+        let two = [nifty(d6, d6, "scan"), nifty(d7, d7, "scan")];
+        let (mut both, _) = plan_of(&root, "both.bin", &two);
+        let mut empty = ledger_of(&site, &[]);
+        *site.run.lock().expect("the run slot") = Some(Progress::claimed());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let occupier = tokio::task::spawn_blocking(move || held.recv());
+        let mut run = Box::pin(execute(&site, &mut both, &mut empty, false));
+        let first = std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the first window's read waits");
+        let doing = feed_rows(&site)
+            .first()
+            .map(|feed| feed.doing.clone())
+            .expect("the feed row");
+        assert!(
+            doing.starts_with("Audit NIFTY · 1min · 2026-07-06..2026-07-06"),
+            "{doing}"
+        );
+        site.run
+            .lock()
+            .expect("the run slot")
+            .as_mut()
+            .expect("the document")
+            .feeds
+            .clear();
+        release.send(()).expect("the occupier waits");
+        assert_eq!(occupier.await.expect("joined"), Ok(()));
+        let summary = run.await.expect("finished");
+        assert!(
+            summary.contains("0 not applicable; 2 unverified; 0 missing/blocked"),
+            "{summary}"
+        );
+        assert!(
+            feed_rows(&site).is_empty(),
+            "nothing published after the clear"
+        );
+        for window in &two {
+            assert_eq!(both.latest[&window.key].status, Status::Unverified);
+        }
+
+        // OUT OF THE BOX: a run slot holding no document at all.
+        *site.run.lock().expect("the run slot") = None;
+        let (mut alone, _) = plan_of(&root, "alone.bin", std::slice::from_ref(&two[0]));
+        let summary = execute(&site, &mut alone, &mut empty, false)
+            .await
+            .expect("finished");
+        assert!(summary.contains("1 unverified"), "{summary}");
+        assert!(site.run.lock().expect("the run slot").is_none());
+        drop((both, alone, empty));
+        let _ = std::fs::remove_dir_all(&root);
+    });
+}
+
+/// One NIFTY minute window's plan on `day`: its units and its identity.
+fn one_window(day: Day) -> (Vec<Record>, [u8; 32]) {
+    let units = vec![nifty(day, day, "scan")];
+    let id = scope_identity(&units);
+    (units, id)
+}
+
+/// Where plan `id`'s STOP history is kept on `site`.
+fn stop_path(site: &Site, id: [u8; 32]) -> PathBuf {
+    super::root(site).join(format!("{}.stop.bin", hex(id)))
+}
+
+/// The sentence `site`'s run ends with, waited for. On this current-thread
+/// runtime a driver just spawned has not run yet, so the first look finds the
+/// run still going.
+async fn ended(site: &Loaded) -> String {
+    tokio::time::timeout(std::time::Duration::from_mins(1), async {
+        while site
+            .run
+            .lock()
+            .expect("the run slot")
+            .as_ref()
+            .is_some_and(Progress::running)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the run ends");
+    site.run
+        .lock()
+        .expect("the run slot")
+        .as_ref()
+        .and_then(|progress| progress.finished.clone())
+        .expect("a finished run")
+}
+
+/// **AN ACTIVATION STOPPED OR REFUSED NAMES A STOP IT COULD NOT PERSIST, A
+/// START NAMING NO RECOVERABLE PLAN IS REFUSED BEFORE ANY CLAIM, AND A PLAN
+/// LEFT IN FLIGHT IS DRIVEN AT START** (BASE-COV-API repair 3, D-8661).
+/// `activate_durable` driven directly with the run slot claimed as `start`
+/// claims it; `start` over plans `plan` refuses; `at_start` and `resume` over
+/// a plan sealed in flight whose shared attempt ledger is gone, so the real
+/// driver runs and ends blocked with no vendor reached. Extremes: a stop
+/// requested during a sound activation with no plan active (refused, the run
+/// blocked, the seed durable and its pointer published, no STOP written); the
+/// same with the plan active (its STOP persisted, the plan left idle); a seed
+/// refused by a folder at the first pointer's staging name with the plan
+/// active (the seed's reason alone, the STOP persisted); a start naming
+/// FINNIFTY and one at the five-minute rung (each `400`, refused by the plan's
+/// own rule, nothing claimed); a grounded start over the plan in flight (named, nothing
+/// claimed); a start that drives it (the driver ends blocked, naming the
+/// missing ledger); a resume afterwards (driven again, ended the same); and, at
+/// once, a stop requested while the plan's STOP history holds another plan's
+/// row (both named in one reason), and a seed refused while the STOP path is a
+/// folder (both named); out of the box, a second start before the first one's
+/// driver has run (refused by the run slot the first took).
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every way an activation ends, beside the starts that drive a plan left in flight"
+)]
+async fn an_activation_stopped_or_refused_names_a_stop_it_could_not_persist_and_a_plan_in_flight_is_driven()
+ {
+    let day = on(2026, 7, 1);
+    let (units, id) = one_window(day);
+    let finished = |site: &Loaded| {
+        site.run
+            .lock()
+            .expect("the run slot")
+            .as_ref()
+            .and_then(|progress| progress.finished.clone())
+    };
+    let claimed = |site: &Loaded, stopping: bool| {
+        *site.run.lock().expect("the run slot") = Some(Progress {
+            stopping,
+            ..Progress::claimed()
+        });
+    };
+    let stopped = "stopped during durable activation";
+
+    // A STOP DURING A SOUND ACTIVATION, NO PLAN ACTIVE.
+    let (root, site) = refused_site("recovery-cover-activation-stop");
+    claimed(&site, true);
+    assert_eq!(
+        activate_durable(Loaded::clone(&site), id, Some(units.clone())).await,
+        Err(stopped.to_owned())
+    );
+    assert_eq!(
+        finished(&site),
+        Some(format!("Recovery BLOCKED: {stopped}"))
+    );
+    let plan = crate::recovery_journal::snapshot(&plan_path(&site, id)).expect("the plan");
+    assert_eq!(plan.latest[&CONTROL].status, Status::InFlight, "seeded");
+    assert!(active_path(&site).is_file(), "its pointer published");
+    assert!(!stop_path(&site, id).exists(), "no plan active: no STOP");
+    let _ = std::fs::remove_dir_all(&root);
+
+    // THE SAME WITH THE PLAN ACTIVE: its STOP persisted, the plan left idle.
+    let (root, site) = refused_site("recovery-cover-activation-active");
+    claimed(&site, true);
+    crate::recovery_control::activate(&site, id);
+    assert_eq!(
+        activate_durable(Loaded::clone(&site), id, Some(units.clone())).await,
+        Err(stopped.to_owned())
+    );
+    assert_eq!(crate::recovery_control::is_stopped(&site, id), Ok(true));
+    assert!(
+        site.recovery_active
+            .lock()
+            .expect("the active plan")
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+
+    // AT ONCE: A STOP WHOSE HISTORY HOLDS ANOTHER PLAN'S ROW.
+    let (root, site) = refused_site("recovery-cover-activation-foreign-stop");
+    claimed(&site, true);
+    crate::recovery_control::activate(&site, id);
+    Journal::open(&stop_path(&site, id))
+        .expect("a STOP history")
+        .append(Record {
+            key: [9; 32],
+            status: Status::Blocked,
+            ..record(format!("recovery-stop-v1:{}", hex([9; 32])))
+        })
+        .expect("another plan's row");
+    let why = format!("{stopped}; stop persistence: recovery STOP journal plan identity mismatch");
+    assert_eq!(
+        activate_durable(Loaded::clone(&site), id, Some(units.clone())).await,
+        Err(why.clone())
+    );
+    assert_eq!(finished(&site), Some(format!("Recovery BLOCKED: {why}")));
+    let _ = std::fs::remove_dir_all(&root);
+
+    // A SEED REFUSED WITH THE PLAN ACTIVE: the seed's reason alone, the STOP
+    // persisted; and, at once, its STOP path a folder: both named.
+    for (name, stop_folder) in [
+        ("recovery-cover-activation-seed", false),
+        ("recovery-cover-activation-seed-folder", true),
+    ] {
+        let (root, site) = refused_site(name);
+        claimed(&site, false);
+        crate::recovery_control::activate(&site, id);
+        std::fs::create_dir_all(super::root(&site).join("active.bin.first").join("held"))
+            .expect("a folder at the staging name");
+        if stop_folder {
+            std::fs::create_dir_all(stop_path(&site, id)).expect("a folder at the STOP path");
+        }
+        let why = activate_durable(Loaded::clone(&site), id, Some(units.clone()))
+            .await
+            .expect_err("the seed is refused");
+        assert_eq!(why.contains("; stop persistence: "), stop_folder, "{why}");
+        assert!(!why.starts_with(stopped), "{why}");
+        assert_eq!(finished(&site), Some(format!("Recovery BLOCKED: {why}")));
+        assert_eq!(
+            crate::recovery_control::is_stopped(&site, id).is_ok_and(|stop| stop),
+            !stop_folder,
+            "{name}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A START NAMING FINNIFTY, AND ONE AT THE FIVE-MINUTE RUNG: legs the form
+    // reader takes and the plan refuses by its own rule.
+    let (root, site) = refused_site("recovery-cover-activation-refused-plan");
+    for body in [
+        legs_of(&[("FINNIFTY", "1min", day, day)]),
+        legs_of(&[("NIFTY", "5min", day, day)]),
+    ] {
+        let (status, _, said) = start(State(Loaded::clone(&site)), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{said}");
+        let said: serde_json::Value = serde_json::from_str(&said).expect("JSON");
+        assert_eq!(said["started"], false);
+        assert!(
+            said["why"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("recovery requires explicit F&O spot members")),
+            "{said}"
+        );
+    }
+    assert!(
+        site.run.lock().expect("the run slot").is_none(),
+        "nothing claimed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+
+    // A PLAN SEALED IN FLIGHT, POINTED AT, ITS SHARED LEDGER GONE.
+    let (root, site) = refused_site("recovery-cover-at-start");
+    {
+        let mut plan = Journal::open(&plan_path(&site, id)).expect("a plan journal");
+        plan.append(units[0].clone()).expect("its window");
+        let mut control = record(CONTROL_BODY.to_owned());
+        control.key = CONTROL;
+        control.status = Status::InFlight;
+        plan.append(control).expect("its seal, in flight");
+        Journal::open(&active_path(&site))
+            .expect("the pointer journal")
+            .append(pointer(id))
+            .expect("its pointer");
+    }
+    assert_eq!(
+        at_start(&site, true),
+        Ok(AtStart::Grounded {
+            plan: Some(hex(id))
+        })
+    );
+    assert!(site.run.lock().expect("the run slot").is_none(), "grounded");
+    assert_eq!(at_start(&site, false), Ok(AtStart::Driving));
+    // OUT OF THE BOX: asked again before its driver has run.
+    assert_eq!(
+        at_start(&site, false),
+        Err("a pull already owns the run slot; recovery was not started twice".to_owned())
+    );
+    let first = ended(&site).await;
+    assert!(
+        first.starts_with(
+            "Recovery BLOCKED: shared recovery attempt history is unavailable; \
+             budgets cannot be reset"
+        ),
+        "{first}"
+    );
+    assert_eq!(resume(Loaded::clone(&site)), Ok(true), "still in flight");
+    assert_eq!(ended(&site).await, first);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A SEED REFUSES A STORE IT CANNOT SHAPE BY THE STORE'S OWN ERROR, AND
+/// MAKES NOTHING** (BASE-COV-API repair 3, D-8661). `seeded` over stores whose
+/// folders are links to nowhere, regular files or closed to writing, run where
+/// the mode bits bind: a child of this test binary as uid 65534 when this
+/// process is root, and as itself otherwise (D-0995). Extremes: `audit` a link
+/// to nowhere (refused: it exists and is no folder; its target not made); the
+/// recovery folder a link to nowhere (the same); a store root closed to
+/// writing with no `audit` (refused by the permission error, nothing made);
+/// `audit` closed to writing with no recovery folder (the same); the recovery
+/// folder closed to writing with no plan (refused making the plan); a store
+/// root that is a file (refused: no replacement root); `audit` a regular file
+/// (refused before any folder is made); a sound store (seeded: its seal in
+/// flight, its pointer published); and, at once, a store root closed to
+/// writing whose `audit` is a regular file (refused by the file, nothing
+/// changed), and `audit` a link to a folder closed to writing (refused at the
+/// recovery folder by the permission error); out of the box, `audit` a link to
+/// a folder elsewhere (seeded there).
+#[test]
+#[cfg(unix)]
+fn a_seed_refuses_a_store_it_cannot_shape_by_the_stores_own_error() {
+    crate::isolated::where_permission_binds(
+        "recovery::cover_tests::a_seed_refuses_a_store_it_cannot_shape_by_the_stores_own_error",
+        a_seed_refuses_a_store_it_cannot_shape_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every store shape a seed meets, each beside the sound store"
+)]
+fn a_seed_refuses_a_store_it_cannot_shape_body() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let (units, id) = one_window(on(2026, 7, 1));
+    let mode = |path: &Path, bits: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).expect("a mode");
+    };
+    let fresh = |name: &str| {
+        let root = store_root(name);
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        (root, site)
+    };
+    let seed = |site: &Loaded| seeded(site, id, Some(units.clone())).map(|_| ());
+    let denied = |why: &str| why.contains("ermission denied");
+
+    // `audit` A LINK TO NOWHERE, and the recovery folder one.
+    for inner in [false, true] {
+        let (root, site) = fresh(if inner {
+            "recovery-cover-shape-inner-link"
+        } else {
+            "recovery-cover-shape-link"
+        });
+        let link = if inner {
+            std::fs::create_dir(root.join("audit")).expect("an audit folder");
+            root.join("audit/recovery-v1")
+        } else {
+            root.join("audit")
+        };
+        symlink(root.join("nowhere"), &link).expect("a link to nowhere");
+        let why = seed(&site).expect_err("a link to nowhere is no folder");
+        assert!(why.contains("exists"), "{why}");
+        assert!(!root.join("nowhere").exists(), "its target not made");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // CLOSED TO WRITING: the store root, then `audit`, then the recovery
+    // folder; each refused by the permission error, the next thing not made.
+    for (name, closed, absent) in [
+        ("recovery-cover-shape-root", "", "audit"),
+        ("recovery-cover-shape-audit", "audit", "audit/recovery-v1"),
+        (
+            "recovery-cover-shape-recovery",
+            "audit/recovery-v1",
+            "audit/recovery-v1/active.bin",
+        ),
+    ] {
+        let (root, site) = fresh(name);
+        std::fs::create_dir_all(root.join(closed)).expect("the folders above");
+        mode(&root.join(closed), 0o555);
+        let why = seed(&site);
+        mode(&root.join(closed), 0o755);
+        let why = why.expect_err("closed to writing");
+        assert!(denied(&why), "{name}: {why}");
+        assert!(!root.join(absent).exists(), "{name}: {absent} not made");
+        assert!(!plan_path(&site, id).exists(), "{name}: no plan");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A STORE ROOT THAT IS A FILE.
+    let file = crate::scratch::path("recovery-cover-shape-file");
+    let _ = std::fs::remove_dir_all(&file);
+    std::fs::write(&file, b"no store").expect("a file where the store goes");
+    let site = Loaded::new(Site::load(&file.join("missing-masters"), &file));
+    assert_eq!(
+        seed(&site),
+        Err(
+            "configured source store is unavailable; recovery creates no replacement root"
+                .to_owned()
+        )
+    );
+    let _ = std::fs::remove_file(&file);
+
+    // `audit` A REGULAR FILE; and, at once, under a store root closed to
+    // writing: refused by the file before any folder is made.
+    for closed in [false, true] {
+        let (root, site) = fresh("recovery-cover-shape-audit-file");
+        std::fs::write(root.join("audit"), b"no folder").expect("a file at audit");
+        if closed {
+            mode(&root, 0o555);
+        }
+        let why = seed(&site);
+        mode(&root, 0o755);
+        let why = why.expect_err("a file is no folder");
+        assert!(why.contains("Not a directory"), "{why}");
+        assert!(root.join("audit").is_file(), "left as it was");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // AT ONCE: `audit` A LINK TO A FOLDER CLOSED TO WRITING; and, out of the
+    // box, the same link to a folder open to writing: seeded there.
+    for closed in [true, false] {
+        let (root, site) = fresh("recovery-cover-shape-linked");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("a folder elsewhere");
+        symlink(&elsewhere, root.join("audit")).expect("a link to it");
+        if closed {
+            mode(&elsewhere, 0o555);
+        }
+        let seeded = seed(&site);
+        mode(&elsewhere, 0o755);
+        if closed {
+            let why = seeded.expect_err("closed to writing");
+            assert!(denied(&why), "{why}");
+            assert!(!elsewhere.join("recovery-v1").exists());
+        } else {
+            assert_eq!(seeded, Ok(()));
+            assert!(
+                elsewhere
+                    .join("recovery-v1")
+                    .join(format!("{}.bin", hex(id)))
+                    .is_file(),
+                "the plan lands where the link points"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A SOUND STORE.
+    let (root, site) = fresh("recovery-cover-shape-sound");
+    assert_eq!(seed(&site), Ok(()));
+    let plan = crate::recovery_journal::snapshot(&plan_path(&site, id)).expect("the plan");
+    assert_eq!(plan.latest[&CONTROL].status, Status::InFlight);
+    assert!(active_path(&site).is_file(), "its pointer published");
+    let _ = std::fs::remove_dir_all(&root);
+}
