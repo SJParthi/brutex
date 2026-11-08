@@ -22,6 +22,28 @@ L-BCA-5 regions (`booleansearchjson.rs`, `index_consistency_projection.rs`, `can
 close (`recovery.rs`' remaining reachable arms, the test-code forms below), besides the items owed to the Mac and the
 L-BCA-5 projections.
 
+## The fourth continuation, in progress (token `BASE-COV-API-AS1-20261105-5`, 8 Nov 2026)
+
+Took the branch at `194d9bdb` (code tip `edead6e4`); owner file `586c3765`. The figures, lists and json above and
+below are still the third continuation's (code tip `edead6e4`) until this continuation's Route B replaces them.
+
+Done so far (test code only, no production line changed; each test red under a hand change to `recovery.rs`,
+reverted, `git status` showing the tests alone; fmt and clippy `-D warnings` clean):
+- `3523152e`, five tests in `recovery_cover_tests.rs`, each 8+ / 2 / 1 on its `Extremes:` line:
+  `a_day_outside_the_window_says_nothing_and_a_reassessment_records_only_what_moved` (1634:12, 1656:28, 1656:53
+  False; 1665:35 True; 1685:40 True; 1296:12 False; 1600:44 False),
+  `a_reconcile_judges_only_its_own_days_and_a_stop_ends_it_at_the_next_boundary` (1233:19 False; 1253:16, 1254:16
+  True; 1260:27 False; 1238-1239; 1070-1071),
+  `an_execute_reads_a_spent_retry_again_names_its_snapshot_and_refuses_an_audit_it_cannot_finish` (1095-1098;
+  1540:49 True; 1023-1031; 1521-1522; 1079:20 and 1123:20 False, the feed row cleared while the first window's read
+  waits behind a runtime of one blocking thread),
+  `an_activation_stopped_or_refused_names_a_stop_it_could_not_persist_and_a_plan_in_flight_is_driven` (668:24
+  False; 676-677; 397; 733-734; test rows 801-802),
+  `a_seed_refuses_a_store_it_cannot_shape_by_the_stores_own_error` (865:25 and 865:76 False, 866; in a child where
+  the mode bits bind).
+
+NEXT: the test-code forms in `gaps-AS1.txt.md`; then Route B, the lists, this report and the json.
+
 ## What the third continuation did (token `BASE-COV-API-AS1-20261105-4`, 7 Nov 2026)
 
 The third continuation took the branch at `53d7eec7` (owner file `9bfdb6a0`), changed test code only, and pushed
