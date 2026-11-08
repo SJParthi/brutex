@@ -1,39 +1,38 @@
-STATUS: IN PROGRESS
+STATUS: BLOCKED OUTSIDE
 
 # BASE-COV-API-AS1 (shard G1 of `SHARDS.md`), BASE-COV-API repair round 3, 5-8 Nov 2026
 
 TOKEN `BASE-COV-API-AS1-20261105-5` (the fourth continuation; the first session's was `BASE-COV-API-AS1-20261105-1`,
 the first continuation's `-2`, the second continuation's `-3`, the third continuation's `-4`); branch
 `cloud/cov-api-as1-20261105`, cut from the kit commit `f4111a0132473d8771d8624a9538b1362926f70b`; START
-`6ea46e59c07488eeccff388407976041852aae2c`; code tip `a718e7a5059e25a4f78bc1c2fa7cd3a3b2bc25f8` (`git rev-list -1 HEAD
+`6ea46e59c07488eeccff388407976041852aae2c`; code tip `3f74e3c1364c15ae1e78627634b80d05a4761936` (`git rev-list -1 HEAD
 -- . ':(exclude)reports'`).
 
 **Where it stands.** Blocking item (3) is done for every file G1's brief names (the first session, D-8660,
 unchanged). Blocking item (1) is further along and still not met. Route B whole:api on the code tip reads G1's 88
-files (`SHARDS.md`'s 76 and the 12 test files AS1 added) at 62,420/63,124 lines and 4,354/4,968 branch sides: 704
-lines and 614 sides uncovered (the third continuation's tip: 735 and 661). Of those, **316 production GAP lines and
-85 sides** (342 and 111 before) and 66 test-code GAP lines and 57 sides (78 and 83; three lines and three sides of
-them are `tests/pool_load.rs`' burst, which this run's load did not trip) remain, each listed with its text in
-`gaps-AS1.txt.md`; the rest are rows inside `#[ignore]`d tests (37 lines), HOST rows owed to the Mac's run (51
-lines, 9 sides), (F) failing arms (148 lines, 403 sides) and (U) rows with their proofs (86 lines, 60 sides) in
-`fu-AS1.txt.md`. Of the 316 production lines, 225 (and 51 sides) are the L-BCA-5 regions (`booleansearchjson.rs`,
+files (`SHARDS.md`'s 76 and the 12 test files AS1 added) at 62,449/63,159 lines and 4,359/4,970 branch sides: 710
+lines and 611 sides uncovered (the third continuation's tip: 735 and 661). Of those, **314 production GAP lines and
+85 sides** (342 and 111 before) and 73 test-code GAP lines and 54 sides (78 and 83; ten lines of them follow the
+failing assertion of a stop-bound test this run's load tripped, `stop_tests.rs` 545-560, which passes alone and
+passed in this continuation's other runs) remain, each listed with its text in `gaps-AS1.txt.md`; the rest are
+rows inside `#[ignore]`d tests (37 lines), HOST rows owed to the Mac's run (51 lines, 9 sides), (F) failing arms
+(148 lines, 403 sides) and (U) rows with their proofs (87 lines, 60 sides) in `fu-AS1.txt.md`. Of the 314 production lines, 225 (and 51 sides) are the L-BCA-5 regions (`booleansearchjson.rs`,
 `index_consistency_projection.rs`, `candidatejson.rs`' catalog reads, `booleanoosjson.rs`' served page) and 26 (11
 sides) are `recovery.rs`' (46 and 35 before): `retry_day`'s arms after a broker request that reached a vendor
-(L-BCA-6), its BLAKE3-preimage arm and its pointer changed mid-read; `chain.rs` fell from 7/1 to 2/0 and
-`bars_change.rs` holds none. Every other production row is a race, fault or bound arm with no seam, the Parameter
-Store arm (L-BCA-6) or a serve started through the binary. Line 1 stays IN PROGRESS: a few test-code rows remain
-that a cloud session can still close with the established forms (Not done), besides the items owed to the Mac, the
-operator's L-BCA-5 and L-BCA-6, and the arms that need a seam.
+(L-BCA-6), its BLAKE3-preimage arm and its pointer changed mid-read; `chain.rs` (7/1 before) and
+`bars_change.rs` (1/1) hold none. Every other production row is a race, fault or bound arm with no seam, the Parameter
+Store arm (L-BCA-6) or a serve started through the binary. Line 1 is BLOCKED OUTSIDE: no G1 row is
+left that a cloud session can close; every remaining one is the Mac's, the assembly's or the operator's (Not done).
 
 ## What the fourth continuation did (token `BASE-COV-API-AS1-20261105-5`, 8 Nov 2026)
 
 The fourth continuation took the branch at `194d9bdb` (code tip `edead6e4`; owner file `586c3765`), changed test
-code only, and pushed after every step: `3523152e`, `5d45b00c`, `d31f37aa`, `5db9175c`, `071f6bdd`, `a718e7a5`
-(code), with reports commits `bf28131e`, `76ffb0bc` (the lists, report and json at `071f6bdd`) and the one after the
-second Route B. No production line changed: every hunk of a production file sits inside one of the file's test
-modules after its last production item (`recovery.rs`, `bars_change.rs`, `pullrun.rs`, `import_journal.rs`,
-`assets.rs`; `census.rs`' one line inside its `mod tests` changes no line count), checked by hunk position, so the
-production line numbers are `edead6e4`'s and START's mapping still holds.
+code only, and pushed after every step: `3523152e`, `5d45b00c`, `d31f37aa`, `5db9175c`, `071f6bdd`, `a718e7a5`, `3f74e3c1` (code),
+with reports commits `bf28131e`, `76ffb0bc` and `83591ccf` (the lists, report and json at `071f6bdd` and at
+`a718e7a5`) and the one after the third Route B. No production line changed: every hunk of a production file
+sits inside one of the file's test modules after its last production item (`recovery.rs`, `bars_change.rs`,
+`pullrun.rs`, `import_journal.rs`, `assets.rs`), checked by hunk position, so the production line numbers are
+`edead6e4`'s and START's mapping still holds.
 
 ### New tests, each with its `Extremes:` doc line (D-8661)
 
@@ -45,9 +44,10 @@ production line numbers are `edead6e4`'s and START's mapping still holds.
 | `recovery.rs` | `recovery::cover_tests::an_activation_stopped_or_refused_names_a_stop_it_could_not_persist_and_a_plan_in_flight_is_driven` | 8 / 2 / 1 |
 | `recovery.rs` | `recovery::cover_tests::a_seed_refuses_a_store_it_cannot_shape_by_the_stores_own_error` | 8 / 2 / 1 |
 | `chain.rs` (`chain_route_tests.rs`) | `server::chain::tests::a_first_stamp_the_index_names_before_the_instant_asked_is_a_named_fault` | 8 / 2 / 1 |
+| `chain.rs` | `server::chain::tests::every_spot_key_the_chain_names_is_one_the_store_admits_and_an_instant_no_calendar_places_is_refused` | 9 / 2 / 1 |
 | `bars_change.rs` | `bars::change::cloud_mutant_tests::the_calendar_never_closes_ten_days_running_so_every_walk_back_finds_its_answer` | 8 / 2 / 1 |
 
-Per file over this continuation's new tests: `recovery.rs` 45 / 10 / 5, `chain.rs` 8 / 2 / 1, `bars_change.rs`
+Per file over this continuation's new tests: `recovery.rs` 45 / 10 / 5, `chain.rs` 17 / 4 / 2, `bars_change.rs`
 8 / 2 / 1; each case named is asserted.
 
 What they reach, in short:
@@ -77,10 +77,14 @@ What they reach, in short:
   store keeps a month its time index, D-4933) whose records were restamped and their block resealed, so the `.tix`
   names a row by its old slot and `first_stored_from` meets a stamp before the instant asked (696:37 False,
   697-703).
+- `chain_route_tests.rs`' `every_spot_key_the_chain_names_..`: every alias index row's store key, every lineage row's
+  old and new name and the keys `option_underlying` resolves them to, each passing `store::path::check_segment` as
+  written (the (U) proof of 819, below); `/chain.json` asked at instants no calendar can place, refused `400` by
+  name (1006).
 - `bars_change.rs`' `the_calendar_never_closes_ten_days_running_..`: the table under `session_before`'s bound,
   asserted over every day of both spans; it carries the (U) proof of 435:11 False and 442 (below).
 
-### Red under a hand change: 8 cases in four runs
+### Red under a hand change: 9 cases in five runs
 
 Hand behaviour changes to production code, each applied in this tree, never committed, built with the stable
 toolchain and run over exactly the tests named; then reverted (`git checkout`, or the one line restored and the
@@ -90,6 +94,7 @@ assertion its change targets.
 - Run 2, one change over `5d45b00c`'s case: `FAILED. 0 passed; 1 failed`.
 - Run 3, one change over `d31f37aa`'s test: `FAILED. 0 passed; 1 failed`.
 - Run 4, one change over `5db9175c`'s test: `FAILED. 0 passed; 1 failed`.
+- Run 5, one change over `3f74e3c1`'s test: `FAILED. 0 passed; 1 failed`.
 
 | test | hand change at | change | red at |
 |---|---|---|---|
@@ -101,6 +106,7 @@ assertion its change targets.
 | `recovery::cover_tests::an_execute_reads_a_spent_retry_again_..` (its restamped month) | `recovery.rs:1410` | a stamp of another month read as the month's own | `recovery_cover_tests.rs:2569` |
 | `server::chain::tests::a_first_stamp_the_index_names_..` | `chain.rs:696` | a stamp before the instant served as the answer | `chain_route_tests.rs:1512` (a stamp, not none) |
 | `bars::change::cloud_mutant_tests::the_calendar_never_closes_..` | `bars_change.rs:70` | `MAX_CLOSED_WALK` lowered to 3 | `bars_change.rs:992` ("the longest closed run is 4 days") |
+| `server::chain::tests::every_spot_key_the_chain_names_..` | `chain.rs:1006` | a spot the reader refuses taken as no spot | `chain_route_tests.rs:1637` (the request answered, not refused `400`) |
 
 Each test row is given as it stood in the tree its change was made in; `071f6bdd` moved a few rows of
 `recovery_cover_tests.rs` by two lines without touching an assertion.
@@ -138,12 +144,17 @@ Test code only, every hunk inside a test module after the file's last production
   increasing, every stamp on the minute), and `pull::gaps::classify_owed` counts as invalid only a stamp off the
   minute or not above the one before it.
 - `bars_change.rs` 435:11 False and 442: beside the test that asserts the table (D-8661 item 6, applied again).
+- `chain.rs` 819: `Months::spot` opens a month addressed by the request's feed and rung, an exchange from the census, `INDEX`
+  or `CASH`, no contract (so `bars::open_classified`'s retired-contract arm never applies) and a key that is the
+  parsed underlying (`Symbol::new` and `check_segment` admit the same bytes), an index row's store key or a
+  lineage's newest name, each passing `check_segment` as written, asserted by
+  `server::chain::tests::every_spot_key_the_chain_names_..` (item 6); so `StorePath::new` never refuses it.
 
 (F), each the failing arm of a `let .. else { panic!(..) }` whose `else` or whose `panic!` arguments sit on lines
 the text reader does not read as the arm (`recovery.rs`' test 2491:17 False, `credential_law_tests.rs` 394:9 False,
 `stop_tests.rs` 601:9 False; the arguments `audit.rs` 5672 and `assets.rs` 1567).
 
-## Coverage, Route B (the fourth continuation, code tip `a718e7a5`)
+## Coverage, Route B (the fourth continuation, code tip `3f74e3c1`)
 
 The kit's `d3-route-b-cloud.sh`, unchanged (sha256 `f032b525..`, checked against `MANIFEST.md`), with `D3_DIR`
 holding the kit's `d3-covset.mjs` (`ecef3bdc..`) and the set built from the kit's set file (`f35a70d2..`):
@@ -154,24 +165,26 @@ holding the kit's `d3-covset.mjs` (`ecef3bdc..`) and the set built from the kit'
   `CARGO_PROFILE_DEV_DEBUG=0` (for room), `CARGO_BUILD_JOBS=3`, `llvm-profdata merge -sparse`, `llvm-cov show
   --show-branches=count`; test arguments `--skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip
   spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (G2's and G3's 4-core hangs, as before).
-- Reading: whole:api, package `api`, on the code tip `a718e7a5` (the run's own `tip` line). The set is the kit's
+- Reading: whole:api, package `api`, on the code tip `3f74e3c1` (the run's own `tip` line). The set is the kit's
   205 coverage files plus the 12 test files AS1 added: 217 (`whole-api-set-AS1.txt`, built as the earlier sessions
   built theirs).
 - Host: this cloud container (Linux x86_64, 4 cores, root, 15 GB). Build tree `/home/user/as1-k` (one
   `CARGO_TARGET_DIR` for the stable builds, `cov` under it for Route B), profile folder a new one under `/tmp` per
-  run (mode 1777) with `umask 000`, so a child re-run as uid 65534 writes its profile (175 profiles merged in each).
-- Runs: two, each with no other cargo command from its build to the end of its tests and no source file touched to
-  its last readout. At the code tip `a718e7a5`: 8 Nov 2026, 17:48:54 to 18:12:08 IST (build 1 min, tests 5 min,
-  readout 15 min). At `071f6bdd`, before round two of the forms: 17:10:09 to 17:33:17 IST (build 2 min, tests 5 min,
-  readout 15 min). Each exit 3: NOT PROVED exactly the 22 `crates/api/benches/**` files and `crates/api/src/lib.rs`,
-  which no object holds (L-BCA-2), as every earlier run. Tests under each: 3,166 passed, 12 failed (host reds, below,
-  the same 12 names in both), 16 ignored.
+  run (mode 1777) with `umask 000`, so a child re-run as uid 65534 writes its profile (175 profiles merged in each run).
+- Runs: three, each with no other cargo command from its build to the end of its tests and no source file touched
+  to its last readout. At the code tip `3f74e3c1`: 8 Nov 2026, 18:31:38 to 18:54:50 IST (build 1 min, tests 5 min,
+  readout 15 min). At `a718e7a5`, after round two of the forms: 17:48:54 to 18:12:08 IST. At `071f6bdd`: 17:10:09 to
+  17:33:17 IST. Each exit 3: NOT PROVED exactly the 22 `crates/api/benches/**` files and `crates/api/src/lib.rs`,
+  which no object holds (L-BCA-2), as every earlier run. Tests under the run at `3f74e3c1`: 3,166 passed, 13 failed
+  (the 12 host reds below and one load-timing red, below), 16 ignored; under each earlier run: 3,166 passed, 12
+  failed (the same 12), 16 ignored.
 
 | reading | lines | branches |
 |---|---|---|
-| whole `api`, 194 files read (NOT PROVED 23, as above), code tip `a718e7a5` | 179,566/183,627 (4,061 uncovered) | 13,088/15,562 (2,474 uncovered sides) |
-| G1's 88 files, code tip `a718e7a5` | 62,420/63,124 (704 uncovered) | 4,354/4,968 (614 uncovered sides) |
-| G1's 76 files of `SHARDS.md` alone, code tip | 58,156/58,844 (688 uncovered) | 4,287/4,866 (579 uncovered sides) |
+| whole `api`, 194 files read (NOT PROVED 23, as above), code tip `3f74e3c1` | 179,590/183,662 (4,072 uncovered) | 13,090/15,564 (2,474 uncovered sides) |
+| G1's 88 files, code tip `3f74e3c1` | 62,449/63,159 (710 uncovered) | 4,359/4,970 (611 uncovered sides) |
+| G1's 76 files of `SHARDS.md` alone, code tip | 58,185/58,879 (694 uncovered) | 4,292/4,868 (576 uncovered sides) |
+| G1's 88 files at `a718e7a5` (the second run) | 62,420/63,124 (704 uncovered) | 4,354/4,968 (614 uncovered sides) |
 | G1's 88 files at `071f6bdd` (this continuation's first run) | 62,423/63,125 (702 uncovered) | 4,360/4,976 (616 uncovered sides) |
 | whole `api` at `071f6bdd` (the same run) | 179,571/183,628 (4,057 uncovered) | 13,093/15,570 (2,477 uncovered sides) |
 | G1's 88 files at the third continuation's tip `edead6e4` (its run) | 61,511/62,246 (735 uncovered) | 4,337/4,998 (661 uncovered sides) |
@@ -179,7 +192,7 @@ holding the kit's `d3-covset.mjs` (`ecef3bdc..`) and the set built from the kit'
 | whole `api` at `edead6e4` (its run) | 178,646/182,749 (4,103 uncovered) | 13,065/15,592 (2,527 uncovered sides) |
 
 The whole-`api` figure holds every group's host rows (a root, 4-core host) and does not compare one to one with
-the Mac's. G1's totals rose with the new tests (the 88 files hold 878 more lines than at `edead6e4`, read as
+the Mac's. G1's totals rose with the new tests (the 88 files hold 913 more lines than at `edead6e4`, read as
 covered but for the rows listed).
 
 **Classification.** No production line moved, so each uncovered row of a G1 file is mapped back through `git diff
@@ -192,55 +205,61 @@ and its failing side, (F); and `recovery_cover_tests.rs` 2511:28 False, GAP test
 `HashMap` whose false side the map's iteration order decided, closed by `a718e7a5`'s array form). The run at
 `a718e7a5` was mapped to `071f6bdd` and the lists written from that run; 6 rows were classed by hand:
 `tests/pool_load.rs` 714-716, 691:30 True, 716:17 and 716:59 True, the busy answers of its 64-request burst, reached
-at `071f6bdd` and not at `a718e7a5` (GAP test, load, as the third continuation named them). No row is left
-unclassed, and the classes sum to the run's uncovered rows exactly (704 lines, 614 sides).
+at `071f6bdd` and not at `a718e7a5` (GAP test, load, as the third continuation named them). The run at `3f74e3c1`
+was mapped to `a718e7a5` and the lists written from this run; 11 rows were classed by hand: `chain.rs` 819, (U) with
+its proof (above), and `stop_tests.rs` 545-560, the lines after the assertion a load-timing red failed in this run
+(GAP test, load). No row is left unclassed, and the classes sum to the run's uncovered rows exactly (710 lines,
+611 sides).
 
 | class | lines | sides | where |
 |---|---|---|---|
-| GAP production | 316 | 85 | `gaps-AS1.txt.md` |
-| GAP test code | 66 | 57 | `gaps-AS1.txt.md` |
+| GAP production | 314 | 85 | `gaps-AS1.txt.md` |
+| GAP test code | 73 | 54 | `gaps-AS1.txt.md` |
 | GAP inside `#[ignore]`d tests | 37 | 0 | `gaps-AS1.txt.md` (owed to the Mac, L-BCA-3) |
 | HOST (covered on the Mac's run of START, not here) | 51 | 9 | `gaps-AS1.txt.md` |
 | (F) failing arm in test code | 148 | 403 | `fu-AS1.txt.md` |
-| (U) with proof | 86 | 60 | `fu-AS1.txt.md` |
+| (U) with proof | 87 | 60 | `fu-AS1.txt.md` |
 
-Since `edead6e4`: closed by tests and forms, 24 production lines and 23 sides, and 13 test-code lines and 26 sides of
-the third continuation's lists (one side more, of this continuation's own making at `071f6bdd`, closed by
-`a718e7a5`); proved (U), 2 production lines and 3 sides; re-classed (F) by hand, 2 test-code lines and 3 sides.
-Moved by load or scheduling between this continuation's two runs: the burst rows of `tests/pool_load.rs` (3 lines,
-3 sides) and one HOST side of `census_warm_tests.rs` (1247:24 False, reached at `a718e7a5`). Every count reconciles
-with the third continuation's: 342 - 24 - 2 = 316 lines and 111 - 23 - 3 = 85 sides of production; 78 - 13 - 2 + 3 =
-66 lines and 83 - 26 - 3 + 3 = 57 sides of test code; (F) 143 + 5 = 148 lines and 400 + 4 - 1 = 403 sides (the
-side gone is `census.rs`' empty-store assertion, read as an array); HOST 51 lines, 10 - 1 = 9 sides.
+Since `edead6e4`: closed by tests and forms, 25 production lines and 23 sides (`chain.rs` 1006 by `3f74e3c1`), and 13
+test-code lines and 26 sides of the third continuation's lists (one side more, of this continuation's own making at
+`071f6bdd`, closed by `a718e7a5`); proved (U), 3 production lines and 3 sides (`chain.rs` 819 by `3f74e3c1`);
+re-classed (F) by hand, 2 test-code lines and 3 sides. Moved by load or scheduling between this continuation's
+runs: the burst rows of `tests/pool_load.rs` (3 lines, 3 sides; reached at `071f6bdd` and `3f74e3c1`, not at
+`a718e7a5`), `stop_tests.rs` 545-560 (10 lines, not reached at `3f74e3c1`, where that test's stop bound failed under
+load) and one HOST side of `census_warm_tests.rs` (1247:24 False, reached since `a718e7a5`). Every count reconciles
+with the third continuation's: 342 - 25 - 3 = 314 lines and 111 - 23 - 3 = 85 sides of production; 78 - 13 - 2 + 10
+= 73 lines and 83 - 26 - 3 = 54 sides of test code; (F) 143 + 5 = 148 lines and 400 + 4 - 1 = 403 sides (the side
+gone is `census.rs`' empty-store assertion, read as an array); (U) 84 + 3 = 87 lines and 57 + 3 = 60 sides; HOST 51
+lines, 10 - 1 = 9 sides.
 
 Production GAP by file at the code tip (lines/sides; the third continuation's in brackets where it changed):
 `booleansearchjson.rs` 117/26, `index_consistency_projection.rs` 89/10, `recovery.rs` 26/11 (46/35),
 `settings_route.rs` 18/1, `candidatejson.rs` 10/9, `facets.rs` 10/8, `booleanoosjson.rs` 9/6, `census.rs` 7/3,
 `recovery_journal.rs` 7/3, `main.rs` 6/1, `feed_checks_files.rs` 5/1, `assets.rs` 3/2, `bars.rs` 2/1, `detail.rs` 2/1,
-`chain.rs` 2/0 (7/1), `calendar_build.rs` 1/2, `credential_law.rs` 1/0, `import_journal.rs` 1/0. `bars_change.rs`
-(1/1 before) holds none.
+`calendar_build.rs` 1/2, `credential_law.rs` 1/0, `import_journal.rs` 1/0. `chain.rs` (7/1 before) and `bars_change.rs`
+(1/1) hold none.
 
 Test-code GAP by file (lines/sides; the third continuation's in brackets where it changed): `tests/pool_load.rs`
-14/19, `census_warm_tests.rs` 4/19, `settings_route_tests.rs` 9/3 (10/6), `audit_lock_wait_tests.rs` 7/3 (11/3),
-`stop_tests.rs` 6/0 (6/5), `server_cloud_mutant_tests_a.rs` 5/2 (5/5), `gap_peer_route_tests.rs` 5/1, `detail.rs`'
+11/16 (14/19), `census_warm_tests.rs` 4/19, `settings_route_tests.rs` 9/3 (10/6), `audit_lock_wait_tests.rs` 7/3 (11/3),
+`stop_tests.rs` 16/0 (6/5; ten of them the load-timing red's lines above), `server_cloud_mutant_tests_a.rs` 5/2 (5/5), `gap_peer_route_tests.rs` 5/1, `detail.rs`'
 tests 0/5, `bars_page_tests.rs` 3/1, `recovery.rs`' tests 2/2 (4/6), `saved_response_boundary_tests.rs` 3/1,
 `census.rs`' tests 2/1 (2/2), `recovery_journal.rs`' tests 3/0, `credential_law_tests.rs` 2/0 (2/3),
 `feed_checks_tests.rs` 1/0; `assets.rs`', `audit.rs`', `autopilot_stall_tests.rs`', `census_epoch_link_tests.rs`',
 `import_journal.rs`', `optiongreeks_route_tests.rs`', `pullrun.rs`', `pullrun_restart_tests.rs`' and
 `recovery_cover_tests.rs`' test rows hold none now.
 
-## Gates (the fourth continuation, code tip `a718e7a5`)
+## Gates (the fourth continuation, code tip `3f74e3c1`)
 
 | gate | command | result |
 |---|---|---|
 | fmt | `cargo fmt --all --check` | clean at the code tip (each code commit formatted and checked before it was made) |
-| clippy | `cargo clippy -p api --all-targets --locked -- -D warnings` (stable 1.97.1) | exit 0 on the code tip's content, the last run after the last code change (before `d31f37aa` it found a lint expectation the shorter chain test did not need; before `071f6bdd` a `format!` appended to a `String` in a test encoder, now `write!`; in round two a `panic!` in `saved_response_boundary_tests.rs`, a file that allows none, whose edit was reverted before any commit) |
+| clippy | `cargo clippy -p api --all-targets --locked -- -D warnings` (stable 1.97.1) | exit 0 on the code tip's content, the last run after the last code change (before `d31f37aa` it found a lint expectation the shorter chain test did not need; before `071f6bdd` a `format!` appended to a `String` in a test encoder, now `write!`; in round two a `panic!` in `saved_response_boundary_tests.rs`, a file that allows none, whose edit was reverted before any commit; round three clean) |
 | tests | `cargo test -p api --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (stable 1.97.1, dev profile, `CARGO_PROFILE_DEV_DEBUG=0` for room) | on `5db9175c` with `071f6bdd`'s first forms: lib 3,081 passed, 12 failed, 16 ignored, 1 filtered out (the skipped G2 test); bin unit tests 4; `binary` 4; `cloud_mutants_bars` 58, 1 filtered out (the skipped G3 test); `logs_r3_24` 6; `pool_load` 5; `state_stream_emits` 4; `store_step_forms` 3; doc tests 1. 16:56:38-17:03:47 IST. Every red is a host red; proofs below |
-| the forms' tests | `cargo test -p api --lib --locked -- audit::lock_wait_tests autopilot::stall_tests census::epoch_link_tests optiongreeks_route_tests assets::`, then `-- census::tests an_execute_reads_a_spent_retry_again server::settings_route::tests` (stable) | 71 passed, then 40 passed: every test the rest of `071f6bdd`'s forms and `a718e7a5`'s touch, built after them; the instrumented suite then ran whole at each |
-| tests under Route B | the same suite, instrumented, in the runs above | 3,166 passed, 12 failed (host reds), 16 ignored, at `a718e7a5` and at `071f6bdd` alike |
-| red, every new test | 8 hand behaviour changes in four runs | 5 of 5, 1 of 1, 1 of 1 and 1 of 1 red at their targeted assertions; reverted each time, `git status` showing the tests alone |
-| print sites (gate 23) | the diff `194d9bdb..a718e7a5` searched for `print!`, `println!`, `eprint!`, `eprintln!`, `dbg!`, `stdout`, `stderr` | none added; the seed test's child proves itself by the harness's own `1 passed`, read by `isolated::where_permission_binds` |
-| decision citations | `cargo test -p core --test decision_citations --locked` at `a718e7a5` | **red until ASA lands D-8660 and D-8661 in `docs/05-decisions.md`**: `every_cited_decision_heads_an_entry_or_is_named_pending` names exactly `D-8660 first cited at crates/api/src/audit.rs:5372` and `D-8661 first cited at crates/api/src/aliases.rs:497`; nothing else |
+| the forms' tests | `cargo test -p api --lib --locked -- audit::lock_wait_tests autopilot::stall_tests census::epoch_link_tests optiongreeks_route_tests assets::`, then `-- census::tests an_execute_reads_a_spent_retry_again server::settings_route::tests` (stable) | 71 passed, then 40 passed: every test the rest of `071f6bdd`'s forms and `a718e7a5`'s touch, built after them; and `3f74e3c1`'s chain test alone, 1 passed; the instrumented suite then ran whole at each |
+| tests under Route B | the same suite, instrumented, in the runs above | at `3f74e3c1`: 3,166 passed, 13 failed (the 12 host reds and one load-timing red, below), 16 ignored; at `a718e7a5` and at `071f6bdd`: 3,166 passed, 12 failed (host reds), 16 ignored |
+| red, every new test | 9 hand behaviour changes in five runs | 5 of 5, then 1 of 1 four times, red at their targeted assertions; reverted each time, `git status` showing the tests alone |
+| print sites (gate 23) | the diff `194d9bdb..3f74e3c1` searched for `print!`, `println!`, `eprint!`, `eprintln!`, `dbg!`, `stdout`, `stderr` | none added; the seed test's child proves itself by the harness's own `1 passed`, read by `isolated::where_permission_binds` |
+| decision citations | `cargo test -p core --test decision_citations --locked` at `3f74e3c1` | **red until ASA lands D-8660 and D-8661 in `docs/05-decisions.md`**: `every_cited_decision_heads_an_entry_or_is_named_pending` names exactly `D-8660 first cited at crates/api/src/audit.rs:5372` and `D-8661 first cited at crates/api/src/aliases.rs:497`; nothing else |
 | the language guard | `cargo test -p vocab --test no_py_language --locked` | 9 passed over the tree holding this report and both lists |
 
 No bench was run: `crates/api/benches/` is ASA's, and none of this continuation's tests times anything (the feed-row
@@ -251,7 +270,7 @@ test holds its race open by a released task, never by a clock); the first sessio
 All are this host's: a root user (permission-bit tests) and 4 cores (deadline and stop timing). None fails at a
 line this continuation changed: two sit in files it changed (`pullrun.rs`' tests, `pullrun_restart_tests.rs`) and fail
 at `pullrun.rs:9329` and `pullrun_restart_tests.rs:1319`, outside its hunks.
-- **Both Route B runs and the stable run, the same 12 lib reds:** `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`,
+- **Every Route B run and the stable run, the same 12 lib reds:** `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`,
   `pullrun::cloud_mutant_tests::newest_records_that_cannot_be_read_leave_the_answer_not_known`,
   `pullrun::restart_tests::the_journals_own_extremes`,
   `server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`,
@@ -262,9 +281,15 @@ at `pullrun.rs:9329` and `pullrun_restart_tests.rs:1319`, outside its hunks.
   `a_chunked_body_reaches_a_slow_reader_whole`, `a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`,
   `pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is`,
   `slow_readers_at_the_cap_are_served_whole_and_the_next_waits`). `tests/pool_load.rs`' timing test, a Route B red of
-  the earlier runs, passed in all three. **Proof:** each is among the first session's reds of this host, each of
+  the earlier runs, passed in all four. **Proof:** each is among the first session's reds of this host, each of
   which failed the same way at START with the same command (its `rb0-start`; the list and statements are in its
   record below).
+- **The run at `3f74e3c1`, one more:** `server::stop_tests::a_stop_during_a_slow_load_ends_within_the_stop_bound` ("the
+  whole stop, signal to end, is inside STOP_BOUND 6s: 7.115836575s" at `stop_tests.rs:540`), a wall-clock bound under
+  the instrumented full suite's load on 4 cores. The same instrumented binary passes it alone three times of three
+  (3.01 s each, 18:39:54-18:40:03 IST), it passed in the other two Route B runs and the stable run, and its code is
+  untouched by this continuation (the file's hunks sit in two other tests). Not proved a host red by the brief's rule
+  (no run of it at START here): owed to the Mac's 14-core run.
 
 ## NEEDS THE MAC
 
@@ -402,7 +427,8 @@ A small-size timing wrapper first calls the full-size measurement's own entry at
     (1842-1847, a race); race, fault and bound arms elsewhere with no seam; test-code rows a run reaches by
     scheduling or load, rows inside children a test kills by design, and trait methods a test double's callers
     never call. Item 20's `chain.rs` 697-704 is reached since, through the time index (item 22), and its directory
-    create refused other than by `AlreadyExists` through the mode bits (item 24).
+    create refused other than by `AlreadyExists` through the mode bits (item 24). `chain.rs` 819 is (U) beside the test
+    that asserts the spot-key tables (item 6), and 1006 is reached through the route at an instant no calendar places.
 
 **Open, and why.** `booleansearchjson.rs`, `index_consistency_projection.rs`, `candidatejson.rs`' catalog rows and `booleanoosjson.rs`' served page (L-BCA-5: `cli::boolean_evidence` re-exports readers only, "never successor-authoring authority", and a priced-candidate capture takes `indicators` and `engine` types `api` cannot name); `recovery.rs`' lines after a broker request that reached a vendor (`retry_day` 1744:11 False and 1772-1812, L-BCA-6), its BLAKE3-preimage arm (466:13 True) and its pointer changed mid-read (1842-1847); `settings_route.rs`' collision, full-disk and join-fault arms; race arms (facets' moves between two locks, a census or version file rewritten between two reads) and fault arms (a thread that will not start, a join error, a full disk, a pool with no clock thread); bounds past `u32::MAX` or `u64::MAX`; test-code rows a run reaches by scheduling or load; the rest listed in `gaps-AS1.txt.md` with every row's text.
 
@@ -412,46 +438,49 @@ A small-size timing wrapper first calls the full-size measurement's own entry at
 
 Changed, all G1's or new test files declared in them (`files_outside_ownership`: none; checked against G1's 88
 files). Not touched: `lib.rs`, `benches/`, `Cargo.*`, `docs/`, `.github/`. This continuation's
-(`edead6e4..a718e7a5`), test code only: `recovery_cover_tests.rs` (+1,082, -4), `chain_route_tests.rs` (+161),
+(`edead6e4..3f74e3c1`), test code only: `recovery_cover_tests.rs` (+1,082, -4), `chain_route_tests.rs` (+237),
 `bars_change.rs` (+84, `cloud_mutant_tests`), and the forms in `assets.rs`, `audit_lock_wait_tests.rs`,
 `autopilot_stall_tests.rs`, `census.rs` (one line, `mod tests`), `census_epoch_link_tests.rs`, `credential_law_tests.rs`,
 `import_journal.rs`, `optiongreeks_route_tests.rs`, `pullrun.rs`, `pullrun_restart_tests.rs`, `recovery.rs`,
-`server_cloud_mutant_tests_a.rs`, `settings_route_tests.rs`, `stop_tests.rs`: 17 files, +1,405, -78. All five
-sessions together over the kit: 54 files, +11,627, -455. The earlier sessions' lists are in their records below.
+`server_cloud_mutant_tests_a.rs`, `settings_route_tests.rs`, `stop_tests.rs`: 17 files, +1,481, -78. All five
+sessions together over the kit: 54 files, +11,703, -455. The earlier sessions' lists are in their records below.
 
-## Not done
+## Not done (each item is the Mac's, the assembly's or the operator's)
 
-- G1's remaining GAP rows, every one in `gaps-AS1.txt.md` with its text. Production: the L-BCA-5 regions
-  (`booleansearchjson.rs`, `index_consistency_projection.rs`, `candidatejson.rs`' catalog reads, `booleanoosjson.rs`'
-  served page: a saved research artifact only `cli`'s search machinery writes, through its `#[cfg(test)]`
-  factories); `recovery.rs`' arms after a broker request that reached a vendor (L-BCA-6: `retry_day` 1744:11 False,
-  1772-1812), its BLAKE3-preimage arm (466:13 True) and its pointer changed mid-read (1842-1847, a race);
-  `settings_route.rs`' collision, full-disk and join-fault arms; race arms (`census.rs`, `feed_checks_files.rs`,
-  `recovery_journal.rs`, `calendar_build.rs`, `facets.rs` between two locks, `bars.rs` 2587), fault arms (a thread
-  or runtime that will not start, a pool with no clock thread, a directory entry whose type or time will not read)
-  and bounds past `u32::MAX`; `main.rs` 59-61 (a serve started through the binary, stopped by a signal a test
-  cannot send without a process of its own); `chain.rs` 819 and 1006 (a spot path the store refuses as invalid);
-  `credential_law.rs` 167 (the Parameter Store arm, L-BCA-6).
-- Test code a cloud session could still reach, each named: `feed_checks_tests.rs` 900 (a refused calendar year the
-  fixture never holds), `recovery_journal.rs`' test writer's `flush` and `stop_tests.rs`' spy target's `append` and
-  `reopen` (trait methods the code under test never calls; an `unreachable!` body still leaves the signature and
-  brace as rows, so only a call closes them), and `saved_response_boundary_tests.rs` 124-127 (`poll_once` returns the
-  refusal as an `Err` every caller turns into the failure; the file holds no panic and no lint allow of its own, and
-  its declaration is `lib.rs`', ASA's).
-- Test-code rows a run reaches by scheduling or load (`tests/pool_load.rs`, `census_warm_tests.rs` (L-BCA-4), the
-  failure-path release in `census.rs`' FIFO test (2868-2870), the polling sides in `recovery.rs`', `detail.rs`',
-  `bars_page_tests.rs`' and `gap_peer_route_tests.rs`' tests), rows inside a child a test kills by design
-  (`audit_lock_wait_tests.rs` 652-658), and environment arms
-  (`server_cloud_mutant_tests_a.rs` 480-484 and 1418-1424: a log folder variable and a build with no commit stamp).
+- G1's remaining production GAP rows, every one in `gaps-AS1.txt.md` with its text:
+  - the L-BCA-5 regions (the operator's): `booleansearchjson.rs`, `index_consistency_projection.rs`, `candidatejson.rs`'
+    catalog reads and `booleanoosjson.rs`' served page, each reading a saved research artifact only `cli`'s search
+    machinery writes, through its `#[cfg(test)]` factories;
+  - L-BCA-6 (the operator's, the Mac's): `recovery.rs`' arms after a broker request that reached a vendor
+    (`retry_day` 1744:11 False, 1772-1812) and `credential_law.rs` 167 (the Parameter Store arm);
+  - arms that need a seam or a fault injector, which D-6017 refuses to restructure a production path for (the
+    operator's): races (`census.rs`, `feed_checks_files.rs`, `recovery_journal.rs`, `calendar_build.rs`, `facets.rs`
+    between two locks, `bars.rs` 2587, `recovery.rs` 1842-1847), faults (a thread or runtime that will not start, a
+    join error, a full disk, a pool with no clock thread, a directory entry whose type or time will not read;
+    `settings_route.rs`' collision, full-disk and join-fault arms), bounds past `u32::MAX` (`bars.rs` 2498-2500,
+    `import_journal.rs` 429, `recovery_journal.rs` 454-455), and `recovery.rs` 466:13 True (a BLAKE3 preimage);
+  - `main.rs` 44-47 (a runtime that will not start, a fault) and 59-61 (a serve started through the binary and
+    stopped by a catchable signal, which a test sends only through a process of its own).
+- G1's remaining test-code GAP rows: rows a run reaches by scheduling or load (the Mac's 14 cores:
+  `tests/pool_load.rs`, `census_warm_tests.rs` (L-BCA-4), the polling sides in `recovery.rs`', `detail.rs`',
+  `bars_page_tests.rs`' and `gap_peer_route_tests.rs`' tests, `census.rs`' FIFO release (2868-2870)); rows inside a
+  child a test kills by design (`audit_lock_wait_tests.rs` 652-658); environment arms (`server_cloud_mutant_tests_a.rs`
+  480-484 and 1418-1424: a log folder variable and a build with no commit stamp); trait methods the code under test
+  never calls (`recovery_journal.rs`' test writer's `flush`, `stop_tests.rs`' spy target's `append` and `reopen`:
+  only a call asserting nothing of production would reach them); `feed_checks_tests.rs` 900 (a refused year the
+  compiled calendar never holds; an `expect` would drop the test's refused-year check); `saved_response_boundary_tests.rs`
+  124-127 (the assembly's: the file holds no panic and no lint allow of its own, and its declaration is `lib.rs`');
+  and lines the instrumentation gives a closure that runs (`credential_law_tests.rs`' closing braces,
+  `gap_peer_route_tests.rs` 43), with no form that changes them.
 - `audit::Journal::look` and a folder at the journal's path: the second continuation's finding, unfixed (no
-  decision id spare).
+  decision id spare; ASA or the main session).
 - Mutants: deferred (operator, 30 Oct).
 - `docs/05-decisions.md` entries D-8660 and D-8661 are ASA's to write; the decision-citation gate stays red until
   then.
 
-NEXT: `feed_checks_tests.rs` 900 and the two test doubles' uncalled methods (above), where a fixture or a call reaches
-them without weakening a check; then Route B again, the lists, this report and the json. Everything else left is
-owed to the Mac, the assembly (ASA) or the operator.
+NEXT: none for a cloud session on G1. Every row left is the Mac's (host, load, real data, macOS), the assembly's
+(the decision entries, `lib.rs`' lint policy) or the operator's (L-BCA-5, L-BCA-6, a seam or a fault injector for
+the race and fault arms, a process that signals the binary).
 
 ## The third continuation's record (token `BASE-COV-API-AS1-20261105-4`, code tip `edead6e4`)
 

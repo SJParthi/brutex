@@ -3,9 +3,9 @@
 Session BASE-COV-API-AS1 (fourth continuation, token BASE-COV-API-AS1-20261105-5). One fenced block below: every uncovered row of G1's files that is an (F) failing arm of an assert or panic in test code whose statement runs, or a (U) row with its proof in brackets (on every target unless the proof names one).
 
 `````text
-BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip a718e7a5059e25a4f78bc1c2fa7cd3a3b2bc25f8, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
-G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 62420/63124 (704 uncovered), branches 4354/4968 (614 uncovered sides)
-classified: GAP prod 316 lines 85 sides; GAP test 66 lines 57 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 9 sides; (F) 148 lines 403 sides; (U) 86 lines 60 sides
+BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip 3f74e3c1364c15ae1e78627634b80d05a4761936, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
+G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 62449/63159 (710 uncovered), branches 4359/4970 (611 uncovered sides)
+classified: GAP prod 314 lines 85 sides; GAP test 73 lines 54 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 9 sides; (F) 148 lines 403 sides; (U) 87 lines 60 sides
 (F) LINE crates/api/src/assets.rs:1136  default_web_dir().display()
 (F) LINE crates/api/src/assets.rs:1452  assets.named().display()
 (F) LINE crates/api/src/assets.rs:1565  panic!(
@@ -199,6 +199,7 @@ classified: GAP prod 316 lines 85 sides; GAP test 66 lines 57 sides; GAP ignored
 (F) BRANCH crates/api/src/census_warm_tests.rs:981:38 False  .all(|(_, kind, thread)| *kind != "whole" && is_census_thread(thread)),
 (F) BRANCH crates/api/src/census_warm_tests.rs:1032:13 False  assert!(whole["underlying"].is_null() && whole["exchange"].is_null());
 (F) BRANCH crates/api/src/census_warm_tests.rs:1032:46 False  assert!(whole["underlying"].is_null() && whole["exchange"].is_null());
+(U) LINE crates/api/src/chain.rs:819  [(U) on every target: Months::spot opens a month addressed by the request feed and rung, an exchange from the census, INDEX or CASH, no contract (so bars::open_classified retired-contract arm, GDFL FNO only, never applies) and a key that is the parsed underlying (Symbol::new and store::path::check_segment admit the same bytes, upper case), an alias index row store key or a lineage newest name, each passing check_segment as written, asserted by server::chain::tests::every_spot_key_the_chain_names_is_one_the_store_admits_and_an_instant_no_calendar_places_is_refused; so StorePath::new never refuses the path and open_classified never answers Invalid here (D-8661 item 6)] OpenRefusalKind::Invalid => return Err(refusal.message),
 (U) LINE crates/api/src/chain.rs:833  [(U) on every target: line 803 pushes (month, ..) whenever no entry of self.opened has month, so the find at 832 always finds one] return Ok(Spot::Unreadable);
 (U) LINE crates/api/src/chain.rs:917  [(U) on every target: VendorCensusNow::census() is a const fn returning Some(&self.census) always (census_cache.rs:688-690, D-3327)] return bad_request("no census row for this feed");
 (U) BRANCH crates/api/src/chain.rs:776:12 False  [(U) on aarch64-apple-darwin and Linux: Metadata::modified is Ok on every unix target (it reads st_mtime), so modified, its .ok(), is never None there] if let Some(modified) = modified {
