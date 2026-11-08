@@ -1183,6 +1183,10 @@ run carries an object-newer or mismatched-data warning.
   the ten (F) rows and the head-deadline message argument above, and `server.rs` 6855:68 F, a GAP.
   Every other G2 file's GAP rows are byte for byte the previous lists'.
 
+Benches: none run in session -6. It changed no bench and no timed route; its four tests assert
+behaviour, not timings, so there is no p50, p99, max or n of its own to report (gate 8 and every
+p99 claim stay the Mac's).
+
 8-extremes on `edd467b0`: every test this session added carries an `Extremes:` line of at least 8
 numbered cases with a Combined part (2 or more) and an Out-of-the-box part (1 or more), each
 asserted: `calendar_of.rs` 2 (10 and 11), `server.rs` 2 (11 and 9). The named files' table under
