@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: BLOCKED OUTSIDE
 
 # report-BASE-COV-API-AS2 (BASE-COV-API repair round 3, shard G2, 5-8 Nov 2026)
 
@@ -1118,6 +1118,77 @@ object is newer ... 10346 functions have mismatched data", and three G1 files re
 run was stopped (`EXIT 143`) and its readout is not used; no figure of it is claimed. The
 measurement below is a fresh run on `edd467b0` during which nothing else was built.
 
+### Final measurement (session -6): Route B whole:api on `edd467b0`, the code tip (8 Nov, 16:21-16:55 IST)
+
+`d3-route-b-cloud.sh /home/user/rb6 /home/user/tgt /home/user/prof/rb7-B /home/user/logs/rb7
+deep-BASE-COV-API-6ea46e59c074-set.txt api -- --skip
+a_full_calendar_pool_refuses_the_census_and_the_audit` (the scratch worktree moved to `edd467b0`,
+clean, every red round restored; the kit's set file whole, 205 coverage files; OPS-10's touch of
+every tracked file first; the profile folder's `api` opened to uid 65534 as soon as the script made
+it, so the `where_permission_binds` children write their profiles; nothing else built during the
+run): build rc 0 in 2 min (170 artifacts, 148 reused); `== test api rc=101 END 2026-11-08 16:30:45
+IST (6 min); tests passed 3201 failed 14 ignored 16`; lib `test result: FAILED. 3117 passed; 13
+failed; 16 ignored; 0 measured; 1 filtered out; finished in 198.69s`. The 14 reds are exactly the
+baseline's 14: the eight lib tests of other shards' files (`audit::cloud_mutant_tests`,
+`detail::tests` (a 4-slot pool), `pullrun::cloud_mutant_tests`, `pullrun::restart_tests`,
+`server::basis_route::tests`, `server::cloud_mutant_tests_c` twice, `server::feeds_route::tests`),
+G2's five head-deadline host reds (proved on START), and `tests/pool_load.rs`'
+`the_feed_list_stays_fast_while_32_clients_loop_each_route` (L-BCA-4). G1's stop-bound test and
+G3's autopilot-tick test passed this time. Every test this shard added or changed passed.
+`ROUTE-B DONE 2026-11-08 16:54:54 IST WITH NOT PROVED lines above`, the same 23 NOT PROVED files
+(the 22 `crates/api/benches/**` files and `crates/api/src/lib.rs`, L-BCA-2); no `.err` file of the
+run carries an object-newer or mismatched-data warning.
+
+- Whole api, this host: lines 180,819/184,989 (4,170 uncovered), branches 12,970/15,502 (2,532
+  uncovered sides).
+- G2 (the same 58 files): lines 70,899/71,878 (979 uncovered), branches 4,779/5,514 (735 uncovered
+  sides): (F) 176 lines 557 sides; (U) 123 lines 90 sides; GAP 680 lines 88 sides (production 519
+  lines 69 sides; test code 51 lines 7 sides; inside `#[ignore]`d tests 110 lines 12 sides).
+- Against `1fbb5ad6` (same host and classifier): production 524/75 to 519/69. This session's tests
+  closed server.rs 21052, 21067:24 T and 21068, 21073:24 T and 21074 (3 lines, 2 sides; 21066,
+  21067, 21072 and 21073 at `1fbb5ad6`) and calendar_of.rs 551:32 F and 834:35 T (827:35 at
+  `1fbb5ad6`). The wall clock's pair in `finished_day_only` swapped sides with the date: this
+  Sunday's run took 6855:68 T, 6864, 6865 and 6865:25 T/F (a test asks a window that ends on
+  2026-11-08, today) and left 6855:68 F, which Saturday's runs took; no one run takes both, as
+  session -5 recorded. Test code 51/7 and inside `#[ignore]`d tests 110/12 unchanged; (U) 123/90
+  unchanged; (F) 174/549 to 176/557: the ten (F) rows of this session's new tests (the false sides
+  of `&&` operands of asserts whose lines ran, and one `matches!(` line inside an assert that ran)
+  and `head_deadline_body_tests.rs` 167, the message argument of the `assert!(n > 0, ...)` at 164,
+  which ran 20 times (the previous run's host red evaluated it; this one's did not). **The bar is
+  not met** for G2; every row left is listed and named.
+- Production, 519 lines and 69 sides, by kind: the 389 lines and 28 sides an L-BCA-5 or L-BCA-6
+  tag names; the 50 lines and 20 sides D-8663's draft names as L-BCA-5's (`expressionsearchjson.rs`
+  past `Reader::open`, `booleanlaunch.rs`' launched-search observer); and 80 lines, 21 sides, each
+  named: `server.rs` 34/7 (6434:12 T and 6435, the spot loop's store breaker, which other shards'
+  `a_store_that_takes_no_write_trips_the_store_breaker` reaches on a non-root host; 6632:12 T and
+  6633, a race (session -6 above); 6855:68 F, the wall clock; 10113:9 F and 10114-10118, a race;
+  10594-10597 and 14899-14902, the machine's clock before 1970 or past 9999; 11993, the Groww name
+  walk that ends at the vendor's real host; 18229:43 T and 18323-18329, the slow-reader paths the
+  five host reds reach on the Mac; 20812-20816 and 20857-20862, a bound listener whose address or
+  kept port the host refuses; 20936, a start-up load whose thread panicked; 20980:24 T and 20981,
+  an unstamped build; 20983:20 T and 20984-20987, a flying autopilot, which would pull after its
+  grace), `census_cache.rs` 17/3 (a warm thread that panicked, 1209-1212; the two races, 918:16 F
+  and 1287-1303), `indexstopvixjson.rs` 6/3 (105-112 and 151:16 F: tests that belong in G1's
+  `indexstopvix_projection_tests.rs`, and 107:16 F, 110, 112 need a native catalog of 171 or more
+  trades), `topjson.rs` 6/1 (179-185) and `dayflags_rules.rs` 1/1 (319-320), race-only windows;
+  `bars_sort.rs` 5/2 (2074-2075 and 2144-2145, more than 2^32 series plans; 2388-2390, a file
+  changed between two reads of one call); `master.rs` 5/1 (356-361, a master that grows past the
+  bound while it is read); `speed.rs` 4/2 (585-586, the insert race; 888, 894:24 F, 896-897, the
+  signal arms); `calendar_route.rs` 1/0 (1312, the journal walk's thread that unwinds); `render.rs`
+  1/1 (3283:13 F and 3284, a directory entry whose type the host cannot read).
+- Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, rewritten from this readout. A row whose line the
+  previous lists (`1fbb5ad6`) classed keeps that class, its line mapped through `git diff
+  1fbb5ad6..edd467b0` (only `calendar_of.rs` and `server.rs` differ among G2's files) and its text
+  checked unchanged (no row's text drifted); the 11 rows new to this readout were read by hand:
+  the ten (F) rows and the head-deadline message argument above, and `server.rs` 6855:68 F, a GAP.
+  Every other G2 file's GAP rows are byte for byte the previous lists'.
+
+8-extremes on `edd467b0`: every test this session added carries an `Extremes:` line of at least 8
+numbered cases with a Combined part (2 or more) and an Out-of-the-box part (1 or more), each
+asserted: `calendar_of.rs` 2 (10 and 11), `server.rs` 2 (11 and 9). The named files' table under
+"The 8-extremes counts of verify r3's named G2 files" stands unchanged (`sources_tests.rs`,
+`research_doors_tests.rs`, `dayflags_rules_tests.rs`, `disk_route.rs`, `server.rs`).
+
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
 - **D-8662 (draft): how G2's test-code GAP rows are closed, and the lists the landing gate
@@ -1224,12 +1295,38 @@ measurement below is a fresh run on `edd467b0` during which nothing else was bui
   whichever side the Mac's run takes, the other stays the wall clock's. The spawning-arm child
   links the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
 
-NEXT (session -6, after `edd467b0`): session -5's items (1), (2) and (3) are done (see "Session
--6": (1) and (2) tested, a defect fixed in (2); (3) read and named a race-only row), (4) stays G1's
-or ASA's; the serve's two warm-up refusals are tested too (`edd467b0`); red rounds 10 and 11 and
-gate 23 by hand are done on the code tip `edd467b0`. Left: Route B whole:api on `edd467b0`
-(started 16:21:32 IST in the worktree `/home/user/rb6`; build nothing else while it runs), G2's
-lists from its readout, the report's figures and the FIX json. The rows named as host, race, clock, build or
-real-host rows stay named (20935 is reached only by a load whose thread panics; 20979-20986 by an
-unstamped build or a flying autopilot, which would pull after its grace; master.rs 356-361 by a
-regular master that grows past 256 MiB during one read); the Mac's items above stay the Mac's.
+- Session -6's platform items: the opening test's handler on macOS is `open`, linked to
+  `/usr/bin/true` or `/usr/bin/false`; it asserts ENOENT (2) for no handler and for a dangling link
+  and EACCES (13) for a file with no execute bit and for a folder in the handler's place, the
+  answers Linux gives and whose numbers macOS shares; the Mac to confirm that its `posix_spawn`
+  answers a folder with EACCES too. Its named port is probed from 20000-31999, below macOS's
+  ephemeral range as below Linux's. The no-thread serve child asks for a 1 EiB stack as session
+  -5's census child does, and asserts only that the refusal is an OS error. Today's run took
+  `finished_day_only`'s 6855:68 T side (a test asks a window ending 2026-11-08), so 6855:68 F is
+  the side this readout leaves to the wall clock.
+
+## Left, and whose (session -6): only items for the Mac, the assembly or the operator
+
+- **The Mac:** Route B whole:api on its pin; the five head-deadline host reds and their lines
+  (test code 51/7, server.rs 18229:43 T and 18323-18329); the ignored real-data tests (110/12,
+  L-BCA-3); the load-bound tests (L-BCA-4); non-root runs (server.rs 6434:12 T and 6435, through
+  other shards' store-breaker test); gate 23 on its CI shell gates; the D1 landing; the platform
+  items above.
+- **The assembly (ASA):** the decision entries from the drafts D-8662 and D-8663 (with the draft
+  invariant rows); D-1202's note; the two `indexstopvixjson.rs` tests that belong in G1's
+  `indexstopvix_projection_tests.rs` (they reach indexstopvixjson.rs 105-108, 107:16 T and
+  151:16 F; 107:16 F, 110 and 112 need a native catalog of 171 or more trades); `lib.rs` and the
+  benches stay L-BCA-2's.
+- **The operator:** L-BCA-5's saved-research fixtures and L-BCA-6's seam (389 lines and 28 sides
+  carry those tags; 50 lines and 20 sides are L-BCA-5's by D-8663's draft), D-8663's other items,
+  and whether the named race, clock,
+  machine-clock, host, build and real-host rows (80 lines, 21 sides, every one named above) stay
+  named limits: none of them is reached by a test this shard can write without a seam in
+  production code (D-6017) or an outward-facing risk (a flying autopilot, the vendor's real host).
+
+NEXT: none for this shard on this host. Session -5's items (1)-(3) are done (two tested, one named
+a race), the serve's two warm-up refusals are tested, every new test was shown red under a hand
+change (red rounds 10 and 11) and gate 23 by hand holds on the code tip `edd467b0`; Route B
+whole:api on `edd467b0`, the lists and the FIX json are this session's last commits. A
+continuation would start from "Left, and whose" above; if the operator answers an item there, the
+answer names the next step.

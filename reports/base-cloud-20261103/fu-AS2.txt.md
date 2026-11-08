@@ -1,12 +1,12 @@
 # fu-AS2.txt.md
 
-Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
+Source: this shard's Route B whole:api readout of tip `edd467b0` (`d3-route-b-cloud.sh`, the kit's set file, this Linux host), classified as its first lines say. One fenced block below holds it.
 
 `````text
-(F)/(U) list of BASE-COV-API-AS2 (repair round 3, shard G2), tip 1fbb5ad66048cdf9899448c4b9bc3c53833c2ce5, whole:api, Route B (see gaps-AS2.txt for the run).
+(F)/(U) list of BASE-COV-API-AS2 (repair round 3, shard G2), tip edd467b09037937bf001bd4ba8d5e0f4415b647f, whole:api, Route B (see gaps-AS2.txt for the run).
 (F) = the failing side of an assert!/assert_eq!/assert_ne!/panic!/unreachable! whose statement ran, in test code (recipe v4 step 4), as repair r2 read it.
 (U) = unreachable on every target, aarch64-apple-darwin included: the proof from the code is in brackets on each row.
-(F) 174 lines 549 sides; (U) 123 lines 90 sides.
+(F) 176 lines 557 sides; (U) 123 lines 90 sides.
 
 (F) LINE crates/api/src/bars_sort.rs:2934  [failing arm of the statement at 2931, which ran]  shared.bytes()
 (F) BRANCH crates/api/src/bars_sort.rs:3822:13 False  [the false side fails the check, and its line ran]  why.contains("; index them with: cli srt-build ") && why.ends_with("2031-02 2031-02"),
@@ -78,19 +78,24 @@ Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cl
 (F) BRANCH crates/api/src/booleanlaunch_tests.rs:473:20 False  [the false side fails the check, and its line ran]  && std::fs::metadata(&log).unwrap().len() <= 1024 * 1024,
 (F) BRANCH crates/api/src/booleanlaunch_tests.rs:801:9 False  [the false side fails the check, and its line ran]  queried.contains("metadata accepts only one exact max_points query")
 (F) BRANCH crates/api/src/booleanlaunch_tests.rs:802:16 False  [the false side fails the check, and its line ran]  && !queried.contains(NO_STORE),
-(F) LINE crates/api/src/calendar_of.rs:1344  [panic/unreachable line]  panic!("day {day} is {kind:?}, not an open session");
-(F) LINE crates/api/src/calendar_of.rs:1789  [failing arm of the statement at 1784, which ran]  24 * 48
-(F) LINE crates/api/src/calendar_of.rs:2517  [panic/unreachable line]  panic!("a landing with an answer lands answered")
-(F) LINE crates/api/src/calendar_of.rs:3493  [failing arm of the statement at 3029, which ran]  json(&exchange)
-(F) BRANCH crates/api/src/calendar_of.rs:1343:13 False  [the else of a let-else that panics, whose line ran]  let DayKind::Open(session) = kind else {
-(F) BRANCH crates/api/src/calendar_of.rs:2278:13 False  [the false side fails the check, and its line ran]  named.contains(&format!(
-(F) BRANCH crates/api/src/calendar_of.rs:2281:19 False  [the false side fails the check, and its line ran]  )) && named.ends_with("a split run is a midday break the exchange never took."),
-(F) BRANCH crates/api/src/calendar_of.rs:2500:38 False  [the false side fails the check, and its line ran]  .is_ok_and(|flights| flights.len() == 1 && flights.contains_key(&key))
-(F) BRANCH crates/api/src/calendar_of.rs:2516:17 False  [the else of a let-else that panics, whose line ran]  let Landed::Answered(derived) = &*landed else {
-(F) BRANCH crates/api/src/calendar_of.rs:3158:17 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
-(F) BRANCH crates/api/src/calendar_of.rs:3158:42 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
-(F) BRANCH crates/api/src/calendar_of.rs:3629:17 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
-(F) BRANCH crates/api/src/calendar_of.rs:3629:42 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
+(F) LINE crates/api/src/calendar_of.rs:1351  [panic/unreachable line]  panic!("day {day} is {kind:?}, not an open session");
+(F) LINE crates/api/src/calendar_of.rs:1796  [failing arm of the statement at 1784, which ran]  24 * 48
+(F) LINE crates/api/src/calendar_of.rs:2694  [the false arm of a matches! inside an assert whose statement ran]  matches!(
+(F) LINE crates/api/src/calendar_of.rs:2894  [panic/unreachable line]  panic!("a landing with an answer lands answered")
+(F) LINE crates/api/src/calendar_of.rs:3870  [failing arm of the statement at 3029, which ran]  json(&exchange)
+(F) BRANCH crates/api/src/calendar_of.rs:1350:13 False  [the else of a let-else that panics, whose line ran]  let DayKind::Open(session) = kind else {
+(F) BRANCH crates/api/src/calendar_of.rs:2285:13 False  [the false side fails the check, and its line ran]  named.contains(&format!(
+(F) BRANCH crates/api/src/calendar_of.rs:2288:19 False  [the false side fails the check, and its line ran]  )) && named.ends_with("a split run is a midday break the exchange never took."),
+(F) BRANCH crates/api/src/calendar_of.rs:2599:13 False  [the false side fails the check, and its line ran]  report.unreadable.is_empty() && report.unopened.is_empty(),
+(F) BRANCH crates/api/src/calendar_of.rs:2599:45 False  [the false side fails the check, and its line ran]  report.unreadable.is_empty() && report.unopened.is_empty(),
+(F) BRANCH crates/api/src/calendar_of.rs:2702:13 False  [the false side fails the check, and its line ran]  report.unreadable.is_empty() && report.unopened.is_empty(),
+(F) BRANCH crates/api/src/calendar_of.rs:2702:45 False  [the false side fails the check, and its line ran]  report.unreadable.is_empty() && report.unopened.is_empty(),
+(F) BRANCH crates/api/src/calendar_of.rs:2877:38 False  [the false side fails the check, and its line ran]  .is_ok_and(|flights| flights.len() == 1 && flights.contains_key(&key))
+(F) BRANCH crates/api/src/calendar_of.rs:2893:17 False  [the else of a let-else that panics, whose line ran]  let Landed::Answered(derived) = &*landed else {
+(F) BRANCH crates/api/src/calendar_of.rs:3535:17 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
+(F) BRANCH crates/api/src/calendar_of.rs:3535:42 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
+(F) BRANCH crates/api/src/calendar_of.rs:4006:17 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
+(F) BRANCH crates/api/src/calendar_of.rs:4006:42 False  [the false side fails the check, and its line ran]  assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
 (F) LINE crates/api/src/calendar_record_tests.rs:78  [failing arm of the statement at 75, which ran]  iso(day)
 (F) LINE crates/api/src/calendar_record_tests.rs:565  [failing arm of the statement at 544, which ran]  widened["special"]
 (F) BRANCH crates/api/src/calendar_record_tests.rs:172:13 False  [the false side fails the check, and its line ran]  assert!(!minutes.contains(&562) && !minutes.contains(&620));
@@ -258,6 +263,7 @@ Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cl
 (F) BRANCH crates/api/src/fno_boundary_tests.rs:226:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = self.asked.feed.descriptor().transport else {
 (F) BRANCH crates/api/src/fno_boundary_tests.rs:1492:9 False  [the false side fails the check, and its line ran]  body.contains("<th>Contracts discovered</th><td>3</td>")
 (F) BRANCH crates/api/src/fno_boundary_tests.rs:1493:16 False  [the false side fails the check, and its line ran]  && body.contains("<th>Contracts asked for</th><td>3</td>"),
+(F) LINE crates/api/src/head_deadline_body_tests.rs:167  [failing arm of the statement at 164, which ran]  String::from_utf8_lossy(&got)
 (F) LINE crates/api/src/head_deadline_body_tests.rs:197  [panic/unreachable line]  panic!("no byte for 10 s after {} of {want}", have.len());
 (F) LINE crates/api/src/head_deadline_body_tests.rs:218  [panic/unreachable line]  panic!("held past {limit:?}; {} byte(s) came", got.len());
 (F) LINE crates/api/src/head_deadline_body_tests.rs:239  [failing arm of the statement at 232, which ran]  String::from_utf8_lossy(&got)
@@ -410,256 +416,260 @@ Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cl
 (F) LINE crates/api/src/server.rs:18907  [failing arm of the statement at 18904, which ran]  began.elapsed()
 (F) LINE crates/api/src/server.rs:18949  [panic/unreachable line]  panic!("held past {limit:?}; {} byte(s) came", got.len());
 (F) LINE crates/api/src/server.rs:18970  [failing arm of the statement at 18966, which ran]  String::from_utf8_lossy(&got)
-(F) LINE crates/api/src/server.rs:21373  [panic/unreachable line]  panic!("this feed is HTTP");
-(F) LINE crates/api/src/server.rs:21661  [failing arm of the statement at 21674, which ran]  withheld[0].1
-(F) LINE crates/api/src/server.rs:22793  [panic/unreachable line]  panic!("HTTP descriptor");
-(F) LINE crates/api/src/server.rs:24134  [panic/unreachable line]  panic!("HTTP descriptor");
-(F) LINE crates/api/src/server.rs:24259  [panic/unreachable line]  panic!("HTTP descriptor");
-(F) LINE crates/api/src/server.rs:24309  [failing arm of the statement at 24202, which ran]  dir.display()
-(F) LINE crates/api/src/server.rs:24315  [panic/unreachable line]  panic!("{receipts:?}");
-(F) LINE crates/api/src/server.rs:24318  [panic/unreachable line]  panic!("{segment:?}");
-(F) LINE crates/api/src/server.rs:24613  [panic/unreachable line]  panic!("the walk's feed is an HTTP feed");
-(F) LINE crates/api/src/server.rs:24647  [panic/unreachable line]  panic!("a walk opened while another process held the vendor");
-(F) LINE crates/api/src/server.rs:24652  [panic/unreachable line]  panic!("a spot request opened while another process held the vendor");
-(F) LINE crates/api/src/server.rs:24696  [panic/unreachable line]  panic!("a walk took an id from a damaged ledger");
-(F) LINE crates/api/src/server.rs:24705  [panic/unreachable line]  panic!("a spot request took an id from a damaged ledger");
-(F) LINE crates/api/src/server.rs:24740  [panic/unreachable line]  panic!("HTTP descriptor");
-(F) LINE crates/api/src/server.rs:24837  [panic/unreachable line]  panic!("HTTP descriptor");
-(F) LINE crates/api/src/server.rs:24880  [failing arm of the statement at 24578, which ran]  away.map(|calendar| calendar.sessions())
-(F) LINE crates/api/src/server.rs:24927  [panic/unreachable line]  panic!("HTTP descriptor");
-(F) LINE crates/api/src/server.rs:25029  [panic/unreachable line]  panic!("HTTP descriptor")
-(F) LINE crates/api/src/server.rs:25815  [failing arm of the statement at 25513, which ran]  root.display()
-(F) LINE crates/api/src/server.rs:29196  [panic/unreachable line]  panic!("{feed:?} is HTTP");
-(F) LINE crates/api/src/server.rs:29917  [failing arm of the statement at 29913, which ran]  root.display()
-(F) LINE crates/api/src/server.rs:30052  [panic/unreachable line]  panic!("this feed is HTTP");
-(F) LINE crates/api/src/server.rs:30066  [failing arm of the statement at 29570, which ran]  stock.len(),
-(F) LINE crates/api/src/server.rs:30067  [failing arm of the statement at 29570, which ran]  index.len()
-(F) LINE crates/api/src/server.rs:31149  [panic/unreachable line]  panic!("{} is an HTTP feed and must have a budget", feed.display())
-(F) LINE crates/api/src/server.rs:31186  [failing arm of the statement at 30691, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:31231  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
-(F) LINE crates/api/src/server.rs:31581  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
-(F) LINE crates/api/src/server.rs:31645  [panic/unreachable line]  panic!("Zerodha is an HTTP feed");
-(F) LINE crates/api/src/server.rs:32138  [panic/unreachable line]  panic!("Zerodha is an HTTP feed")
-(F) LINE crates/api/src/server.rs:32825  [panic/unreachable line]  panic!(
-(F) LINE crates/api/src/server.rs:32937  [failing arm of the statement at 32080, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:32983  [failing arm of the statement at 32125, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:32991  [failing arm of the statement at 32133, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:32996  [failing arm of the statement at 32139, which ran]  feed.display(),
-(F) LINE crates/api/src/server.rs:32997  [failing arm of the statement at 32139, which ran]  months.len()
-(F) LINE crates/api/src/server.rs:33063  [panic/unreachable line]  panic!("{} declares no HTTP transport", feed.display());
-(F) LINE crates/api/src/server.rs:33069  [failing arm of the statement at 32211, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:33076  [failing arm of the statement at 32217, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:33090  [failing arm of the statement at 32232, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:33096  [failing arm of the statement at 32238, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:33109  [failing arm of the statement at 32252, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:33116  [failing arm of the statement at 32258, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:33307  [failing arm of the statement at 32446, which ran]  &body[..body.len().min(120)]
-(F) LINE crates/api/src/server.rs:33509  [panic/unreachable line]  panic!("attempt {attempt} of a 429 gave {stepped:?}");
-(F) LINE crates/api/src/server.rs:33838  [failing arm of the statement at 32980, which ran]  marked[0]
-(F) LINE crates/api/src/server.rs:34028  [panic/unreachable line]  panic!(
-(F) LINE crates/api/src/server.rs:35282  [panic/unreachable line]  panic!("this feed is HTTP");
-(F) LINE crates/api/src/server.rs:35313  [failing arm of the statement at 34450, which ran]  got.bodies.iter().map(|(w, _)| *w).collect::<Vec<_>>()
-(F) LINE crates/api/src/server.rs:35396  [panic/unreachable line]  panic!("this feed is HTTP");
-(F) LINE crates/api/src/server.rs:35427  [failing arm of the statement at 34564, which ran]  got.bodies.iter().map(|(w, _)| *w).collect::<Vec<_>>()
-(F) LINE crates/api/src/server.rs:35637  [panic/unreachable line]  panic!("this feed is HTTP");
-(F) LINE crates/api/src/server.rs:35794  [panic/unreachable line]  panic!("this feed authenticates, so its transport is HTTP")
-(F) LINE crates/api/src/server.rs:35910  [failing arm of the statement at 35047, which ran]  chunks.len()
-(F) LINE crates/api/src/server.rs:36108  [failing arm of the statement at 35245, which ran]  refused.len()
-(F) LINE crates/api/src/server.rs:36340  [failing arm of the statement at 35476, which ran]  ledger.fact(1).1
-(F) LINE crates/api/src/server.rs:37015  [panic/unreachable line]  panic!("{feed} is an HTTP broker");
-(F) LINE crates/api/src/server.rs:37333  [failing arm of the statement at 36473, which ran]  feed.display()
-(F) LINE crates/api/src/server.rs:37385  [failing arm of the statement at 36525, which ran]  tf.as_str()
-(F) LINE crates/api/src/server.rs:37433  [failing arm of the statement at 36573, which ran]  rung.as_str()
-(F) LINE crates/api/src/server.rs:37985  [failing arm of the statement at 37126, which ran]  bucket.word()
+(F) LINE crates/api/src/server.rs:21374  [panic/unreachable line]  panic!("this feed is HTTP");
+(F) LINE crates/api/src/server.rs:21662  [failing arm of the statement at 21674, which ran]  withheld[0].1
+(F) LINE crates/api/src/server.rs:22794  [panic/unreachable line]  panic!("HTTP descriptor");
+(F) LINE crates/api/src/server.rs:24135  [panic/unreachable line]  panic!("HTTP descriptor");
+(F) LINE crates/api/src/server.rs:24260  [panic/unreachable line]  panic!("HTTP descriptor");
+(F) LINE crates/api/src/server.rs:24310  [failing arm of the statement at 24202, which ran]  dir.display()
+(F) LINE crates/api/src/server.rs:24316  [panic/unreachable line]  panic!("{receipts:?}");
+(F) LINE crates/api/src/server.rs:24319  [panic/unreachable line]  panic!("{segment:?}");
+(F) LINE crates/api/src/server.rs:24614  [panic/unreachable line]  panic!("the walk's feed is an HTTP feed");
+(F) LINE crates/api/src/server.rs:24648  [panic/unreachable line]  panic!("a walk opened while another process held the vendor");
+(F) LINE crates/api/src/server.rs:24653  [panic/unreachable line]  panic!("a spot request opened while another process held the vendor");
+(F) LINE crates/api/src/server.rs:24697  [panic/unreachable line]  panic!("a walk took an id from a damaged ledger");
+(F) LINE crates/api/src/server.rs:24706  [panic/unreachable line]  panic!("a spot request took an id from a damaged ledger");
+(F) LINE crates/api/src/server.rs:24741  [panic/unreachable line]  panic!("HTTP descriptor");
+(F) LINE crates/api/src/server.rs:24838  [panic/unreachable line]  panic!("HTTP descriptor");
+(F) LINE crates/api/src/server.rs:24881  [failing arm of the statement at 24578, which ran]  away.map(|calendar| calendar.sessions())
+(F) LINE crates/api/src/server.rs:24928  [panic/unreachable line]  panic!("HTTP descriptor");
+(F) LINE crates/api/src/server.rs:25030  [panic/unreachable line]  panic!("HTTP descriptor")
+(F) LINE crates/api/src/server.rs:25816  [failing arm of the statement at 25513, which ran]  root.display()
+(F) LINE crates/api/src/server.rs:29516  [panic/unreachable line]  panic!("{feed:?} is HTTP");
+(F) LINE crates/api/src/server.rs:30237  [failing arm of the statement at 29913, which ran]  root.display()
+(F) LINE crates/api/src/server.rs:30372  [panic/unreachable line]  panic!("this feed is HTTP");
+(F) LINE crates/api/src/server.rs:30386  [failing arm of the statement at 29570, which ran]  stock.len(),
+(F) LINE crates/api/src/server.rs:30387  [failing arm of the statement at 29570, which ran]  index.len()
+(F) LINE crates/api/src/server.rs:31469  [panic/unreachable line]  panic!("{} is an HTTP feed and must have a budget", feed.display())
+(F) LINE crates/api/src/server.rs:31506  [failing arm of the statement at 30691, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:31551  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
+(F) LINE crates/api/src/server.rs:31901  [panic/unreachable line]  panic!("Dhan is an HTTP feed");
+(F) LINE crates/api/src/server.rs:31965  [panic/unreachable line]  panic!("Zerodha is an HTTP feed");
+(F) LINE crates/api/src/server.rs:32458  [panic/unreachable line]  panic!("Zerodha is an HTTP feed")
+(F) LINE crates/api/src/server.rs:33145  [panic/unreachable line]  panic!(
+(F) LINE crates/api/src/server.rs:33257  [failing arm of the statement at 32080, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33303  [failing arm of the statement at 32125, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33311  [failing arm of the statement at 32133, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33316  [failing arm of the statement at 32139, which ran]  feed.display(),
+(F) LINE crates/api/src/server.rs:33317  [failing arm of the statement at 32139, which ran]  months.len()
+(F) LINE crates/api/src/server.rs:33383  [panic/unreachable line]  panic!("{} declares no HTTP transport", feed.display());
+(F) LINE crates/api/src/server.rs:33389  [failing arm of the statement at 32211, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33396  [failing arm of the statement at 32217, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33410  [failing arm of the statement at 32232, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33416  [failing arm of the statement at 32238, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33429  [failing arm of the statement at 32252, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33436  [failing arm of the statement at 32258, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:33627  [failing arm of the statement at 32446, which ran]  &body[..body.len().min(120)]
+(F) LINE crates/api/src/server.rs:33829  [panic/unreachable line]  panic!("attempt {attempt} of a 429 gave {stepped:?}");
+(F) LINE crates/api/src/server.rs:34158  [failing arm of the statement at 32980, which ran]  marked[0]
+(F) LINE crates/api/src/server.rs:34348  [panic/unreachable line]  panic!(
+(F) LINE crates/api/src/server.rs:35602  [panic/unreachable line]  panic!("this feed is HTTP");
+(F) LINE crates/api/src/server.rs:35633  [failing arm of the statement at 34450, which ran]  got.bodies.iter().map(|(w, _)| *w).collect::<Vec<_>>()
+(F) LINE crates/api/src/server.rs:35716  [panic/unreachable line]  panic!("this feed is HTTP");
+(F) LINE crates/api/src/server.rs:35747  [failing arm of the statement at 34564, which ran]  got.bodies.iter().map(|(w, _)| *w).collect::<Vec<_>>()
+(F) LINE crates/api/src/server.rs:35957  [panic/unreachable line]  panic!("this feed is HTTP");
+(F) LINE crates/api/src/server.rs:36114  [panic/unreachable line]  panic!("this feed authenticates, so its transport is HTTP")
+(F) LINE crates/api/src/server.rs:36230  [failing arm of the statement at 35047, which ran]  chunks.len()
+(F) LINE crates/api/src/server.rs:36428  [failing arm of the statement at 35245, which ran]  refused.len()
+(F) LINE crates/api/src/server.rs:36660  [failing arm of the statement at 35476, which ran]  ledger.fact(1).1
+(F) LINE crates/api/src/server.rs:37335  [panic/unreachable line]  panic!("{feed} is an HTTP broker");
+(F) LINE crates/api/src/server.rs:37653  [failing arm of the statement at 36473, which ran]  feed.display()
+(F) LINE crates/api/src/server.rs:37705  [failing arm of the statement at 36525, which ran]  tf.as_str()
+(F) LINE crates/api/src/server.rs:37753  [failing arm of the statement at 36573, which ran]  rung.as_str()
+(F) LINE crates/api/src/server.rs:38305  [failing arm of the statement at 37126, which ran]  bucket.word()
 (F) BRANCH crates/api/src/server.rs:18948:17 False  [the else of a let-else that panics, whose line ran]  let Ok(read) = tokio::time::timeout_at(until, stream.read(&mut chunk)).await else {
-(F) BRANCH crates/api/src/server.rs:21293:17 False  [the false side fails the check, and its line ran]  why.contains("1day") && why.contains("1 of 1"),
-(F) BRANCH crates/api/src/server.rs:21293:41 False  [the false side fails the check, and its line ran]  why.contains("1day") && why.contains("1 of 1"),
-(F) BRANCH crates/api/src/server.rs:21372:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
-(F) BRANCH crates/api/src/server.rs:21744:13 False  [the false side fails the check, and its line ran]  run.months == 1 && run.from == month_of(2026, 7) && run.why == ladder::OwedWhy::Interior
-(F) BRANCH crates/api/src/server.rs:21744:32 False  [the false side fails the check, and its line ran]  run.months == 1 && run.from == month_of(2026, 7) && run.why == ladder::OwedWhy::Interior
-(F) BRANCH crates/api/src/server.rs:21748:80 False  [the false side fails the check, and its line ran]  ladder::Gate::RungFirst { missing: 13, runs: 13, ref owed, .. } if owed.len() == ladder::OWED_NAMED
-(F) BRANCH crates/api/src/server.rs:21771:13 False  [the false side fails the check, and its line ran]  at_close.contains("ends at 15:30 IST and is asked for from 15:35")
-(F) BRANCH crates/api/src/server.rs:21772:20 False  [the false side fails the check, and its line ran]  && at_close.contains("it is 15:30 now"),
-(F) BRANCH crates/api/src/server.rs:21792:61 False  [the false side fails the check, and its line ran]  assert!(matches!(muhurat, DayKind::Open(session) if session != Session::full()));
-(F) BRANCH crates/api/src/server.rs:21893:13 False  [the false side fails the check, and its line ran]  unmade.contains("store-fault-probe-shut/audit: ")
-(F) BRANCH crates/api/src/server.rs:21894:20 False  [the false side fails the check, and its line ran]  && unmade.contains("Permission denied"),
-(F) BRANCH crates/api/src/server.rs:21941:13 False  [the false side fails the check, and its line ran]  said.starts_with("STORE UNAVAILABLE") && said.contains("after 9 of 208"),
-(F) BRANCH crates/api/src/server.rs:21941:54 False  [the false side fails the check, and its line ran]  said.starts_with("STORE UNAVAILABLE") && said.contains("after 9 of 208"),
-(F) BRANCH crates/api/src/server.rs:21990:13 False  [the false side fails the check, and its line ran]  line.why.starts_with(pull::calendar::PAST_RECORD_FINDING)
-(F) BRANCH crates/api/src/server.rs:21991:20 False  [the false side fails the check, and its line ran]  && line.why.contains(
-(F) BRANCH crates/api/src/server.rs:21994:20 False  [the false side fails the check, and its line ran]  && line
-(F) BRANCH crates/api/src/server.rs:22487:13 False  [the false side fails the check, and its line ran]  said.starts_with("transient — 0 failure(s) another attempt could change")
-(F) BRANCH crates/api/src/server.rs:22488:20 False  [the false side fails the check, and its line ran]  && said.contains("2 of the store and not the vendor")
-(F) BRANCH crates/api/src/server.rs:22489:20 False  [the false side fails the check, and its line ran]  && said.contains("and 0 it would repeat"),
-(F) BRANCH crates/api/src/server.rs:22783:13 False  [the false side fails the check, and its line ran]  fault.contains(".store-probe") && fault.contains("could not be unlinked"),
-(F) BRANCH crates/api/src/server.rs:22783:47 False  [the false side fails the check, and its line ran]  fault.contains(".store-probe") && fault.contains("could not be unlinked"),
-(F) BRANCH crates/api/src/server.rs:22792:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
-(F) BRANCH crates/api/src/server.rs:23662:13 False  [the false side fails the check, and its line ran]  !read.merged.contributed.contains(&Vendor::Groww)
-(F) BRANCH crates/api/src/server.rs:23663:20 False  [the false side fails the check, and its line ran]  && !read.merged.contributed.contains(&Vendor::Dhan),
-(F) BRANCH crates/api/src/server.rs:24133:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:24258:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:24314:13 False  [the else of a let-else that panics, whose line ran]  let [(0, segment)] = receipts.as_slice() else {
-(F) BRANCH crates/api/src/server.rs:24317:13 False  [the else of a let-else that panics, whose line ran]  let [receipt] = segment.receipts.as_slice() else {
-(F) BRANCH crates/api/src/server.rs:24612:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = asked.feed.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:24646:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, body)) = fno_landing(&page, Vec::new(), (&site, &wire, &asked), 1) else {
-(F) BRANCH crates/api/src/server.rs:24650:17 False  [the false side fails the check, and its line ran]  assert!(body.contains("run_busy") && body.contains(holder), "{body}");
-(F) BRANCH crates/api/src/server.rs:24650:46 False  [the false side fails the check, and its line ran]  assert!(body.contains("run_busy") && body.contains(holder), "{body}");
-(F) BRANCH crates/api/src/server.rs:24651:13 False  [the else of a let-else that panics, whose line ran]  let Err((why, code)) = open_spot_landing(&spot, &site, 1) else {
-(F) BRANCH crates/api/src/server.rs:24655:17 False  [the false side fails the check, and its line ran]  assert!(why.starts_with("run_busy") && why.contains(holder), "{why}");
-(F) BRANCH crates/api/src/server.rs:24655:48 False  [the false side fails the check, and its line ran]  assert!(why.starts_with("run_busy") && why.contains(holder), "{why}");
-(F) BRANCH crates/api/src/server.rs:24695:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, body)) = fno_landing(&page, Vec::new(), (&site, &wire, &asked), 1) else {
-(F) BRANCH crates/api/src/server.rs:24704:13 False  [the else of a let-else that panics, whose line ran]  let Err((why, code)) = open_spot_landing(&spot, &site, 1) else {
-(F) BRANCH crates/api/src/server.rs:24739:17 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:24836:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:24926:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:25028:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:25392:17 False  [the false side fails the check, and its line ran]  assert!(e.contains("unknown argument") && e.contains("usage"), "{e}");
-(F) BRANCH crates/api/src/server.rs:25392:51 False  [the false side fails the check, and its line ran]  assert!(e.contains("unknown argument") && e.contains("usage"), "{e}");
-(F) BRANCH crates/api/src/server.rs:25448:13 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_MASTERS") && refused.contains("HOME"),
-(F) BRANCH crates/api/src/server.rs:25448:51 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_MASTERS") && refused.contains("HOME"),
-(F) BRANCH crates/api/src/server.rs:25555:13 False  [the false side fails the check, and its line ran]  refused.contains("pid=4242") && refused.contains("addr=127.0.0.1:8080"),
-(F) BRANCH crates/api/src/server.rs:25555:45 False  [the false side fails the check, and its line ran]  refused.contains("pid=4242") && refused.contains("addr=127.0.0.1:8080"),
-(F) BRANCH crates/api/src/server.rs:25751:13 False  [the false side fails the check, and its line ran]  body.contains(concat!("if let Some(warning) = ", "stamped {"))
-(F) BRANCH crates/api/src/server.rs:25752:20 False  [the false side fails the check, and its line ran]  && body.contains(concat!(
-(F) BRANCH crates/api/src/server.rs:25763:13 False  [the false side fails the check, and its line ran]  refused.contains("os error 28") && refused.contains("os error 5"),
-(F) BRANCH crates/api/src/server.rs:25763:48 False  [the false side fails the check, and its line ran]  refused.contains("os error 28") && refused.contains("os error 5"),
-(F) BRANCH crates/api/src/server.rs:25919:13 False  [the false side fails the check, and its line ran]  html.contains("appended to") && !html.contains("NOT in the journal"),
-(F) BRANCH crates/api/src/server.rs:25919:45 False  [the false side fails the check, and its line ran]  html.contains("appended to") && !html.contains("NOT in the journal"),
-(F) BRANCH crates/api/src/server.rs:26111:13 False  [the false side fails the check, and its line ran]  text.contains("INE121A01024") && text.contains("INE121A08PJ0"),
-(F) BRANCH crates/api/src/server.rs:26111:46 False  [the false side fails the check, and its line ran]  text.contains("INE121A01024") && text.contains("INE121A08PJ0"),
-(F) BRANCH crates/api/src/server.rs:26196:17 False  [the false side fails the check, and its line ran]  assert!(up.contains("NSE-NIFTY") && up.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26196:45 False  [the false side fails the check, and its line ran]  assert!(up.contains("NSE-NIFTY") && up.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26197:17 False  [the false side fails the check, and its line ran]  assert!(down.contains("NSE-NIFTY") && down.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26197:47 False  [the false side fails the check, and its line ran]  assert!(down.contains("NSE-NIFTY") && down.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26201:17 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26201:48 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26217:17 False  [the false side fails the check, and its line ran]  assert!(one.contains("NSE-NIFTY") && one.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26217:46 False  [the false side fails the check, and its line ran]  assert!(one.contains("NSE-NIFTY") && one.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26224:13 False  [the false side fails the check, and its line ran]  past.contains("NSE-NIFTY") && past.contains("NSE-RELIANCE"),
-(F) BRANCH crates/api/src/server.rs:26224:43 False  [the false side fails the check, and its line ran]  past.contains("NSE-NIFTY") && past.contains("NSE-RELIANCE"),
-(F) BRANCH crates/api/src/server.rs:26240:17 False  [the false side fails the check, and its line ran]  html.contains("NSE-NIFTY") && html.contains("NSE-RELIANCE"),
-(F) BRANCH crates/api/src/server.rs:26240:47 False  [the false side fails the check, and its line ran]  html.contains("NSE-NIFTY") && html.contains("NSE-RELIANCE"),
-(F) BRANCH crates/api/src/server.rs:26256:17 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26256:48 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26298:17 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26298:48 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26320:17 False  [the false side fails the check, and its line ran]  assert!(all.contains("NSE-NIFTY") && all.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26320:46 False  [the false side fails the check, and its line ran]  assert!(all.contains("NSE-NIFTY") && all.contains("NSE-RELIANCE"));
-(F) BRANCH crates/api/src/server.rs:26708:13 False  [the false side fails the check, and its line ran]  reach.contains(r#""feed":"groww""#) && reach.contains(r#""target":"n50""#),
-(F) BRANCH crates/api/src/server.rs:26708:52 False  [the false side fails the check, and its line ran]  reach.contains(r#""feed":"groww""#) && reach.contains(r#""target":"n50""#),
-(F) BRANCH crates/api/src/server.rs:27405:21 False  [the false side fails the check, and its line ran]  !fine.contains("400 Bad Request") && !fine.contains("reads no feed called"),
-(F) BRANCH crates/api/src/server.rs:27405:58 False  [the false side fails the check, and its line ran]  !fine.contains("400 Bad Request") && !fine.contains("reads no feed called"),
-(F) BRANCH crates/api/src/server.rs:27455:17 False  [the false side fails the check, and its line ran]  back.contains("2022-02-08") && back.contains("2022-01-08"),
-(F) BRANCH crates/api/src/server.rs:27455:48 False  [the false side fails the check, and its line ran]  back.contains("2022-02-08") && back.contains("2022-01-08"),
-(F) BRANCH crates/api/src/server.rs:28066:17 False  [the false side fails the check, and its line ran]  assert!(html.contains("09:15") && html.contains("15:30"), "{html}");
-(F) BRANCH crates/api/src/server.rs:28066:43 False  [the false side fails the check, and its line ran]  assert!(html.contains("09:15") && html.contains("15:30"), "{html}");
-(F) BRANCH crates/api/src/server.rs:28085:17 False  [the false side fails the check, and its line ran]  assert!(html.contains("groww") && html.contains("dhan"), "{html}");
-(F) BRANCH crates/api/src/server.rs:28085:43 False  [the false side fails the check, and its line ran]  assert!(html.contains("groww") && html.contains("dhan"), "{html}");
-(F) BRANCH crates/api/src/server.rs:28335:13 False  [the false side fails the check, and its line ran]  note.contains("debg") && note.contains("notalevel"),
-(F) BRANCH crates/api/src/server.rs:28335:38 False  [the false side fails the check, and its line ran]  note.contains("debg") && note.contains("notalevel"),
-(F) BRANCH crates/api/src/server.rs:28451:31 False  [the false side fails the check, and its line ran]  .all(|(t, l)| t == "pull" && *l == telemetry::Level::Debug),
-(F) BRANCH crates/api/src/server.rs:28456:13 False  [the false side fails the check, and its line ran]  note.contains("DROPPED") && note.contains("api=trace"),
-(F) BRANCH crates/api/src/server.rs:28456:41 False  [the false side fails the check, and its line ran]  note.contains("DROPPED") && note.contains("api=trace"),
-(F) BRANCH crates/api/src/server.rs:28632:17 False  [the false side fails the check, and its line ran]  missing.starts_with(&format!("{program}: ")) && missing.contains("No such file"),
-(F) BRANCH crates/api/src/server.rs:28632:65 False  [the false side fails the check, and its line ran]  missing.starts_with(&format!("{program}: ")) && missing.contains("No such file"),
-(F) BRANCH crates/api/src/server.rs:28772:13 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_STORE") && refused.contains("HOME"),
-(F) BRANCH crates/api/src/server.rs:28772:49 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_STORE") && refused.contains("HOME"),
-(F) BRANCH crates/api/src/server.rs:28776:13 False  [the false side fails the check, and its line ran]  refused.contains("bars/") && refused.contains("manifest/"),
-(F) BRANCH crates/api/src/server.rs:28776:42 False  [the false side fails the check, and its line ran]  refused.contains("bars/") && refused.contains("manifest/"),
-(F) BRANCH crates/api/src/server.rs:29195:17 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = descriptor.transport else {
-(F) BRANCH crates/api/src/server.rs:29270:13 False  [the false side fails the check, and its line ran]  html.contains("NSE-INDEX-NIFTY") && html.contains("NSE-INDEX-BANKNIFTY"),
-(F) BRANCH crates/api/src/server.rs:29270:49 False  [the false side fails the check, and its line ran]  html.contains("NSE-INDEX-NIFTY") && html.contains("NSE-INDEX-BANKNIFTY"),
-(F) BRANCH crates/api/src/server.rs:29274:13 False  [the false side fails the check, and its line ran]  html.contains("groww: UNAVAILABLE") && html.contains("dhan: UNAVAILABLE"),
-(F) BRANCH crates/api/src/server.rs:29274:52 False  [the false side fails the check, and its line ran]  html.contains("groww: UNAVAILABLE") && html.contains("dhan: UNAVAILABLE"),
-(F) BRANCH crates/api/src/server.rs:29481:13 False  [the false side fails the check, and its line ran]  !CREDENTIAL_FACT.is_empty() && CREDENTIAL_FACT.contains("no longer valid"),
-(F) BRANCH crates/api/src/server.rs:29481:44 False  [the false side fails the check, and its line ran]  !CREDENTIAL_FACT.is_empty() && CREDENTIAL_FACT.contains("no longer valid"),
-(F) BRANCH crates/api/src/server.rs:29537:17 False  [the false side fails the check, and its line ran]  assert!(!plain.reached_wire && !plain.vendor_down && !plain.credential_dead);
-(F) BRANCH crates/api/src/server.rs:29537:40 False  [the false side fails the check, and its line ran]  assert!(!plain.reached_wire && !plain.vendor_down && !plain.credential_dead);
-(F) BRANCH crates/api/src/server.rs:29537:62 False  [the false side fails the check, and its line ran]  assert!(!plain.reached_wire && !plain.vendor_down && !plain.credential_dead);
-(F) BRANCH crates/api/src/server.rs:29544:13 False  [the false side fails the check, and its line ran]  !cred.reached_wire && !cred.vendor_down,
-(F) BRANCH crates/api/src/server.rs:29544:35 False  [the false side fails the check, and its line ran]  !cred.reached_wire && !cred.vendor_down,
-(F) BRANCH crates/api/src/server.rs:29554:17 False  [the false side fails the check, and its line ran]  assert!(all.reached_wire && all.vendor_down && all.credential_dead);
-(F) BRANCH crates/api/src/server.rs:29554:37 False  [the false side fails the check, and its line ran]  assert!(all.reached_wire && all.vendor_down && all.credential_dead);
-(F) BRANCH crates/api/src/server.rs:29554:56 False  [the false side fails the check, and its line ran]  assert!(all.reached_wire && all.vendor_down && all.credential_dead);
-(F) BRANCH crates/api/src/server.rs:29563:13 False  [the false side fails the check, and its line ran]  real.reached_wire && real.credential_dead && !real.vendor_down,
-(F) BRANCH crates/api/src/server.rs:29563:34 False  [the false side fails the check, and its line ran]  real.reached_wire && real.credential_dead && !real.vendor_down,
-(F) BRANCH crates/api/src/server.rs:29563:58 False  [the false side fails the check, and its line ran]  real.reached_wire && real.credential_dead && !real.vendor_down,
-(F) BRANCH crates/api/src/server.rs:29781:13 False  [the false side fails the check, and its line ran]  words.starts_with("INTERRUPTED: an expired-F&O walk for 2026-07-01..2026-07-30")
-(F) BRANCH crates/api/src/server.rs:29782:20 False  [the false side fails the check, and its line ran]  && words.contains("run the same walk again from /pull/fno")
-(F) BRANCH crates/api/src/server.rs:29783:20 False  [the false side fails the check, and its line ran]  && !words.contains("/pull/spot")
-(F) BRANCH crates/api/src/server.rs:29784:20 False  [the false side fails the check, and its line ran]  && !words.contains("press Pull"),
-(F) BRANCH crates/api/src/server.rs:30028:13 False  [the false side fails the check, and its line ran]  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-(F) BRANCH crates/api/src/server.rs:30028:50 False  [the false side fails the check, and its line ran]  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
-(F) BRANCH crates/api/src/server.rs:30051:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
-(F) BRANCH crates/api/src/server.rs:30492:13 False  [the false side fails the check, and its line ran]  whole_body.contains(&format!(r#""expected":{}"#, owed.len()))
-(F) BRANCH crates/api/src/server.rs:30493:20 False  [the false side fails the check, and its line ran]  && holed_body.contains(&format!(r#""expected":{}"#, owed.len())),
-(F) BRANCH crates/api/src/server.rs:30501:13 False  [the false side fails the check, and its line ran]  whole_body.contains(r#""source":"record""#) && whole_body.contains(r#""voted_by":[]"#),
-(F) BRANCH crates/api/src/server.rs:30501:60 False  [the false side fails the check, and its line ran]  whole_body.contains(r#""source":"record""#) && whole_body.contains(r#""voted_by":[]"#),
-(F) BRANCH crates/api/src/server.rs:30768:17 False  [the false side fails the check, and its line ran]  damaged.contains("x-brutex-census-note:") && damaged.contains("UNREADABLE"),
-(F) BRANCH crates/api/src/server.rs:30768:62 False  [the false side fails the check, and its line ran]  damaged.contains("x-brutex-census-note:") && damaged.contains("UNREADABLE"),
-(F) BRANCH crates/api/src/server.rs:30899:13 False  [the false side fails the check, and its line ran]  !clean.contains('\r') && !clean.contains('\n'),
-(F) BRANCH crates/api/src/server.rs:30899:38 False  [the false side fails the check, and its line ran]  !clean.contains('\r') && !clean.contains('\n'),
-(F) BRANCH crates/api/src/server.rs:30903:13 False  [the false side fails the check, and its line ran]  clean.contains("groww UNREADABLE") && clean.contains("at /tmp/x"),
-(F) BRANCH crates/api/src/server.rs:30903:51 False  [the false side fails the check, and its line ran]  clean.contains("groww UNREADABLE") && clean.contains("at /tmp/x"),
-(F) BRANCH crates/api/src/server.rs:31230:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:31580:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(dhan) = transport else {
-(F) BRANCH crates/api/src/server.rs:31644:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
-(F) BRANCH crates/api/src/server.rs:31651:17 False  [the false side fails the check, and its line ran]  assert!(spec.fno.by_name().is_none() && spec.fno.by_offset().is_none());
-(F) BRANCH crates/api/src/server.rs:31651:49 False  [the false side fails the check, and its line ran]  assert!(spec.fno.by_name().is_none() && spec.fno.by_offset().is_none());
-(F) BRANCH crates/api/src/server.rs:32103:17 False  [the false side fails the check, and its line ran]  rebuilt.contains("did not match its commit log") && rebuilt.contains("missing"),
-(F) BRANCH crates/api/src/server.rs:32103:69 False  [the false side fails the check, and its line ran]  rebuilt.contains("did not match its commit log") && rebuilt.contains("missing"),
-(F) BRANCH crates/api/src/server.rs:32137:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
-(F) BRANCH crates/api/src/server.rs:32223:13 False  [the false side fails the check, and its line ran]  body.contains("NOT STARTED") && body.contains("clock names no usable date"),
-(F) BRANCH crates/api/src/server.rs:32223:45 False  [the false side fails the check, and its line ran]  body.contains("NOT STARTED") && body.contains("clock names no usable date"),
-(F) BRANCH crates/api/src/server.rs:32597:17 False  [the false side fails the check, and its line ran]  body.contains("detached_pull(") && body.contains(held),
-(F) BRANCH crates/api/src/server.rs:32597:52 False  [the false side fails the check, and its line ran]  body.contains("detached_pull(") && body.contains(held),
-(F) BRANCH crates/api/src/server.rs:32686:13 False  [the false side fails the check, and its line ran]  !source.contains("sort_unstable_by_key") && !source.contains(".sort("),
-(F) BRANCH crates/api/src/server.rs:32686:57 False  [the false side fails the check, and its line ran]  !source.contains("sort_unstable_by_key") && !source.contains(".sort("),
-(F) BRANCH crates/api/src/server.rs:33062:17 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:33281:26 False  [the false side fails the check, and its line ran]  .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-(F) BRANCH crates/api/src/server.rs:33508:17 False  [the else of a let-else that panics, whose line ran]  let Step::Again { wait_ms, throttled } = stepped else {
-(F) BRANCH crates/api/src/server.rs:33857:13 False  [the false side fails the check, and its line ran]  code.contains("BAD_REQUEST") && code.contains("BAD_GATEWAY"),
-(F) BRANCH crates/api/src/server.rs:33857:45 False  [the false side fails the check, and its line ran]  code.contains("BAD_REQUEST") && code.contains("BAD_GATEWAY"),
-(F) BRANCH crates/api/src/server.rs:33861:13 False  [the false side fails the check, and its line ran]  !code.contains("contains(") && !code.contains("starts_with("),
-(F) BRANCH crates/api/src/server.rs:33861:44 False  [the false side fails the check, and its line ran]  !code.contains("contains(") && !code.contains("starts_with("),
-(F) BRANCH crates/api/src/server.rs:33925:13 False  [the false side fails the check, and its line ran]  !code.contains("15:30") && !code.contains("930"),
-(F) BRANCH crates/api/src/server.rs:33925:40 False  [the false side fails the check, and its line ran]  !code.contains("15:30") && !code.contains("930"),
-(F) BRANCH crates/api/src/server.rs:34488:13 False  [the false side fails the check, and its line ran]  page.contains(">376</td>") && page.contains(">375</td>"),
-(F) BRANCH crates/api/src/server.rs:34488:43 False  [the false side fails the check, and its line ran]  page.contains(">376</td>") && page.contains(">375</td>"),
-(F) BRANCH crates/api/src/server.rs:35281:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
-(F) BRANCH crates/api/src/server.rs:35395:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
-(F) BRANCH crates/api/src/server.rs:35516:13 False  [the false side fails the check, and its line ran]  note.contains("BEFORE FIRST BAR") && note.contains("2018-01-01..=2023-06-23"),
-(F) BRANCH crates/api/src/server.rs:35516:50 False  [the false side fails the check, and its line ran]  note.contains("BEFORE FIRST BAR") && note.contains("2018-01-01..=2023-06-23"),
-(F) BRANCH crates/api/src/server.rs:35530:13 False  [the false side fails the check, and its line ran]  failure.contains("NO ROWS AT ALL") && failure.contains("2016-03"),
-(F) BRANCH crates/api/src/server.rs:35530:51 False  [the false side fails the check, and its line ran]  failure.contains("NO ROWS AT ALL") && failure.contains("2016-03"),
-(F) BRANCH crates/api/src/server.rs:35548:13 False  [the false side fails the check, and its line ran]  failure.contains("1 of 3") && failure.contains(&late.from().to_string()),
-(F) BRANCH crates/api/src/server.rs:35548:43 False  [the false side fails the check, and its line ran]  failure.contains("1 of 3") && failure.contains(&late.from().to_string()),
-(F) BRANCH crates/api/src/server.rs:35636:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
-(F) BRANCH crates/api/src/server.rs:35793:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
-(F) BRANCH crates/api/src/server.rs:35925:17 False  [the false side fails the check, and its line ran]  crate::emitted::counts(record, "chunk", 1)
-(F) BRANCH crates/api/src/server.rs:35926:24 False  [the false side fails the check, and its line ran]  && crate::emitted::counts(record, "of", 1),
-(F) BRANCH crates/api/src/server.rs:36118:17 False  [the false side fails the check, and its line ran]  crate::emitted::says(record, "instrument", "NIFTY")
-(F) BRANCH crates/api/src/server.rs:36119:24 False  [the false side fails the check, and its line ran]  && crate::emitted::says(record, "feed", "dhan"),
-(F) BRANCH crates/api/src/server.rs:36123:17 False  [the false side fails the check, and its line ran]  crate::emitted::counts(record, "index", 1)
-(F) BRANCH crates/api/src/server.rs:36124:24 False  [the false side fails the check, and its line ran]  && crate::emitted::counts(record, "of", 1),
-(F) BRANCH crates/api/src/server.rs:36533:13 False  [the false side fails the check, and its line ran]  !ledger.opened() && ledger.opened_refused.is_some(),
-(F) BRANCH crates/api/src/server.rs:36533:33 False  [the false side fails the check, and its line ran]  !ledger.opened() && ledger.opened_refused.is_some(),
-(F) BRANCH crates/api/src/server.rs:36732:13 False  [the false side fails the check, and its line ran]  crate::emitted::says(mine, "rung", "1min")
-(F) BRANCH crates/api/src/server.rs:36733:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "target", asked.target.label()),
-(F) BRANCH crates/api/src/server.rs:36748:13 False  [the false side fails the check, and its line ran]  crate::emitted::counts(mine, "failed", 0)
-(F) BRANCH crates/api/src/server.rs:36749:20 False  [the false side fails the check, and its line ran]  && crate::emitted::counts(mine, "bars_stored", 0),
-(F) BRANCH crates/api/src/server.rs:36798:13 False  [the false side fails the check, and its line ran]  crate::emitted::says(mine, "month", "2026-08")
-(F) BRANCH crates/api/src/server.rs:36799:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "day", "2026-08-04")
-(F) BRANCH crates/api/src/server.rs:36800:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "window", "2026-08-03..=2026-08-05")
-(F) BRANCH crates/api/src/server.rs:36801:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "why", "the store refused the month"),
-(F) BRANCH crates/api/src/server.rs:36853:13 False  [the false side fails the check, and its line ran]  crate::emitted::counts(ordinary, "status", 200)
-(F) BRANCH crates/api/src/server.rs:36854:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(ordinary, "method", "GET")
-(F) BRANCH crates/api/src/server.rs:36855:20 False  [the false side fails the check, and its line ran]  && ordinary.field("micros").is_some(),
-(F) BRANCH crates/api/src/server.rs:37014:17 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
-(F) BRANCH crates/api/src/server.rs:37373:13 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
-(F) BRANCH crates/api/src/server.rs:37373:37 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
-(F) BRANCH crates/api/src/server.rs:37422:13 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
-(F) BRANCH crates/api/src/server.rs:37422:37 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
+(F) BRANCH crates/api/src/server.rs:21294:17 False  [the false side fails the check, and its line ran]  why.contains("1day") && why.contains("1 of 1"),
+(F) BRANCH crates/api/src/server.rs:21294:41 False  [the false side fails the check, and its line ran]  why.contains("1day") && why.contains("1 of 1"),
+(F) BRANCH crates/api/src/server.rs:21373:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
+(F) BRANCH crates/api/src/server.rs:21745:13 False  [the false side fails the check, and its line ran]  run.months == 1 && run.from == month_of(2026, 7) && run.why == ladder::OwedWhy::Interior
+(F) BRANCH crates/api/src/server.rs:21745:32 False  [the false side fails the check, and its line ran]  run.months == 1 && run.from == month_of(2026, 7) && run.why == ladder::OwedWhy::Interior
+(F) BRANCH crates/api/src/server.rs:21749:80 False  [the false side fails the check, and its line ran]  ladder::Gate::RungFirst { missing: 13, runs: 13, ref owed, .. } if owed.len() == ladder::OWED_NAMED
+(F) BRANCH crates/api/src/server.rs:21772:13 False  [the false side fails the check, and its line ran]  at_close.contains("ends at 15:30 IST and is asked for from 15:35")
+(F) BRANCH crates/api/src/server.rs:21773:20 False  [the false side fails the check, and its line ran]  && at_close.contains("it is 15:30 now"),
+(F) BRANCH crates/api/src/server.rs:21793:61 False  [the false side fails the check, and its line ran]  assert!(matches!(muhurat, DayKind::Open(session) if session != Session::full()));
+(F) BRANCH crates/api/src/server.rs:21894:13 False  [the false side fails the check, and its line ran]  unmade.contains("store-fault-probe-shut/audit: ")
+(F) BRANCH crates/api/src/server.rs:21895:20 False  [the false side fails the check, and its line ran]  && unmade.contains("Permission denied"),
+(F) BRANCH crates/api/src/server.rs:21942:13 False  [the false side fails the check, and its line ran]  said.starts_with("STORE UNAVAILABLE") && said.contains("after 9 of 208"),
+(F) BRANCH crates/api/src/server.rs:21942:54 False  [the false side fails the check, and its line ran]  said.starts_with("STORE UNAVAILABLE") && said.contains("after 9 of 208"),
+(F) BRANCH crates/api/src/server.rs:21991:13 False  [the false side fails the check, and its line ran]  line.why.starts_with(pull::calendar::PAST_RECORD_FINDING)
+(F) BRANCH crates/api/src/server.rs:21992:20 False  [the false side fails the check, and its line ran]  && line.why.contains(
+(F) BRANCH crates/api/src/server.rs:21995:20 False  [the false side fails the check, and its line ran]  && line
+(F) BRANCH crates/api/src/server.rs:22488:13 False  [the false side fails the check, and its line ran]  said.starts_with("transient — 0 failure(s) another attempt could change")
+(F) BRANCH crates/api/src/server.rs:22489:20 False  [the false side fails the check, and its line ran]  && said.contains("2 of the store and not the vendor")
+(F) BRANCH crates/api/src/server.rs:22490:20 False  [the false side fails the check, and its line ran]  && said.contains("and 0 it would repeat"),
+(F) BRANCH crates/api/src/server.rs:22784:13 False  [the false side fails the check, and its line ran]  fault.contains(".store-probe") && fault.contains("could not be unlinked"),
+(F) BRANCH crates/api/src/server.rs:22784:47 False  [the false side fails the check, and its line ran]  fault.contains(".store-probe") && fault.contains("could not be unlinked"),
+(F) BRANCH crates/api/src/server.rs:22793:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
+(F) BRANCH crates/api/src/server.rs:23663:13 False  [the false side fails the check, and its line ran]  !read.merged.contributed.contains(&Vendor::Groww)
+(F) BRANCH crates/api/src/server.rs:23664:20 False  [the false side fails the check, and its line ran]  && !read.merged.contributed.contains(&Vendor::Dhan),
+(F) BRANCH crates/api/src/server.rs:24134:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:24259:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:24315:13 False  [the else of a let-else that panics, whose line ran]  let [(0, segment)] = receipts.as_slice() else {
+(F) BRANCH crates/api/src/server.rs:24318:13 False  [the else of a let-else that panics, whose line ran]  let [receipt] = segment.receipts.as_slice() else {
+(F) BRANCH crates/api/src/server.rs:24613:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = asked.feed.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:24647:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, body)) = fno_landing(&page, Vec::new(), (&site, &wire, &asked), 1) else {
+(F) BRANCH crates/api/src/server.rs:24651:17 False  [the false side fails the check, and its line ran]  assert!(body.contains("run_busy") && body.contains(holder), "{body}");
+(F) BRANCH crates/api/src/server.rs:24651:46 False  [the false side fails the check, and its line ran]  assert!(body.contains("run_busy") && body.contains(holder), "{body}");
+(F) BRANCH crates/api/src/server.rs:24652:13 False  [the else of a let-else that panics, whose line ran]  let Err((why, code)) = open_spot_landing(&spot, &site, 1) else {
+(F) BRANCH crates/api/src/server.rs:24656:17 False  [the false side fails the check, and its line ran]  assert!(why.starts_with("run_busy") && why.contains(holder), "{why}");
+(F) BRANCH crates/api/src/server.rs:24656:48 False  [the false side fails the check, and its line ran]  assert!(why.starts_with("run_busy") && why.contains(holder), "{why}");
+(F) BRANCH crates/api/src/server.rs:24696:13 False  [the else of a let-else that panics, whose line ran]  let Err((status, body)) = fno_landing(&page, Vec::new(), (&site, &wire, &asked), 1) else {
+(F) BRANCH crates/api/src/server.rs:24705:13 False  [the else of a let-else that panics, whose line ran]  let Err((why, code)) = open_spot_landing(&spot, &site, 1) else {
+(F) BRANCH crates/api/src/server.rs:24740:17 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:24837:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:24927:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:25029:13 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:25393:17 False  [the false side fails the check, and its line ran]  assert!(e.contains("unknown argument") && e.contains("usage"), "{e}");
+(F) BRANCH crates/api/src/server.rs:25393:51 False  [the false side fails the check, and its line ran]  assert!(e.contains("unknown argument") && e.contains("usage"), "{e}");
+(F) BRANCH crates/api/src/server.rs:25449:13 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_MASTERS") && refused.contains("HOME"),
+(F) BRANCH crates/api/src/server.rs:25449:51 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_MASTERS") && refused.contains("HOME"),
+(F) BRANCH crates/api/src/server.rs:25556:13 False  [the false side fails the check, and its line ran]  refused.contains("pid=4242") && refused.contains("addr=127.0.0.1:8080"),
+(F) BRANCH crates/api/src/server.rs:25556:45 False  [the false side fails the check, and its line ran]  refused.contains("pid=4242") && refused.contains("addr=127.0.0.1:8080"),
+(F) BRANCH crates/api/src/server.rs:25752:13 False  [the false side fails the check, and its line ran]  body.contains(concat!("if let Some(warning) = ", "stamped {"))
+(F) BRANCH crates/api/src/server.rs:25753:20 False  [the false side fails the check, and its line ran]  && body.contains(concat!(
+(F) BRANCH crates/api/src/server.rs:25764:13 False  [the false side fails the check, and its line ran]  refused.contains("os error 28") && refused.contains("os error 5"),
+(F) BRANCH crates/api/src/server.rs:25764:48 False  [the false side fails the check, and its line ran]  refused.contains("os error 28") && refused.contains("os error 5"),
+(F) BRANCH crates/api/src/server.rs:25920:13 False  [the false side fails the check, and its line ran]  html.contains("appended to") && !html.contains("NOT in the journal"),
+(F) BRANCH crates/api/src/server.rs:25920:45 False  [the false side fails the check, and its line ran]  html.contains("appended to") && !html.contains("NOT in the journal"),
+(F) BRANCH crates/api/src/server.rs:26112:13 False  [the false side fails the check, and its line ran]  text.contains("INE121A01024") && text.contains("INE121A08PJ0"),
+(F) BRANCH crates/api/src/server.rs:26112:46 False  [the false side fails the check, and its line ran]  text.contains("INE121A01024") && text.contains("INE121A08PJ0"),
+(F) BRANCH crates/api/src/server.rs:26197:17 False  [the false side fails the check, and its line ran]  assert!(up.contains("NSE-NIFTY") && up.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26197:45 False  [the false side fails the check, and its line ran]  assert!(up.contains("NSE-NIFTY") && up.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26198:17 False  [the false side fails the check, and its line ran]  assert!(down.contains("NSE-NIFTY") && down.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26198:47 False  [the false side fails the check, and its line ran]  assert!(down.contains("NSE-NIFTY") && down.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26202:17 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26202:48 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26218:17 False  [the false side fails the check, and its line ran]  assert!(one.contains("NSE-NIFTY") && one.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26218:46 False  [the false side fails the check, and its line ran]  assert!(one.contains("NSE-NIFTY") && one.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26225:13 False  [the false side fails the check, and its line ran]  past.contains("NSE-NIFTY") && past.contains("NSE-RELIANCE"),
+(F) BRANCH crates/api/src/server.rs:26225:43 False  [the false side fails the check, and its line ran]  past.contains("NSE-NIFTY") && past.contains("NSE-RELIANCE"),
+(F) BRANCH crates/api/src/server.rs:26241:17 False  [the false side fails the check, and its line ran]  html.contains("NSE-NIFTY") && html.contains("NSE-RELIANCE"),
+(F) BRANCH crates/api/src/server.rs:26241:47 False  [the false side fails the check, and its line ran]  html.contains("NSE-NIFTY") && html.contains("NSE-RELIANCE"),
+(F) BRANCH crates/api/src/server.rs:26257:17 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26257:48 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26299:17 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26299:48 False  [the false side fails the check, and its line ran]  assert!(stale.contains("NSE-NIFTY") && stale.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26321:17 False  [the false side fails the check, and its line ran]  assert!(all.contains("NSE-NIFTY") && all.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26321:46 False  [the false side fails the check, and its line ran]  assert!(all.contains("NSE-NIFTY") && all.contains("NSE-RELIANCE"));
+(F) BRANCH crates/api/src/server.rs:26709:13 False  [the false side fails the check, and its line ran]  reach.contains(r#""feed":"groww""#) && reach.contains(r#""target":"n50""#),
+(F) BRANCH crates/api/src/server.rs:26709:52 False  [the false side fails the check, and its line ran]  reach.contains(r#""feed":"groww""#) && reach.contains(r#""target":"n50""#),
+(F) BRANCH crates/api/src/server.rs:27406:21 False  [the false side fails the check, and its line ran]  !fine.contains("400 Bad Request") && !fine.contains("reads no feed called"),
+(F) BRANCH crates/api/src/server.rs:27406:58 False  [the false side fails the check, and its line ran]  !fine.contains("400 Bad Request") && !fine.contains("reads no feed called"),
+(F) BRANCH crates/api/src/server.rs:27456:17 False  [the false side fails the check, and its line ran]  back.contains("2022-02-08") && back.contains("2022-01-08"),
+(F) BRANCH crates/api/src/server.rs:27456:48 False  [the false side fails the check, and its line ran]  back.contains("2022-02-08") && back.contains("2022-01-08"),
+(F) BRANCH crates/api/src/server.rs:28067:17 False  [the false side fails the check, and its line ran]  assert!(html.contains("09:15") && html.contains("15:30"), "{html}");
+(F) BRANCH crates/api/src/server.rs:28067:43 False  [the false side fails the check, and its line ran]  assert!(html.contains("09:15") && html.contains("15:30"), "{html}");
+(F) BRANCH crates/api/src/server.rs:28086:17 False  [the false side fails the check, and its line ran]  assert!(html.contains("groww") && html.contains("dhan"), "{html}");
+(F) BRANCH crates/api/src/server.rs:28086:43 False  [the false side fails the check, and its line ran]  assert!(html.contains("groww") && html.contains("dhan"), "{html}");
+(F) BRANCH crates/api/src/server.rs:28336:13 False  [the false side fails the check, and its line ran]  note.contains("debg") && note.contains("notalevel"),
+(F) BRANCH crates/api/src/server.rs:28336:38 False  [the false side fails the check, and its line ran]  note.contains("debg") && note.contains("notalevel"),
+(F) BRANCH crates/api/src/server.rs:28452:31 False  [the false side fails the check, and its line ran]  .all(|(t, l)| t == "pull" && *l == telemetry::Level::Debug),
+(F) BRANCH crates/api/src/server.rs:28457:13 False  [the false side fails the check, and its line ran]  note.contains("DROPPED") && note.contains("api=trace"),
+(F) BRANCH crates/api/src/server.rs:28457:41 False  [the false side fails the check, and its line ran]  note.contains("DROPPED") && note.contains("api=trace"),
+(F) BRANCH crates/api/src/server.rs:28633:17 False  [the false side fails the check, and its line ran]  missing.starts_with(&format!("{program}: ")) && missing.contains("No such file"),
+(F) BRANCH crates/api/src/server.rs:28633:65 False  [the false side fails the check, and its line ran]  missing.starts_with(&format!("{program}: ")) && missing.contains("No such file"),
+(F) BRANCH crates/api/src/server.rs:28986:13 False  [the false side fails the check, and its line ran]  output.status.success() && stdout.contains("1 passed"),
+(F) BRANCH crates/api/src/server.rs:28986:40 False  [the false side fails the check, and its line ran]  output.status.success() && stdout.contains("1 passed"),
+(F) BRANCH crates/api/src/server.rs:29005:13 False  [the false side fails the check, and its line ran]  listened && stdout.contains("brutex api listening on "),
+(F) BRANCH crates/api/src/server.rs:29005:25 False  [the false side fails the check, and its line ran]  listened && stdout.contains("brutex api listening on "),
+(F) BRANCH crates/api/src/server.rs:29092:13 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_STORE") && refused.contains("HOME"),
+(F) BRANCH crates/api/src/server.rs:29092:49 False  [the false side fails the check, and its line ran]  refused.contains("BRUTEX_STORE") && refused.contains("HOME"),
+(F) BRANCH crates/api/src/server.rs:29096:13 False  [the false side fails the check, and its line ran]  refused.contains("bars/") && refused.contains("manifest/"),
+(F) BRANCH crates/api/src/server.rs:29096:42 False  [the false side fails the check, and its line ran]  refused.contains("bars/") && refused.contains("manifest/"),
+(F) BRANCH crates/api/src/server.rs:29515:17 False  [the else of a let-else that panics, whose line ran]  let Transport::Http(spec) = descriptor.transport else {
+(F) BRANCH crates/api/src/server.rs:29590:13 False  [the false side fails the check, and its line ran]  html.contains("NSE-INDEX-NIFTY") && html.contains("NSE-INDEX-BANKNIFTY"),
+(F) BRANCH crates/api/src/server.rs:29590:49 False  [the false side fails the check, and its line ran]  html.contains("NSE-INDEX-NIFTY") && html.contains("NSE-INDEX-BANKNIFTY"),
+(F) BRANCH crates/api/src/server.rs:29594:13 False  [the false side fails the check, and its line ran]  html.contains("groww: UNAVAILABLE") && html.contains("dhan: UNAVAILABLE"),
+(F) BRANCH crates/api/src/server.rs:29594:52 False  [the false side fails the check, and its line ran]  html.contains("groww: UNAVAILABLE") && html.contains("dhan: UNAVAILABLE"),
+(F) BRANCH crates/api/src/server.rs:29801:13 False  [the false side fails the check, and its line ran]  !CREDENTIAL_FACT.is_empty() && CREDENTIAL_FACT.contains("no longer valid"),
+(F) BRANCH crates/api/src/server.rs:29801:44 False  [the false side fails the check, and its line ran]  !CREDENTIAL_FACT.is_empty() && CREDENTIAL_FACT.contains("no longer valid"),
+(F) BRANCH crates/api/src/server.rs:29857:17 False  [the false side fails the check, and its line ran]  assert!(!plain.reached_wire && !plain.vendor_down && !plain.credential_dead);
+(F) BRANCH crates/api/src/server.rs:29857:40 False  [the false side fails the check, and its line ran]  assert!(!plain.reached_wire && !plain.vendor_down && !plain.credential_dead);
+(F) BRANCH crates/api/src/server.rs:29857:62 False  [the false side fails the check, and its line ran]  assert!(!plain.reached_wire && !plain.vendor_down && !plain.credential_dead);
+(F) BRANCH crates/api/src/server.rs:29864:13 False  [the false side fails the check, and its line ran]  !cred.reached_wire && !cred.vendor_down,
+(F) BRANCH crates/api/src/server.rs:29864:35 False  [the false side fails the check, and its line ran]  !cred.reached_wire && !cred.vendor_down,
+(F) BRANCH crates/api/src/server.rs:29874:17 False  [the false side fails the check, and its line ran]  assert!(all.reached_wire && all.vendor_down && all.credential_dead);
+(F) BRANCH crates/api/src/server.rs:29874:37 False  [the false side fails the check, and its line ran]  assert!(all.reached_wire && all.vendor_down && all.credential_dead);
+(F) BRANCH crates/api/src/server.rs:29874:56 False  [the false side fails the check, and its line ran]  assert!(all.reached_wire && all.vendor_down && all.credential_dead);
+(F) BRANCH crates/api/src/server.rs:29883:13 False  [the false side fails the check, and its line ran]  real.reached_wire && real.credential_dead && !real.vendor_down,
+(F) BRANCH crates/api/src/server.rs:29883:34 False  [the false side fails the check, and its line ran]  real.reached_wire && real.credential_dead && !real.vendor_down,
+(F) BRANCH crates/api/src/server.rs:29883:58 False  [the false side fails the check, and its line ran]  real.reached_wire && real.credential_dead && !real.vendor_down,
+(F) BRANCH crates/api/src/server.rs:30101:13 False  [the false side fails the check, and its line ran]  words.starts_with("INTERRUPTED: an expired-F&O walk for 2026-07-01..2026-07-30")
+(F) BRANCH crates/api/src/server.rs:30102:20 False  [the false side fails the check, and its line ran]  && words.contains("run the same walk again from /pull/fno")
+(F) BRANCH crates/api/src/server.rs:30103:20 False  [the false side fails the check, and its line ran]  && !words.contains("/pull/spot")
+(F) BRANCH crates/api/src/server.rs:30104:20 False  [the false side fails the check, and its line ran]  && !words.contains("press Pull"),
+(F) BRANCH crates/api/src/server.rs:30348:13 False  [the false side fails the check, and its line ran]  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
+(F) BRANCH crates/api/src/server.rs:30348:50 False  [the false side fails the check, and its line ran]  mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
+(F) BRANCH crates/api/src/server.rs:30371:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
+(F) BRANCH crates/api/src/server.rs:30812:13 False  [the false side fails the check, and its line ran]  whole_body.contains(&format!(r#""expected":{}"#, owed.len()))
+(F) BRANCH crates/api/src/server.rs:30813:20 False  [the false side fails the check, and its line ran]  && holed_body.contains(&format!(r#""expected":{}"#, owed.len())),
+(F) BRANCH crates/api/src/server.rs:30821:13 False  [the false side fails the check, and its line ran]  whole_body.contains(r#""source":"record""#) && whole_body.contains(r#""voted_by":[]"#),
+(F) BRANCH crates/api/src/server.rs:30821:60 False  [the false side fails the check, and its line ran]  whole_body.contains(r#""source":"record""#) && whole_body.contains(r#""voted_by":[]"#),
+(F) BRANCH crates/api/src/server.rs:31088:17 False  [the false side fails the check, and its line ran]  damaged.contains("x-brutex-census-note:") && damaged.contains("UNREADABLE"),
+(F) BRANCH crates/api/src/server.rs:31088:62 False  [the false side fails the check, and its line ran]  damaged.contains("x-brutex-census-note:") && damaged.contains("UNREADABLE"),
+(F) BRANCH crates/api/src/server.rs:31219:13 False  [the false side fails the check, and its line ran]  !clean.contains('\r') && !clean.contains('\n'),
+(F) BRANCH crates/api/src/server.rs:31219:38 False  [the false side fails the check, and its line ran]  !clean.contains('\r') && !clean.contains('\n'),
+(F) BRANCH crates/api/src/server.rs:31223:13 False  [the false side fails the check, and its line ran]  clean.contains("groww UNREADABLE") && clean.contains("at /tmp/x"),
+(F) BRANCH crates/api/src/server.rs:31223:51 False  [the false side fails the check, and its line ran]  clean.contains("groww UNREADABLE") && clean.contains("at /tmp/x"),
+(F) BRANCH crates/api/src/server.rs:31550:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:31900:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(dhan) = transport else {
+(F) BRANCH crates/api/src/server.rs:31964:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
+(F) BRANCH crates/api/src/server.rs:31971:17 False  [the false side fails the check, and its line ran]  assert!(spec.fno.by_name().is_none() && spec.fno.by_offset().is_none());
+(F) BRANCH crates/api/src/server.rs:31971:49 False  [the false side fails the check, and its line ran]  assert!(spec.fno.by_name().is_none() && spec.fno.by_offset().is_none());
+(F) BRANCH crates/api/src/server.rs:32423:17 False  [the false side fails the check, and its line ran]  rebuilt.contains("did not match its commit log") && rebuilt.contains("missing"),
+(F) BRANCH crates/api/src/server.rs:32423:69 False  [the false side fails the check, and its line ran]  rebuilt.contains("did not match its commit log") && rebuilt.contains("missing"),
+(F) BRANCH crates/api/src/server.rs:32457:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
+(F) BRANCH crates/api/src/server.rs:32543:13 False  [the false side fails the check, and its line ran]  body.contains("NOT STARTED") && body.contains("clock names no usable date"),
+(F) BRANCH crates/api/src/server.rs:32543:45 False  [the false side fails the check, and its line ran]  body.contains("NOT STARTED") && body.contains("clock names no usable date"),
+(F) BRANCH crates/api/src/server.rs:32917:17 False  [the false side fails the check, and its line ran]  body.contains("detached_pull(") && body.contains(held),
+(F) BRANCH crates/api/src/server.rs:32917:52 False  [the false side fails the check, and its line ran]  body.contains("detached_pull(") && body.contains(held),
+(F) BRANCH crates/api/src/server.rs:33006:13 False  [the false side fails the check, and its line ran]  !source.contains("sort_unstable_by_key") && !source.contains(".sort("),
+(F) BRANCH crates/api/src/server.rs:33006:57 False  [the false side fails the check, and its line ran]  !source.contains("sort_unstable_by_key") && !source.contains(".sort("),
+(F) BRANCH crates/api/src/server.rs:33382:17 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:33601:26 False  [the false side fails the check, and its line ran]  .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+(F) BRANCH crates/api/src/server.rs:33828:17 False  [the else of a let-else that panics, whose line ran]  let Step::Again { wait_ms, throttled } = stepped else {
+(F) BRANCH crates/api/src/server.rs:34177:13 False  [the false side fails the check, and its line ran]  code.contains("BAD_REQUEST") && code.contains("BAD_GATEWAY"),
+(F) BRANCH crates/api/src/server.rs:34177:45 False  [the false side fails the check, and its line ran]  code.contains("BAD_REQUEST") && code.contains("BAD_GATEWAY"),
+(F) BRANCH crates/api/src/server.rs:34181:13 False  [the false side fails the check, and its line ran]  !code.contains("contains(") && !code.contains("starts_with("),
+(F) BRANCH crates/api/src/server.rs:34181:44 False  [the false side fails the check, and its line ran]  !code.contains("contains(") && !code.contains("starts_with("),
+(F) BRANCH crates/api/src/server.rs:34245:13 False  [the false side fails the check, and its line ran]  !code.contains("15:30") && !code.contains("930"),
+(F) BRANCH crates/api/src/server.rs:34245:40 False  [the false side fails the check, and its line ran]  !code.contains("15:30") && !code.contains("930"),
+(F) BRANCH crates/api/src/server.rs:34808:13 False  [the false side fails the check, and its line ran]  page.contains(">376</td>") && page.contains(">375</td>"),
+(F) BRANCH crates/api/src/server.rs:34808:43 False  [the false side fails the check, and its line ran]  page.contains(">376</td>") && page.contains(">375</td>"),
+(F) BRANCH crates/api/src/server.rs:35601:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
+(F) BRANCH crates/api/src/server.rs:35715:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
+(F) BRANCH crates/api/src/server.rs:35836:13 False  [the false side fails the check, and its line ran]  note.contains("BEFORE FIRST BAR") && note.contains("2018-01-01..=2023-06-23"),
+(F) BRANCH crates/api/src/server.rs:35836:50 False  [the false side fails the check, and its line ran]  note.contains("BEFORE FIRST BAR") && note.contains("2018-01-01..=2023-06-23"),
+(F) BRANCH crates/api/src/server.rs:35850:13 False  [the false side fails the check, and its line ran]  failure.contains("NO ROWS AT ALL") && failure.contains("2016-03"),
+(F) BRANCH crates/api/src/server.rs:35850:51 False  [the false side fails the check, and its line ran]  failure.contains("NO ROWS AT ALL") && failure.contains("2016-03"),
+(F) BRANCH crates/api/src/server.rs:35868:13 False  [the false side fails the check, and its line ran]  failure.contains("1 of 3") && failure.contains(&late.from().to_string()),
+(F) BRANCH crates/api/src/server.rs:35868:43 False  [the false side fails the check, and its line ran]  failure.contains("1 of 3") && failure.contains(&late.from().to_string()),
+(F) BRANCH crates/api/src/server.rs:35956:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = transport else {
+(F) BRANCH crates/api/src/server.rs:36113:13 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(shipped) = transport else {
+(F) BRANCH crates/api/src/server.rs:36245:17 False  [the false side fails the check, and its line ran]  crate::emitted::counts(record, "chunk", 1)
+(F) BRANCH crates/api/src/server.rs:36246:24 False  [the false side fails the check, and its line ran]  && crate::emitted::counts(record, "of", 1),
+(F) BRANCH crates/api/src/server.rs:36438:17 False  [the false side fails the check, and its line ran]  crate::emitted::says(record, "instrument", "NIFTY")
+(F) BRANCH crates/api/src/server.rs:36439:24 False  [the false side fails the check, and its line ran]  && crate::emitted::says(record, "feed", "dhan"),
+(F) BRANCH crates/api/src/server.rs:36443:17 False  [the false side fails the check, and its line ran]  crate::emitted::counts(record, "index", 1)
+(F) BRANCH crates/api/src/server.rs:36444:24 False  [the false side fails the check, and its line ran]  && crate::emitted::counts(record, "of", 1),
+(F) BRANCH crates/api/src/server.rs:36853:13 False  [the false side fails the check, and its line ran]  !ledger.opened() && ledger.opened_refused.is_some(),
+(F) BRANCH crates/api/src/server.rs:36853:33 False  [the false side fails the check, and its line ran]  !ledger.opened() && ledger.opened_refused.is_some(),
+(F) BRANCH crates/api/src/server.rs:37052:13 False  [the false side fails the check, and its line ran]  crate::emitted::says(mine, "rung", "1min")
+(F) BRANCH crates/api/src/server.rs:37053:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "target", asked.target.label()),
+(F) BRANCH crates/api/src/server.rs:37068:13 False  [the false side fails the check, and its line ran]  crate::emitted::counts(mine, "failed", 0)
+(F) BRANCH crates/api/src/server.rs:37069:20 False  [the false side fails the check, and its line ran]  && crate::emitted::counts(mine, "bars_stored", 0),
+(F) BRANCH crates/api/src/server.rs:37118:13 False  [the false side fails the check, and its line ran]  crate::emitted::says(mine, "month", "2026-08")
+(F) BRANCH crates/api/src/server.rs:37119:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "day", "2026-08-04")
+(F) BRANCH crates/api/src/server.rs:37120:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "window", "2026-08-03..=2026-08-05")
+(F) BRANCH crates/api/src/server.rs:37121:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(mine, "why", "the store refused the month"),
+(F) BRANCH crates/api/src/server.rs:37173:13 False  [the false side fails the check, and its line ran]  crate::emitted::counts(ordinary, "status", 200)
+(F) BRANCH crates/api/src/server.rs:37174:20 False  [the false side fails the check, and its line ran]  && crate::emitted::says(ordinary, "method", "GET")
+(F) BRANCH crates/api/src/server.rs:37175:20 False  [the false side fails the check, and its line ran]  && ordinary.field("micros").is_some(),
+(F) BRANCH crates/api/src/server.rs:37334:17 False  [the else of a let-else that panics, whose line ran]  let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+(F) BRANCH crates/api/src/server.rs:37693:13 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
+(F) BRANCH crates/api/src/server.rs:37693:37 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
+(F) BRANCH crates/api/src/server.rs:37742:13 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
+(F) BRANCH crates/api/src/server.rs:37742:37 False  [the false side fails the check, and its line ran]  why.contains("1min") && why.contains("1day"),
 (F) LINE crates/api/src/server_cloud_mutant_tests_e.rs:256  [failing arm of the statement at 255, which ran]  matches!(
 (F) LINE crates/api/src/server_cloud_mutant_tests_e.rs:267  [panic/unreachable line]  panic!("the flush re-arms the head clock");
 (F) BRANCH crates/api/src/server_cloud_mutant_tests_e.rs:266:9 False  [the else of a let-else that panics, whose line ran]  let HeadState::Awaiting { deadline, .. } = wrapped.state else {
@@ -777,10 +787,10 @@ Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cl
 (U) LINE crates/api/src/booleanjson.rs:143  [a size bound: a page holds at most limit <= 256 rows, the largest row a coordinate whose program text is at most 17,265 bytes (MAX_INSTRUCTIONS * 3 tokens, crates/vocab/src/expression.rs:15, 400-459) plus under 2 KiB of fixed fields, two grid summaries of about 3.5 KB: under 5 MB, below MAX_RESPONSE_BYTES = 8,388,608 (detail.rs:32) on every input]  "catalog response exceeds byte admission; no prefix returned",
 (U) BRANCH crates/api/src/booleanjson.rs:138:16 False  [a size bound: a page holds at most limit <= 256 rows, the largest row a coordinate whose program text is at most 17,265 bytes (MAX_INSTRUCTIONS * 3 tokens, crates/vocab/src/expression.rs:15, 400-459) plus under 2 KiB of fixed fields, two grid summaries of about 3.5 KB: under 5 MB, below MAX_RESPONSE_BYTES = 8,388,608 (detail.rs:32) on every input]  if result.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
 (U) BRANCH crates/api/src/booleanlaunch.rs:450:12 False  [booleanevidencejson::search_policy returns admission_projection::policy, whose tail expression is the object literal json!({"digest":..,"values":rows}) (booleanadmission_projection.rs:76-133), so as_object_mut() is Some]  if let Some(fields) = policy.as_object_mut() {
-(U) LINE crates/api/src/calendar_of.rs:3086  [the loop takes the open run at every non-Unmeasured day, and a Calendar's last day is never Unmeasured: from_observed sets the last observed day's slot to Open or OpenLengthUnmeasured and withhold_closed changes only Closed slots (crates/pull/src/calendar.rs:5009-5106, 5162-5187)]  flush(&mut out, done);
+(U) LINE crates/api/src/calendar_of.rs:3463  [the loop takes the open run at every non-Unmeasured day, and a Calendar's last day is never Unmeasured: from_observed sets the last observed day's slot to Open or OpenLengthUnmeasured and withhold_closed changes only Closed slots (crates/pull/src/calendar.rs:5009-5106, 5162-5187)]  flush(&mut out, done);
 (U) BRANCH crates/api/src/calendar_of.rs:585:28 False  [day comes from by_month, which gets a day only right after inserting it into traded (549-553), and traded loses no key before into_iter: get_mut is Some]  if let Some(slot) = traded.get_mut(day) {
-(U) BRANCH crates/api/src/calendar_of.rs:684:24 False  [month is a pull::session::Day, validated into 1970..=9999 with months 1..=12 at construction (crates/pull/src/session.rs), exactly the range YearMonth::new accepts (crates/store/src/path.rs:583-591), so YearMonth::new(month.year(), month.month()) is Ok]  && let Ok(named) = YearMonth::new(month.year(), month.month())
-(U) BRANCH crates/api/src/calendar_of.rs:3085:12 True  [the loop takes the open run at every non-Unmeasured day, and a Calendar's last day is never Unmeasured: from_observed sets the last observed day's slot to Open or OpenLengthUnmeasured and withhold_closed changes only Closed slots (crates/pull/src/calendar.rs:5009-5106, 5162-5187)]  if let Some(done) = run {
+(U) BRANCH crates/api/src/calendar_of.rs:691:24 False  [month is a pull::session::Day, validated into 1970..=9999 with months 1..=12 at construction (crates/pull/src/session.rs), exactly the range YearMonth::new accepts (crates/store/src/path.rs:583-591), so YearMonth::new(month.year(), month.month()) is Ok]  && let Ok(named) = YearMonth::new(month.year(), month.month())
+(U) BRANCH crates/api/src/calendar_of.rs:3462:12 True  [the loop takes the open run at every non-Unmeasured day, and a Calendar's last day is never Unmeasured: from_observed sets the last observed day's slot to Open or OpenLengthUnmeasured and withhold_closed changes only Closed slots (crates/pull/src/calendar.rs:5009-5106, 5162-5187)]  if let Some(done) = run {
 (U) LINE crates/api/src/calendar_record.rs:341  [every store::path::YearMonth is year 1970..=9999 and month 1..=12 (YearMonth::new, crates/store/src/path.rs:583-591, the only way to make one), and pull::session::Day::new accepts the first day of every such month (a Day is validated into 1970..=9999)]  continue;
 (U) LINE crates/api/src/calendar_record.rs:356  [the line before resizes counts to at + 1 whenever its length is at or below at, so get_mut(at) is Some (the implicit else sits on the if's closing brace)]  }
 (U) LINE crates/api/src/calendar_record.rs:502  [auction_start takes no argument: high starts at pull::calendar::SOURCED_LAST_DAY, 2026-12-31 (crates/pull/src/calendar.rs:982-990), and auction_day is cash_auction_eligibility_required, day >= 2026-08-03 (crates/pull/src/vendor.rs:1443-1447), so the record's last day is always an auction day]  return None;
@@ -889,8 +899,8 @@ Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cl
 (U) LINE crates/api/src/server.rs:13023  [the loop continues past its head only when window.verdict(ts.div_euclid(1_000_000), ..) is Ok(None), and Window::verdict begins with IstMoment::from_epoch_secs(epoch_secs)? on that same value (crates/pull/src/session.rs:1160-1166): Ok here on every row]  "the bar's stamp is not a moment any calendar places",
 (U) LINE crates/api/src/server.rs:13025  [the loop continues past its head only when window.verdict(ts.div_euclid(1_000_000), ..) is Ok(None), and Window::verdict begins with IstMoment::from_epoch_secs(epoch_secs)? on that same value (crates/pull/src/session.rs:1160-1166): Ok here on every row]  continue;
 (U) LINE crates/api/src/server.rs:15926  [bars_html calls contract_param(query) only after locate_series returned Ok, and locate_series (server.rs 15429-15435) returns Err(Unlocated::Refused) whenever contract_param(query) is Err; contract_param is a pure function of the same query]  Err(why) => return unlocatable(site, &symbol, &Unlocated::Refused(why)),
-(U) LINE crates/api/src/server.rs:38355  [index runs over 0..vocab::table::COUNT, and COUNT <= ConditionMask::BITS is a const assertion (crates/vocab/src/table.rs:1448-1452) with BITS = WORDS * 64 = 384 (crates/vocab/src/mask.rs:18, :44), so index is below 65,536 and u16::try_from is Ok]  break;
-(U) LINE crates/api/src/server.rs:38362  [the loop is for index in 0..vocab::table::COUNT and COUNT is TABLE.len() (crates/vocab/src/table.rs:1432); definition is TABLE.get(usize::from(index)) (table.rs:1581-1583): Some for every position]  break;
+(U) LINE crates/api/src/server.rs:38675  [index runs over 0..vocab::table::COUNT, and COUNT <= ConditionMask::BITS is a const assertion (crates/vocab/src/table.rs:1448-1452) with BITS = WORDS * 64 = 384 (crates/vocab/src/mask.rs:18, :44), so index is below 65,536 and u16::try_from is Ok]  break;
+(U) LINE crates/api/src/server.rs:38682  [the loop is for index in 0..vocab::table::COUNT and COUNT is TABLE.len() (crates/vocab/src/table.rs:1432); definition is TABLE.get(usize::from(index)) (table.rs:1581-1583): Some for every position]  break;
 (U) BRANCH crates/api/src/server.rs:1922:9 False  [census_cache::VendorCensusNow::census (census_cache.rs:688-690) is a const fn whose body is Some(&self.census): Some on every call]  let Some(census) = now.census() else {
 (U) BRANCH crates/api/src/server.rs:1990:8 True  [report_from (server.rs:768-783) ends the body with writeln! into a String, whose fmt::Write cannot fail: the body always ends with a newline]  if !body.ends_with('\n') {
 (U) BRANCH crates/api/src/server.rs:2758:31 False  [targets is [usize; SpotTarget::ALL.len()] and slot comes from SpotTarget::ALL.into_iter().enumerate(), so targets.get_mut(slot) is Some]  if counted && let Some(n) = targets.get_mut(slot) {
@@ -903,8 +913,8 @@ Source: this shard's Route B whole:api readout of tip `1fbb5ad6` (`d3-route-b-cl
 (U) BRANCH crates/api/src/server.rs:11928:8 True  [the only HttpSpecs are DHAN (FnoAccess::ByStrikeOffset, crates/pull/src/vendor.rs:5048), GROWW (ByName, :5285) and ZERODHA (ByToken, :6107); fno_walk returns at by_offset (Dhan) and by_token (Zerodha) above, and Groww's ByName serves (FnoAccess::serves, vendor.rs:2925-2927)]  if !spec.fno.serves() {
 (U) BRANCH crates/api/src/server.rs:12069:13 False  [months is crate::ladder::months_of(asked.window) on the line before, whose first iteration pushes window.from().year_month() (ladder.rs:451-468); Day::year_month is YearMonth::new(year, month) (crates/pull/src/session.rs:433-435), Ok for every Day, since a Day is validated into 1970..=9999 with months 1..=12, the range YearMonth::new accepts (crates/store/src/path.rs:583-591); so months is never empty and last() is Some]  let Some(&last) = months.last() else {
 (U) BRANCH crates/api/src/server.rs:13019:13 False  [the loop continues past its head only when window.verdict(ts.div_euclid(1_000_000), ..) is Ok(None), and Window::verdict begins with IstMoment::from_epoch_secs(epoch_secs)? on that same value (crates/pull/src/session.rs:1160-1166): Ok here on every row]  let Ok(at) = pull::session::IstMoment::from_epoch_secs(ts.div_euclid(1_000_000)) else {
-(U) BRANCH crates/api/src/server.rs:38354:13 False  [index runs over 0..vocab::table::COUNT, and COUNT <= ConditionMask::BITS is a const assertion (crates/vocab/src/table.rs:1448-1452) with BITS = WORDS * 64 = 384 (crates/vocab/src/mask.rs:18, :44), so index is below 65,536 and u16::try_from is Ok]  let Ok(position) = u16::try_from(index) else {
-(U) BRANCH crates/api/src/server.rs:38361:13 False  [the loop is for index in 0..vocab::table::COUNT and COUNT is TABLE.len() (crates/vocab/src/table.rs:1432); definition is TABLE.get(usize::from(index)) (table.rs:1581-1583): Some for every position]  let Some(def) = vocab::table::definition(position) else {
+(U) BRANCH crates/api/src/server.rs:38674:13 False  [index runs over 0..vocab::table::COUNT, and COUNT <= ConditionMask::BITS is a const assertion (crates/vocab/src/table.rs:1448-1452) with BITS = WORDS * 64 = 384 (crates/vocab/src/mask.rs:18, :44), so index is below 65,536 and u16::try_from is Ok]  let Ok(position) = u16::try_from(index) else {
+(U) BRANCH crates/api/src/server.rs:38681:13 False  [the loop is for index in 0..vocab::table::COUNT and COUNT is TABLE.len() (crates/vocab/src/table.rs:1432); definition is TABLE.get(usize::from(index)) (table.rs:1581-1583): Some for every position]  let Some(def) = vocab::table::definition(position) else {
 (U) LINE crates/api/src/sources.rs:1500  [the link is /calendar.json?feed= + Vendor::as_str (lowercase letters, crates/core/src/vendor.rs:169-177) + &symbol= + query_value (unreserved bytes and %XX only) + &rung= + a Timeframe name (1s, 1min to 60min, 1day; crates/store/src/path.rs:360-499); every byte is one an origin-form URI accepts, and Symbol::new bounds the symbol at 1 to 24 bytes, so the link parses]  return Sessions {
 (U) LINE crates/api/src/sources.rs:1501  [the link is /calendar.json?feed= + Vendor::as_str (lowercase letters, crates/core/src/vendor.rs:169-177) + &symbol= + query_value (unreserved bytes and %XX only) + &rung= + a Timeframe name (1s, 1min to 60min, 1day; crates/store/src/path.rs:360-499); every byte is one an origin-form URI accepts, and Symbol::new bounds the symbol at 1 to 24 bytes, so the link parses]  json: json!({ "calendar": link, "why": "the calendar link would not parse" }),
 (U) LINE crates/api/src/sources.rs:1502  [the link is /calendar.json?feed= + Vendor::as_str (lowercase letters, crates/core/src/vendor.rs:169-177) + &symbol= + query_value (unreserved bytes and %XX only) + &rung= + a Timeframe name (1s, 1min to 60min, 1day; crates/store/src/path.rs:360-499); every byte is one an origin-form URI accepts, and Symbol::new bounds the symbol at 1 to 24 bytes, so the link parses]  not_held: None,
