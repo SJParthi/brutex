@@ -944,6 +944,90 @@ mod cloud_mutant_tests {
         assert_eq!(session_before(day(5)), Some(day(2)));
     }
 
+    /// **THE CALENDAR OF RECORD NEVER CLOSES TEN DAYS RUNNING, SO EVERY WALK
+    /// BACK FROM A DAY FINDS A SESSION OR AN UNMEASURED DAY BEFORE ITS BOUND**
+    /// (BASE-COV-API repair 3, D-8661). `session_before` gives up after
+    /// [`MAX_CLOSED_WALK`] closed days, and `pull::calendar` answers `Closed`
+    /// only inside its sourced and measured spans (`unmeasured` outside them),
+    /// so this test walks every day of both spans and asserts the table that
+    /// leaves that arm unreachable: a later table that reaches it turns this
+    /// test red rather than leaving `fu-AS1.txt.md`'s proof stale (D-8661 item
+    /// 6). Extremes: the longest run of closed days the table holds (under
+    /// ten, and at least a weekend); the day after that run (the open day
+    /// before the run); a Tuesday (its Monday); a Monday (the Friday before);
+    /// the sourced span's first day (none: the day before it is unmeasured);
+    /// the day after the table's last day (its last open day); the
+    /// day after that (none); a day far past the table (none); and, at once,
+    /// the day after the longest run, whose walk is the longest any day makes,
+    /// and every day of both spans and one past each end, each answered as an
+    /// unbounded walk over the same table answers it; out of the box, the
+    /// first day after the longest run is asked of the bound itself: its walk
+    /// is shorter than ten by the margin the table leaves.
+    #[test]
+    fn the_calendar_never_closes_ten_days_running_so_every_walk_back_finds_its_answer() {
+        let first = calendar::SOURCED_FIRST_DAY.min(calendar::FIRST_DAY);
+        let last = calendar::SOURCED_LAST_DAY.max(calendar::LAST_DAY);
+        // AN UNBOUNDED WALK OVER THE SAME TABLE: what the bounded one must say.
+        let unbounded = |day: i64| {
+            let mut at = day - 1;
+            loop {
+                match calendar::exchange_kind_of(at) {
+                    DayKind::Open(_) => return Some(at),
+                    DayKind::Closed => at -= 1,
+                    DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => return None,
+                }
+            }
+        };
+        let (mut run, mut longest, mut ends) = (0_i64, 0_i64, first);
+        for day in first..=last {
+            if calendar::exchange_kind_of(day) == DayKind::Closed {
+                run += 1;
+                if run > longest {
+                    (longest, ends) = (run, day);
+                }
+            } else {
+                run = 0;
+            }
+        }
+        assert!(
+            (2..MAX_CLOSED_WALK).contains(&longest),
+            "the longest closed run is {longest} days"
+        );
+        let after = ends + 1;
+        assert_eq!(session_before(after), unbounded(after));
+        assert!(
+            session_before(after).is_some_and(|open| open == ends - longest),
+            "the open day before the longest run"
+        );
+        assert!(
+            after - (ends - longest) < MAX_CLOSED_WALK + 1,
+            "within the bound"
+        );
+        for day in (first - 1)..=(last + 1) {
+            assert_eq!(session_before(day), unbounded(day), "day {day}");
+        }
+        let on = |y: u16, m: u8, d: u8| {
+            i64::from(
+                pull::session::Day::new(y, m, d)
+                    .expect("a day")
+                    .days_from_epoch(),
+            )
+        };
+        // 2026-07-07 is a Tuesday, 07-06 a Monday, 07-03 a Friday.
+        assert_eq!(session_before(on(2026, 7, 7)), Some(on(2026, 7, 6)));
+        assert_eq!(session_before(on(2026, 7, 6)), Some(on(2026, 7, 3)));
+        assert_eq!(session_before(calendar::SOURCED_FIRST_DAY), None);
+        let after_last = last + 1;
+        assert_eq!(
+            session_before(after_last),
+            unbounded(after_last),
+            "the table's last open day"
+        );
+        assert!(session_before(after_last).is_some());
+        assert_eq!(session_before(after_last + 1), None);
+        assert_eq!(session_before(on(2100, 1, 4)), None);
+    }
+
     /// **TWO DAY BARS OF ADJACENT SESSIONS ARE MEASURED**: a day bar spans its
     /// session, so the intraday rules (halt, phase, bucket) do not apply to
     /// it. Runs `judge`'s day-rung return, which no test reached.
