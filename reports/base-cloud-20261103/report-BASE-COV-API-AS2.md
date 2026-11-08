@@ -1313,10 +1313,24 @@ asserted: `calendar_of.rs` 2 (10 and 11), `server.rs` 2 (11 and 9). The named fi
   other shards' store-breaker test); gate 23 on its CI shell gates; the D1 landing; the platform
   items above.
 - **The assembly (ASA):** the decision entries from the drafts D-8662 and D-8663 (with the draft
-  invariant rows); D-1202's note; the two `indexstopvixjson.rs` tests that belong in G1's
-  `indexstopvix_projection_tests.rs` (they reach indexstopvixjson.rs 105-108, 107:16 T and
-  151:16 F; 107:16 F, 110 and 112 need a native catalog of 171 or more trades); `lib.rs` and the
-  benches stay L-BCA-2's.
+  invariant rows); D-1202's note; the `indexstopvixjson.rs` tests that belong in G1's
+  `indexstopvix_projection_tests.rs`, whose fixtures they need
+  (`crate::indexstopjson::projection_tests::with_saved_stop_catalog`, the file's own
+  `saved_reference`, `Asked::parse`).
+  The exact change: (a) for 151:16 F, in the shape of that file's
+  `a_cached_saved_vix_reader_for_one_root_never_answers_for_another`: `render(root, &asked)`
+  admits; `render` over the SAME root for the same pin and an identity no catalog holds (64 hex of
+  `[0x5a; 32]`) must refuse, which evaluates `cached.identity == asked.identity` false with
+  `cached.root == root` true; then `render(root, &asked)` admits again, opened cold. (b) For
+  105-108 and 107:16 T, `index_stop_vix_json` itself, which finds its store through
+  `server::store_dir` (the environment): a child of the test binary
+  (`crate::isolated::rerun` with `BRUTEX_STORE` the fixture's root, run inside the fixture's
+  closure) awaits it for the same query and asserts `200` and `status: saved`, proving itself by a
+  file its parent reads (never a print site, gate 23). (c) 107:16 F, 110 and 112 need a rendered
+  page past `crate::detail::MAX_RESPONSE_BYTES` (a native catalog of 171 or more trades, session
+  -5's figure): the same child then answers `503` "saved-VIX response exceeds byte admission; no
+  prefix returned"; that fixture is L-BCA-5's family unless the generator grows a size. `lib.rs`
+  and the benches stay L-BCA-2's.
 - **The operator:** L-BCA-5's saved-research fixtures and L-BCA-6's seam (389 lines and 28 sides
   carry those tags; 50 lines and 20 sides are L-BCA-5's by D-8663's draft), D-8663's other items,
   and whether the named race, clock,
