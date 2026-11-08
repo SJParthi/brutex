@@ -14,7 +14,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, statS
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import http from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile, spawn as spawnChild } from 'node:child_process';
 
 import {
   PAGE_TARGETS, MEASURED_PAGES, SPEED_ROUTE, WINDOWS, SORTS, GARBLED, BUNDLE_BUDGETS,
@@ -3732,43 +3732,157 @@ const pidIn = async (file) => {
 };
 
 /**
- * THE SYSTEM'S TABLE FOR A TEST, READ HOWEVER LONG `ps` TAKES (BASE-STACK-1028
- * repair 6). A command's stop lists its group with `ps` bounded by
- * `LIST_WAIT_MS` and, when one list answers later, says why after its words
- * ({@link sheet.asker}): that is the sheet's word on a stalled machine. The D1
- * landing gate of 6 Nov 2026 (M ba39c7d21, load 207 to 253) had one `ps` of
- * the ~50 a 5 s stop runs answer past 2,000 ms, and the --restart test, which
- * states a stop's words for its processes alone, failed at its stubborn stop.
- * `ps` took 21 ms at p50 and 58 ms at most in 200 runs on this Mac at load 146
- * the same day, so that answer was a stall, and no bound outlasts every stall.
- * A test that states a real stop's words gives it this list: the sheet's own
- * command and reading (`sheet.membersIn`) with no time bound, so a stall delays
- * the words and never changes them, and a `ps` that fails or is missing is
- * still said. How the sheet's bounded list degrades is tested on its own: a
- * `ps` that fails, one late at one list, one late at every list. `ms` keeps the
- * time of each list in the order they answered, and `waited` is what a stop
- * waited on them: its first list, before it signals, and the one in flight
- * when its wait ends (the rest run while it waits), so a test that bounds a
- * stop's time adds that and nothing else.
+ * How long the speed tests' patient list waits for one `ps`, ms (BASE-STACK-1028
+ * repair 7; check r7, A5). Repair 6's list had no bound: a `ps` that never
+ * answered outlived the test's own timeout, held the test file's process, and
+ * `node --test` never ended, where the sheet's bounded list failed the same test
+ * by name in 2.3 s. The bound is far above every stall measured here: `ps`
+ * answered in 58.5 ms at most in 200 runs in a row at load 146 on 6 Nov 2026
+ * (logs-STACK1028/repair6/ps-latency.txt) and in 3,870.8 ms at most in 500 runs
+ * at load 100 to 109 on 7 Nov (check r7, ps-latency-r7.mjs: one past 2,000 ms),
+ * and the D1 landing gate of 6 Nov met one past 2,000 ms at load 207 to 253.
+ * 15,000 ms is 3.9 times the largest of those answers and 7.5 times
+ * `LIST_WAIT_MS`; a test that meets it, or a `ps` that never answers, ends by its
+ * name well inside the 60 s and 180 s timeouts of the tests that use it.
  */
-const patiently = () => {
+const PATIENT_LIST_MS = 15_000;
+
+/** The most a list takes of a `ps`'s output, as the sheet's own list takes (its `maxBuffer`), bytes. */
+const LIST_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * THE SYSTEM'S TABLE, READ ONCE WITH THE SHEET'S OWN COMMAND, `ps -A -o pid= -o
+ * pgid=`, WAITED FOR AT MOST `boundMs` (BASE-STACK-1028 repair 7). The `ps`
+ * leads a process group of its own, so past the bound that whole group is sent
+ * SIGKILL: a `ps` that ignores SIGTERM or has stopped ends too, and so does a
+ * process it left holding its output. An answer after the bound is never taken:
+ * `execFile`'s own bound reads a `ps` that printed a line and exited while a
+ * child of it held its output as a whole table of that line (probed 8 Nov,
+ * scratch/repair-BASE-STACK-1028-r7/probe). Its group is signalled only while it
+ * is known to be this `ps`'s: the `ps` not yet reaped, or the group found there
+ * a moment ago (an id in use by a group is given to no new one). A failure is
+ * said in the words of the sheet's own list ({@link sheet.groupMembers}).
+ *
+ * @param {number} boundMs
+ * @param {(pid: number) => void} [started] told the pid of the `ps` it starts, which is its group's id (a test's own look)
+ * @returns {Promise<{table: string} | {why: string}>}
+ */
+const tableWithin = (boundMs, started = (/** @type {number} */ _pid) => undefined) =>
+  new Promise((resolve) => {
+    /** @type {Buffer[]} */
+    const out = [];
+    let size = 0;
+    let answered = false;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let bound;
+    /** @param {{table: string} | {why: string}} got */
+    const answer = (got) => {
+      if (answered) return;
+      answered = true;
+      clearTimeout(bound);
+      resolve(got);
+    };
+    const ps = spawnChild('ps', ['-A', '-o', 'pid=', '-o', 'pgid='], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (ps.pid !== undefined) started(ps.pid);
+    const end = () => {
+      ps.stdout?.destroy();
+      const pid = ps.pid;
+      if (pid !== undefined && ((ps.exitCode === null && ps.signalCode === null) || sheet.groupRunning(pid))) sheet.signalPid(-pid, 'SIGKILL');
+    };
+    bound = setTimeout(() => {
+      end();
+      answer({ why: `ps did not answer within ${boundMs} ms, the speed tests' patient bound` });
+    }, boundMs);
+    ps.stdout?.on('data', (/** @type {Buffer} */ chunk) => {
+      size += chunk.length;
+      if (size <= LIST_MAX_BYTES) out.push(chunk);
+      else {
+        end();
+        answer({ why: 'ps failed: stdout maxBuffer length exceeded' });
+      }
+    });
+    ps.once('error', (why) => answer({ why: `ps failed: ${why.message}` }));
+    ps.once('close', (code) => answer(code === 0 ? { table: Buffer.concat(out).toString() } : { why: 'ps failed: Command failed: ps -A -o pid= -o pgid=' }));
+  });
+
+/**
+ * THE SYSTEM'S TABLE FOR A TEST THAT STATES A REAL STOP'S WORDS, READ WITH
+ * PATIENCE AND A BOUND (BASE-STACK-1028 repairs 6 and 7). A command's stop
+ * lists its group with `ps` bounded by `LIST_WAIT_MS` and, when one list
+ * answers later, says why after its words ({@link sheet.asker}): that is the
+ * sheet's word on a stalled machine. The D1 landing gate of 6 Nov 2026 (load
+ * 207 to 253) had one `ps` of the ~50 a 5 s stop runs answer past 2,000 ms,
+ * and the --restart test, which states a stop's words for its processes alone,
+ * failed at its stubborn stop. A test that states a real stop's words gives it
+ * this list: the sheet's own command and reading (`sheet.membersIn`), each
+ * `ps` waited for up to `boundMs` ({@link tableWithin}).
+ *
+ * WHAT LATENESS CHANGES, AS MEASURED (check r7): a list that answers within
+ * the bound delays the words and leaves them as they are, but for one case. A
+ * process that joins the group after its first list (a fork racing the
+ * signal, or the asker test's own) is asked only by a list that answers
+ * inside the stop's wait, `COMMAND_STOP_MS` after the command left; a list
+ * that answers after that finds it too late, its group is killed, and the
+ * stop says KILLED (A7: every list after the first 6 s late). The asker test
+ * names each list's time when that happens, and the edge is a test of its own.
+ * A list past the bound is cut, its `ps` and everything in that `ps`'s group
+ * killed, and the stop says why after its words, so a test that meets it fails
+ * by that name, and a `ps` that never answers ends a test that way (A5). A
+ * `ps` that fails or is missing is said in the sheet's words. How the sheet's
+ * bounded list degrades is tested on its own. `ms` keeps the time of each list
+ * in the order they answered, and `waited` is what a stop waited on them: its
+ * first list, before it signals, and the one in flight when its wait ends
+ * (the rest run while it waits), so a test that bounds a stop's time adds
+ * that and nothing else.
+ *
+ * @param {number} [boundMs] how long one `ps` is waited for: {@link PATIENT_LIST_MS}, or a test's own
+ * @param {(pid: number) => void} [started] told the pid of each `ps` it starts ({@link tableWithin})
+ */
+const patiently = (boundMs = PATIENT_LIST_MS, started = undefined) => {
   /** @type {number[]} */
   const ms = [];
   return {
     ms,
     deps: {
       /** @param {number} pgid @returns {Promise<{pids: number[]} | {why: string}>} */
-      list: (pgid) =>
-        new Promise((resolve) => {
-          const t = performance.now();
-          execFile('ps', ['-A', '-o', 'pid=', '-o', 'pgid='], { maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-            ms.push(performance.now() - t);
-            resolve(error ? { why: `ps failed: ${error.message.split('\n')[0]}` } : { pids: sheet.membersIn(String(stdout), pgid) });
-          });
-        })
+      list: async (pgid) => {
+        const t = performance.now();
+        const got = await tableWithin(boundMs, started);
+        ms.push(performance.now() - t);
+        return 'why' in got ? got : { pids: sheet.membersIn(got.table, pgid) };
+      }
     },
     waited: () => (ms.length === 0 ? 0 : ms[0] + (ms.length > 1 ? ms[ms.length - 1] : 0))
   };
+};
+
+/**
+ * How long a look for a group in the real table lasts in all, ms (BASE-STACK-1028 repair 7; check r7, A1 and A8:
+ * the asker test's look asked a late answer again up to 100 times, 2.05 s each under a `ps` late at every call,
+ * and ran past its test's 60 s timeout, which named no reason).
+ */
+const LOOK_MS = 10_000;
+
+/**
+ * Looks for the group `pgid` in the real table through the sheet's own bounded list ({@link sheet.groupMembers})
+ * until it holds `count` processes, for `lookMs` in all. An answer past LIST_WAIT_MS says how fast this machine
+ * was, not what its table holds, so it is asked again; any other failure ends the look. Answers what it last got,
+ * how many looks it took, and how long, so a look that ends without the group fails by those.
+ *
+ * @param {number} pgid @param {number} count @param {number} [lookMs]
+ */
+const lookFor = async (pgid, count, lookMs = LOOK_MS) => {
+  const from = performance.now();
+  /** @type {{pids: number[]} | {why: string}} */
+  let got = { pids: [] };
+  let looks = 0;
+  while (!('pids' in got && got.pids.length === count) && performance.now() - from < lookMs) {
+    got = await sheet.groupMembers(pgid);
+    looks += 1;
+    if (!('pids' in got) && got.why !== `ps did not answer within ${sheet.LIST_WAIT_MS} ms`) break;
+    if (!('pids' in got && got.pids.length === count)) await nap(50);
+  }
+  return { got, looks, ms: performance.now() - from };
 };
 
 /**
@@ -3947,8 +4061,11 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   // One run, bounded: a command that never exits, with a child of its own in the background.
   // EVERY STOP OF THIS TEST LISTS ITS GROUP PATIENTLY (BASE-STACK-1028 repair 6; the D1 landing gate of 6 Nov
   // 2026, load 207 to 253: one `ps` of the stubborn stop below answered past LIST_WAIT_MS, so that stop rightly
-  // said why after its words, and this test, which states its words for its processes alone, failed). A stall
-  // now delays the words and never changes them; the bound below adds what the stop waited on its lists.
+  // said why after its words, and this test, which states its words for its processes alone, failed). A list
+  // late by less than PATIENT_LIST_MS now delays the words and leaves them as they are (no process of these
+  // commands joins its group after the first list but a fork racing the signal); one later than that is cut and
+  // said after the words, so this test fails by that name, and a `ps` that never answers ends it so (repair 7,
+  // check r7, A5). The bound below adds what the stop waited on its lists.
   const bg = join(dir, 'bg.pid');
   const restartLists = patiently();
   const t0 = Date.now();
@@ -4192,16 +4309,10 @@ test('a process that joins a command\'s group after its SIGTERM went out, as a f
   const listed = spawn('sleep 30 & exec sleep 30', { shell: true, detached: true, stdio: 'ignore' });
   try {
     const pgid = /** @type {number} */ (listed.pid);
-    /** @type {{pids: number[]} | {why: string}} */
-    let got = { pids: [] };
-    for (let i = 0; i < 100 && !('pids' in got && got.pids.length === 2); i += 1) {
-      got = await sheet.groupMembers(pgid);
-      // An answer past LIST_WAIT_MS says how fast this machine was, not what its table holds: it is asked
-      // again, and any other failure ends the look (BASE-STACK-1028 repair 6: a stall broke the look here).
-      if (!('pids' in got) && got.why !== `ps did not answer within ${sheet.LIST_WAIT_MS} ms`) break;
-      await nap(50);
-    }
-    assert.ok('pids' in got && got.pids.length === 2 && got.pids.includes(pgid), `the leader and its one child: ${JSON.stringify(got)}`);
+    // An answer past LIST_WAIT_MS is asked again, for LOOK_MS in all, and then the look fails by its name
+    // (BASE-STACK-1028 repairs 6 and 7: a stall broke the look here; a `ps` late at every call ran it past the timeout).
+    const look = await lookFor(pgid, 2);
+    assert.ok('pids' in look.got && look.got.pids.length === 2 && look.got.pids.includes(pgid), `the leader and its one child: ${JSON.stringify(look.got)}, after ${look.looks} looks in ${Math.round(look.ms)} ms (a late answer is asked again for ${LOOK_MS} ms in all)`);
   } finally {
     process.kill(-(/** @type {number} */ (listed.pid)), 'SIGKILL');
   }
@@ -4213,14 +4324,18 @@ test('a process that joins a command\'s group after its SIGTERM went out, as a f
   writeFileSync(script, ['trap \'( sleep 0.3; exec sh -c "echo \\$\\$ > \\"$2\\"; exec sleep 1000" ) & exit 0\' TERM', 'sleep 1000 &', 'echo $$ > "$1"', 'wait', ''].join('\n'));
   const ready = join(dir, 'ready.pid');
   const lateFile = join(dir, 'late.pid');
-  // Listed patiently (BASE-STACK-1028 repair 6): a list a stall made late is waited for, so the process that
-  // joined is asked whatever the machine's speed; the bound adds what the stop waited on its lists.
+  // Listed patiently (BASE-STACK-1028 repairs 6 and 7): each list is waited for up to PATIENT_LIST_MS, and the
+  // process that joined is asked in time only by a list that answers inside the stop's wait, COMMAND_STOP_MS after
+  // the command left; a later one finds it too late (check r7, A7: every list after the first 6 s late). The
+  // failure then names each list's time; the edge is a test of its own. The bound adds what the stop waited on
+  // its lists.
   const leavesLists = patiently();
   const leaves = sheet.run(`sh '${script}' '${ready}' '${lateFile}'`, logFd, leavesLists.deps);
   try {
     await pidIn(ready);
     const t0 = Date.now();
-    assert.deepEqual(await leaves.stop(), { said: 'was sent SIGTERM and left', killed: false }, 'the process that joined after the signal was asked, and left');
+    const stopped = await leaves.stop();
+    assert.deepEqual(stopped, { said: 'was sent SIGTERM and left', killed: false }, `the process that joined after the signal was asked, and left (its lists answered in ${leavesLists.ms.map(Math.round).join(', ')} ms; one that answers later than COMMAND_STOP_MS after the command left finds that process too late, L-STACK1028-14)`);
     const tookLeaving = Date.now() - t0;
     assert.ok(tookLeaving < sheet.COMMAND_STOP_MS + leavesLists.waited(), `well inside the wait (took ${tookLeaving} ms, ${Math.round(leavesLists.waited())} ms of it on its lists)`);
     assert.equal(sheet.groupRunning(leaves.child.pid), false, 'no process of its group is left');
@@ -4691,7 +4806,8 @@ test('the sheet\'s follow-ups: one file by its device and inode, a day and a mon
   assert.equal(sheet.STDOUT_WAIT_MS, 60_000);
   // A writer the sheet had to kill is a failure in the sheet (verify r6 follow-up: said on stderr only).
   assert.equal(sheet.KILLED, `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
-  // Its group listed patiently (BASE-STACK-1028 repair 6), so the failure is the kill's words alone however late `ps` answers.
+  // Its group listed patiently (BASE-STACK-1028 repairs 6 and 7), so the failure is the kill's words alone for any `ps` that
+  // answers within PATIENT_LIST_MS; a later one is cut and named after them.
   const killed = await sheet.runSheet({ ...argsFor(), clients: [1], writer: "trap '' TERM; while :; do sleep 1; done", commandLog: join(dir, 'commands.log') }, { send: standIn({ ignore: new Set(), delayMs: 5 }).send, log: () => {}, group: patiently().deps });
   assert.ok(killed.failures.includes(`the --writer command's process group ${sheet.KILLED}: what it was writing was ended by force, not asked to stop`), killed.failures.join('\n'));
 });
@@ -6239,7 +6355,8 @@ test('a --writer the sheet had to kill fails the sheet whatever the list of its 
   const path = process.env.PATH;
   /**
    * @param {string | null} bin a folder whose `ps` the stop finds first, its own bounded list reading it; or null for
-   *   the system's `ps`, read patiently (BASE-STACK-1028 repair 6: a stall must add no reason the processes did not earn)
+   *   the system's `ps`, read patiently (BASE-STACK-1028 repairs 6 and 7: a stall within PATIENT_LIST_MS must add no reason
+   *   the processes did not earn; a later one is cut and named)
    * @param {string} tag
    */
   const sheetWith = async (bin, tag) => {
@@ -6371,10 +6488,13 @@ test('a capped settle is the machine\'s only for requests asked of its own stand
 // the commands they run: the two cases on those fail on the sheet before this
 // repair, which took no list there. Case A makes the landing gate's own words
 // at will, through the sheet's bounded list; the rest pin what a patient list
-// says for each extreme of `ps`.
+// says for each extreme of `ps`. Repair 7 (check r7): the patient list waits
+// PATIENT_LIST_MS at most (its own test is below), so this title no longer
+// says "however late"; case A counts its lists on this side, where a kill
+// cannot lose one (A4: a stall killed the late `ps` before it counted).
 // ---------------------------------------------------------------------------
 
-test('a stop given a patient list says its processes\' words however late `ps` answers, and the sheet\'s own bounded list says each late answer it met: a `ps` late at every list, one that fails, one with no table and none at all (BASE-STACK-1028 repair 6)', { timeout: 180_000 }, async () => {
+test('a stop given a patient list says its processes\' words for any `ps` that answers within the patient bound, and the sheet\'s own bounded list says each late answer it met: a `ps` late at every list, one that fails, one with no table and none at all (BASE-STACK-1028 repairs 6 and 7)', { timeout: 180_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'stack1028-r6-'));
   const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
   const [late, failing, empty, none] = ['late', 'failing', 'empty', 'none'].map((name) => join(dir, name));
@@ -6428,11 +6548,13 @@ test('a stop given a patient list says its processes\' words however late `ps` a
 
   // A. THE LANDING GATE'S WORDS, AT WILL: the --restart test's stubborn command, its first list read patiently
   // and every later one by the sheet's own bounded list (sheet.groupMembers), each `ps` 2.1 s late. The second
-  // list ran out at LIST_WAIT_MS, the stop said so after its words, and listed no more.
+  // list ran out at LIST_WAIT_MS, the stop said so after its words, and listed no more. The lists are counted
+  // here, as the stop asks for them (repair 7, check r7 A4): the late `ps` counts itself before its sleep, and
+  // one stall past LIST_WAIT_MS before that line killed it uncounted, so its own count said 1 of 2.
   const firstOnly = patiently();
   let n = 0;
   const gate = await withPs(late, () => stopOf("trap '' TERM; sleep 1000", { list: (pgid) => (n++ === 0 ? firstOnly.deps.list(pgid) : sheet.groupMembers(pgid)) }, 300));
-  assert.deepEqual([gate, calls()], [{ said: `${sheet.KILLED}${LATE.again}`, killed: true }, 2], 'the words of 6 Nov, and no list after the late one');
+  assert.deepEqual([gate, n, firstOnly.ms.length], [{ said: `${sheet.KILLED}${LATE.again}`, killed: true }, 2, 1], 'the words of 6 Nov, and no list after the late one');
 
   // B. THE FIX: the same stop given a patient list waits for every late answer, lists on, and says the processes' words alone.
   const patient = patiently();
@@ -6509,4 +6631,259 @@ test('a stop given a patient list says its processes\' words however late `ps` a
   await counted.deps.list(process.pid);
   await counted.deps.list(process.pid);
   assert.deepEqual([counted.ms.length, counted.waited()], [3, counted.ms[0] + counted.ms[2]]);
+});
+
+// ---------------------------------------------------------------------------
+// BASE-STACK-1028 repair 7 (8 Nov 2026): check r7's three blocking items in
+// repair 6's tests, each reproduced on its tip first (logs-STACK1028/repair7,
+// run-A5-before.txt, run-A4-before.txt, run-A7-before.txt). A5: the patient
+// list had no bound, so a `ps` that never answered held the test file's
+// process past its timeout and `node --test` never ended. A4: case A above
+// read the late `ps`'s own count, which a stall can lose. A7: a list that
+// answers after the stop's wait finds a process that joined the group after
+// the first list too late, so such a stall changes the words, which repair
+// 6's rows said a stall never does.
+// ---------------------------------------------------------------------------
+
+test('a patient list waits for `ps` at most its bound and takes no answer after it, ending that `ps` and every process of its group: one that never answers, one that ignores SIGTERM, one that stops itself, one that exits while its child holds its output, one that prints past 16 MiB and one that prints a table and never exits; it says a failing, missing or empty `ps` in the sheet\'s words, and a stop and a look that meet a `ps` that never answers end by name (BASE-STACK-1028 repair 7)', { timeout: 120_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stack1028-r7-bound-'));
+  const path = process.env.PATH;
+  /**
+   * A folder whose `ps` runs `body`, `$d` naming the folder.
+   *
+   * @param {string} name @param {string[]} body
+   */
+  const stub = (name, body) => {
+    const bin = join(dir, name);
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'ps'), ['#!/bin/sh', 'd=${0%/*}', ...body, ''].join('\n'), { mode: 0o755 });
+    return bin;
+  };
+  /**
+   * Calls `body` with `bin`'s `ps` found first, or alone on PATH, or with no PATH at all (`bin` null), and puts
+   * this process's own PATH back at once (the tests of this file run one at a time). A list starts its `ps` when
+   * it is called, so each keeps the PATH it was called under.
+   *
+   * @template T @param {string | null} bin @param {() => T} body @param {boolean} [alone] @returns {T}
+   */
+  const under = (bin, body, alone = false) => {
+    if (bin === null) delete process.env.PATH;
+    else process.env.PATH = alone ? bin : `${bin}:${path}`;
+    try {
+      return body();
+    } finally {
+      process.env.PATH = path;
+    }
+  };
+  /** Whether every process of group `pgid` is gone, waited for up to 30 s (SIGKILL went out at the bound). @param {number} pgid */
+  const goneWithin = async (pgid) => {
+    const end = Date.now() + 30_000;
+    while (sheet.groupRunning(pgid) && Date.now() < end) await nap(20);
+    return !sheet.groupRunning(pgid);
+  };
+  const GROUP = 4242;
+  /**
+   * One patient list of GROUP through `bin`'s `ps`, bounded by `bound`: what it answered, how long it took, and
+   * whether the group that `ps` led is gone.
+   *
+   * @param {string | null} bin @param {number} bound @param {boolean} [alone]
+   */
+  const listOf = async (bin, bound, alone = false) => {
+    /** @type {number[]} */
+    const started = [];
+    const lists = patiently(bound, (pid) => started.push(pid));
+    const got = await under(bin, () => lists.deps.list(GROUP), alone);
+    return { got, ms: lists.ms[0], gone: started.length === 1 && (await goneWithin(started[0])) };
+  };
+  const cut = (/** @type {number} */ bound) => ({ why: `ps did not answer within ${bound} ms, the speed tests' patient bound` });
+  const B = 500;
+  assert.equal(PATIENT_LIST_MS, 15_000);
+
+  // 1. A `ps` THAT NEVER ANSWERS (check r7, A5): answered at the bound, by name, and ended.
+  const never = stub('never', ['exec sleep 1000']);
+  const a = await listOf(never, B);
+  assert.deepEqual([a.got, a.gone], [cut(B), true]);
+  assert.ok(a.ms >= B - 1, `it waited its bound (${Math.round(a.ms)} ms)`);
+  // 2. ONE THAT IGNORES SIGTERM, with a child that ignores it too: the whole group is sent SIGKILL.
+  const deaf = stub('deaf', ["trap '' TERM", 'sleep 1000 &', 'wait']);
+  const b = await listOf(deaf, B);
+  assert.deepEqual([b.got, b.gone], [cut(B), true]);
+  // 3. ONE THAT STOPS ITSELF, which no SIGTERM ends until it is continued.
+  const stopped = stub('stopped', ['kill -STOP $$']);
+  const c = await listOf(stopped, B);
+  assert.deepEqual([c.got, c.gone], [cut(B), true]);
+  // 4. ONE THAT PRINTS A LINE NAMING THE GROUP AND EXITS AT ONCE, its child holding its output: never read as a
+  // table of that line, which is what a bound that kills the `ps` alone reads at that moment (probed, 8 Nov).
+  const holder = stub('holder', [`echo "  ${GROUP}   ${GROUP}"`, 'sleep 1000 &', 'exit 0']);
+  const d = await listOf(holder, B);
+  assert.deepEqual([d.got, d.gone], [cut(B), true]);
+  // 5. ONE THAT PRINTS A TABLE AND NEVER EXITS: not an answer until it ends.
+  const lingering = stub('lingering', [`echo "  ${GROUP}   ${GROUP}"`, 'exec 1>&-', 'exec sleep 1000']);
+  const e = await listOf(lingering, B);
+  assert.deepEqual([e.got, e.gone], [cut(B), true]);
+  // 6. ONE THAT PRINTS PAST 16 MiB, the sheet's own maxBuffer: refused in the sheet's words, and ended.
+  const flood = stub('flood', ["exec yes '1 1'"]);
+  const f = await listOf(flood, PATIENT_LIST_MS);
+  assert.deepEqual([f.got, f.gone], [{ why: 'ps failed: stdout maxBuffer length exceeded' }, true]);
+  // 7. ONE THAT FAILS, 8. NONE ON PATH, 9. ONE WITH NO TABLE: each as the sheet's own list says it.
+  const failing = stub('failing', ['echo "no process table here" >&2', 'exit 1']);
+  assert.deepEqual((await listOf(failing, PATIENT_LIST_MS)).got, { why: 'ps failed: Command failed: ps -A -o pid= -o pgid=' });
+  const nowhere = join(dir, 'nowhere');
+  mkdirSync(nowhere);
+  assert.deepEqual((await listOf(nowhere, PATIENT_LIST_MS, true)).got, { why: 'ps failed: spawn ps ENOENT' });
+  const blank = stub('blank', ['exit 0']);
+  assert.deepEqual((await listOf(blank, PATIENT_LIST_MS)).got, { pids: [] });
+  // 10. OUT OF THE BOX, A TABLE OF GARBAGE: bytes that are no text, lines of other shapes, the group's one process.
+  const garbage = stub('garbage', [`printf '\\377\\376 79 ${GROUP}\\n'`, `printf '%s\\n' 'x ${GROUP}' '${GROUP} ${GROUP} extra' '0 ${GROUP}' '  77   ${GROUP}' '   78    7'`]);
+  assert.deepEqual((await listOf(garbage, PATIENT_LIST_MS)).got, { pids: [77] });
+
+  // THE REAL TABLE, for the cases that read it: a group started here, its leader and its one child.
+  const { spawn } = await import('node:child_process');
+  const real = spawn('sleep 30 & exec sleep 30', { shell: true, detached: true, stdio: 'ignore' });
+  const pgid = /** @type {number} */ (real.pid);
+  try {
+    const look = await lookFor(pgid, 2);
+    assert.ok('pids' in look.got && look.got.pids.length === 2, `the group's two processes: ${JSON.stringify(look.got)}`);
+    const both = [...look.got.pids].sort((x, y) => x - y);
+    // 11. COMBINED, TWELVE LISTS AT ONCE: four of a `ps` that never answers, four of one 2.1 s late, four of the
+    // system's: each answers as its own `ps` does, and every `ps` that never answered is ended.
+    const late = stub('late', ['sleep 2.1', 'PATH=${PATH#"$d:"}', 'exec ps "$@"']);
+    /** @type {number[]} */
+    const neverStarted = [];
+    const kinds = /** @type {const} */ (['never', 'late', 'system']);
+    const runs = kinds.flatMap((kind) =>
+      [0, 1, 2, 3].map(() => {
+        const lists = kind === 'never' ? patiently(B, (pid) => neverStarted.push(pid)) : patiently();
+        const listed = kind === 'system' ? lists.deps.list(pgid) : under(kind === 'never' ? never : late, () => lists.deps.list(pgid));
+        return listed.then((got) => [kind, 'pids' in got ? [...got.pids].sort((x, y) => x - y) : got]);
+      })
+    );
+    const answered = await Promise.all(runs);
+    assert.deepEqual(answered, kinds.flatMap((kind) => [0, 1, 2, 3].map(() => [kind, kind === 'never' ? cut(B) : both])));
+    assert.deepEqual(await Promise.all(neverStarted.map(goneWithin)), [true, true, true, true]);
+    // 12. OUT OF THE BOX, NO PATH AT ALL: the system's default search finds `ps`, for this list as for the sheet's.
+    const noPath = await under(null, () => patiently().deps.list(pgid));
+    assert.deepEqual('pids' in noPath ? [...noPath.pids].sort((x, y) => x - y) : noPath, both);
+    delete process.env.PATH;
+    /** @type {Awaited<ReturnType<typeof lookFor>>} */
+    let sheetNoPath;
+    try {
+      sheetNoPath = await lookFor(pgid, 2);
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.deepEqual('pids' in sheetNoPath.got ? [...sheetNoPath.got.pids].sort((x, y) => x - y) : sheetNoPath.got, both);
+    // 13. THE LOOK OF THE ASKER TEST GIVES UP BY NAME under a `ps` late at every call (check r7, A1 and A8): it
+    // asks again for its bound in all, then answers the late words, never past the test's timeout.
+    process.env.PATH = `${late}:${path}`;
+    /** @type {Awaited<ReturnType<typeof lookFor>>} */
+    let gaveUp;
+    try {
+      gaveUp = await lookFor(pgid, 2, 3_000);
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.deepEqual(gaveUp.got, { why: `ps did not answer within ${sheet.LIST_WAIT_MS} ms` });
+    assert.ok(gaveUp.looks >= 1 && gaveUp.ms >= 3_000, `it looked ${gaveUp.looks} times in ${Math.round(gaveUp.ms)} ms`);
+  } finally {
+    process.kill(-pgid, 'SIGKILL');
+  }
+
+  // 14. COMBINED, A REAL STOP UNDER A `ps` THAT NEVER ANSWERS: its first list is cut at the bound and said after
+  // its words, the group is sent SIGTERM as one, and the stop ends by name; a command that ignores SIGTERM too is
+  // killed at the stop's own bound, and its words say both. No process of either is left.
+  const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
+  const asOne = (/** @type {string} */ why) => ` (its processes could not be listed (${why}), so the group was sent SIGTERM as one, which misses a process forked at that instant)`;
+  for (const [command, said, killed] of /** @type {[string, string, boolean][]} */ ([
+    ['exec sleep 1000', 'was sent SIGTERM and left', false],
+    ["trap '' TERM; sleep 1000", sheet.KILLED, true]
+  ])) {
+    /** @type {number[]} */
+    const started = [];
+    const cmd = sheet.run(command, logFd, patiently(B, (pid) => started.push(pid)).deps);
+    try {
+      await nap(100);
+      assert.deepEqual(await under(never, () => cmd.stop()), { said: `${said}${asOne(cut(B).why)}`, killed }, command);
+      assert.equal(sheet.groupRunning(cmd.child.pid), false, `${command}: no process of its group is left`);
+      assert.deepEqual(await Promise.all(started.map(goneWithin)), [true], `${command}: its one list's \`ps\` was ended`);
+    } finally {
+      try {
+        process.kill(-(/** @type {number} */ (cmd.child.pid)), 'SIGKILL');
+      } catch {
+        // already gone: the case the assertions above ask for
+      }
+    }
+  }
+});
+
+test('a process that joins a stopping group after its first list is asked in time only by a list that answers inside the stop\'s wait: a list answering 1,000 ms past COMMAND_STOP_MS after the command left finds it too late, so the group is killed and the stop says so, and one answering 2,500 ms before then finds it in time (BASE-STACK-1028 repair 7)', { timeout: 60_000 }, async () => {
+  // Check r7, A7: every list after the first 6 s late, past the stop's wait, turned the asker test's stop into
+  // KILLED under a patient list. A stop waits COMMAND_STOP_MS for its group once the command has left, and a
+  // process that joined the group after the first list is asked only by a later list that sees it. This pins
+  // that edge from both sides, with the asker test's own command, which on SIGTERM starts a process into its
+  // group and leaves. OUTSIDE IS EXACT: the late list's timer is due 1,000 ms after the stop's deadline, and
+  // timers run in the order they are due, so the stop's look past its deadline runs first and finds the joined
+  // process unasked. INSIDE leaves the joined process 2,500 ms to be asked and leave before the deadline.
+  const dir = mkdtempSync(join(tmpdir(), 'stack1028-r7-edge-'));
+  const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
+  const script = join(dir, 'leaves-one.sh');
+  writeFileSync(script, ['trap \'( sleep 0.3; exec sh -c "echo \\$\\$ > \\"$2\\"; exec sleep 1000" ) & exit 0\' TERM', 'sleep 1000 &', 'echo $$ > "$1"', 'wait', ''].join('\n'));
+  /**
+   * Stops that command with a patient list whose first list answers at once and every later one no sooner than
+   * `at` ms after the command left: how the stop ended, how many lists it asked for and their times, the
+   * process that joined, every signal it sent, and whether its group is gone.
+   *
+   * @param {number} at @param {string} tag
+   */
+  const stopLate = async (at, tag) => {
+    const ready = join(dir, `${tag}.ready`);
+    const joined = join(dir, `${tag}.joined`);
+    const lists = patiently();
+    /** @type {[number, string][]} */
+    const sent = [];
+    let calls = 0;
+    let leftAt = 0;
+    /** @type {Promise<void>} */
+    let left = Promise.resolve();
+    const cmd = sheet.run(`sh '${script}' '${ready}' '${joined}'`, logFd, {
+      list: async (pgid) => {
+        calls += 1;
+        if (calls > 1) {
+          await left;
+          await nap(Math.max(0, leftAt + at - performance.now()));
+        }
+        return lists.deps.list(pgid);
+      },
+      kill: (target, signal) => {
+        sent.push([target, signal]);
+        return sheet.signalPid(target, signal);
+      }
+    });
+    // Registered before the stop's own wait is, so `leftAt` is read first and the stop's deadline is
+    // COMMAND_STOP_MS after it or later.
+    left = cmd.wait.then(() => {
+      leftAt = performance.now();
+    });
+    try {
+      await pidIn(ready);
+      const how = await cmd.stop();
+      return { how, calls, ms: lists.ms.map(Math.round), joiner: await pidIn(joined), sent, gone: !sheet.groupRunning(cmd.child.pid), pgid: /** @type {number} */ (cmd.child.pid) };
+    } finally {
+      try {
+        process.kill(-(/** @type {number} */ (cmd.child.pid)), 'SIGKILL');
+      } catch {
+        // already gone: the case the assertions ask for
+      }
+    }
+  };
+  const asked = (/** @type {{sent: [number, string][]}} */ r, /** @type {number} */ pid) => r.sent.filter(([t, s]) => t === pid && s === 'SIGTERM').length;
+  assert.equal(sheet.COMMAND_STOP_MS, 5_000);
+  // OUTSIDE: the joined process is asked by the late list, after the wait ended, and the group is then killed.
+  const outside = await stopLate(sheet.COMMAND_STOP_MS + 1_000, 'outside');
+  assert.deepEqual(outside.how, { said: sheet.KILLED, killed: true }, `lists ${outside.ms.join(', ')} ms`);
+  assert.deepEqual([outside.calls, asked(outside, outside.joiner), outside.sent.some(([t, s]) => t === -outside.pgid && s === 'SIGKILL'), outside.gone], [2, 1, true, true], 'two lists, the second in flight when the wait ended; it asked the joined process once, too late');
+  // INSIDE: the same list 2,500 ms before the deadline asks it in time, and it leaves; nothing is killed.
+  const inside = await stopLate(sheet.COMMAND_STOP_MS - 2_500, 'inside');
+  assert.deepEqual(inside.how, { said: 'was sent SIGTERM and left', killed: false }, `lists ${inside.ms.join(', ')} ms`);
+  assert.deepEqual([asked(inside, inside.joiner), inside.sent.some(([, s]) => s === 'SIGKILL'), inside.gone], [1, false, true], 'the joined process was asked once, in time');
 });
