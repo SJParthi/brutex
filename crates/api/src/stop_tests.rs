@@ -140,7 +140,7 @@ fn a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free() {
     while !crate::speed::global()
         .open_now()
         .iter()
-        .any(|(name, n)| name == route && *n == 1)
+        .any(|(name, n)| [name == route, *n == 1] == [true; 2])
     {
         assert!(
             std::time::Instant::now() < deadline,
@@ -158,10 +158,10 @@ fn a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free() {
     assert!(ended.is_ok(), "{ended:?}");
     let started = crate::emitted::landed(mark, "api.serve", "stop started");
     assert!(
-        started
-            .iter()
-            .any(|record| field_of(record, "drain_ms") == 200
-                && field_of(record, "bound_ms") == 200 + millis(SHUTDOWN_GRACE)),
+        started.iter().any(|record| [
+            field_of(record, "drain_ms") == 200,
+            field_of(record, "bound_ms") == 200 + millis(SHUTDOWN_GRACE)
+        ] == [true; 2]),
         "the stop says its bounds when it starts: {started:?}"
     );
     let cut = crate::emitted::landed(
@@ -171,8 +171,10 @@ fn a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free() {
     );
     assert!(
         cut.iter().any(|record| {
-            crate::emitted::says(record, "routes", &format!("{route}=1"))
-                && field_of(record, "cut") >= 1
+            [
+                crate::emitted::says(record, "routes", &format!("{route}=1")),
+                field_of(record, "cut") >= 1,
+            ] == [true; 2]
         }),
         "the cut names how many and where: {cut:?}"
     );
@@ -420,8 +422,10 @@ fn blocking_work_past_the_wait_keeps_the_store_and_the_port_to_the_process_end()
     );
     let said = crate::emitted::landed(mark, "api.main", "blocking work outlived the shutdown wait");
     assert!(
-        said.iter().any(|record| field_of(record, "grace_ms") == 100
-            && field_of(record, "engine_abandoned") == 0),
+        said.iter().any(|record| [
+            field_of(record, "grace_ms") == 100,
+            field_of(record, "engine_abandoned") == 0
+        ] == [true; 2]),
         "the keep is said, with the wait it outlived: {said:?}"
     );
     drop(finish);

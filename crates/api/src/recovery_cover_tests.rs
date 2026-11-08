@@ -1107,10 +1107,10 @@ async fn the_page_names_every_state_and_a_pointer_to_another_plan_is_refused() {
         "a plain pointer names no predecessor"
     );
     assert!(
-        view.records
-            .iter()
-            .any(|row| row.status == Status::Verified
-                && server::param(&row.body, "member") == "NIFTY"),
+        view.records.iter().any(|row| [
+            row.status == Status::Verified,
+            server::param(&row.body, "member") == "NIFTY"
+        ] == [true; 2]),
         "{:?}",
         view.records
     );

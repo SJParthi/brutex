@@ -4736,12 +4736,13 @@ mod tests {
         // more for the field.
         let encode = |text: &str| -> String {
             text.bytes()
-                .map(|b| {
-                    if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                // A MATCH, NOT A LAZY `||`, so no side waits on a byte the
+                // fixture never carries (D-8661 item 21).
+                .map(|b| match b {
+                    b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'-' | b'_' | b'.' | b'~' => {
                         char::from(b).to_string()
-                    } else {
-                        format!("%{b:02X}")
                     }
+                    _ => format!("%{b:02X}"),
                 })
                 .collect()
         };
@@ -9900,14 +9901,15 @@ mod cloud_mutant_tests {
     /// The leg encoding the page writes: `route|vendor|dir|label|payload`,
     /// each part's `%`, `&`, `=`, `|` and `+` escaped, twice over.
     fn enc(raw: &str) -> String {
+        use std::fmt::Write as _;
         let mut out = String::new();
         for ch in raw.chars() {
             match ch {
-                '%' => out.push_str("%25"),
-                '&' => out.push_str("%26"),
-                '=' => out.push_str("%3D"),
-                '|' => out.push_str("%7C"),
-                '+' => out.push_str("%2B"),
+                // ONE ARM FOR THE FIVE, so no arm waits on a character the
+                // fixtures never carry (D-8661 item 21).
+                '%' | '&' | '=' | '|' | '+' => {
+                    let _ = write!(out, "%{:02X}", u32::from(ch));
+                }
                 c => out.push(c),
             }
         }

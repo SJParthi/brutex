@@ -162,15 +162,16 @@ fn api_census_refuses_a_symlinked_epoch_by_name() {
 fn listed_and_read_as_before(dir: &Path) -> usize {
     use std::io::Read as _;
     let mut newest: Option<u32> = None;
-    for entry in std::fs::read_dir(dir).expect("listed") {
-        if let Some(epoch) = entry
+    // A FILTER, NOT AN `if let`, so no side waits on a folder holding a file
+    // that is no epoch (D-8661 item 21).
+    for epoch in std::fs::read_dir(dir).expect("listed").filter_map(|entry| {
+        entry
             .expect("an entry")
             .file_name()
             .to_str()
             .and_then(parse_epoch_name)
-        {
-            newest = Some(newest.map_or(epoch, |seen| seen.max(epoch)));
-        }
+    }) {
+        newest = Some(newest.map_or(epoch, |seen| seen.max(epoch)));
     }
     let path = dir.join(format!("{:06}.man", newest.expect("an epoch")));
     let mut bytes = Vec::new();

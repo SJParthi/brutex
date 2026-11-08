@@ -1614,7 +1614,7 @@ mod cloud_mutant_tests {
     fn row(parsed: &Parsed, kind: ImportKind, on: &str) -> DayRow {
         parsed
             .range(day(on), day(on))
-            .find(|row| row.kind == kind && row.filter == "*")
+            .find(|row| [row.kind == kind, row.filter == "*"] == [true; 2])
             .cloned()
             .expect("a row for the key")
     }

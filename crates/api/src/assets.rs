@@ -1080,9 +1080,8 @@ mod tests {
     /// Writes one file under the build directory, creating its parents.
     fn put(dir: &Path, rel: &str, body: &str) {
         let path = dir.join(BUILD_DIR).join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("mkdir");
-        }
+        std::fs::create_dir_all(path.parent().expect("a file under the build directory"))
+            .expect("mkdir");
         let mut f = std::fs::File::create(&path).expect("create");
         f.write_all(body.as_bytes()).expect("write");
     }

@@ -359,10 +359,10 @@ fn the_open_list_stops_at_the_scan_bound_and_says_so() {
         "pull runs have no closing record, not named",
     );
     assert!(
-        unnamed
-            .iter()
-            .any(|line| crate::emitted::counts(line, "unnamed", 6)
-                && crate::emitted::counts(line, "open_count", 70)),
+        unnamed.iter().any(|line| [
+            crate::emitted::counts(line, "unnamed", 6),
+            crate::emitted::counts(line, "open_count", 70)
+        ] == [true; 2]),
         "{unnamed:?}"
     );
     assert_eq!(

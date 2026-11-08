@@ -203,10 +203,14 @@ async fn a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_
         "re-read returned the SAME value; the token is dead and the pull halted",
     );
     assert!(
+        // READ AS AN ARRAY, so no side of the scan depends on what else the
+        // log holds (D-8661 item 21).
         said.iter().any(|record| {
-            record.level == telemetry::Level::Warn
-                && crate::emitted::says(record, "field", "access-token")
-                && !format!("{record:?}").contains("stale")
+            [
+                record.level == telemetry::Level::Warn,
+                crate::emitted::says(record, "field", "access-token"),
+                !format!("{record:?}").contains("stale"),
+            ] == [true; 3]
         }),
         "the same-value verdict is logged by field name and never by value: {said:?}"
     );

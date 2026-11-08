@@ -211,7 +211,7 @@ fn a_refusal_names_a_holder_in_this_process_when_it_is_known() {
         .expect("the builder");
     let why = journal
         .appended_within(Duration::from_millis(30), &member(7), |_| {
-            member(7).image().to_vec()
+            unreachable!("never built")
         })
         .expect_err("held");
     for part in [
@@ -320,7 +320,7 @@ fn a_zero_bound_refuses_at_once() {
     let started = Instant::now();
     let why = journal
         .appended_within(Duration::ZERO, &closed("z"), |_| {
-            closed("z").image().to_vec()
+            unreachable!("never built")
         })
         .expect_err("held, and no patience");
     let took = started.elapsed();

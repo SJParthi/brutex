@@ -62,9 +62,7 @@ fn stall_out(state: &mut FeedState) -> u32 {
         ticks += 1;
         assert!(ticks <= 64, "a month must stall within its bound");
         if let Next::Stall { .. } = state.observe(&failed()) {
-            if let Some(next) = month_after(state.frontier) {
-                state.frontier = next;
-            }
+            state.frontier = month_after(state.frontier).expect("a month after the frontier");
             return ticks;
         }
     }

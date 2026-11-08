@@ -125,7 +125,7 @@ async fn a_setting_changes_without_a_restart_and_is_audited() {
     let rows = cli::operation_audit::page(&root, None, 32).unwrap();
     assert!(
         rows.iter()
-            .any(|row| row.label == "POST /settings" && row.response_status == 200),
+            .any(|row| [row.label == "POST /settings", row.response_status == 200] == [true; 2]),
         "{rows:?}"
     );
     // A STALE REPEAT IS REFUSED 409, AND AUDITED TOO.
@@ -135,7 +135,7 @@ async fn a_setting_changes_without_a_restart_and_is_audited() {
     let rows = cli::operation_audit::page(&root, None, 32).unwrap();
     assert!(
         rows.iter()
-            .any(|row| row.label == "POST /settings" && row.response_status == 409),
+            .any(|row| [row.label == "POST /settings", row.response_status == 409] == [true; 2]),
         "{rows:?}"
     );
 

@@ -474,10 +474,10 @@ fn no_rate_table_is_a_named_refusal_in_every_cell_and_never_a_guess() {
     ));
     let missing = fixture.root.join("no-such-table.tsv");
     let unreadable = RateTable::from_var(Some(missing.clone().into_os_string()));
-    let why = match &unreadable {
-        RateTable::Unreadable(why) => why.clone(),
-        other => format!("not unreadable: {other:?}"),
+    let RateTable::Unreadable(why) = &unreadable else {
+        panic!("not unreadable: {unreadable:?}");
     };
+    let why = why.clone();
     assert_eq!(unreadable.state(), "unreadable", "{why}");
     assert!(why.contains("no-such-table.tsv"), "{why}");
     let written = fixture.root.join("table.tsv");

@@ -879,20 +879,24 @@ async fn a_degraded_serve_exits_degraded_and_refuses_an_unreadable_recovery() {
     );
     assert!(
         stopped.iter().any(|record| {
-            record.level == telemetry::Level::Error
-                && crate::emitted::counts(record, "exit", u64::from(DEGRADED))
+            [
+                record.level == telemetry::Level::Error,
+                crate::emitted::counts(record, "exit", u64::from(DEGRADED)),
+            ] == [true; 2]
         }),
         "{stopped:?}"
     );
     let refused = crate::emitted::landed(from, "api.recovery", "recovery not resumed");
     assert!(
         refused.iter().any(|record| {
-            record.level == telemetry::Level::Error
-                && crate::emitted::says(
+            [
+                record.level == telemetry::Level::Error,
+                crate::emitted::says(
                     record,
                     "why",
                     "active recovery pointer is empty; prior activation is unverified",
-                )
+                ),
+            ] == [true; 2]
         }),
         "{refused:?}"
     );
@@ -1080,7 +1084,7 @@ fn rerun_child(test: &str, env: &[(&str, &std::ffi::OsStr)]) -> (String, String)
         .iter()
         .any(|&(key, value)| key == READ_ONLY_ENV && value == "1");
     let names_autopilot = env.iter().any(|&(key, _)| key == autopilot::AUTOPILOT_ENV);
-    if !(read_only && names_autopilot) {
+    if [read_only, names_autopilot] != [true; 2] {
         command.env(autopilot::AUTOPILOT_ENV, "pause");
     }
     let output = command.output().expect("the child test process starts");

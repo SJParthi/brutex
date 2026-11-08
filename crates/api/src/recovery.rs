@@ -2495,10 +2495,10 @@ mod tests {
             // ONE EVENT, read back from the installed sink, naming the plan.
             let events = crate::emitted::landed(from, "api.recovery", "recovery not resumed");
             assert!(
-                events
-                    .iter()
-                    .any(|event| crate::emitted::says(event, "plan", &hex(id))
-                        && crate::emitted::says(event, "why", &line)),
+                events.iter().any(|event| [
+                    crate::emitted::says(event, "plan", &hex(id)),
+                    crate::emitted::says(event, "why", &line)
+                ] == [true; 2]),
                 "the grounded start wrote no event naming plan {}",
                 hex(id)
             );
@@ -2589,16 +2589,10 @@ mod tests {
         );
         note(&body, "recovery fixture: source evidence unresolved");
         let events = crate::emitted::landed(start, "pull.recovery", "window unresolved");
-        assert!(
-            events
-                .iter()
-                .any(|event| crate::emitted::says(event, "symbol", "NIFTY")
-                    && crate::emitted::says(
-                        event,
-                        "why",
-                        "recovery fixture: source evidence unresolved"
-                    ))
-        );
+        assert!(events.iter().any(|event| [
+            crate::emitted::says(event, "symbol", "NIFTY"),
+            crate::emitted::says(event, "why", "recovery fixture: source evidence unresolved")
+        ] == [true; 2]));
         let root = crate::scratch::path("recovery-event-refusal");
         let site = Loaded::new(Site::load(&root.join("absent"), &root));
         claim(&site, None).unwrap();
@@ -2612,12 +2606,10 @@ mod tests {
         )
         .await;
         let events = crate::emitted::landed(start, "pull.recovery", "recovery ended");
-        assert!(
-            events
-                .iter()
-                .any(|event| crate::emitted::says(event, "plan", &hex(id))
-                    && crate::emitted::says(event, "summary", "Recovery BLOCKED"))
-        );
+        assert!(events.iter().any(|event| [
+            crate::emitted::says(event, "plan", &hex(id)),
+            crate::emitted::says(event, "summary", "Recovery BLOCKED")
+        ] == [true; 2]));
         assert!(!site.run.lock().unwrap().as_ref().unwrap().running());
         assert!(!root.exists());
     }
