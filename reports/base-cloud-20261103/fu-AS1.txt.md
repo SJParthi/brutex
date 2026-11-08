@@ -3,9 +3,9 @@
 Session BASE-COV-API-AS1 (fourth continuation, token BASE-COV-API-AS1-20261105-5). One fenced block below: every uncovered row of G1's files that is an (F) failing arm of an assert or panic in test code whose statement runs, or a (U) row with its proof in brackets (on every target unless the proof names one).
 
 `````text
-BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip 071f6bdde320bdd3523a52fd97ecf4b213082c34, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
-G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 62423/63125 (702 uncovered), branches 4360/4976 (616 uncovered sides)
-classified: GAP prod 316 lines 85 sides; GAP test 64 lines 57 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 10 sides; (F) 148 lines 404 sides; (U) 86 lines 60 sides
+BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip a718e7a5059e25a4f78bc1c2fa7cd3a3b2bc25f8, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
+G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 62420/63124 (704 uncovered), branches 4354/4968 (614 uncovered sides)
+classified: GAP prod 316 lines 85 sides; GAP test 66 lines 57 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 9 sides; (F) 148 lines 403 sides; (U) 86 lines 60 sides
 (F) LINE crates/api/src/assets.rs:1136  default_web_dir().display()
 (F) LINE crates/api/src/assets.rs:1452  assets.named().display()
 (F) LINE crates/api/src/assets.rs:1565  panic!(
@@ -150,7 +150,6 @@ classified: GAP prod 316 lines 85 sides; GAP test 64 lines 57 sides; GAP ignored
 (F) BRANCH crates/api/src/census.rs:2836:46 False  why.contains("(symlink)") && why.contains("a symbolic link, not a regular file"),
 (F) BRANCH crates/api/src/census.rs:2841:21 False  assert!(census.is_loud() && census.note().contains("not a regular file"));
 (F) BRANCH crates/api/src/census.rs:2841:41 False  assert!(census.is_loud() && census.note().contains("not a regular file"));
-(F) BRANCH crates/api/src/census.rs:3193:26 False  rows == 0 || filled > 0,
 (F) LINE crates/api/src/census_cover_tests.rs:224  panic!("a refusal is unreadable: {other:?}");
 (F) LINE crates/api/src/census_cover_tests.rs:493  panic!("not held: {}", census.note());
 (F) LINE crates/api/src/census_cover_tests.rs:531  panic!("{segment:?}: not refused: {}", census.note());

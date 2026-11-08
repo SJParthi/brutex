@@ -3,9 +3,9 @@
 Session BASE-COV-API-AS1 (fourth continuation, token BASE-COV-API-AS1-20261105-5). One fenced block below: the figures, then every uncovered row of G1's files that is a GAP (production, test, or inside an #[ignore]d test) or a HOST row, each with its text. (F) and (U) rows are in `fu-AS1.txt.md`.
 
 `````text
-BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip 071f6bdde320bdd3523a52fd97ecf4b213082c34, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
-G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 62423/63125 (702 uncovered), branches 4360/4976 (616 uncovered sides)
-classified: GAP prod 316 lines 85 sides; GAP test 64 lines 57 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 10 sides; (F) 148 lines 404 sides; (U) 86 lines 60 sides
+BASE-COV-API repair 3, shard AS1 (G1 of SHARDS.md), Route B on code tip a718e7a5059e25a4f78bc1c2fa7cd3a3b2bc25f8, reading whole:api, set whole-api-set-AS1.txt (the kit's 205 coverage files and the 12 test files AS1 added, 217)
+G1 files read 88 of 88 (SHARDS.md's 76 and the 12 test files AS1 declared in them): lines 62420/63124 (704 uncovered), branches 4354/4968 (614 uncovered sides)
+classified: GAP prod 316 lines 85 sides; GAP test 66 lines 57 sides; GAP ignored 37 lines 0 sides; HOST 51 lines 9 sides; (F) 148 lines 403 sides; (U) 86 lines 60 sides
 HOST = covered on the Mac's run of START (the kit's lists hold no row for it) and not here: the test that reaches it is a host red of this 4-core root host or one of the two tests skipped here as 4-core hangs; owed to the Mac's Route B.
 per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/aliases.rs: lines 410/410, branches 36/36; GAP 0/0
@@ -33,10 +33,10 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/candidatejson.rs: lines 684/694, branches 71/80; GAP 10/9
   crates/api/src/candidatejson_cover_tests.rs: lines 23/23, branches 0/0; GAP 0/0
   crates/api/src/catalog.rs: lines 659/659, branches 36/42; GAP 0/0
-  crates/api/src/census.rs: lines 1606/1624, branches 220/242; GAP 9/5
+  crates/api/src/census.rs: lines 1606/1624, branches 218/238; GAP 9/4
   crates/api/src/census_cover_tests.rs: lines 878/886, branches 16/32; GAP 0/0
   crates/api/src/census_epoch_link_tests.rs: lines 200/206, branches 4/6; GAP 0/0
-  crates/api/src/census_warm_tests.rs: lines 1235/1250, branches 86/114; GAP 4/19
+  crates/api/src/census_warm_tests.rs: lines 1235/1250, branches 87/114; GAP 4/19
   crates/api/src/chain.rs: lines 674/678, branches 127/130; GAP 2/0
   crates/api/src/chain_cover_tests.rs: lines 154/154, branches 6/12; GAP 0/0
   crates/api/src/chain_route_tests.rs: lines 1086/1088, branches 4/8; GAP 0/0
@@ -75,7 +75,7 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/pullrun_cover_tests.rs: lines 70/70, branches 2/2; GAP 0/0
   crates/api/src/pullrun_restart_tests.rs: lines 1047/1081, branches 26/52; GAP 6/0
   crates/api/src/recovery.rs: lines 2703/2760, branches 413/440; GAP 45/13
-  crates/api/src/recovery_cover_tests.rs: lines 2012/2014, branches 24/26; GAP 0/1
+  crates/api/src/recovery_cover_tests.rs: lines 2012/2014, branches 23/24; GAP 0/0
   crates/api/src/recovery_journal.rs: lines 1264/1277, branches 91/98; GAP 10/3
   crates/api/src/recovery_journal_cover_tests.rs: lines 34/35, branches 1/2; GAP 0/0
   crates/api/src/repair_route.rs: lines 555/557, branches 37/40; GAP 0/0
@@ -85,7 +85,7 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/served_routes_tests.rs: lines 281/281, branches 4/4; GAP 0/0
   crates/api/src/server_cloud_mutant_tests_a.rs: lines 1357/1365, branches 36/44; GAP 5/2
   crates/api/src/settings_route.rs: lines 663/694, branches 74/80; GAP 18/1
-  crates/api/src/settings_route_tests.rs: lines 844/858, branches 26/40; GAP 10/4
+  crates/api/src/settings_route_tests.rs: lines 844/857, branches 25/38; GAP 9/3
   crates/api/src/spot.rs: lines 408/409, branches 56/56; GAP 0/0
   crates/api/src/spot_route_tests.rs: lines 429/429, branches 8/16; GAP 0/0
   crates/api/src/stop_tests.rs: lines 430/440, branches 13/24; GAP 6/0
@@ -94,7 +94,7 @@ per file (lines a/b, branches c/d; GAP lines/sides):
   crates/api/src/sweeprun_admission_tests.rs: lines 157/157, branches 0/0; GAP 0/0
   crates/api/src/verification_route_tests.rs: lines 182/182, branches 0/0; GAP 0/0
   crates/api/tests/binary.rs: lines 100/100, branches 0/0; GAP 0/0
-  crates/api/tests/pool_load.rs: lines 507/528, branches 48/70; GAP 11/16
+  crates/api/tests/pool_load.rs: lines 504/528, branches 45/70; GAP 14/19
   crates/api/tests/state_stream_emits.rs: lines 564/564, branches 168/168; GAP 0/0
 GAP prod LINE crates/api/src/assets.rs:417  Err(_) => tree.unreadable = tree.unreadable.saturating_add(1),
 GAP prod LINE crates/api/src/assets.rs:651  continue;
@@ -345,7 +345,6 @@ GAP prod BRANCH crates/api/src/census.rs:1590:8 True  if u64::try_from(bytes.len
 GAP prod BRANCH crates/api/src/census.rs:1721:9 False  file.read_exact_at(&mut again, at).is_ok() && again.as_slice() == kept
 GAP prod BRANCH crates/api/src/census.rs:1876:8 True  if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
 GAP test BRANCH crates/api/src/census.rs:2868:12 True  if read.is_err() {
-GAP test BRANCH crates/api/src/census.rs:3193:13 True  rows == 0 || filled > 0,
 GAP test LINE crates/api/src/census_warm_tests.rs:1255  }
 GAP test LINE crates/api/src/census_warm_tests.rs:1256  assert!(
 GAP test LINE crates/api/src/census_warm_tests.rs:1257  Instant::now() < deadline,
@@ -358,7 +357,6 @@ GAP test BRANCH crates/api/src/census_warm_tests.rs:970:65 False  if header(&hea
 GAP test BRANCH crates/api/src/census_warm_tests.rs:1159:64 False  while inside.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
 GAP test BRANCH crates/api/src/census_warm_tests.rs:1199:47 False  if freshness == Freshness::Current && generation == was + 1 && facets == vendor_generation {
 HOST BRANCH crates/api/src/census_warm_tests.rs:1199:72 False  if freshness == Freshness::Current && generation == was + 1 && facets == vendor_generation {
-HOST BRANCH crates/api/src/census_warm_tests.rs:1247:24 False  && crate::emitted::says(record, "feed", "gdfl")
 GAP test BRANCH crates/api/src/census_warm_tests.rs:1248:24 False  && crate::emitted::says(record, "state", "ready")
 GAP test BRANCH crates/api/src/census_warm_tests.rs:1253:12 False  if WARMED.into_iter().all(named) && !warmed.is_empty() {
 GAP test BRANCH crates/api/src/census_warm_tests.rs:1253:45 False  if WARMED.into_iter().all(named) && !warmed.is_empty() {
@@ -616,7 +614,6 @@ GAP prod BRANCH crates/api/src/recovery.rs:1807:12 False  if item.status != Stat
 GAP prod BRANCH crates/api/src/recovery.rs:1842:8 True  if crate::recovery_journal::tail(&active_path(site), 1)
 GAP test BRANCH crates/api/src/recovery.rs:2364:19 True  while site.run.lock().unwrap().as_ref().unwrap().running() {
 GAP test BRANCH crates/api/src/recovery.rs:3402:19 True  while site.run.lock().unwrap().as_ref().unwrap().running() {
-GAP test BRANCH crates/api/src/recovery_cover_tests.rs:2511:28 False  .any(|row| row.body == said && row.status == Status::Unverified),
 GAP prod LINE crates/api/src/recovery_journal.rs:324  TryLockError::Error(error) => error,
 GAP prod LINE crates/api/src/recovery_journal.rs:339  return Err(invalid_data(
 GAP prod LINE crates/api/src/recovery_journal.rs:340  "recovery journal length changed during locked replay",
@@ -673,11 +670,9 @@ GAP test LINE crates/api/src/settings_route_tests.rs:560  release(&pipe);
 GAP test LINE crates/api/src/settings_route_tests.rs:569  release(&pipe);
 GAP test LINE crates/api/src/settings_route_tests.rs:576  release(&pipe);
 GAP test LINE crates/api/src/settings_route_tests.rs:861  return None;
-GAP test LINE crates/api/src/settings_route_tests.rs:895  return out;
 GAP test BRANCH crates/api/src/settings_route_tests.rs:398:22 True  Ok(value) if !value.trim().is_empty() => {
 GAP test BRANCH crates/api/src/settings_route_tests.rs:398:22 False  Ok(value) if !value.trim().is_empty() => {
 GAP test BRANCH crates/api/src/settings_route_tests.rs:860:20 True  if started.elapsed() > std::time::Duration::from_secs(10) {
-GAP test BRANCH crates/api/src/settings_route_tests.rs:894:9 False  let Ok(entries) = std::fs::read_dir(dir) else {
 HOST LINE crates/api/src/spot.rs:722  Err(why) => not_admitted("a spot read", &why),
 GAP test LINE crates/api/src/stop_tests.rs:272  fn append(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
 GAP test LINE crates/api/src/stop_tests.rs:273  Ok(())
@@ -698,6 +693,9 @@ HOST LINE crates/api/tests/pool_load.rs:602  continue;
 GAP test LINE crates/api/tests/pool_load.rs:606  continue;
 GAP test LINE crates/api/tests/pool_load.rs:610  continue;
 GAP test LINE crates/api/tests/pool_load.rs:617  continue;
+GAP test LINE crates/api/tests/pool_load.rs:714  assert!(answer.retry_after, "a busy answer says when: {body}");
+GAP test LINE crates/api/tests/pool_load.rs:715  assert!(
+GAP test LINE crates/api/tests/pool_load.rs:716  body.contains("log read not admitted") && body.contains("run at once"),
 GAP test BRANCH crates/api/tests/pool_load.rs:225:24 False  if get_blocking(addr, path).is_some() {
 GAP test BRANCH crates/api/tests/pool_load.rs:301:16 True  if measurable {
 GAP test BRANCH crates/api/tests/pool_load.rs:311:12 True  if measurable {
@@ -716,4 +714,7 @@ HOST BRANCH crates/api/tests/pool_load.rs:600:13 False  let Ok(mut socket) = tok
 GAP test BRANCH crates/api/tests/pool_load.rs:605:12 True  if socket.write_all(request.as_bytes()).await.is_err() {
 GAP test BRANCH crates/api/tests/pool_load.rs:609:12 True  if socket.read_to_end(&mut answer).await.is_err() {
 GAP test BRANCH crates/api/tests/pool_load.rs:616:13 False  let Some(status) = head.split(' ').nth(1).and_then(|code| code.parse().ok()) else {
+GAP test BRANCH crates/api/tests/pool_load.rs:691:30 True  .filter(|(a, _)| a.status != 200 && a.status != 429)
+GAP test BRANCH crates/api/tests/pool_load.rs:716:17 True  body.contains("log read not admitted") && body.contains("run at once"),
+GAP test BRANCH crates/api/tests/pool_load.rs:716:59 True  body.contains("log read not admitted") && body.contains("run at once"),
 `````
