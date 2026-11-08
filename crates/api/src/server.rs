@@ -28889,6 +28889,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The store root the parent of
+    /// [`a_serve_on_a_host_that_starts_no_thread_says_each_warm_up_it_could_not_start`]
+    /// hands its child.
+    const NO_THREAD_STORE: &str = "BRUTEX_AS2_NO_THREAD_STORE";
+
+    /// **A SERVE ON A HOST THAT STARTS NO THREAD SAYS EACH WARM-UP IT COULD
+    /// NOT START, AND STILL SERVES** (BASE-COV-API-AS2).
+    ///
+    /// After its start-up load, `run_in_over` starts the calendars' warm
+    /// (`calendar_route::warm_at_start`) and the census caches'
+    /// (`census_cache::start`) on threads of their own, and a start the host
+    /// refuses is a line on stderr, never a refusal of the serve. The child is
+    /// `census_cache`'s no-thread child's shape: its `RUST_MIN_STACK` asks for
+    /// 1 EiB of stack, so every thread built without a stack size of its own
+    /// is refused, and libtest runs its one test on its main thread. Its
+    /// runtime runs there too and gives its blocking pool a stack size of its
+    /// own, so the start-up load, which runs on that pool, starts. The child
+    /// serves a named port with `BRUTEX_NO_OPEN` set, and its stop asks that
+    /// port once for `/health`, which only `serve` answers, after both
+    /// warm-ups were asked for. The parent reads both of the child's streams.
+    ///
+    /// Extremes: 9 (6 single, 2 combined, 1 out of the box): (1) the
+    /// calendars' warm that cannot start is a stderr line naming the host's
+    /// own refusal (an OS error); (2) the census caches' warm likewise; (3)
+    /// each is said exactly once; (4) the serve still answers `/health` 200;
+    /// (5) and exits OK, the universe's verdict, never FAILED; (6) the banner
+    /// says it listened on the named port, not port zero. Combined: (7) no
+    /// thread AND a named port with the opener off: the opener's line is the
+    /// variable's, and it asked for no thread; (8) no thread AND the start-up
+    /// load: it ran on the pool's own stack, so the universe is read and said
+    /// `ok`. Out of the box: (9) the host's shape is proved, not assumed: in
+    /// the child a thread started without a stack size of its own is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_serve_on_a_host_that_starts_no_thread_says_each_warm_up_it_could_not_start() {
+        if let Some(store) = std::env::var_os(NO_THREAD_STORE) {
+            assert!(
+                std::thread::Builder::new().spawn(|| ()).is_err(),
+                "(9) this host refuses a thread started without a stack size"
+            );
+            let root = PathBuf::from(store);
+            let dir = agreeing("as2-no-thread-masters");
+            let addr = SocketAddr::from(([127, 0, 0, 1], a_port_below_the_ephemeral_ranges()));
+            let answered = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let seen = std::sync::Arc::clone(&answered);
+            let stop: Shutdown = Box::pin(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut stream = tokio::net::TcpStream::connect(addr).await?;
+                let ask =
+                    format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+                stream.write_all(ask.as_bytes()).await?;
+                let mut answer = String::new();
+                stream.read_to_string(&mut answer).await?;
+                *seen.lock().expect("one writer") = answer;
+                Ok(())
+            });
+            let code = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .thread_stack_size(8 << 20)
+                .build()
+                .expect("a runtime that starts no thread of its own")
+                .block_on(run_in_over(
+                    &dir,
+                    Ok(root),
+                    &argv(&["serve", &addr.to_string()]),
+                    stop,
+                    &mut Held::default(),
+                ));
+            assert_eq!(code, OK, "(5)");
+            let answer = answered.lock().expect("one writer").clone();
+            assert!(answer.starts_with("HTTP/1.1 200 "), "(4) {answer}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let folder = crate::scratch::path("as2-no-thread-serve");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("a store root of its own");
+        let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "server::tests::a_serve_on_a_host_that_starts_no_thread_says_each_warm_up_it_could_not_start",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(NO_THREAD_STORE, &folder)
+            .env("RUST_MIN_STACK", "1152921504606846976")
+            .env(NO_OPEN_ENV, "1")
+            .env(assets::WEB_ENV, folder.join("no-front-end"))
+            .env_remove(autopilot::AUTOPILOT_ENV)
+            .output()
+            .expect("the child test process starts");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "the child ran its one test:\n{stdout}\n{stderr}"
+        );
+        for (case, warm) in [("(1)", "Calendars"), ("(2)", "Census caches")] {
+            let said: Vec<&str> = stderr
+                .lines()
+                .filter(|line| line.starts_with(&format!("{warm} NOT warmed at start: ")))
+                .collect();
+            assert_eq!(said.len(), 1, "{case}(3) {warm}: {stderr}");
+            assert!(
+                said.iter().all(|line| line.contains("(os error ")),
+                "{case} the host's own refusal: {stderr}"
+            );
+        }
+        let listened = stdout
+            .lines()
+            .filter(|line| line.starts_with("brutex api listening on http://127.0.0.1:"))
+            .all(|line| !line.ends_with(":0/"));
+        assert!(
+            listened && stdout.contains("brutex api listening on "),
+            "(6) {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "  opening: NOT OPENED ({NO_OPEN_ENV} is set) — go to http://127.0.0.1:"
+            )),
+            "(7) {stdout}"
+        );
+        assert!(
+            stdout.lines().any(|line| line == "  universe: ok"),
+            "(8) {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     /// The Windows row is the regression proof: the URL is appended later as
     /// one opaque argument, and there are no fixed interpreter tokens ahead of
     /// it. The other two assertions pin their existing launchers while making
