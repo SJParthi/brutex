@@ -20439,12 +20439,13 @@ pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
 ///
 /// D-1202 records why that is not the "interpreted runtime, as a dependency, a
 /// dev-dependency, or a tool" `CLAUDE.md` §2 forbids: nothing in the workspace
-/// names it, `cargo build`, `cargo test` and `cargo clippy` never reach it (no
-/// test calls [`open_in_browser`]; the tests drive [`open_unless_suppressed`]
-/// on its suppressed arm, and on its spawning arm only in a child whose `PATH`
-/// is one scratch folder holding no handler or a link to the system's `true`
-/// or `false`, so the operator's handler is never resolved; and a `:0`
-/// listener never opens), the URL it is
+/// names it, `cargo build`, `cargo test` and `cargo clippy` never reach it (the
+/// tests drive [`open_unless_suppressed`] on its suppressed arm, and reach its
+/// spawning arm, directly or through a serve on a named port, only in a child
+/// whose `PATH` is one scratch folder holding no handler, a link to the
+/// system's `true` or `false`, or a file, link or folder that cannot start, so
+/// the operator's handler is never resolved; and a `:0` listener never
+/// opens), the URL it is
 /// handed is this server's own `http://` loopback address and never operator
 /// text, and [`NO_OPEN_ENV`] turns it off. A spawn failure is printed, never
 /// swallowed.
@@ -28696,6 +28697,196 @@ mod tests {
             "the child ran its cases"
         );
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// The child's proof of
+    /// [`a_serve_on_a_named_port_opens_its_own_address_and_says_what_the_handler_answered`]:
+    /// the port its serves listened on, beside the store root they served.
+    const OPENING_PROOF: &str = "BRUTEX_AS2_OPENING_PROOF";
+
+    /// A loopback port nothing holds now, below every host's ephemeral range
+    /// (Linux's 32768-60999, macOS's 49152-65535), probed from a point this
+    /// process's id picks, so two runs of the suite probe apart. Every other
+    /// server of this binary asks the kernel for `:0`, which answers only
+    /// inside those ranges, so none of them takes it between the probe and
+    /// the serve's own bind.
+    #[cfg(unix)]
+    fn a_port_below_the_ephemeral_ranges() -> u16 {
+        let from = 20_000 + u16::try_from(std::process::id() % 10_000).expect("below 10,000");
+        (from..32_000)
+            .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
+            .expect("a free loopback port below the ephemeral ranges")
+    }
+
+    /// **A SERVE ON A NAMED PORT OPENS ITS OWN ADDRESS, AND SAYS WHAT THE
+    /// HANDLER ANSWERED** (BASE-COV-API-AS2).
+    ///
+    /// `run_in_over`'s last banner step hands `http://<addr>/` to
+    /// `open_in_browser`, and only a serve on a port other than zero prints
+    /// its answer. The spawning-arm test's shape, through the whole serve:
+    /// each child's `PATH` is one scratch folder, so the platform's handler is
+    /// never the operator's, and its one slot holds, in turn, a link to the
+    /// system's `true`, one to `false`, nothing, a file with no execute bit, a
+    /// dangling link and a folder, across seven serves of one store, each
+    /// stopped once its start-up load is done. One child runs with
+    /// `BRUTEX_NO_OPEN` absent and one with it set to nothing; each serve must
+    /// exit OK, and the parent reads every `opening:` line off each child's
+    /// stdout. No window opens: nothing that `PATH` resolves is a browser.
+    ///
+    /// Extremes: 11 (7 single, 3 combined, 1 out of the box): (1) port zero
+    /// is skipped by name; (2) a handler that starts is the `opening:` line,
+    /// naming the listener's own loopback address; (3) a handler that exits 1
+    /// is opened all the same, its status left to the reaper; (4) no handler
+    /// on `PATH` is NOT OPENED in the spawn's own words, with the address to
+    /// go to; (5) a handler with no execute bit, likewise, permission denied;
+    /// (6) a handler link that dangles, likewise, not found; (7) every serve
+    /// exits OK, whatever the open answered. Combined: (8) port zero AND the
+    /// variable set: still skipped, the port decides first; (9) a handler that
+    /// starts AND the variable set: not opened, in the variable's words; (10)
+    /// no handler AND the variable set: the variable's words, never the
+    /// spawn's. Out of the box: (11) a folder where the handler should be: not
+    /// opened, permission denied, and the serve goes on.
+    #[cfg(unix)]
+    #[test]
+    fn a_serve_on_a_named_port_opens_its_own_address_and_says_what_the_handler_answered() {
+        let (program, _) = browser_handler(CURRENT_BROWSER_HOST);
+        if let Some(proof) = std::env::var_os(OPENING_PROOF) {
+            serve_through_each_handler(program, Path::new(&proof));
+            return;
+        }
+        let test = "server::tests::a_serve_on_a_named_port_opens_its_own_address_and_says_what_the_handler_answered";
+        let folder = crate::scratch::path("as2-opening");
+        let _ = std::fs::remove_dir_all(&folder);
+        let handlers = folder.join("path");
+        std::fs::create_dir_all(&handlers).expect("a PATH of its own");
+        std::fs::create_dir_all(folder.join("store")).expect("a store root of its own");
+        let (proof, no_front) = (folder.join("proof"), folder.join("no-front-end"));
+        let env = [
+            (OPENING_PROOF, proof.as_os_str()),
+            ("PATH", handlers.as_os_str()),
+            (assets::WEB_ENV, no_front.as_os_str()),
+        ];
+        let [proof_env, path_env, front_env] = env;
+        let opening = |stdout: &str| -> Vec<String> {
+            stdout
+                .lines()
+                .filter(|line| line.starts_with("  opening: "))
+                .map(str::to_owned)
+                .collect()
+        };
+        let expected = |suppressed: &[String; 6]| -> Vec<String> {
+            let port = std::fs::read_to_string(&proof).expect("the child ran its cases");
+            let home = format!("http://127.0.0.1:{port}/");
+            std::iter::once("  opening: skipped — port 0 addresses nothing".to_owned())
+                .chain(suppressed.iter().map(|why| why.replace("{home}", &home)))
+                .collect()
+        };
+        // ENOENT and EACCES are 2 and 13 on Linux and on macOS alike.
+        let spawned = |errno: i32| {
+            format!(
+                "  opening: NOT OPENED ({program}: {}) — go to {{home}}",
+                std::io::Error::from_raw_os_error(errno)
+            )
+        };
+        let opened = "  opening: {home}".to_owned();
+        let absent =
+            crate::isolated::rerun_unsetting(test, &env, &[NO_OPEN_ENV, autopilot::AUTOPILOT_ENV]);
+        assert_eq!(
+            opening(&absent),
+            expected(&[
+                opened.clone(),
+                opened,
+                spawned(2),
+                spawned(13),
+                spawned(2),
+                spawned(13),
+            ]),
+            "(1)-(6), (11) with {NO_OPEN_ENV} absent:\n{absent}"
+        );
+        let _ = std::fs::remove_file(&proof);
+        let variable = format!("  opening: NOT OPENED ({NO_OPEN_ENV} is set) — go to {{home}}");
+        let set = crate::isolated::rerun_unsetting(
+            test,
+            &[
+                (NO_OPEN_ENV, std::ffi::OsStr::new("")),
+                proof_env,
+                path_env,
+                front_env,
+            ],
+            &[autopilot::AUTOPILOT_ENV],
+        );
+        assert_eq!(
+            opening(&set),
+            expected(&[
+                variable.clone(),
+                variable.clone(),
+                variable.clone(),
+                variable.clone(),
+                variable.clone(),
+                variable,
+            ]),
+            "(8)-(10) with {NO_OPEN_ENV} set to nothing:\n{set}"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// [`a_serve_on_a_named_port_opens_its_own_address_and_says_what_the_handler_answered`]
+    /// in its child: seven serves of the store beside `proof`, the handler slot
+    /// of this process's one-folder `PATH` changed between them, each asserted
+    /// OK (7), then the named port written to `proof`. The store's background
+    /// work dies with this process, so the parent removes the store after it.
+    #[cfg(unix)]
+    fn serve_through_each_handler(program: &str, proof: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _shared = crate::emitted::sink();
+        let path = std::env::var_os("PATH").expect("the child's PATH");
+        let handler = Path::new(&path).join(program);
+        let system = |name: &str| {
+            ["/usr/bin", "/bin"]
+                .into_iter()
+                .map(|dir| Path::new(dir).join(name))
+                .find(|candidate| candidate.is_file())
+                .expect("the system's own true and false")
+        };
+        let dir = agreeing("as2-opening-masters");
+        let root = proof.parent().expect("the parent's folder").join("store");
+        let port = a_port_below_the_ephemeral_ranges();
+        let named = format!("127.0.0.1:{port}");
+        let serve = |addr: &str| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(run_in_over(
+                    &dir,
+                    Ok(root.clone()),
+                    &argv(&["serve", addr]),
+                    after_the_load(&root),
+                    &mut Held::default(),
+                ))
+        };
+        std::os::unix::fs::symlink(system("true"), &handler).expect("a handler that exits 0");
+        assert_eq!(serve("127.0.0.1:0"), OK, "(1)");
+        assert_eq!(serve(&named), OK, "(2)");
+        std::fs::remove_file(&handler).expect("the true link goes");
+        std::os::unix::fs::symlink(system("false"), &handler).expect("a handler that exits 1");
+        assert_eq!(serve(&named), OK, "(3)");
+        std::fs::remove_file(&handler).expect("the false link goes");
+        assert_eq!(serve(&named), OK, "(4)");
+        std::fs::write(&handler, b"not a program").expect("a plain file");
+        std::fs::set_permissions(&handler, std::fs::Permissions::from_mode(0o644))
+            .expect("its mode");
+        assert_eq!(serve(&named), OK, "(5)");
+        std::fs::remove_file(&handler).expect("the plain file goes");
+        std::os::unix::fs::symlink(Path::new(&path).join("nowhere"), &handler)
+            .expect("a dangling link");
+        assert_eq!(serve(&named), OK, "(6)");
+        std::fs::remove_file(&handler).expect("the dangling link goes");
+        std::fs::create_dir(&handler).expect("a folder in the handler's place");
+        assert_eq!(serve(&named), OK, "(11)");
+        std::fs::remove_dir(&handler).expect("the folder goes, for the next child");
+        std::fs::write(proof, port.to_string()).expect("the proof");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The Windows row is the regression proof: the URL is appended later as
