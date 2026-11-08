@@ -6739,14 +6739,14 @@ test('a patient list waits for `ps` at most its bound and takes no answer after 
   const garbage = stub('garbage', [`printf '\\377\\376 79 ${GROUP}\\n'`, `printf '%s\\n' 'x ${GROUP}' '${GROUP} ${GROUP} extra' '0 ${GROUP}' '  77   ${GROUP}' '   78    7'`]);
   assert.deepEqual((await listOf(garbage, PATIENT_LIST_MS)).got, { pids: [77] });
 
-  // THE REAL TABLE, for the cases that read it: a group started here, its leader and its one child.
+  // THE REAL TABLE, for the cases that read it: a group started here, its leader and its one child, whose pids
+  // it writes itself, so knowing them asks no `ps` (a `ps` this machine stalls changes nothing here).
   const { spawn } = await import('node:child_process');
-  const real = spawn('sleep 30 & exec sleep 30', { shell: true, detached: true, stdio: 'ignore' });
+  const kid = join(dir, 'kid.pid');
+  const real = spawn(`sleep 1000 & echo $! > '${kid}'; exec sleep 1000`, { shell: true, detached: true, stdio: 'ignore' });
   const pgid = /** @type {number} */ (real.pid);
   try {
-    const look = await lookFor(pgid, 2);
-    assert.ok('pids' in look.got && look.got.pids.length === 2, `the group's two processes: ${JSON.stringify(look.got)}`);
-    const both = [...look.got.pids].sort((x, y) => x - y);
+    const both = [pgid, await pidIn(kid)].sort((x, y) => x - y);
     // 11. COMBINED, TWELVE LISTS AT ONCE: four of a `ps` that never answers, four of one 2.1 s late, four of the
     // system's: each answers as its own `ps` does, and every `ps` that never answered is ended.
     const late = stub('late', ['sleep 2.1', 'PATH=${PATH#"$d:"}', 'exec ps "$@"']);
@@ -6827,15 +6827,19 @@ test('a process that joins a stopping group after its first list is asked in tim
   // timer is due 1,000 ms after the stop's deadline, timers run in the order they are due however late they run,
   // so the stop's look past its deadline runs first and finds the joined process unasked. Only a hold of this
   // process of nearly that second inside one turn of its event loop, between the turn's clock and the list's
-  // timer, could reorder them. INSIDE leaves the joined process 2,500 ms to be asked and leave before the deadline.
+  // timer, could reorder them. Each late list reads the table as soon as the joined process is in it and answers
+  // at its time, so a `ps` this machine stalls by less than that time moves nothing; INSIDE then leaves the
+  // joined process 2,500 ms to leave before the deadline.
   const dir = mkdtempSync(join(tmpdir(), 'stack1028-r7-edge-'));
   const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
   const script = join(dir, 'leaves-one.sh');
   writeFileSync(script, ['trap \'( sleep 0.3; exec sh -c "echo \\$\\$ > \\"$2\\"; exec sleep 1000" ) & exit 0\' TERM', 'sleep 1000 &', 'echo $$ > "$1"', 'wait', ''].join('\n'));
   /**
-   * Stops that command with a patient list whose first list answers at once and every later one no sooner than
-   * `at` ms after the command left: how the stop ended, how many lists it asked for and their times, the
-   * process that joined, every signal it sent, and whether its group is gone.
+   * Stops that command with a patient list whose first list answers at once and every later one reads the table
+   * once the joined process is in it and answers no sooner than `at` ms after the command left, so the time of
+   * the answer is the test's and a `ps` this machine stalls (by less than `at`) moves nothing: how the stop ended,
+   * how many lists it asked for and when each later one answered after the command left, the process that
+   * joined, every signal it sent, and whether its group is gone.
    *
    * @param {number} at @param {string} tag
    */
@@ -6845,6 +6849,8 @@ test('a process that joins a stopping group after its first list is asked in tim
     const lists = patiently();
     /** @type {[number, string][]} */
     const sent = [];
+    /** @type {number[]} */
+    const answeredAt = [];
     let calls = 0;
     let leftAt = 0;
     /** @type {Promise<void>} */
@@ -6852,11 +6858,13 @@ test('a process that joins a stopping group after its first list is asked in tim
     const cmd = sheet.run(`sh '${script}' '${ready}' '${joined}'`, logFd, {
       list: async (pgid) => {
         calls += 1;
-        if (calls > 1) {
-          await left;
-          await nap(Math.max(0, leftAt + at - performance.now()));
-        }
-        return lists.deps.list(pgid);
+        if (calls === 1) return lists.deps.list(pgid);
+        await pidIn(joined);
+        const got = await lists.deps.list(pgid);
+        await left;
+        await nap(Math.max(0, leftAt + at - performance.now()));
+        answeredAt.push(Math.round(performance.now() - leftAt));
+        return got;
       },
       kill: (target, signal) => {
         sent.push([target, signal]);
@@ -6871,7 +6879,7 @@ test('a process that joins a stopping group after its first list is asked in tim
     try {
       await pidIn(ready);
       const how = await cmd.stop();
-      return { how, calls, ms: lists.ms.map(Math.round), joiner: await pidIn(joined), sent, gone: !sheet.groupRunning(cmd.child.pid), pgid: /** @type {number} */ (cmd.child.pid) };
+      return { how, calls, answeredAt, joiner: await pidIn(joined), sent, gone: !sheet.groupRunning(cmd.child.pid), pgid: /** @type {number} */ (cmd.child.pid) };
     } finally {
       try {
         process.kill(-(/** @type {number} */ (cmd.child.pid)), 'SIGKILL');
@@ -6884,10 +6892,10 @@ test('a process that joins a stopping group after its first list is asked in tim
   assert.equal(sheet.COMMAND_STOP_MS, 5_000);
   // OUTSIDE: the joined process is asked by the late list, after the wait ended, and the group is then killed.
   const outside = await stopLate(sheet.COMMAND_STOP_MS + 1_000, 'outside');
-  assert.deepEqual(outside.how, { said: sheet.KILLED, killed: true }, `lists ${outside.ms.join(', ')} ms`);
+  assert.deepEqual(outside.how, { said: sheet.KILLED, killed: true }, `later lists answered ${outside.answeredAt.join(', ')} ms after the command left`);
   assert.deepEqual([outside.calls, asked(outside, outside.joiner), outside.sent.some(([t, s]) => t === -outside.pgid && s === 'SIGKILL'), outside.gone], [2, 1, true, true], 'two lists, the second in flight when the wait ended; it asked the joined process once, too late');
   // INSIDE: the same list 2,500 ms before the deadline asks it in time, and it leaves; nothing is killed.
   const inside = await stopLate(sheet.COMMAND_STOP_MS - 2_500, 'inside');
-  assert.deepEqual(inside.how, { said: 'was sent SIGTERM and left', killed: false }, `lists ${inside.ms.join(', ')} ms`);
+  assert.deepEqual(inside.how, { said: 'was sent SIGTERM and left', killed: false }, `later lists answered ${inside.answeredAt.join(', ')} ms after the command left`);
   assert.deepEqual([asked(inside, inside.joiner), inside.sent.some(([, s]) => s === 'SIGKILL'), inside.gone], [1, false, true], 'the joined process was asked once, in time');
 });
