@@ -1406,3 +1406,164 @@ fn a_month_that_opens_and_will_not_read_is_a_named_fault_for_a_first_stamp_and_f
     assert_eq!(body["chains"][2]["spot"], SPOT, "past the damage: {body}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Stamps record `index` of the month file at `path`, a month of `n_valid`
+/// records, `stamp` microseconds, and reseals that record's checksum block in
+/// the month's `.crc` with the store's own geometry and CRC-32C
+/// (`docs/02-store-format.md` §6): a month altered by hand, as no writer
+/// leaves one, that still opens and still verifies.
+fn restamp(path: &std::path::Path, (index, n_valid): (u64, u64), stamp: i64) {
+    use std::os::unix::fs::FileExt as _;
+    let layout = store::layout::Layout::CURRENT;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("the month file");
+    file.write_all_at(
+        &stamp.to_le_bytes(),
+        layout.offset_of(index).expect("the record's offset"),
+    )
+    .expect("the record's new stamp");
+    let block = index / store::format::RECORDS_PER_BLOCK;
+    let (start, end) = layout
+        .covered_byte_range(block, n_valid)
+        .expect("the block's covered bytes");
+    let mut covered = vec![0; usize::try_from(end - start).expect("one block")];
+    file.read_exact_at(&mut covered, start).expect("the block");
+    let sum = store::block::seal(layout, n_valid, block, &covered).expect("the block's sum");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.with_extension("crc"))
+        .expect("the month's checksums")
+        .write_all_at(&sum.to_le_bytes(), block * 4)
+        .expect("the block's new sum");
+}
+
+/// **A FIRST STAMP THE TIME INDEX NAMES AT A RECORD STAMPED BEFORE THE
+/// INSTANT ASKED IS A NAMED FAULT, NEVER AN ANSWER** (BASE-COV-API repair 3,
+/// D-8661). Option months of 1,024 bars written here (the size at which the
+/// store keeps a month its time index, D-4933), then records restamped by hand
+/// and their block resealed under the store's own checksum: the month opens, the
+/// block verifies, and the month's time index still names each row by its old
+/// slot, so `first_at_or_after` answers that row without reading it and
+/// `first_stored_from` reads a stamp before the instant it asked from (a
+/// bisection over the same records would have stepped past it). Extremes: the
+/// month as written, asked at its third bar (that bar); the third row
+/// restamped before its slot, asked there (none, the fault naming the file,
+/// the instant and the stamp); an instant before the first bar (the first
+/// bar); the second bar's instant and the fourth's (each that bar, either side
+/// of the restamped row); the last bar's instant (that bar); an instant after
+/// the last bar (none, no fault); the third row restamped later than its slot
+/// (that row's own stamp served); and, at once, a walk from October, a month
+/// with no file, into a November whose first row is restamped before the
+/// instant asked (October passed over, the stamp named), and two rows
+/// restamped before their slots, asked at the second (that one named); out of
+/// the box, a row restamped one microsecond before the instant asked (a fault
+/// all the same).
+#[test]
+fn a_first_stamp_the_index_names_before_the_instant_asked_is_a_named_fault() {
+    let root = crate::scratch::path("chain-restamped");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let open = ist(2018, 11, 5, 9, 15, 0);
+    let expiry = Expiry::new(2018, 11, 29).expect("an expiry");
+    // THE SIZE AT WHICH THE STORE KEEPS A MONTH ITS TIME INDEX (D-4933).
+    let rows = store::time_index::INDEX_MIN_ROWS;
+    let count = i64::try_from(rows).expect("a small count");
+    let bars: Vec<(i64, i64)> = (0..count).map(|n| (open + n, 1_000 + n)).collect();
+    let written = |contract: &str| {
+        write_option(&root, "ZEDCO", contract, month(2018, 11), &bars);
+        month_file(&root, "FNO", "ZEDCO", Some(contract), month(2018, 11))
+    };
+    let first = |contract: &str, from: i64, faults: &mut Vec<String>| {
+        let key = OptionKey {
+            root: &root,
+            feed: Vendor::Gdfl,
+            exchange: "NSE",
+            underlying: "ZEDCO",
+            contract: Contract::parse(contract).expect("a contract"),
+            timeframe: Timeframe::SECOND_1,
+        };
+        first_stored_from(&key, from, expiry, faults)
+    };
+    let fault = |path: &std::path::Path, from: i64, stamp: i64| {
+        format!(
+            "{}: the record found at or after t={} is stamped {stamp} us, before it",
+            path.display(),
+            from.div_euclid(MICROS)
+        )
+    };
+
+    // THE MONTH AS WRITTEN, then its third row restamped before its slot.
+    let pe = "2018-11-29-400000-PE";
+    let path = written(pe);
+    let mut faults = Vec::new();
+    assert_eq!(
+        first(pe, (open + 2) * MICROS, &mut faults),
+        Some((open + 2) * MICROS)
+    );
+    let early = (open - 100) * MICROS;
+    restamp(&path, (2, rows), early);
+    assert_eq!(first(pe, (open + 2) * MICROS, &mut faults), None);
+    assert_eq!(faults, vec![fault(&path, (open + 2) * MICROS, early)]);
+    // EVERY OTHER INSTANT ASKED OF THE SAME MONTH: its own bar, or none.
+    let mut clean = Vec::new();
+    for (from, answered) in [
+        (open - 3_600, Some(open)),
+        (open + 1, Some(open + 1)),
+        (open + 3, Some(open + 3)),
+        (open + count - 1, Some(open + count - 1)),
+        (open + count, None),
+    ] {
+        assert_eq!(
+            first(pe, from * MICROS, &mut clean),
+            answered.map(|secs| secs * MICROS),
+            "from {from}"
+        );
+    }
+    assert!(
+        clean.is_empty(),
+        "the restamped row was never met: {clean:?}"
+    );
+
+    // THE THIRD ROW RESTAMPED LATER THAN ITS SLOT: its own stamp is served.
+    let later = "2018-11-29-410000-PE";
+    restamp(&written(later), (2, rows), (open + 3) * MICROS);
+    assert_eq!(
+        first(later, (open + 2) * MICROS, &mut clean),
+        Some((open + 3) * MICROS)
+    );
+    assert!(clean.is_empty(), "{clean:?}");
+
+    // AT ONCE: A WALK FROM OCTOBER INTO A NOVEMBER WHOSE FIRST ROW IS
+    // RESTAMPED BEFORE THE INSTANT ASKED.
+    let walked = "2018-11-29-420000-PE";
+    let walked_path = written(walked);
+    let from = ist(2018, 10, 15, 9, 15, 0) * MICROS;
+    let before = ist(2018, 10, 1, 9, 15, 0) * MICROS;
+    restamp(&walked_path, (0, rows), before);
+    let mut faults = Vec::new();
+    assert_eq!(first(walked, from, &mut faults), None);
+    assert_eq!(faults, vec![fault(&walked_path, from, before)]);
+
+    // AT ONCE: TWO ROWS RESTAMPED BEFORE THEIR SLOTS, asked at the second.
+    let both = "2018-11-29-430000-PE";
+    let both_path = written(both);
+    restamp(&both_path, (2, rows), early);
+    let second = (open - 50) * MICROS;
+    restamp(&both_path, (3, rows), second);
+    let mut faults = Vec::new();
+    assert_eq!(first(both, (open + 3) * MICROS, &mut faults), None);
+    assert_eq!(faults, vec![fault(&both_path, (open + 3) * MICROS, second)]);
+
+    // OUT OF THE BOX: ONE MICROSECOND BEFORE THE INSTANT ASKED.
+    let just = "2018-11-29-440000-PE";
+    let just_path = written(just);
+    let asked = (open + 2) * MICROS;
+    restamp(&just_path, (2, rows), asked - 1);
+    let mut faults = Vec::new();
+    assert_eq!(first(just, asked, &mut faults), None);
+    assert_eq!(faults, vec![fault(&just_path, asked, asked - 1)]);
+    let _ = std::fs::remove_dir_all(&root);
+}
