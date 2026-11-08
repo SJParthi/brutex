@@ -1,6 +1,6 @@
 STATUS: IN PROGRESS
 
-# report-BASE-COV-API-AS2 (BASE-COV-API repair round 3, shard G2, 5-7 Nov 2026)
+# report-BASE-COV-API-AS2 (BASE-COV-API repair round 3, shard G2, 5-8 Nov 2026)
 
 Branch `cloud/cov-api-as2-20261105`, cut from the kit commit
 `f4111a0132473d8771d8624a9538b1362926f70b`; START `6ea46e59c07488eeccff388407976041852aae2c`.
@@ -8,9 +8,11 @@ Owners in order: token `BASE-COV-API-AS2-20261105-1` (commits `dd7f285b`..`f13f4
 session's pause `PAUSED-BY-MAIN-20261105-1420` (`0eff0822`), `BASE-COV-API-AS2-20261105-3`
 (`8ed8a90f`..`c47e9a06`; the account's weekly limit cut it at about 21:28 IST on 5 Nov, its work
 intact), `BASE-COV-API-AS2-20261105-4` (`725e11d5`..`85bff1da`, 6 Nov; cut by the weekly limit
-after its last push, its work intact), and this continuation, `BASE-COV-API-AS2-20261105-5`
-(from `80d4dfcd`, 7 Nov; its section is "Session -5" below). The first session wrote no report,
-so its commits are its record; this file is the shard's one report.
+after its last push, its work intact), `BASE-COV-API-AS2-20261105-5` (`80d4dfcd`..`3cd3b945`,
+7 Nov; its section is "Session -5" below; the main session paused it at about 19:52 IST and its
+account then ended, its work intact), and this continuation, `BASE-COV-API-AS2-20261105-6` (from
+`0a258fd8`, 8 Nov; its section is "Session -6" below). The first session wrote no report, so its
+commits are its record; this file is the shard's one report.
 
 ## Kit check
 
@@ -961,6 +963,67 @@ with this shard's code: G3's (AS3) or ASA's to read. Every test this shard added
 - Lists: `gaps-AS2.txt.md` and `fu-AS2.txt.md`, rewritten from this readout. Gate 23 by hand on
   `1fbb5ad6`: exit 1, its output equal to `518b2355`'s line for line.
 
+## Session -6 (8 Nov)
+
+### Host and pins
+
+A fresh container: Linux x86_64 (kernel 6.18.44), root, 4 cores, 15 GB memory, 29 GB free disk;
+TMPDIR `/dev/shm/as2tmp` (tmpfs, mode 1777). The pinned nightly installed as `nightly-2026-08-08`:
+`rustc -V` prints exactly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, its llvm-cov and
+llvm-profdata print `LLVM version 23.1.0-rust-1.99.0-nightly`. fmt and clippy on `1.97.1` (the
+repository's pin). One `CARGO_TARGET_DIR` (`/home/user/tgt/cov`) for every build;
+`CARGO_PROFILE_DEV_DEBUG=0`. Every kit file's sha256 equals `MANIFEST.md`'s (all 19, the fenced
+ones extracted with the manifest's awk line; both json files pass `jq -e .`). The instrumented
+build of `-p api` from nothing took 3 min 15 s (170 artifacts).
+
+### NEXT (2) of session -5: `calendar_of.rs` 827:35 T and 551:32 F (`29b4b636`)
+
+A helper, `write_restamped`, writes a month legally with `write_bars`, then gives each record a
+crafted stamp in place (its first eight bytes) and seals every block again with
+`store::block::seal` over `Layout::covered_byte_range`, written at `block * 4` of the month's
+`FileKind::Checksums` file, as `crates/store/src/file_fault_tests.rs`' off-grid test does. The
+month reads clean and holds what the writer refuses.
+
+| test | extremes (single / combined / out of the box) | rows (tip numbering) |
+|---|---|---|
+| `a_minute_bar_stamped_inside_the_minute_before_it_neither_extends_nor_splits_its_run` | 10 (7 / 2 / 1) | calendar_of.rs 834:35 T (827:35 before the fix's comment), `Some(last) if last.1 == minute => {}`: 12 |
+| `a_daily_bar_before_the_epoch_is_filed_under_no_month_and_the_months_after_it_are_withheld` | 11 (8 / 2 / 1) | calendar_of.rs 551:32 F, `if let Some(civil) = day_month(day)`: 3 |
+
+**A defect the second test found, fixed at its cause.** `withhold_unproved` (D-1443) returned
+before withholding anything when the calendar's first day was before the epoch (`u32::try_from` of
+a negative day failed), so one daily bar stamped 1969 in any daily file left every month after it,
+1970-01 to the month before the bar's real neighbour, `Closed`: decades of holidays no daily file
+had read. The walk now starts at the epoch's month (`calendar.first_day().max(0)`); a span wholly
+before the epoch is left as session -5's `a_span_no_day_names_or_that_ends_the_calendar_is_withheld_only_where_it_can_be`
+pins it (case (1)), and its other cases are unchanged. Red first: the new test run on the unchanged
+production code (`c2`): `test result: FAILED. 1 passed; 1 failed`, at its own case (3),
+`left: Closed, right: Unmeasured` for 1970-01-01. After the fix: every `calendar_of::` and
+`calendar_route` test passes (`c4`: 84 passed, 1 ignored, the real-store test). Its case (7)
+counts three sessions, not two: 2021-02-24, the calendar's one regulator-sourced open day
+(`pull::calendar::SYSTEMS_OUTAGE_DAY`), is inside the widened span, and withholding never touches
+an open day. The two target rows read covered in that run (`834:35 True: 12`, `551:32 False: 3`);
+the new code's only uncovered rows are (F): the `matches!(` line inside an assert that ran, and
+the false sides of the `&&` operands of two asserts whose lines ran. fmt rc 0; clippy `-p api
+--all-targets --locked -- -D warnings` rc 0 (1.97.1), the minute test carrying the crate's
+`#[expect(clippy::too_many_lines, reason = ...)]` as session -5's long Extremes tests do.
+
+### NEXT (3) of session -5: `server.rs` 6632:12 T and 6633, read and named, not tested
+
+`recovery_spot` closes the run (`run.ledger.close`, whose refusal returns at once through `?`) and
+then calls `run.ledger.rest`, which offers again every member failure not yet on disk; 6632 is
+taken only when that re-offer is refused right after the close landed. Every journal append (the
+opening record, a member failure, the close) goes through the one `Journal::appended_within`: one
+`create_dir` of `audit/`, one open of the journal for append, one bounded lock, one identity
+check, one write and one sync. No file mode tells the close from the member failure that follows
+it: a journal the mode bits shut refuses the close too, and the member's whole note
+(`Journal::notes_path`) refuses nothing when it cannot be written (`with_whole_note` logs it and
+appends the record). So the row is reached only by another writer holding the journal's lock in
+the instant between the close and the re-offer: a race window, named with 10113:9 F. The
+per-thread write seam `audit::lock_wait_tests::refuse_next_write` is single-shot ("the next
+journal record write on this thread"), private to G1's `audit_lock_wait_tests.rs`, and the close
+and the re-offer are back to back inside `recovery_spot` with no hook between them, so it cannot
+pick the second of two consecutive writes either.
+
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
 - **D-8662 (draft): how G2's test-code GAP rows are closed, and the lists the landing gate
@@ -1024,6 +1087,21 @@ with this shard's code: G3's (AS3) or ASA's to read. Every test this shard added
   failed once, in the `1fbb5ad6` run, over lib code identical to `619a9b4e`'s where it passed (the
   tick's note named BANKNIFTY's missing broker window instead of "no instrument in the universe
   could be reached"): G3's or ASA's to read, as an input the hour or the load decides.
+  **Session -6 adds:** (7) A defect fixed at its cause, pinned by a test red on the old code:
+  `calendar_of::withhold_unproved` (D-1443) withheld nothing for a calendar whose first day is
+  before the epoch, so one daily bar stamped 1969 (only a file written outside the store's writer
+  holds one: the writer refuses a bar outside its month) served every month after it as holidays.
+  Its walk now starts at the epoch's month; the days before the epoch, which no `Day` or
+  `YearMonth` names, are left as they are (session -5's pinned case for a span wholly before the
+  epoch). Draft invariant row for ASA's `docs/04-invariants.md`: "a calendar span that begins
+  before the epoch still withholds every unproved month from 1970 on" (test
+  `calendar_of::tests::a_daily_bar_before_the_epoch_is_filed_under_no_month_and_the_months_after_it_are_withheld`).
+  Whether a pre-epoch daily bar should instead refuse its whole month (as a record that fails its
+  checksum does) is the operator's call; this fix changes only the withholding. (8) `server.rs`
+  6632:12 T and 6633 (a member failure re-offered by `rest` and refused right after the run's
+  close landed) is a race-only row: every journal append shares `Journal::appended_within`, so no
+  file mode refuses the re-offer without refusing the close, and the per-thread write seam is
+  single-shot and private to G1's `audit_lock_wait_tests.rs`.
 
 ## NEEDS THE MAC
 
@@ -1046,20 +1124,13 @@ with this shard's code: G3's (AS3) or ASA's to read. Every test this shard added
   whichever side the Mac's run takes, the other stays the wall clock's. The spawning-arm child
   links the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
 
-NEXT: the production rows left that a test could still reach, each a new test with its own
-`Extremes:` line: (1) `server.rs` 21052, a serve on a non-zero port in a child whose `PATH` is a
-scratch folder holding a link to the system's `true` and whose `BRUTEX_NO_OPEN` is unset (the
-spawning-arm test's shape; the port taken by binding `:0` first, a race a reviewer may refuse);
-(2) `calendar_of.rs` 827:35 T and 551:32 F, a bar file written legally by `write_bars_for` and
-then one record rewritten: a minute bar restamped 30 s past its neighbour (the same minute, off
-the grid, which the writer refuses and the reader reads) for `read_minute_spans`, and a daily
-bar restamped before 1970 IST for `derive`; each block's checksum recomputed with
-`store::block::seal` over `Layout::covered_byte_range` and written at `block * 4` of the month's
-`FileKind::Checksums` file, as `crates/store/src/file_fault_tests.rs` does (about line 725);
-(3) `server.rs` 6632-6633, a journal that takes a run's open and close and refuses a
-member's note, in a uid-65534 child where the mode bits bind; (4) the two indexstopvix tests for
-G1's `indexstopvix_projection_tests.rs` (G1 or ASA). Then Route B whole:api on the code tip
-again, the lists, and the FIX json. The rows named as host, race, clock, build or real-host rows
-stay named (20935 is reached only by a load whose thread panics; 20979-20986 by an unstamped
-build or a flying autopilot, which would pull after its grace; master.rs 356-361 by a regular
-master that grows past 256 MiB during one read); the Mac's items above stay the Mac's.
+NEXT (session -6, after `29b4b636`): session -5's items (2) and (3) are done (see "Session -6":
+(2) tested, a defect fixed; (3) read and named a race-only row) and (4) stays G1's or ASA's.
+Left: (1) `server.rs` 21052, a serve on a non-zero port in a child whose `PATH` is one scratch
+folder holding a link to the system's `true` and whose `BRUTEX_NO_OPEN` is unset, with its own
+`Extremes:` line; then the red round of the minute test (its arm `Some(last) if last.1 == minute
+=> {}` removed by hand), gate 23 by hand, Route B whole:api on the code tip, the lists and the
+FIX json. The rows named as host, race, clock, build or real-host rows stay named (20935 is
+reached only by a load whose thread panics; 20979-20986 by an unstamped build or a flying
+autopilot, which would pull after its grace; master.rs 356-361 by a regular master that grows past
+256 MiB during one read); the Mac's items above stay the Mac's.
