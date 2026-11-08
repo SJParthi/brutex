@@ -1024,6 +1024,59 @@ journal record write on this thread"), private to G1's `audit_lock_wait_tests.rs
 and the re-offer are back to back inside `recovery_spot` with no hook between them, so it cannot
 pick the second of two consecutive writes either.
 
+### NEXT (1) of session -5: `server.rs` 21052, the browser-open line of a serve on a named port (`8e94e0b8`)
+
+| test | extremes (single / combined / out of the box) | rows (tip numbering) |
+|---|---|---|
+| `a_serve_on_a_named_port_opens_its_own_address_and_says_what_the_handler_answered` | 11 (7 / 3 / 1) | server.rs 21052, `Ok(()) => say!("  opening: {home}")`: 2 |
+
+Two children of the test binary (`crate::isolated::rerun_unsetting`), each with `PATH` one scratch
+folder and no `BRUTEX_AUTOPILOT`, serve one store seven times through `run_in_over`, each serve
+stopped once its start-up load is done (`after_the_load`) and asserted `OK`; between serves the
+child changes the folder's one handler slot: a link to the system's `true`, one to `false`,
+nothing, a file with no execute bit, a dangling link, a folder. One child has `BRUTEX_NO_OPEN`
+absent and one has it set to nothing. The children print nothing of their own (the banner is
+`say!`, the declared site); the parent reads every `opening:` line off each child's stdout and
+compares it whole: `skipped`, `opening: http://127.0.0.1:<port>/` twice, then `NOT OPENED
+(xdg-open: <the spawn's own error>) — go to http://127.0.0.1:<port>/` four times (ENOENT, EACCES,
+ENOENT, EACCES), and with the variable set, `skipped` then six `NOT OPENED (BRUTEX_NO_OPEN is set)`.
+**The port race session -5's NEXT feared is avoided:** the child probes a loopback port below
+every host's ephemeral range (Linux's 32768-60999, macOS's 49152-65535), from a point its process
+id picks, and every other server of this binary binds `:0`, which the kernel answers only inside
+those ranges, so no test of this binary can take the port between the probe and the serve's bind
+(this run's child took 26333). No window can open: nothing the child's `PATH` resolves is a
+browser. Filtered instrumented run (`s1`): `2 passed` (with the spawning-arm test); 21048 ran 14
+times, 21049 twice, 21052 twice, 21053 ten times; the new test code, 134 lines and 2 branch sides,
+all covered. fmt rc 0; clippy rc 0 (1.97.1).
+
+`open_in_browser`'s doc said "no test calls [`open_in_browser`]", already untrue (G3's
+`server_cloud_mutant_tests_a.rs` banner child calls it with the variable set) and now untrue twice;
+it now says the tests reach its spawning arm, directly or through a serve on a named port, only in
+a child whose `PATH` is one scratch folder, so the operator's handler is never resolved.
+
+### Red round 10 (the three tests of this session)
+
+Three hand changes in production code with every test committed (`8e94e0b8`): `read_minute_spans`
+without its `Some(last) if last.1 == minute => {}` arm, `withhold_unproved` without `.max(0)`, and
+`run_in_over`'s opened line printing `{addr}` for `{home}`. The instrumented build, `cargo test -p
+api --lib --locked --no-fail-fast -- <the three>`: `test result: FAILED. 0 passed; 3 failed`, each
+at its own assertion: the minute test at (1) (`left: [(555, 555), (555, 557)]`, the repeated
+minute splitting the run; `right: [(555, 557)]`), the pre-epoch test at (3) (`left: Closed`,
+`right: Unmeasured`), and the serve test at its first comparison (`"  opening: 127.0.0.1:26333"`
+against `"  opening: http://127.0.0.1:26333/"`). Restored with `git checkout` of the two files.
+
+### Gate 23 by hand on `8e94e0b8`
+
+The `Gate 23` step's `run:` script of each tree's own `.github/workflows/ci.yml` (job
+language-purity; the step's 775 lines are the same in both), taken from the file unchanged, run on
+this tree and on `f01d7a0e4` (a detached worktree), each with its own scanner and runtime tool
+built as the job builds them (`rustc --edition=2024 -D warnings .github/source_scan.rs`, then
+`.github/gates_runtime.rs` with `CARGO_BIN_EXE_source_scan` naming it; `RUNNER_TEMP` and
+`SOURCE_SCAN` pointing at them). Both exit 1 (BASE-REDS-1023's reds). `diff` of the two outputs (261
+lines each) is the one line `993 tracked source file(s)` on f01d7a0e4 against `997` here; the
+print-surface section is the same on both and names no `api/src/sources_tests.rs` site (`grep -c
+sources_tests` of this tree's output: 0) and no site of this shard's.
+
 ## Decision drafts (ids D-8662 and D-8663 only; ASA writes the docs entries)
 
 - **D-8662 (draft): how G2's test-code GAP rows are closed, and the lists the landing gate
@@ -1101,7 +1154,10 @@ pick the second of two consecutive writes either.
   6632:12 T and 6633 (a member failure re-offered by `rest` and refused right after the run's
   close landed) is a race-only row: every journal append shares `Journal::appended_within`, so no
   file mode refuses the re-offer without refusing the close, and the per-thread write seam is
-  single-shot and private to G1's `audit_lock_wait_tests.rs`.
+  single-shot and private to G1's `audit_lock_wait_tests.rs`. (9) D-1202's wording (session -5's
+  item (2)): the opener's spawning arm is now also reached through a whole serve on a named port,
+  in a child whose `PATH` is one scratch folder, and `open_in_browser`'s doc says so (it said no
+  test calls the function, which G3's banner child already did); ASA's note on D-1202 covers both.
 
 ## NEEDS THE MAC
 
@@ -1124,13 +1180,11 @@ pick the second of two consecutive writes either.
   whichever side the Mac's run takes, the other stays the wall clock's. The spawning-arm child
   links the system's `true`/`false` (`/usr/bin` on macOS) and resolves nothing else.
 
-NEXT (session -6, after `29b4b636`): session -5's items (2) and (3) are done (see "Session -6":
-(2) tested, a defect fixed; (3) read and named a race-only row) and (4) stays G1's or ASA's.
-Left: (1) `server.rs` 21052, a serve on a non-zero port in a child whose `PATH` is one scratch
-folder holding a link to the system's `true` and whose `BRUTEX_NO_OPEN` is unset, with its own
-`Extremes:` line; then the red round of the minute test (its arm `Some(last) if last.1 == minute
-=> {}` removed by hand), gate 23 by hand, Route B whole:api on the code tip, the lists and the
-FIX json. The rows named as host, race, clock, build or real-host rows stay named (20935 is
-reached only by a load whose thread panics; 20979-20986 by an unstamped build or a flying
-autopilot, which would pull after its grace; master.rs 356-361 by a regular master that grows past
-256 MiB during one read); the Mac's items above stay the Mac's.
+NEXT (session -6, after `8e94e0b8`): session -5's items (1), (2) and (3) are done (see "Session
+-6": (1) and (2) tested, a defect fixed in (2); (3) read and named a race-only row), (4) stays G1's
+or ASA's, and red round 10 and gate 23 by hand are done on the code tip `8e94e0b8`. Left: Route B
+whole:api on `8e94e0b8` (started 16:00:59 IST in the worktree `/home/user/rb6`), G2's lists from
+its readout, the report's figures and the FIX json. The rows named as host, race, clock, build or
+real-host rows stay named (20935 is reached only by a load whose thread panics; 20979-20986 by an
+unstamped build or a flying autopilot, which would pull after its grace; master.rs 356-361 by a
+regular master that grows past 256 MiB during one read); the Mac's items above stay the Mac's.
