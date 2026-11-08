@@ -891,9 +891,9 @@ fn under_a_successor_race_a_landed_post_is_answered_saved() {
 /// Every file under `dir`, recursively, as bytes.
 fn every_file(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
+    // A FOLDER THE SCAN CANNOT READ FAILS IT: a scan over nothing proves
+    // nothing (D-8661 item 21).
+    let entries = std::fs::read_dir(dir).expect("a folder the scan reads");
     for entry in entries.map(Result::unwrap) {
         let path = entry.path();
         if path.is_dir() {

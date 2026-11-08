@@ -2508,7 +2508,7 @@ fn an_execute_reads_a_spent_retry_again_names_its_snapshot_and_refuses_an_audit_
             shares
                 .latest
                 .values()
-                .any(|row| row.body == said && row.status == Status::Unverified),
+                .any(|row| [row.body == said, row.status == Status::Unverified] == [true; 2]),
             "{said}"
         );
         assert!(said.starts_with("lifecycle snapshot ONLY: 2026-08-27 sha256="));

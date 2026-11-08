@@ -3190,7 +3190,7 @@ mod tests {
         );
         let (_, rows, _) = census.counters().expect("held");
         assert!(
-            rows == 0 || filled > 0,
+            [rows == 0, filled > 0].contains(&true),
             "rows held and cells held cannot disagree about an empty store"
         );
 
