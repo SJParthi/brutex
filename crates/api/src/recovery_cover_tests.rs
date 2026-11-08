@@ -2314,6 +2314,53 @@ async fn a_reconcile_judges_only_its_own_days_and_a_stop_ends_it_at_the_next_bou
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Stamps record `index` of `symbol`'s Zerodha month at rung `dir`, a month
+/// of `n_valid` records, with `stamp`, and reseals that record's checksum
+/// block in the month's `.crc` with the store's own geometry and CRC-32C
+/// (`docs/02-store-format.md` §6): a month altered by hand, as no writer
+/// leaves one, that still opens and reads.
+fn restamped(
+    root: &Path,
+    symbol: &str,
+    dir: &str,
+    month: store::path::YearMonth,
+    (index, n_valid): (u64, u64),
+    stamp: i64,
+) {
+    use std::io::{Read as _, Seek as _, Write as _};
+    let layout = store::layout::Layout::CURRENT;
+    let bars = source_path(root, symbol, dir, month).expect("a path");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bars)
+        .expect("the month");
+    let at = layout.offset_of(index).expect("the record's offset");
+    file.seek(std::io::SeekFrom::Start(at))
+        .expect("to the record");
+    file.write_all(&stamp.to_le_bytes())
+        .expect("the record's new stamp");
+    let block = index / store::format::RECORDS_PER_BLOCK;
+    let (start, end) = layout
+        .covered_byte_range(block, n_valid)
+        .expect("the block's covered bytes");
+    let mut covered = vec![0; usize::try_from(end - start).expect("one block")];
+    file.seek(std::io::SeekFrom::Start(start))
+        .expect("to the block");
+    file.read_exact(&mut covered).expect("the block");
+    let sum = store::block::seal(layout, n_valid, block, &covered).expect("the block's sum");
+    let mut sidecar = std::fs::OpenOptions::new()
+        .write(true)
+        .open(bars.with_extension("crc"))
+        .expect("the month's checksums");
+    sidecar
+        .seek(std::io::SeekFrom::Start(block * 4))
+        .expect("to the block's entry");
+    sidecar.write_all(&sum.to_le_bytes()).expect("the new sum");
+    sidecar.sync_all().expect("the sum is durable");
+    file.sync_all().expect("the record is durable");
+}
+
 /// The feed rows of the document in `site`'s run slot.
 fn feed_rows(site: &Site) -> Vec<FeedReport> {
     site.run
@@ -2337,7 +2384,9 @@ fn feed_rows(site: &Site) -> Vec<FeedReport> {
 /// missing); a holed day held in the minutes with no daily bar (missing and
 /// owed a retry); a lifecycle master for the plan's last day (named by its
 /// day, digest and source); a plan ending on another day (unverified, named);
-/// an audit past its 4,096 runs (refused by name); a feed row cleared while a
+/// an audit past its 4,096 runs (refused by name); a month whose middle bar is
+/// stamped in another month, resealed under the store's own checksum (read as
+/// written before, refused by name after); a feed row cleared while a
 /// window is read (that window's count not published); the next window's
 /// doing (not published); and, at once, a spent day and a blocked day in one
 /// window (both answered without a request, the window read again once), and
@@ -2491,6 +2540,35 @@ fn an_execute_reads_a_spent_retry_again_names_its_snapshot_and_refuses_an_audit_
                 .await
                 .map(|found| found.held),
             Err("source gap audit is truncated or has invalid timestamps".to_owned())
+        );
+
+        // A MONTH WHOSE MIDDLE BAR IS STAMPED IN ANOTHER MONTH, resealed under
+        // the store's own checksum, so the month opens and the bar reads.
+        let september = on(2026, 9, 1).year_month().expect("a month");
+        let days = [on(2026, 9, 1), on(2026, 9, 2), on(2026, 9, 3)];
+        source_month(
+            &root,
+            "NIFTY",
+            "1day",
+            september,
+            &days.map(|day| at(day, 0, 0)),
+        );
+        assert_eq!(
+            read_stamps(&root, "NIFTY", "1day", september).map(|stamps| stamps.len()),
+            Ok(3),
+            "the month as written reads"
+        );
+        restamped(
+            &root,
+            "NIFTY",
+            "1day",
+            september,
+            (1, 3),
+            at(on(2026, 10, 1), 0, 0),
+        );
+        assert_eq!(
+            read_stamps(&root, "NIFTY", "1day", september),
+            Err("source timestamp belongs to a different instrument-month window".to_owned())
         );
 
         // THE FEED ROW CLEARED WHILE THE FIRST WINDOW'S READ WAITS behind the
