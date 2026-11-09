@@ -212,8 +212,9 @@ fn in_a_launch_child() {
 /// Extremes: singles — a 60min rung (seven bars a session, so every saved
 /// body is small enough to rehash on each read), a later window of two
 /// months (the shortest whose 60min bars outlast the 200-bar warm-up), a
-/// second page one row in, the same first page asked again (the held reader
-/// answers it), the largest page (limit 256), a page starting exactly at the
+/// second page one row in, the same first page of each model asked again (the
+/// held reader answers it once its currency check holds), the largest page
+/// (limit 256), a page starting exactly at the
 /// end (served empty, no next page), a page starting one past the end
 /// (refused by name), a pin that is not the saved completion on statistics
 /// and on admission, each statistics page kind (candidates, splits, sources),
@@ -352,6 +353,12 @@ fn saved_boolean_evidence_is_served_by_every_reader_that_reads_it() {
         assert_eq!(admitted["model"], "admission", "{admitted}");
         assert_eq!(admitted["statistics_identity"], statistics, "{admitted}");
         assert_eq!(admitted["total"], first["total"], "{admitted}");
+        let (status, held) = page("admission", &format!("identity={admission}")).await;
+        assert_eq!(status, StatusCode::OK, "{held}");
+        assert_eq!(
+            held["rows"], admitted["rows"],
+            "the held admission answers again"
+        );
         let (status, refused) = page(
             "admission",
             &format!("identity={admission}&completion={other}"),
@@ -368,6 +375,12 @@ fn saved_boolean_evidence_is_served_by_every_reader_that_reads_it() {
         let (status, settings) = page("qualification", &format!("identity={qualification}")).await;
         assert_eq!(status, StatusCode::OK, "{settings}");
         assert_eq!(settings["model"], "qualification", "{settings}");
+        let (status, held) = page("qualification", &format!("identity={qualification}")).await;
+        assert_eq!(status, StatusCode::OK, "{held}");
+        assert_eq!(
+            held["rows"], settings["rows"],
+            "the held qualification answers again"
+        );
         let completion = settings["completion"].as_str().expect("a completion");
         let pinned = format!("identity={qualification}&completion={completion}");
         for (kind, period) in [

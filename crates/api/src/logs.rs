@@ -10911,23 +10911,20 @@ mod r3_24_follow_tests {
                 .any(|why| why.contains("not read yet")),
             "{unread:?}"
         );
-        let started = std::time::Instant::now();
-        let caught_up = loop {
-            let now = import_refusals(&root);
-            if now
-                .unread("options")
-                .iter()
-                .all(|why| !why.contains("logs/cli"))
-            {
-                break now;
-            }
-            assert!(
-                started.elapsed() < std::time::Duration::from_mins(1),
-                "the follower did not catch up: {:?}",
-                now.unread("options")
-            );
+        // ONE QUESTION EVERY 50 MS UNTIL THE FOLLOWER HAS CAUGHT UP, AND A
+        // FAILURE BY NAME AFTER A MINUTE. The deciding is the iterator's own
+        // (`take_while`, `find`), so a follower already done at the first
+        // question leaves no side of this test unrun (BASE-COV-API-AS3: the
+        // loop it replaces ran its not-yet side only on a host slower than
+        // the follower).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        let caught_up = std::iter::repeat_with(|| {
             std::thread::sleep(std::time::Duration::from_millis(50));
-        };
+            import_refusals(&root)
+        })
+        .take_while(|_| std::time::Instant::now() < deadline)
+        .find(|now| !now.unread("options").join("\n").contains("logs/cli"))
+        .expect("the follower caught up within a minute");
         let cli = caught_up
             .dirs()
             .iter()
