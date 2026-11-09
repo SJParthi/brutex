@@ -650,4 +650,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "indexstopqualificationjson_saved_tests.rs"]
-mod saved_tests;
+pub(crate) mod saved_tests;

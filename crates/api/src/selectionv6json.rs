@@ -34,6 +34,10 @@ use std::path::Path;
 #[path = "selectionv6json_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "selectionv6json_saved_tests.rs"]
+mod saved_tests;
+
 type Response = (
     StatusCode,
     [(axum::http::HeaderName, &'static str); 1],

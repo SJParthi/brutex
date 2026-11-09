@@ -504,3 +504,7 @@ fn summary(summary: &StatisticsSummary) -> Result<Value, String> {
         json!({"scope":crate::server::hex32(summary.scope),"cohort":crate::server::hex32(summary.cohort),"layout":crate::server::hex32(summary.layout),"families":summary.families.to_string(),"candidates":summary.candidates.to_string(),"periods":summary.periods.to_string(),"segments":summary.segments.to_string(),"periods_per_segment":summary.periods_per_segment.to_string(),"splits":summary.splits.to_string(),"procedure":{"draws":draws.to_string(),"seed":seed.to_string(),"block_length":block_length.to_string()},"bounds":{"families":families.to_string(),"candidates":candidates.to_string(),"observations":observations.to_string(),"bootstrap_work":bootstrap_work.to_string(),"split_work":split_work.to_string(),"additional_working_bytes":memory_bytes.to_string(),"saved_body_bytes":bytes.to_string()},"test_families":{"white":crate::server::hex32(white),"spa":crate::server::hex32(spa),"romano":crate::server::hex32(romano)},"white":family_test(summary.white),"spa":family_test(summary.spa),"romano_availability":availability(summary.romano_availability)?,"contributing_splits":summary.contributing_splits.to_string(),"bottom_half_splits":summary.bottom_half_splits.to_string()}),
     )
 }
+
+#[cfg(test)]
+#[path = "booleanevidencejson_saved_tests.rs"]
+mod saved_tests;

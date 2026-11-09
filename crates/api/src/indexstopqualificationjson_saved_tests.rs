@@ -32,16 +32,20 @@ const CHILD_PATH: &str = concat!(
 /// store's writer: minutes that cycle through a fixed pattern around
 /// 20,000.00.
 fn generated_nifty_months(root: &Path, months: &[u8]) {
-    nifty_months(root, months, |_month, day, minute, _place| {
-        let open = 2_000_000 + i64::from((minute + u16::from(day)) % 31) * 100;
-        // Each minute reaches up and down by its own amount, from 100 to
-        // 3,700 paisa, so the excursions an exit grid ranks spread wide enough
-        // on both sides for a 3:1 target pair.
-        let up = 100 + i64::from((minute * 7 + u16::from(day)) % 13) * 300;
-        let down = 100 + i64::from((minute * 11 + u16::from(day)) % 13) * 300;
-        let close = open + if minute % 3 == 0 { -50 } else { 50 };
-        (open, open + up, open - down, close)
-    });
+    nifty_months(root, months, generated_bar);
+}
+
+/// The `(open, high, low, close)` of [`generated_nifty_months`]' minute of
+/// the day `minute` on `day`: a fixed pattern around 20,000.00.
+pub(crate) fn generated_bar(_month: u8, day: u8, minute: u16, _place: i64) -> (i64, i64, i64, i64) {
+    let open = 2_000_000 + i64::from((minute + u16::from(day)) % 31) * 100;
+    // Each minute reaches up and down by its own amount, from 100 to
+    // 3,700 paisa, so the excursions an exit grid ranks spread wide enough
+    // on both sides for a 3:1 target pair.
+    let up = 100 + i64::from((minute * 7 + u16::from(day)) % 13) * 300;
+    let down = 100 + i64::from((minute * 11 + u16::from(day)) % 13) * 300;
+    let close = open + if minute.is_multiple_of(3) { -50 } else { 50 };
+    (open, open + up, open - down, close)
 }
 
 /// The sessions of the trending months whose 09:16 minute dips 10 paisa
@@ -71,16 +75,29 @@ fn trending_nifty_months(root: &Path, months: &[u8]) {
     });
 }
 
-/// Writes the NIFTY minutes `bar` prices — `(open, high, low, close)` of the
-/// month, day, minute of the day and place in its session — and their days,
-/// for every open session of the months of 2025 named in `months`.
+/// Writes the NIFTY minutes `bar` prices and their days: [`index_months`] for
+/// NIFTY.
 fn nifty_months(
     root: &Path,
     months: &[u8],
     bar: impl Fn(u8, u8, u16, i64) -> (i64, i64, i64, i64),
 ) {
-    let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+    index_months(root, "NIFTY", months, bar);
+}
+
+/// Writes the minutes `bar` prices — `(open, high, low, close)` of the month,
+/// day, minute of the day and place in its session — and their days for the
+/// index `index` under `zerodha`, for every open session of the months of 2025
+/// named in `months`; answers each month's minutes, in the order of `months`.
+pub(crate) fn index_months(
+    root: &Path,
+    index: &str,
+    months: &[u8],
+    bar: impl Fn(u8, u8, u16, i64) -> (i64, i64, i64, i64),
+) -> Vec<Vec<store::format::Bar>> {
+    let hash = brutex_core::universe::fnv1a(index).to_le_bytes();
     let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
+    let mut written = Vec::new();
     for &month in months {
         let mut minutes = Vec::new();
         let mut daily = Vec::new();
@@ -132,7 +149,7 @@ fn nifty_months(
                 vendor: brutex_core::vendor::Vendor::Zerodha,
                 exchange: "NSE",
                 segment: "INDEX",
-                symbol: "NIFTY",
+                symbol: index,
                 contract: None,
                 timeframe,
                 month: store::path::YearMonth::new(2025, month).expect("a month"),
@@ -144,7 +161,9 @@ fn nifty_months(
                 .append(bars)
                 .expect("generated bars append");
         }
+        written.push(minutes);
     }
+    written
 }
 
 /// The shipped admission policy profile.
