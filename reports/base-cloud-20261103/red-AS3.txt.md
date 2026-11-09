@@ -379,4 +379,17 @@ result: FAILED. 0 passed; 1 failed".
 bars::series::tod_index_tests::a_key_put_again_replaces_its_value_and_its_weight (new)
   hand change: crates/api/src/bars_series.rs:387 (WeighedGenerations::admit): «if let Some((_, was)) = self.young.remove(&key) {» -> «if let Some((_, was)) = self.young.remove(&key).filter(|_| false) {»
   red at crates/api/src/bars_series.rs:2757: the first weight out, not counted twice: left 200 right 100
+
+Continuation -6 (token -6, 9 Nov), run red8: the two new launch tests. Tree: a local, never-pushed commit red8
+(08408911) over code tip 32c1ac68 holding two hand changes; built with the repo toolchain (rustc 1.97.1),
+CARGO_TARGET_DIR=/var/tmp/as3/K2, cargo test -p api --locked --no-run (stamped: the build printed no "cli run
+persistence disabled"); run as api-<hash> --exact <the 2 full names> (TMPDIR a 1777 tmpfs): "test result: FAILED. 0
+passed; 2 failed". Before the change, the same two names on the stamped build of 32c1ac68: "ok. 1 passed" each.
+
+selectionv6json::saved_tests::a_ledger_v6_block_is_served_saved_and_every_damage_to_it_is_refused_by_name (new)
+  hand change: crates/api/src/selectionv6json.rs:226 (render_page, the Records arm): «json!({"rung":rung,"status":"saved",» -> «json!({"rung":rung,"status":"stored",»
+  red at crates/api/src/selectionv6json_saved_tests.rs:203 (the child): the page's status: left "absent" right "saved"; the parent at :99
+booleanevidencejson::saved_tests::saved_boolean_evidence_is_served_by_every_reader_that_reads_it (new)
+  hand change: crates/api/src/booleanevidencejson.rs:424 (admission): «json!(crate::server::hex32(stats.identity())),» -> «json!(crate::server::hex32(reader.identity())),»
+  red at crates/api/src/booleanevidencejson_saved_tests.rs:353 (the child): the linked statistics identity: left the admission's own (fb65894a...) right the statistics' (54750aba...); the parent at :197
 `````
