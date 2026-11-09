@@ -15,6 +15,24 @@ STATUS: IN PROGRESS
   `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`; llvm-cov and llvm-profdata `LLVM version 23.1.0-rust-1.99.0-nightly`.
   Every kit file's sha256 matched `MANIFEST.md`. Every figure here is this host's, the builder's: the Mac re-measures.
 
+## Working notes of continuation -6 (`0e0d177d`.., Mon 9 Nov; token `BASE-COV-API-AS3-20261105-6`)
+
+- `32c1ac68`: NEXT 4 and NEXT 3 done as tests, each from a production launch over a generated store, both
+  green on a stamped stable build of that commit (opt-level 3: 3 s and 23 s):
+  `selectionv6json::saved_tests::a_ledger_v6_block_is_served_saved_and_every_damage_to_it_is_refused_by_name` (the
+  public `cli::run(["ledger-v6", ...])`: the 1min rung commits its sealed block, both families naturally extinct at
+  999,999 ppm, and the 2min rung, whose files the store does not hold, refuses the run; the page serves the block
+  saved) and `booleanevidencejson::saved_tests::saved_boolean_evidence_is_served_by_every_reader_that_reads_it` (the
+  qualified Boolean search over a 60min rung folded from the generated minutes; at 1min one batch saved a 550 MB
+  candidate body that every currency check rehashes, at 60min 13 MB; a one-month later window at 60min holds no
+  warm row of the 200-bar trend average and is refused, June-July holds them).
+- NEXT 1 (`indexstopqualificationjson.rs` 237) measured twice more, not reached: a zero-price minute is refused by
+  the exact-minute ORB/GapFib overlay before any metric (the launch refused: `CorruptMinute { .., why:
+  PriceNotPositive }`); the 2021-02-24 systems-outage day (two windows) is withheld by the decode
+  (`indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS` holds 18,682), so every setting stayed Unmeasured.
+- Next: red runs for the two new tests, the gates, Route B of record, `gaps-AS3.txt.md`, `fu-AS3.txt.md`, this
+  report and `fix-BASE-COV-API-AS3.json.md`.
+
 ## What continuation -5 did (`7694e19b`..`98908e77`, 7 Nov)
 
 - **NEXT 0, the late red, found and fixed** (`32fbc1ab`). It was the test, not the host's day:
