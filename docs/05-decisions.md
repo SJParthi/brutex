@@ -88929,3 +88929,475 @@ The documents' citations are `cited_commits`' to read.
 
 **Cost.** Comments and documents only: no compiled line changes, no served
 route, no store file, no bench row. D-7403 to D-7409 are unused.
+
+### D-7410 — The instrumented cli tests' stack overflow is fixed at its cause: the grammar cursors a batch and a checkpoint frame hold live on the heap, and no stack budget is raised anywhere (BASE-STACK-1028) — 2026-10-29
+
+**Context** (BASE-STACK-1028, found 28 Oct 2026 by TESTTIME-1025's D3 deep
+step). D3 coverage Route B (`state/decisions-20261027/d3-route-b.sh`) builds
+the `cli` lib unit tests instrumented at opt-level 0. That binary aborted
+with SIGABRT: `index_stop_search::tests::complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch`
+overflowed the 2 MiB test thread, and a process ended by a signal writes no
+profile, so no `cli` file of any D2 set could be read and D3 coverage of every
+`cli` part was NOT PROVED. Some agents worked around it with a raised
+`RUST_MIN_STACK`; the D3 recipe forbids that, and so does this decision.
+
+**Measured on 29 Oct 2026, before** (the tip `f01d7a0e4`, the exact Route B
+build): the test overflows at 2 MiB and passes at 2176 KiB and every larger
+size tried, so its peak is over 2048 KiB and at most 2176 KiB (a
+`RUST_MIN_STACK` sweep used only to measure). No frame recursed on data depth:
+`index_stop_search_checkpoint::recover` already walks the acknowledged
+ancestry in a loop. The depth was frame SIZE. Read from the instrumented
+binary's own prologues (llvm-objdump of the nightly's llvm-tools), one call
+chain held `execute_observed_with` 650,064 B, `open_checkpoint` 424,288 B,
+`recover` 471,024 B, `Frame::decode` 227,936 B and `Batch::decode` 198,560 B:
+1,971,872 B before the test's own frame and the qualification replay. The
+reason is `vocab::expression_search::Cursor`, about 13 KiB inline (`offered`
+plus four `MAX_INSTRUCTIONS`-long arrays): a `Batch` held two, a checkpoint
+`Frame` one plus an `Option<Batch>`, and at opt-level 0 every move and every
+temporary of a value gets its own stack slot, so each of those functions
+reserved tens of `Frame`-sized copies.
+
+**Decision.** Fix it at the cause, never by a stack raise in the recipe, CI, a
+script, a test or the environment. `Batch` keeps `before` and `after` as
+`Box<Cursor>` (`prepare` takes `impl Into<Box<Cursor>>`, so no caller
+changes); `Frame.cursor` is a `Box<Cursor>`; a saved cursor is decoded
+straight into a box in a frame of its own (`decode_boxed`). After (the same
+build, this tip): those five frames are 36,144, 92,768, 28,992, 19,168 and
+14,384 B, and the end-to-end test overflows a 704 KiB test thread and passes on
+768 KiB, so its peak is over 704 KiB and at most 768 KiB, under the 2 MiB
+default 2.6 times; `Batch` and `Frame` are a few hundred bytes inline. No byte format, identity, report, progress record, refusal or
+admission changes: `encode` and `decode` are untouched apart from where the
+decoded cursor lives, and every existing round-trip and refusal test of the
+batch, the checkpoint, the reader and the end-to-end search passes unchanged.
+
+**The second overflow behind the first.** With the native search fixed, the
+same Route B run aborted later, on
+`step3_orchestrator::tests::stored_pair_commits_observation_and_statistics_then_reuses_exact_bytes`:
+that ONE test frame reserved 2,837,264 B, more than the whole 2 MiB thread.
+Each Committed* value of the Step 3 chain holds its predecessor inline (the
+family 10,488 B, observation-statistics 30,304, lineage 31,432, admission
+35,344, finalization 36,344, Population V5 37,296, Execution V3 38,696 B,
+measured with `size_of` in that build), and the test made two chains with every
+move, `Result` and `?` a slot of its own. The test now builds each chain value
+through a small `boxed` helper and holds boxes: its frame is 611,584 B and it
+passes on the default test thread. Production types are unchanged here (their
+inline retention is the D-0648 shape; boxing them is a wider change left for
+the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
+
+**A third overflow, in the release test build.** `cargo test -p cli
+--release` aborted on `build_provenance::tests::a_delta_chain_resolves_to_exactly_max_delta_depth_and_no_further`
+(feat/db-fix's code, unchanged by this part before this paragraph): the
+commit-stamp git reader resolves a chain of `MAX_DELTA_DEPTH` (128) reference
+deltas by recursion, bounded by that constant, and with the zlib decoder's
+state inlined `read_bytes` reserved 54,096 B per level, about 6.9 MB for the
+chain. Inflation now happens in its own `#[inline(never)] fn inflate`, a leaf
+called after the base is resolved: `read_bytes` is 496 B, `inflate` 53,808 B
+once, and the test passes on a 256 KiB thread in the release build. The
+recursion stays bounded by `MAX_DELTA_DEPTH`; its behaviour is unchanged. The
+entry reader's own refusals (not a pack, a self-naming delta, an overlong
+size, a reserved kind) gain a test, so every line of the changed functions is
+run.
+
+**Held by tests, smaller than the default, never larger.** The end-to-end
+test is unchanged and runs on the harness's default thread (2.6 times its
+measured peak; an earlier draft ran it on a 1.25 MiB thread, which it fits,
+and that wrapper was not kept, so the unchanged test adds no lines to the D2
+set); the batch and checkpoint tests run their bodies on 448 KiB and 384 KiB
+threads (twice their measured peaks); and `Batch` and `Frame` sizes are
+bounded. A value that creeps back onto the stack overflows there, in every
+plain `cargo test`, with the thread named. That a lower explicit stack is the
+only stack size a test states is the rule: an explicit raise stays forbidden
+(docs/06-limits.md L-STACK1028-01..03, docs/04-invariants.md STACK1028-01..04).
+
+**Cost.** One heap allocation per cursor a batch or frame keeps (one per batch
+prepared or decoded, one per frame), against tens of 13 KiB stack copies per
+call at opt-level 0. O(1) per operation is unchanged. D-7411 to D-7419 are
+unused.
+
+### D-7411 — BASE-STACK-1028 repair 1: the two test bodies this part changed hold no line a passing run cannot execute; a fallible call that spans lines binds its `Result` and takes `?` in a statement of its own — 2026-10-31
+
+**Context.** The D3 deep step on `bcac15e2c4d9`
+(`state/fix/round2/verify-BASE-STACK-1028-r1-deep.json`, Route B, opt-level 0,
+branch coverage) measured the D2 set of D-7410 and found GAPs in two test
+functions the part changed, so each counts whole:
+`index_stop_search_checkpoint_tests.rs`
+`an_empty_batch_completes_without_children_and_keeps_the_last_saved_table`
+held a search loop whose body never ran (its fixture's first one-node
+reservation is already the empty one), and `step3_orchestrator.rs`
+`stored_pair_commits_observation_and_statistics_then_reuses_exact_bytes` held
+fourteen lines that were only a call's closing `)?` (the `?` error return is
+the one region that starts there), two `map_err` closure bodies, a `let`-`else`
+that returned an error, an `assert!` whose second and third alternatives were
+never tried, and a `match` on the Admission V3 status with three arms no
+fixture row reached.
+
+**Decision.** Fixed in the test bodies, never by an exclusion or by weakening
+an assertion. The loop is gone: the test asserts the first reservation is
+empty and not exhausted, then completes it as before. In the Step 3 test every
+fallible call that spans lines binds its `Result` and takes `?` in a one-line
+statement (`let bounds = bounds?;`), so the line that holds the `?` also holds
+code every passing run executes; the retained-pair check is
+`assert_eq!(.., Ok(()))`; one named closure maps both fixture I/O errors; the
+stale-source attack asserts the exact refusal (it starts with
+`Execution V3 retained Population source refused: ` and names
+`Finalization`), so an `Ok` fails the test instead of returning an error; and
+the per-status counts are four comparisons in the receipt's order plus a check
+that they sum to the row count, which still fails if a fifth status appears.
+No production code changes, and no fixture byte, receipt or refusal changes.
+This entry takes D-7411; D-7412 to D-7419 stay unused.
+
+### D-7412 — BASE-STACK-1028 repair 2: each correction of this part's figures is a new row that names what it corrects, the rows at the data parts' cut point stay byte for byte; the Step 3 test's frame and peak are measured again after repair 1; the nightly's commit is listed as the compiler's — 2026-11-01
+
+**Context.** Three findings of the second agent's check of `c00b31a76`
+(`state/fix/round2/verify-BASE-STACK-1028-r2.json`) and of the independent
+levers check (`state/post-landing-20261101/check-levers-r2.md`, its B5):
+
+- The Step 3 success-path test's frame was stated as 611,584 B in D-7410,
+  docs/04-invariants.md STACK1028-05 and docs/06-limits.md L-STACK1028-04,
+  while at `c00b31a76` it is 690,096 B: repair 1 (D-7411) bound each fallible
+  call's `Result` before its `?`, which gives the test more stack slots at
+  opt-level 0, and the frame was not measured again. The same rows gave no peak
+  or margin for that test, and two rows cited "the full Route B run of `cli` on
+  this tip" for runs taken on earlier commits.
+- An earlier attempt of this repair, `1f5a8d5f8`, corrected those figures by
+  rewriting the rows. They sit at `bcac15e2c`, the commit the data parts and
+  FNO-SEAM were cut from and append right after, and the five ledgers are
+  append-only (`state/decisions-20261027/d1-landing.txt`), so the family's
+  landing tool refuses docs/05 and docs/06 for every one of them as "not an
+  append".
+- `crates/store/tests/cited_commits.rs` has been red since `bcac15e2c`.
+  docs/06-limits.md's section preamble names the coverage nightly as `rustc -V`
+  prints it, `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, and the test reads
+  that word as a commit of this repository, on no branch and listed nowhere.
+
+**Decision 1: a correction is a new row.** D-7410, STACK1028-01 to -07, and
+docs/06's section preamble with L-STACK1028-01 to -05 are byte for byte what
+`bcac15e2c` holds, and D-7411 what `c00b31a76` holds:
+`git diff bcac15e2c <tip> -- docs/04-invariants.md docs/05-decisions.md
+docs/06-limits.md` shows additions only. So some of those rows still say what
+they said; where one disagrees with a newer row, the newer row wins, and it
+names the row it corrects (L-STACK1028-06 to -10, STACK1028-08 and -09).
+`crates/cli/tests/stack_rows_kept.rs` reads the rows against that commit, by
+lines and in order, so a rewrite fails in every plain `cargo test -p cli` and
+never again waits for the family's landing to find it; it fails on `1f5a8d5f8`.
+
+**Decision 2: the figures, measured again.** On `c00b31a76`, in a scratch build
+of that commit with the Route B flags whose only additions were ignored probe
+tests and an override that run a test body on a thread of a stated size, never
+committed (`state/fix/round2/logs-STACK1028/repair2/`), the prologues read with
+the nightly's `llvm-objdump` give the Step 3 test 690,096 B and the five
+native-search frames of D-7410 unchanged. The Step 3 body overflows 1280, 1344,
+1408 and 1472 KiB threads, each time naming its thread, and passes on 1536 KiB,
+so its peak is over 1472 KiB and at most 1536 KiB and the default 2 MiB test
+thread holds it at least 1.33 times (L-STACK1028-06). The end-to-end native
+search overflows 704 and 736 KiB and passes on 768 KiB (L-STACK1028-07). The
+batch and checkpoint peaks measure the same as D-7410's (L-STACK1028-08). No
+`crates/cli` source changes after `c00b31a76`, this part's new test file apart,
+so these hold on every later tip of this part; its D3 step reads the frames
+again from its own build.
+
+**The commits those rows speak of.** docs/04 and docs/06 are read whole by the
+citation test, and a commit of this branch named there is a new citation that a
+fold of the branch would leave unresolved, so the new rows say "repair 1's tip"
+and this entry, which that test does not read, names each:
+
+| The rows' words | Commit | Where |
+|---|---|---|
+| the part's base, "before" | `f01d7a0e4` | D-7410 |
+| the builder's earlier commit, the batch and checkpoint sweep | `fa43b2e86` | `scratch/stack1028-sweep-after`, 29 Oct 11:23 to 11:27 IST |
+| the builder's measuring commit: "after" frames, 704 and 768 KiB, 611,584 B | `c7c14b544` | `scratch/stack1028-sweep-final`, 29 Oct 15:46 to 15:47 IST |
+| the commit that made `inflate` a leaf, the release figures | `6ef8b8638` | `crates/cli/build_provenance.rs`; only tests were added to it since |
+| repair 1's tip | `c00b31a76` | `state/fix/round2/logs-STACK1028/repair2/` (`frames-c00b31a76.txt`, `sweep2/`, `sweep3/`) |
+| the three full Route B runs of `cli`, 2,501 tests | `3f30357e4df4` | `state/fix/round2/logs-STACK1028/routeb-3f30357e4df4.log`, EXIT 0 |
+| 2,506 tests | `29d3f566ab8b` | `state/fix/round2/logs-STACK1028/routeb-29d3f566ab8b.log`, EXIT 3 only because `crates/cli/build_provenance.rs` is mounted by a `#[path]` the script's plain path does not name |
+| 2,507 tests | `bcac15e2c4d9` | `scratch/deep-BASE-STACK-1028-logs/route-b-2.log`, EXIT 3 for the same reason |
+
+**Why the Step 3 test keeps the default thread.** D-7410 lets a test state only
+a stack smaller than the default, and any such bound would sit closer to this
+peak than the default does. The headroom is already under 576 KiB, a chain that
+gains a Committed* value uses it up sooner, and an overflow aborts the whole
+instrumented `cli` run, so no `cli` file of any part could be read: the failure
+this part exists to remove. The margin is stated instead, beside what would
+widen it: the production chain values are still held inline (L-STACK1028-04, for
+the owners of those modules).
+
+**Decision 3: the compiler's commit has a reason of its own.** `1a98b1e13` is in
+`NOT_ON_MAIN` as `Off::Compiler`, not `Off::Neither`. `Off::Neither` asks every
+sentence citing the commit to say it "is in neither `main`'s history nor this"
+branch, and the sentence here stands in a row Decision 1 keeps byte for byte, so
+that listing fails with the words "by a sentence that does not say" (run on 1 Nov
+2026, `state/fix/round2/logs-STACK1028/repair2b/proof-neither.log`). It would also
+not say what is true: the commit is the compiler repository's, and no history of
+this one can hold it. The new reason's words are the whole print in backticks, so
+it exempts that one quotation of that one nightly and nothing else; another pin
+is refused until it is listed. A commit this branch or `main` holds is refused
+under it exactly as under `Off::Neither`.
+
+**Cost.** Tests and documents only: no production code, fixture or report byte
+changes. This entry takes D-7412; D-7413 to D-7419 stay unused.
+
+### D-7413 — BASE-STACK-1028 repair 3: the proof cell of STACK1028-03 names its tests, the one rewrite of this part's rows at the data parts' cut point, allowed by the main session; a `Cursor` is about 12 KiB — 2026-11-02
+
+**Context.** The second agent's check of `862ddd7aa8b8`
+(`state/fix/round2/verify-BASE-STACK-1028-r3.json`) found gate 10 refusing
+STACK1028-03. Its proof cell named two bare test files and no test, so the gate
+says "a ✓ row names no test, gate or front-end test file". The landing runs that
+gate, so this part could not land. The row is one `bcac15e2c` holds, and D-7412's
+Decision 1 keeps those rows byte for byte and makes every correction a new row.
+Two rules collided, and only on this row.
+
+**Why a new row could not cure it.** `names_a_proof` in
+`.github/invariant_paths.rs` reads only the row's own cell. That file is
+BASE-REDS-1023's. A declaration written only to satisfy the gate would hide the
+very defect the gate exists to find, so it was never an option. The cell had to
+change, and D-7412 binds this part, so the change was not this part's to allow.
+
+**Who allowed it.** The main session, on 2 Nov 2026 at about 18:44 IST, in
+answer to this repair's question. It is the main session's decision, not the
+operator's, and the operator may override it. Its words are in
+`state/fix/round2/repair-BASE-STACK-1028-progress.md`.
+
+**Decision.** That one cell changes, to the form the other rows use: each test
+file by its path, then the eight tests that prove the row's claim. Every other
+byte of every row `bcac15e2c` holds stays. `crates/cli/tests/stack_rows_kept.rs`
+holds the cell's two texts in `AGREED`, so that row must read as it did
+everywhere else and this cell must read exactly as agreed: another cell changed,
+this cell written another way, the row put back, moved, doubled or removed, or
+the same change to any other row each fail. STACK1028-12 is the new row that
+proves it, and it narrows STACK1028-10.
+
+BASE-REDS-1023 rewrites R427-11's proof cell the same way, so landing that part
+first and this one second meets both.
+
+**What the main session asked for before the long coverage run.** Gate 10 and
+the chain simulation on this text; each data part and FNO-SEAM merged with this
+tip through the family tool's `resolve-ledger`, with no "not an append" refusal
+on `docs/04`, `docs/05` or `docs/06`; and gate 10 on the merge with
+BASE-REDS-1023's tip. The results are in this repair's report and logs,
+`state/fix/round2/fix-BASE-STACK-1028.json` and
+`state/fix/round2/logs-STACK1028/repair3/`, not here: an entry cannot state a
+result taken on the commit that holds it.
+
+**Also corrected.** A `Cursor` is 12,286 B inline, about 12 KiB. D-7410 and
+L-STACK1028-01 say 13 KiB and stay as written; the comment on `Batch` is corrected
+and L-STACK1028-11 is the new row. The stack figures were measured and do not
+rest on that word.
+
+**Cost.** One ledger cell, one test file and one comment: no production code,
+fixture or report byte changes. This entry takes D-7413; D-7414 to D-7419 stay
+unused.
+
+### D-7414 — BASE-STACK-1028 repair 4: the kept-rows test takes the repository's history rule, it skips only with no `git` or no `.git`, and a clone without the cut commit compares with `main`'s copy — 2026-11-03
+
+**Context.** The second agent's check of repair 3's tip
+(`state/fix/round2/verify-BASE-STACK-1028-r4.json`) found the kept-rows test
+passing with every row unread. `crates/cli/tests/stack_rows_kept.rs` turned any
+failed `git show` into "nothing lost", so a `GIT_DIR` naming nothing, a `.git`
+file pointing nowhere and a shallow clone each passed with a row at the cut point
+rewritten, and the line saying so went to a passing test's captured stdout, so a
+plain run printed nothing. This repository has closed that skip twice: D-0693
+item 8 in `store/tests/cited_commits.rs` and P1-14-04 in
+`core/tests/findings.rs`. CLAUDE.md section 4 bans a fallback that hides a
+failure. Repair 2 wrote this one and pinned it with a test.
+
+**Decision.** The test takes the rule of those two files. It skips only where
+`git` cannot be run and where the tree holds no `.git`, read by
+`symlink_metadata`. Where the tree holds a `.git` and `git rev-parse --git-dir`
+fails there it fails with git's own words, fenced by `GIT_CEILING_DIRECTORIES`, and
+it refuses a shallow clone by name. A commit the clone holds that cannot show the
+ledger, because the object is gone or the ledger was never there, fails with
+git's own words too. What a compare has to say now goes to this process's stderr,
+which the harness does not capture, so a plain run prints a skip, and a plain run
+of a whole tree prints nothing. STACK1028-13 is the row. STACK1028-10 stays as
+written and that row narrows it. `a_commit_that_cannot_be_shown_compares_nothing`
+keeps its name, because STACK1028-10 names it, and now pins only the tree with no
+`.git`; the wider skip it pinned is gone.
+
+**Why a full clone without the cut commit does not fail.** The check gave a
+choice: fail by name, as `cited_commits` does for a clone without `main`, or say
+why not here. `main` takes this work as a squash merge and keeps no commit of the
+branch (`store/tests/cited_commits.rs`, its head; `docs/07-plan.md`), so every
+clone of `main` after that merge is a full clone without this commit, and a failure
+there would turn `main` red for good on the day this lands. Passing there unread
+would be the same skip again. So that clone compares with `main`'s copy: the
+group's own number of lines from its first, since `main`'s copy goes on past them,
+and it says so. `cited_commits` rests on `main`'s copy the same way for a squashed
+commit. A clone with neither fails by name: where `main` does not resolve, with the
+fetch that fixes it, and where `main` does not hold the rows, because nothing in
+such a clone can say what they were. Until then the landing keeps this history,
+because this tree cites the commit by its hash (the launcher's step 2c), so every
+clone of `feat/db-fix` and every data part holds it. L-STACK1028-12 names what the
+test still cannot compare.
+
+**Also corrected.**
+
+- The comment on the batch size test said 2 * 13 KiB; repair 3 corrected only the
+  comment on `Batch`. A `Cursor` is about 12 KiB (L-STACK1028-11).
+- `on_bounded_stack` said "Never raises a budget" and a 64 MiB stack passed
+  through it. It now refuses a size at or over the harness's 2 MiB default before
+  any thread starts (STACK1028-15), as an `Err`, since gate 11 refuses a runtime
+  assert. The check runs on the caller's thread, not on the bounded one, so no peak
+  of L-STACK1028-07 or -08 moves.
+- `the_ledger_holds_the_agreed_row_once_and_its_tests_exist` read a name planted in
+  a comment as a declaration. It now reads `#[test]` and then the test's `fn`
+  (STACK1028-16).
+- STACK1028-06 says nine completion fields. The test has ten completion cases,
+  eight fields, a missing grammar body and a missing prior batch, and 22 cases in
+  all. The row is at the cut point and stays; STACK1028-14 is the new row.
+- D-7412 says no `crates/cli` source changes after repair 1's tip. Repair 3 changed
+  one comment on `Batch`, and this repair changes the comment above and adds the
+  `#[cfg(test)]` check above. Neither is a frame of the measured paths, so what
+  D-7412 draws from that sentence stands.
+- D-7413's heading had no date, and has one now. It said D-7414 to D-7419 stay
+  unused; this entry takes D-7414.
+
+**Cost.** One test file, one `#[cfg(test)]` helper and its test, one comment and
+ledger rows: no production byte, fixture or report changes. The results are in this
+repair's report, `state/fix/round2/fix-BASE-STACK-1028.json`, and
+`state/fix/round2/logs-STACK1028/repair4/`, not here: an entry cannot state a
+result taken on the commit that holds it. D-7415 to D-7419 stay unused.
+
+### D-7415 — BASE-STACK-1028 repair 6: the speed tests give a real stop a patient list, so its words are its processes' however late `ps` answers; the sheet keeps its bounded list and its words for a late answer — 2026-11-06
+
+**Context.** This part's D1 landing gate of 6 Nov 2026 (M `ba39c7d21`, the merge
+of `2f136e0c2` into `feat/db-fix` `146031905`, load 207 to 253; check r6,
+`state/fix/ci-gates-logs/land-BASE-STACK-1028-20261106T1001Z-g2/web.log`) was red
+in `web/tests/speed.test.js` at line 3921 and green on `feat/db-fix` alone; the
+merge changes no file under `web/`. The --restart test's stubborn stop said
+`KILLED` and then "(its processes could not be listed again (ps did not answer
+within 2000 ms), so a process that joined it after the last list was not sent
+SIGTERM)". The stop lists its command's group with `ps -A -o pid= -o pgid=`
+every 100 ms while it waits, about fifty lists in a 5 s stop, each bounded by
+`LIST_WAIT_MS`. One answered past 2,000 ms, and the stop said so, as D-7152's
+addenda 25 and 28 require. The test stated the words of a machine on which no
+`ps` ever stalls. `ps` took 21.2 ms at p50 and 58.5 ms at most over 200 runs on
+this Mac at load 146 the same day, so that answer was a stall, and a stall can
+outlast any fixed bound. Every test of the file that states a real stop's words
+made the same assumption. With a `ps` that answers 2.1 s late at every call, M's
+own test file is red at line 3901 with no load, and the stubborn stop says the
+gate's words exactly.
+
+**Decision.** The fix is in the tests, where the assumption was. A test that
+states the words of a stop of a real command gives the stop a patient list: the
+sheet's own command, read by `sheet.membersIn`, with no time bound, so a stall
+delays the words and never changes them. A `ps` that fails or is missing is
+still said, because the list waits out lateness only. The stop takes the list
+through `run`'s `deps`, and now through `restartWithin`'s fourth argument and
+`runSheet`'s `deps.group`, so both of the sheet's commands can be given it; with
+nothing given, each still uses the sheet's bounded list. A test that bounds such
+a stop's time adds what the stop waited on its lists, its first and the one in
+flight when its wait ends, and nothing else. The look at the real table asks
+again only after an answer past `LIST_WAIT_MS`. A child sheet, which no test can
+hand a list, may say exactly the sheet's words for a late answer after its own,
+and nothing else. The sheet keeps `LIST_WAIT_MS`, its words, and its rule that
+no list is tried after one failed. The new test makes those words through the
+sheet's own list at will, and pins what a patient list says for a `ps` late at
+its first list or at every list, one that fails, one with no table, and none at
+all. STACK1028-17 is the row, and L-STACK1028-13 names the bound.
+
+**Why not the others.** A larger `LIST_WAIT_MS` is a raised timeout, and still
+races a longer stall. Retrying a late list in the sheet changes D-7152's rule
+and still races at the last list of a wait. Accepting either set of words in a
+test that runs in this process asserts less than it can, because there the
+outcome can be made exact.
+
+**Not this part's.** `speed.test.js` line 2032, red on M and on `feat/db-fix`
+alone, is the base's (the D1 red alert of 6 Nov, 10:27Z). This repair does not
+touch it.
+
+**Cost.** Four lines of `web/ci/speed-sheet.mjs`, which pass a list through, and
+their comments; the tests; and these rows. No Rust byte changes. D-7416 to
+D-7419 stay unused.
+
+### D-7416 — BASE-STACK-1028 repair 7: the speed tests' patient list waits for `ps` at most 15,000 ms and ends that `ps`'s whole process group; a real stop's words are its processes' only within that bound and, for a process that joins after the first list, inside the stop's wait; this corrects D-7415 — 2026-11-08
+
+**Context.** Check r7 of this part (`state/fix/round2/verify-BASE-STACK-1028-r7.json`,
+on repair 6's tip `0dab2b751`) failed it on three items in repair 6's speed tests
+and rows, each reproduced on that tip first
+(`state/fix/round2/logs-STACK1028/repair7/run-A5-before.txt`, `run-A4-before.txt`,
+`run-A7-before.txt`). A5: the patient list ran `ps` with no time bound, so under a
+`ps` that never answers the --restart test was cancelled at its 180 s timeout,
+the test file's process stayed alive under that `ps` (still at 253 s), and
+`node --test` never ended; `feat/db-fix` fails the same test by name in 2.3 s.
+L-STACK1028-13 said the test's own timeout ends such a `ps`; a timeout cancels a
+test and ends no process. A4: case A of repair 6's new test read the late `ps`'s
+own count, which that `ps` writes before its sleep; one stall past `LIST_WAIT_MS`
+before that line killed it uncounted, so the case said 1 list of 2. A7: under a
+`ps` that answers its first call at once and every later one 6 s late, the asker
+test's patient stop said `KILLED`: the process that joined the group after the
+first list was found by a list that answered after the stop's 5 s wait.
+STACK1028-17, D-7415 and the comment above `patiently()` said a stall delays the
+words and never changes them.
+
+**Decision.**
+
+1. **The patient list is bounded, and its bound ends the `ps`.**
+   `PATIENT_LIST_MS` is 15,000 ms: 3.9 times the largest answer measured on this
+   Mac (3,870.8 ms in 500 runs at load 100 to 109, check r7) and 7.5 times
+   `LIST_WAIT_MS`. The list starts the sheet's own `ps -A -o pid= -o pgid=` as the
+   leader of a process group of its own; past the bound it sends that group
+   SIGKILL, so a `ps` that ignores SIGTERM, has stopped or left a child holding
+   its output ends with all of it, and it answers "ps did not answer within 15000
+   ms, the speed tests' patient bound". The stop says that after its words, so a
+   test that meets the bound fails by that name, and the run ends: under a `ps`
+   that never answers, the --restart test fails by name at 15.5 s and
+   `node --test` ends at 17 s (`run-A5-after1.txt`). An answer after the bound is
+   never taken.
+2. **A stop's words change past the stop's wait, and this is stated.** A list
+   that answers within the bound leaves the words as they are, but for a process
+   that joins the group after the first list (a fork racing the signal, or the
+   asker test's own): only a list that sees it can ask it, and one that answers
+   after the stop's wait, `COMMAND_STOP_MS` after the command left, finds it too
+   late, so the group is killed and the stop says `KILLED`. A new test pins that
+   edge from both sides with the asker test's command: a late list due 1,000 ms
+   past the deadline gives `KILLED`, decided by the order in which timers run, so
+   the stop's look past its deadline comes first and finds the joined process
+   unasked; one due 2,500 ms inside it gives "was sent SIGTERM and left". The
+   asker test's failure names each list's time and this bound
+   (`run-A7-after1.txt`). STACK1028-18 narrows STACK1028-17; L-STACK1028-14
+   corrects L-STACK1028-13.
+3. **Case A counts on the test's side,** as the stop asks for each list, which no
+   kill can lose; under check r7's one stall the test passes
+   (`run-A4-after1.txt`).
+4. **The asker test's look is bounded in all.** It asks a late answer again for
+   `LOOK_MS`, 10,000 ms, then fails by name (check r7: under a `ps` late at every
+   call it asked 100 times, 2.05 s each, and ran past its 60 s timeout, which
+   named no reason).
+5. **Repair 6's test is renamed** from "however late `ps` answers" to "for any
+   `ps` that answers within the patient bound"; STACK1028-17 names it by its old
+   title.
+6. **Check r7's cheap follow-ups in this part's Rust test files.** The kept-rows
+   test's `git` runs with `GIT_NO_REPLACE_OBJECTS`, so a replace ref cannot make
+   the cut commit show a forged copy of the rows (E1); a clone that holds neither
+   the commit nor `main` is also told that the objects `git` reads may not be its
+   own (E3); a test any attribute stands above, `#[cfg(any())]` and `#[ignore]`
+   among them, is not read as declared; and the "SKIPPING" lines of the two
+   fixtures this part wrote go to stderr past the harness's capture, as `tell`
+   writes.
+
+**Why not the others.**
+
+- Ending the `ps` when the test ends, with no bound: a test's timeout cancels it
+  and runs nothing, so the run would still wait on the `ps`.
+- A bound by `execFile`'s `timeout`: it ends the `ps` alone, and it takes the
+  output of a `ps` that exited while its child held that output as a whole table
+  of what had been printed (probed: `scratch/repair-BASE-STACK-1028-r7/probe`).
+- Words that hold for any lateness: the stop's wait is the sheet's (D-7152).
+  Lengthening it for a test runs a stop the sheet never runs, and giving a
+  process found after the wait a wait of its own lets a group that keeps forking
+  hold the stop without end.
+
+**Not this part's.** The sheet's own bounded list, `groupMembers` in
+`web/ci/speed-sheet.mjs`, takes at its 2,000 ms bound the output of a `ps` that
+exited while a child held that output as the whole table
+(`probe/execfile-grandchild.mjs`). A real `ps` leaves no such child; this is
+filed for that file's owner, and this part does not change it. Check r7's
+follow-ups not taken: the kept-rows test's in-order match (E2), which needs a rule
+that still lets another part's line stand between the rows, and the checkpoint
+transition's encode of a boxed copy (optional, O(1) either way).
+
+**Cost.** `web/tests/speed.test.js` (the list, the look, the asker test's
+message, case A, comments, two tests), `crates/cli/tests/stack_rows_kept.rs`,
+the skip line of the fixture this part wrote in `crates/store/tests/cited_commits.rs`,
+and these rows. No byte of `web/ci` and none of any crate's `src` changes.
+D-7417 to D-7419 stay unused.

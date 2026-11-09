@@ -5492,6 +5492,17 @@ mod tests {
         assert_ne!(nifty as usize, banknifty as usize);
     }
 
+    /// D-7410: builds one committed chain value straight into a box. Each
+    /// Committed* value holds its predecessor inline (30 to 40 KiB here), and
+    /// at opt-level 0 every move, `Result` and `?` of one is its own stack
+    /// slot, so the test below reserved 2,837,264 B in ONE frame of the
+    /// instrumented coverage build and overflowed the 2 MiB test thread. Made
+    /// here, those copies live only in this short frame; the test holds boxes.
+    #[inline(never)]
+    fn boxed<T, E>(make: impl FnOnce() -> Result<T, E>) -> Result<Box<T>, E> {
+        make().map(Box::new)
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -5503,20 +5514,21 @@ mod tests {
         let long = exit_policy(Side::Long)?;
         let short = exit_policy(Side::Short)?;
         let diagnostic_sweeper = Sweeper::new(engine::Ladder::with_min_hits(1));
-        let nifty_min_hits = maximum_fixture_singleton_support(&fixture_request(
-            &fixture.source,
-            "NIFTY",
-            &diagnostic_sweeper,
-            &long,
-            &short,
-        )?)?;
-        let banknifty_min_hits = maximum_fixture_singleton_support(&fixture_request(
+        // Every fallible call below that spans lines binds its `Result` first
+        // and takes `?` in a statement of its own: a `?` alone on a call's
+        // closing line is a line that no passing run executes (D3 line
+        // coverage of this test, D-7411).
+        let nifty_request =
+            fixture_request(&fixture.source, "NIFTY", &diagnostic_sweeper, &long, &short);
+        let nifty_min_hits = maximum_fixture_singleton_support(&nifty_request?)?;
+        let banknifty_request = fixture_request(
             &fixture.source,
             "BANKNIFTY",
             &diagnostic_sweeper,
             &long,
             &short,
-        )?)?;
+        );
+        let banknifty_min_hits = maximum_fixture_singleton_support(&banknifty_request?)?;
         let nifty_sweeper = Sweeper::new(engine::Ladder::with_min_hits(nifty_min_hits));
         let banknifty_sweeper = Sweeper::new(engine::Ladder::with_min_hits(banknifty_min_hits));
         let observation_bounds = ObservationAuthorityBoundsV1::new(4, 2 * 1_024 * 1_024)?;
@@ -5524,24 +5536,29 @@ mod tests {
             PopulationStatisticsV2Bounds::new(4, 1_000_000, 64, 1_000_000, 512 * 1_024 * 1_024)?;
         let procedure = PopulationStatisticsProcedureV2::new(16, 7, 2)?;
 
-        let first_nifty =
-            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)?;
-        let first_banknifty = committed_stored_family(
-            &fixture.source,
-            "BANKNIFTY",
-            &banknifty_sweeper,
-            &long,
-            &short,
-        )?;
-        let mut first = commit_stored_observation_statistics_v2(
-            first_nifty,
-            first_banknifty,
-            &fixture.observation,
-            &fixture.statistics,
-            observation_bounds,
-            statistics_bounds,
-            procedure,
-        )?;
+        let first_nifty = boxed(|| {
+            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)
+        })?;
+        let first_banknifty = boxed(|| {
+            committed_stored_family(
+                &fixture.source,
+                "BANKNIFTY",
+                &banknifty_sweeper,
+                &long,
+                &short,
+            )
+        })?;
+        let mut first = boxed(|| {
+            commit_stored_observation_statistics_v2(
+                *first_nifty,
+                *first_banknifty,
+                &fixture.observation,
+                &fixture.statistics,
+                observation_bounds,
+                statistics_bounds,
+                procedure,
+            )
+        })?;
 
         assert!(matches!(
             first.observation_commit(),
@@ -5551,11 +5568,14 @@ mod tests {
             .map_err(|why| format!("fixture source canonicalization failed: {why}"))?;
         assert_eq!(first.nifty_source().root().path(), canonical_source);
         assert_eq!(first.banknifty_source().root().path(), canonical_source);
-        require_exact_stored_source_root_pair_v2(
-            first.nifty_source(),
-            first.banknifty_source(),
-            "success fixture retained sources",
-        )?;
+        assert_eq!(
+            require_exact_stored_source_root_pair_v2(
+                first.nifty_source(),
+                first.banknifty_source(),
+                "success fixture retained sources",
+            ),
+            Ok(())
+        );
         let observations = first.observations();
         assert_eq!(observations.nifty().family(), InstrumentFamilyV1::Nifty);
         assert_eq!(
@@ -5703,9 +5723,11 @@ mod tests {
             4 * crate::anchored_search_lineage_v4::ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES as u64,
             2 * crate::anchored_search_lineage_v4::ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES
                 as u64,
-        )?;
-        let first_lineage =
-            commit_stored_search_lineage_v4(first, &fixture.search_lineage, search_lineage_bounds)?;
+        );
+        let search_lineage_bounds = search_lineage_bounds?;
+        let first_lineage = boxed(|| {
+            commit_stored_search_lineage_v4(*first, &fixture.search_lineage, search_lineage_bounds)
+        })?;
         let first_lineage_authority = first_lineage.lineage();
         assert_ne!(
             first_lineage_authority.structural_receipt().pair_id(),
@@ -5726,14 +5748,17 @@ mod tests {
             1,
             crate::population_admission_v3::POPULATION_ADMISSION_V3_COMPLETION_BYTES as u64,
             candidate_count,
-        )?;
+        );
+        let admission_bounds = admission_bounds?;
         let admission_policy = population_admission_policy()?;
-        let mut first_population_admission = commit_stored_population_admission_v3(
-            first_lineage,
-            &fixture.admission,
-            admission_bounds,
-            &admission_policy,
-        )?;
+        let mut first_population_admission = boxed(|| {
+            commit_stored_population_admission_v3(
+                *first_lineage,
+                &fixture.admission,
+                admission_bounds,
+                &admission_policy,
+            )
+        })?;
         let first_admission_receipt = first_population_admission.admission_receipt();
         assert_eq!(first_admission_receipt.decision_count(), candidate_count);
         let first_admission_projection = first_population_admission
@@ -5760,12 +5785,15 @@ mod tests {
             1,
             crate::population_finalization_v3::POPULATION_FINALIZATION_V3_COMPLETION_BYTES as u64,
             candidate_count,
-        )?;
-        let mut first_finalization = commit_stored_population_finalization_v3(
-            first_population_admission,
-            &fixture.finalization,
-            finalization_bounds,
-        )?;
+        );
+        let finalization_bounds = finalization_bounds?;
+        let mut first_finalization = boxed(|| {
+            commit_stored_population_finalization_v3(
+                *first_population_admission,
+                &fixture.finalization,
+                finalization_bounds,
+            )
+        })?;
         let first_finalization_receipt = first_finalization.finalization_receipt();
         assert_eq!(
             first_finalization_receipt.admission_block_id(),
@@ -5827,12 +5855,15 @@ mod tests {
             1,
             crate::population_v5::POPULATION_V5_COMPLETION_BYTES as u64,
             candidate_count,
-        )?;
-        let mut first_population_v5 = crate::population_v5::commit_population_v5(
-            &fixture.population_v5,
-            population_v5_bounds,
-            first_finalization,
-        )?;
+        );
+        let population_v5_bounds = population_v5_bounds?;
+        let mut first_population_v5 = boxed(|| {
+            crate::population_v5::commit_population_v5(
+                &fixture.population_v5,
+                population_v5_bounds,
+                *first_finalization,
+            )
+        })?;
         assert!(first_population_v5.was_written());
         let first_population_v5_receipt = first_population_v5.structural_receipt();
         assert_eq!(first_population_v5_receipt.row_count(), candidate_count);
@@ -5881,7 +5912,6 @@ mod tests {
             first_population_v5_rows.len(),
             first_population_v5_inputs.len()
         );
-        let mut population_v5_status_counts = [0_u64; 4];
         for (index, (row, input)) in first_population_v5_rows
             .iter()
             .zip(&first_population_v5_inputs)
@@ -5910,27 +5940,36 @@ mod tests {
                 row.finalization_completion_id(),
                 input.finalization_completion_id()
             );
-            let status_index = match row.status() {
-                AdmissionV3Status::Admitted => 0,
-                AdmissionV3Status::Rejected => 1,
-                AdmissionV3Status::Unmeasured => 2,
-                AdmissionV3Status::Refused => 3,
-            };
-            let status_count = population_v5_status_counts
-                .get_mut(status_index)
-                .ok_or_else(|| "Population V5 fixture status lies outside matrix".to_owned())?;
-            *status_count = (*status_count)
-                .checked_add(1)
-                .ok_or_else(|| "Population V5 fixture status count overflowed".to_owned())?;
         }
+        // One count per status, in the receipt's order, by comparison rather
+        // than a `match`: the fixture's rows hold one status, so a `match`
+        // here had three arms no row reached. The sum check below still
+        // fails if a status outside these four ever appears.
+        let population_v5_status_counts = [
+            AdmissionV3Status::Admitted,
+            AdmissionV3Status::Rejected,
+            AdmissionV3Status::Unmeasured,
+            AdmissionV3Status::Refused,
+        ]
+        .map(|status| {
+            first_population_v5_rows
+                .iter()
+                .filter(|row| row.status() == status)
+                .count()
+        });
         assert_eq!(
-            population_v5_status_counts,
+            population_v5_status_counts.iter().sum::<usize>(),
+            first_population_v5_rows.len()
+        );
+        assert_eq!(
+            population_v5_status_counts.map(Ok::<usize, std::num::TryFromIntError>),
             [
                 first_population_v5_receipt.admitted_count(),
                 first_population_v5_receipt.rejected_count(),
                 first_population_v5_receipt.unmeasured_count(),
                 first_population_v5_receipt.refused_count(),
             ]
+            .map(usize::try_from)
         );
         let authenticated_first_population_v5_row = first_population_v5.authenticated_row(0)?;
         let expected_first_population_v5_row = first_population_v5_rows
@@ -5952,39 +5991,50 @@ mod tests {
         let execution_disposition_bytes = candidate_count
             .checked_mul(crate::execution_v3::EXECUTION_V3_DISPOSITION_BYTES as u64)
             .ok_or_else(|| "fixture Execution V3 disposition-byte bound overflowed".to_owned())?;
+        let parameter_file = crate::execution_v3::ExecutionV3FileBound::new(
+            execution_parameter_records,
+            execution_parameter_bytes,
+            crate::execution_v3::EXECUTION_V3_PARAMETER_BYTES,
+            "fixture parameter",
+        );
+        let parameter_file = parameter_file?;
+        let percentile_file = crate::execution_v3::ExecutionV3FileBound::new(
+            execution_percentile_records,
+            execution_percentile_bytes,
+            crate::execution_v3::EXECUTION_V3_PERCENTILE_BYTES,
+            "fixture percentile",
+        );
+        let percentile_file = percentile_file?;
+        let disposition_file = crate::execution_v3::ExecutionV3FileBound::new(
+            candidate_count,
+            execution_disposition_bytes,
+            crate::execution_v3::EXECUTION_V3_DISPOSITION_BYTES,
+            "fixture disposition",
+        );
+        let disposition_file = disposition_file?;
+        let completion_file = crate::execution_v3::ExecutionV3FileBound::new(
+            1,
+            crate::execution_v3::EXECUTION_V3_COMPLETION_BYTES as u64,
+            crate::execution_v3::EXECUTION_V3_COMPLETION_BYTES,
+            "fixture Completion",
+        );
+        let completion_file = completion_file?;
         let execution_bounds = crate::execution_v3::ExecutionV3Bounds::new(
-            crate::execution_v3::ExecutionV3FileBound::new(
-                execution_parameter_records,
-                execution_parameter_bytes,
-                crate::execution_v3::EXECUTION_V3_PARAMETER_BYTES,
-                "fixture parameter",
-            )?,
-            crate::execution_v3::ExecutionV3FileBound::new(
-                execution_percentile_records,
-                execution_percentile_bytes,
-                crate::execution_v3::EXECUTION_V3_PERCENTILE_BYTES,
-                "fixture percentile",
-            )?,
-            crate::execution_v3::ExecutionV3FileBound::new(
-                candidate_count,
-                execution_disposition_bytes,
-                crate::execution_v3::EXECUTION_V3_DISPOSITION_BYTES,
-                "fixture disposition",
-            )?,
-            crate::execution_v3::ExecutionV3FileBound::new(
-                1,
-                crate::execution_v3::EXECUTION_V3_COMPLETION_BYTES as u64,
-                crate::execution_v3::EXECUTION_V3_COMPLETION_BYTES,
-                "fixture Completion",
-            )?,
+            parameter_file,
+            percentile_file,
+            disposition_file,
+            completion_file,
             candidate_count,
             execution_percentile_records,
-        )?;
-        let mut first_execution_v3 = crate::execution_v3::commit_stored_execution_v3(
-            &fixture.execution_v3,
-            execution_bounds,
-            first_population_v5,
-        )?;
+        );
+        let execution_bounds = execution_bounds?;
+        let mut first_execution_v3 = boxed(|| {
+            crate::execution_v3::commit_stored_execution_v3(
+                &fixture.execution_v3,
+                execution_bounds,
+                *first_population_v5,
+            )
+        })?;
         assert!(first_execution_v3.was_written());
         let first_execution_v3_receipt = first_execution_v3.structural_receipt();
         assert_eq!(
@@ -6004,33 +6054,38 @@ mod tests {
         let execution_v3_bytes = directory_bytes(&fixture.execution_v3)?;
         let selection_root = fixture.base.join("selection-v5");
         fs::create_dir(&selection_root).map_err(|why| format!("selection fixture root: {why}"))?;
-        let (first_execution_v3, first_selection_receipt) =
-            crate::selection_v5::prove_stored_selection(
-                first_execution_v3,
-                &selection_root,
-                false,
-            )?;
+        let first_selection = crate::selection_v5::prove_stored_selection(
+            *first_execution_v3,
+            &selection_root,
+            false,
+        );
+        let (first_execution_v3, first_selection_receipt) = first_selection?;
         let selection_bytes = directory_bytes(&selection_root)?;
         drop(first_execution_v3);
 
-        let retry_nifty =
-            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)?;
-        let retry_banknifty = committed_stored_family(
-            &fixture.source,
-            "BANKNIFTY",
-            &banknifty_sweeper,
-            &long,
-            &short,
-        )?;
-        let mut retry = commit_stored_observation_statistics_v2(
-            retry_nifty,
-            retry_banknifty,
-            &fixture.observation,
-            &fixture.statistics,
-            observation_bounds,
-            statistics_bounds,
-            procedure,
-        )?;
+        let retry_nifty = boxed(|| {
+            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)
+        })?;
+        let retry_banknifty = boxed(|| {
+            committed_stored_family(
+                &fixture.source,
+                "BANKNIFTY",
+                &banknifty_sweeper,
+                &long,
+                &short,
+            )
+        })?;
+        let mut retry = boxed(|| {
+            commit_stored_observation_statistics_v2(
+                *retry_nifty,
+                *retry_banknifty,
+                &fixture.observation,
+                &fixture.statistics,
+                observation_bounds,
+                statistics_bounds,
+                procedure,
+            )
+        })?;
         assert!(matches!(
             retry.observation_commit(),
             ObservationAuthorityCommitV1::Reused(_)
@@ -6056,8 +6111,9 @@ mod tests {
         );
         assert_eq!(directory_bytes(&fixture.observation)?, observation_bytes);
         assert_eq!(directory_bytes(&fixture.statistics)?, statistics_bytes);
-        let retry_lineage =
-            commit_stored_search_lineage_v4(retry, &fixture.search_lineage, search_lineage_bounds)?;
+        let retry_lineage = boxed(|| {
+            commit_stored_search_lineage_v4(*retry, &fixture.search_lineage, search_lineage_bounds)
+        })?;
         assert_eq!(
             retry_lineage.lineage().structural_receipt(),
             first_lineage_authority.structural_receipt()
@@ -6066,12 +6122,14 @@ mod tests {
             directory_bytes(&fixture.search_lineage)?,
             search_lineage_bytes
         );
-        let mut retry_population_admission = commit_stored_population_admission_v3(
-            retry_lineage,
-            &fixture.admission,
-            admission_bounds,
-            &admission_policy,
-        )?;
+        let mut retry_population_admission = boxed(|| {
+            commit_stored_population_admission_v3(
+                *retry_lineage,
+                &fixture.admission,
+                admission_bounds,
+                &admission_policy,
+            )
+        })?;
         assert_eq!(
             retry_population_admission.admission_receipt(),
             first_admission_receipt
@@ -6083,11 +6141,13 @@ mod tests {
             first_admission_projection
         );
         assert_eq!(directory_bytes(&fixture.admission)?, admission_bytes);
-        let mut retry_finalization = commit_stored_population_finalization_v3(
-            retry_population_admission,
-            &fixture.finalization,
-            finalization_bounds,
-        )?;
+        let mut retry_finalization = boxed(|| {
+            commit_stored_population_finalization_v3(
+                *retry_population_admission,
+                &fixture.finalization,
+                finalization_bounds,
+            )
+        })?;
         assert_eq!(
             retry_finalization.finalization_receipt(),
             first_finalization_receipt
@@ -6101,11 +6161,13 @@ mod tests {
             first_population_v5_inputs
         );
         assert_eq!(directory_bytes(&fixture.finalization)?, finalization_bytes);
-        let mut retry_population_v5 = crate::population_v5::commit_population_v5(
-            &fixture.population_v5,
-            population_v5_bounds,
-            retry_finalization,
-        )?;
+        let mut retry_population_v5 = boxed(|| {
+            crate::population_v5::commit_population_v5(
+                &fixture.population_v5,
+                population_v5_bounds,
+                *retry_finalization,
+            )
+        })?;
         assert!(!retry_population_v5.was_written());
         assert_eq!(
             retry_population_v5.structural_receipt(),
@@ -6119,46 +6181,48 @@ mod tests {
             directory_bytes(&fixture.population_v5)?,
             population_v5_bytes
         );
-        let retry_execution_v3 = crate::execution_v3::commit_stored_execution_v3(
-            &fixture.execution_v3,
-            execution_bounds,
-            retry_population_v5,
-        )?;
+        let retry_execution_v3 = boxed(|| {
+            crate::execution_v3::commit_stored_execution_v3(
+                &fixture.execution_v3,
+                execution_bounds,
+                *retry_population_v5,
+            )
+        })?;
         assert!(!retry_execution_v3.was_written());
         assert_eq!(
             retry_execution_v3.structural_receipt(),
             first_execution_v3_receipt
         );
         assert_eq!(directory_bytes(&fixture.execution_v3)?, execution_v3_bytes);
-        let (mut retry_execution_v3, retry_selection_receipt) =
-            crate::selection_v5::prove_stored_selection(retry_execution_v3, &selection_root, true)?;
+        let retry_selection =
+            crate::selection_v5::prove_stored_selection(*retry_execution_v3, &selection_root, true);
+        let (mut retry_execution_v3, retry_selection_receipt) = retry_selection?;
         assert_eq!(retry_selection_receipt, first_selection_receipt);
         assert_eq!(directory_bytes(&selection_root)?, selection_bytes);
         let finalization_row_path = fixture.finalization.join("population-finalization-v3.bin");
-        let mut corrupted_finalization = fs::read(&finalization_row_path).map_err(|why| {
-            format!(
-                "fixture could not read Finalization V3 row file for stale-source attack: {why}"
-            )
-        })?;
+        let attack = |why: std::io::Error| format!("stale-source attack fixture: {why}");
+        let mut corrupted_finalization = fs::read(&finalization_row_path).map_err(attack)?;
         let final_byte = corrupted_finalization
             .last_mut()
             .ok_or_else(|| "fixture Finalization V3 row file is unexpectedly empty".to_owned())?;
         *final_byte ^= 1;
-        fs::write(&finalization_row_path, corrupted_finalization).map_err(|why| {
-            format!("fixture could not persist Finalization V3 stale-source attack: {why}")
-        })?;
-        let Err(stale_source_refusal) = retry_execution_v3.ordered_authenticated_dispositions()
-        else {
-            return Err(
-                "Execution V3 authenticated dispositions after its retained Population/Finalization source changed"
-                    .to_owned(),
-            );
-        };
+        fs::write(&finalization_row_path, corrupted_finalization).map_err(attack)?;
+        // `None` is the failure this attack exists to catch: Execution V3
+        // authenticated its dispositions after its retained source changed.
+        let stale_source_refusal = retry_execution_v3
+            .ordered_authenticated_dispositions()
+            .err();
         assert!(
-            stale_source_refusal.contains("Finalization")
-                || stale_source_refusal.contains("changed")
-                || stale_source_refusal.contains("corrupt"),
-            "unexpected retained-source refusal: {stale_source_refusal}"
+            stale_source_refusal.as_deref().is_some_and(|refusal| {
+                refusal.starts_with("Execution V3 retained Population source refused: ")
+            }),
+            "the retained Population source is reauthenticated first: {stale_source_refusal:?}"
+        );
+        assert!(
+            stale_source_refusal
+                .as_deref()
+                .is_some_and(|refusal| refusal.contains("Finalization")),
+            "the refusal names the changed Finalization source: {stale_source_refusal:?}"
         );
         Ok(())
     }
