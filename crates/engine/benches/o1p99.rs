@@ -4,9 +4,9 @@
 //! 10^6 bars for C-E-01) and keeps the minimum, or the mean of a long loop,
 //! which hides the tail. This file re-times the same production primitives
 //! per call at 1, 10^2, 10^4 and 10^6, prints p50 and p99, and fails when the
-//! quietest-round p99 at the largest size exceeds the smallest's by more than
-//! 3.0x (the shared-CI ceiling). See `o1p99/harness.rs` and
-//! `O1-ATTACK-REPORT.md` at the repository root.
+//! quietest-round p99 at any size exceeds the smallest's by more than 3.0x
+//! (the shared-CI ceiling). See `o1p99/harness.rs` and `O1-ATTACK-REPORT.md`
+//! at the repository root.
 //!
 //! * `O1P99-ENGINE-01` `Column::support`, cost PER BAR, flat in column length,
 //!   gated in floors (a fold of the same rows) so memory bandwidth cancels.
@@ -16,6 +16,12 @@
 //!   re-offered position walks 64 offered ones rather than repeating one.
 //! * `O1P99-ENGINE-03` `primitives::append` into a vector reserved past it,
 //!   flat in how many results are held, 64 pushes a sample.
+//! * `O1P99-ENGINE-04` `keep::Best::offer`, a refused offer into a full
+//!   retention of cap 1 to 10^5 ("O(1) to refuse"): raw and memory floor
+//!   printed, GATED in floors from cap 10^4.
+//! * `O1P99-ENGINE-05` 10^6 refused offers in a row at cap 10^5: p50, p99,
+//!   p99.9, max and the calls over 100 us, printed only (the max is not O(1);
+//!   `O1-ATTACK-REPORT.md`, "Beyond p99").
 
 use std::collections::HashSet;
 use std::hint::black_box;
@@ -261,7 +267,9 @@ fn refused_offer_is_flat(clock: u128) -> bool {
     // The refused mask lands in a random slot of a set of `cap` masks: the
     // memory floor is one random load in the bytes the set and the heap
     // hold (a 48-byte mask in the set, a 56-byte itemset in the heap). The
-    // gate is on the cost in those floors.
+    // gate is on the cost in those floors, from cap 10^4: at caps 1 and 10^2
+    // the floor is a few nanoseconds, under the clock (UNDER-RESOLVED), and a
+    // quotient of two clock-limited figures would gate on noise.
     let bytes: Vec<u64> = CAPS.iter().map(|c| c.saturating_mul(104)).collect();
     let floor = harness::memory_floor(&bytes, 5, 2_000, clock);
     let _printed = verdict(
@@ -271,11 +279,19 @@ fn refused_offer_is_flat(clock: u128) -> bool {
         &floor,
         u128::MAX,
     );
+    let floors = harness::against(&tails, &floor);
+    let _printed = harness::verdict_floors(
+        "O1P99-ENGINE-04",
+        "keep::Best::offer refused, in floors, every cap (printed)",
+        &CAPS,
+        &floors,
+        u128::MAX,
+    );
     let ok = harness::verdict_floors(
         "O1P99-ENGINE-04",
-        "keep::Best::offer refused, in floors, by cap",
-        &CAPS,
-        &harness::against(&tails, &floor),
+        "keep::Best::offer refused, in floors, cap 10^4 -> 10^5",
+        CAPS.get(2..).unwrap_or(&[]),
+        floors.get(2..).unwrap_or(&[]),
         FACTOR_PERMILLE,
     );
     // ENGINE-05: the long churn on the largest retention, printed only.
