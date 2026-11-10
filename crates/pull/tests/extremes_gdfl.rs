@@ -1201,3 +1201,90 @@ fn a_chained_rename_files_each_stem_under_ltm_only_on_its_own_days() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ===========================================================================
+// A lot revised in the middle of a contract's life
+// ===========================================================================
+
+/// FINDING (GDFL options lineage, a lot revised mid-contract).
+///
+/// Input: the NIFTY quarterly contract that settled 2026-03-30 (stated 31
+/// March 2026), observed by the import's lot ledger on 2025-12-29 and on
+/// 2025-12-31, each day's traded quantities showing the lot the costs table
+/// says was in force for THAT contract that day: 75 and then 65
+/// (`costs::lot::lot_size_of`, the rule citing NSE/FAOP/70616: "Lot size of
+/// existing quarterly and half yearly contracts will be revised on
+/// 30-Dec-2025 EOD").
+///
+/// Expected: the ledger's lot for the contract after the revision is the
+/// revised lot, 65 (and the record says the lot changed on 2025-12-31).
+///
+/// Actual: see the assertion. `LotLedger::observe`
+/// (`crates/pull/src/gdfl_lineage.rs:1222-1243`) keeps "the common divisor of
+/// every day's" GCD on the stated premise that a contract's lot "can only
+/// fall within one lineage"; a revised lot is folded into gcd(75, 65) = 5, so
+/// `imports/gdfl.lots` records lot 5 for a contract that never traded in
+/// lots of 5. An upward revision (25 to 75, NSE/FAOP/64625, cited for the
+/// far contract's switch on 2024-12-26) is folded the other way: the ledger
+/// keeps 25 after the switch, a lot below the true one.
+///
+/// Proposed fix: when a day's GCD is not a multiple of the held lot (or the
+/// held lot is not a multiple of the day's), record a lot CHANGE from that
+/// day rather than the common divisor, or consult the costs crate's sourced
+/// revision dates; keep the common-divisor fold for days that only refine
+/// the same lot.
+#[test]
+#[ignore = "finding: a mid-contract lot revision is folded into a GCD (EXTREMES-REPORT.md)"]
+fn finding_a_lot_revised_mid_contract_is_folded_into_a_common_divisor() {
+    use pull::gdfl_lineage::{LotEvidence, LotLedger};
+    let nifty = brutex_core::symbol::Symbol::new("NIFTY").unwrap();
+    let slot = costs::venue::swept_slot(nifty).unwrap();
+    let lot = |expiry: (u16, u8, u8), on: (u16, u8, u8)| {
+        let expiry = costs::day::TradeDay::new(expiry.0, expiry.1, expiry.2).unwrap();
+        let on = costs::day::TradeDay::new(on.0, on.1, on.2).unwrap();
+        u64::from(
+            costs::lot::lot_size_of(slot, expiry, on)
+                .unwrap()
+                .lot
+                .units(),
+        )
+    };
+    let mut seen = Vec::new();
+    for (expiry, eve, after, text) in [
+        (
+            (2026, 3, 30),
+            (2025, 12, 29),
+            (2025, 12, 31),
+            "2026-03-30-26000-CE",
+        ),
+        (
+            (2025, 3, 27),
+            (2024, 12, 24),
+            (2024, 12, 27),
+            "2025-03-27-24000-PE",
+        ),
+    ] {
+        let (old, new) = (lot(expiry, eve), lot(expiry, after));
+        assert_ne!(old, new, "the costs table revises {text}'s lot mid-life");
+        let contract = brutex_core::instrument::Contract::parse(text).unwrap();
+        let mut ledger = LotLedger::new();
+        let first = ledger.observe(
+            nifty,
+            contract,
+            day(eve.0, eve.1, eve.2),
+            LotEvidence::Inferred(old),
+        );
+        assert!(first.is_some(), "the first lot seen is recorded");
+        let _second = ledger.observe(
+            nifty,
+            contract,
+            day(after.0, after.1, after.2),
+            LotEvidence::Inferred(new),
+        );
+        seen.push((text, old, new, ledger.lot_of(nifty, contract)));
+    }
+    assert!(
+        seen.iter().all(|&(_, _, new, held)| held == Some(new)),
+        "(contract, lot before, lot after, ledger's lot after) = {seen:?}"
+    );
+}
