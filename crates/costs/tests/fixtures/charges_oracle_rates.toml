@@ -1,0 +1,745 @@
+# CHARGES ORACLE RATE TABLE — machine-readable twin of docs/charges-oracle/RATES.md
+#
+# Every charge on an NSE intraday trade, for three segments, 2018-09-01 to
+# 2026-10-31, from official sources only. Read by
+# crates/costs/tests/charges_oracle.rs, which refuses any key, value or shape
+# it does not understand.
+#
+# HOW THE SOURCES WERE READ (it bounds every row): the session that wrote this
+# table could not fetch any page — its network policy refused every official
+# host. Every quote below is text a web-search tool returned from the official
+# URL named on the row, queried 10 Nov 2026 with the search restricted to that
+# official domain. `verification` says whether the tool returned the string as
+# the source's own text ("verbatim via search") or paraphrased it.
+#
+# Fields:
+#   id        unique row id, cited by RATES.md and the report
+#   charge    brokerage_rate | brokerage_cap | brokerage_per_order | exchange_txn
+#             | ipft | clearing | sebi_fee | stt | stt_exercise | stamp | gst
+#             | gst_on_sebi_fee
+#   segments  comma list of equity_intraday, stock_option, index_option
+#   applies   buy | sell | both | exercise
+#   base      what the rate multiplies
+#   num/den   the rate as an exact fraction (paisa for brokerage_cap and
+#             brokerage_per_order; 1 or 0 for gst_on_sebi_fee)
+#   from/to   inclusive calendar dates
+#   status    verified | assumption | unverified | unknown | counterfactual
+#             (unknown: no official figure was reached; num is 0 and the oracle
+#             prices nothing for it and says so)
+#   value     the figure as the source states it
+#   source    official URL(s)
+#   quote     the exact quote, as the search tool returned it
+#   note      verification level and any choice the row makes
+
+schema = "brutex-charges-oracle/1"
+window_from = "2018-09-01"
+window_to = "2026-10-31"
+
+# ===========================================================================
+# BROKERAGE — Dhan (Raise Securities Pvt Ltd)
+# ===========================================================================
+
+[[rate]]
+id = "BRK-EQ-RATE-0"
+charge = "brokerage_rate"
+segments = "equity_intraday"
+applies = "both"
+base = "order value, per executed order"
+num = 3
+den = 10000
+from = "2018-09-01"
+to = "2021-11-03"
+status = "counterfactual"
+value = "0.03% of the order value (what-if: Dhan had not launched; its launch tariff applied backwards)"
+source = "https://dhan.co/ai-info/"
+quote = "Founded: 2021 · Launched: November 2021"
+note = "verbatim via search. Dhan published no price before its public launch (Muhurat trading, 4 Nov 2021, community.dhan.co, paraphrase via search)."
+
+[[rate]]
+id = "BRK-EQ-RATE-1"
+charge = "brokerage_rate"
+segments = "equity_intraday"
+applies = "both"
+base = "order value, per executed order"
+num = 3
+den = 10000
+from = "2021-11-04"
+to = "2026-10-31"
+status = "assumption"
+value = "the lower of Rs 20 and 0.03% of the order value, per executed order"
+source = "https://knowledge.dhan.co/support/solutions/articles/82000830571-what-are-the-trading-investing-charges-for-dhan- ; https://dhan.co/pricing/"
+quote = "Equity Intraday & ETF Equity Intraday: Rs. 20/- or 0.03%, whichever is lower on per executed order."
+note = "verbatim via search (knowledge base). The figure is the current page's; that it held unchanged since launch is assumed — no dated snapshot was reachable (web.archive.org refused)."
+
+[[rate]]
+id = "BRK-EQ-CAP-0"
+charge = "brokerage_cap"
+segments = "equity_intraday"
+applies = "both"
+base = "paisa per executed order"
+num = 2000
+den = 1
+from = "2018-09-01"
+to = "2021-11-03"
+status = "counterfactual"
+value = "Rs 20 per executed order (what-if, as BRK-EQ-RATE-0)"
+source = "https://dhan.co/ai-info/"
+quote = "Founded: 2021 · Launched: November 2021"
+note = "verbatim via search."
+
+[[rate]]
+id = "BRK-EQ-CAP-1"
+charge = "brokerage_cap"
+segments = "equity_intraday"
+applies = "both"
+base = "paisa per executed order"
+num = 2000
+den = 1
+from = "2021-11-04"
+to = "2026-10-31"
+status = "assumption"
+value = "Rs 20 per executed order, the cap on the 0.03%"
+source = "https://dhan.co/pricing/"
+quote = "Brokerage | ₹ 0 (Zero Brokerage) | ₹ 20 or 0.03% per executed order whichever is lower"
+note = "verbatim via search. Constancy since launch assumed, as BRK-EQ-RATE-1."
+
+[[rate]]
+id = "BRK-OPT-0"
+charge = "brokerage_per_order"
+segments = "stock_option,index_option"
+applies = "both"
+base = "paisa per executed order"
+num = 2000
+den = 1
+from = "2018-09-01"
+to = "2021-11-03"
+status = "counterfactual"
+value = "Rs 20 per executed order (what-if, as BRK-EQ-RATE-0)"
+source = "https://dhan.co/ai-info/"
+quote = "Founded: 2021 · Launched: November 2021"
+note = "verbatim via search."
+
+[[rate]]
+id = "BRK-OPT-1"
+charge = "brokerage_per_order"
+segments = "stock_option,index_option"
+applies = "both"
+base = "paisa per executed order"
+num = 2000
+den = 1
+from = "2021-11-04"
+to = "2026-10-31"
+status = "assumption"
+value = "Rs 20 per executed order, whatever the size"
+source = "https://knowledge.dhan.co/support/solutions/articles/82000830571-what-are-the-trading-investing-charges-for-dhan- ; https://dhan.co/pricing/"
+quote = "Options (Equity, Commodities, Currency): Flat Rs. 20/- per executed order."
+note = "verbatim via search. CONFLICT: https://dhan.co/options/ says \"For options trading, there is a ₹20 (or 0.03%) charge per order executed in any segment's options.\" The knowledge base and pricing page say a fixed Rs 20; that is used. Constancy since launch assumed."
+
+# ===========================================================================
+# NSE EXCHANGE TRANSACTION CHARGE — each side
+# Before 2024-10-01 NSE billed members on a monthly-turnover slab ladder; no
+# per-client rate exists. These rows take the ladder's highest per-lakh rate
+# (the rate a member pays on its first slab), which is what brokers commonly
+# passed to clients — an ASSUMPTION about the pass-through, not a quote.
+# ===========================================================================
+
+[[rate]]
+id = "EXC-EQ-2009"
+charge = "exchange_txn"
+segments = "equity_intraday"
+applies = "both"
+base = "traded value"
+num = 325
+den = 10000000
+from = "2018-09-01"
+to = "2020-12-31"
+status = "assumption"
+value = "Rs 3.25 per lakh each side (first slab, up to Rs 1,250 crore a month)"
+source = "https://archives.nseindia.com/content/circulars/faac13028.pdf ; https://archives.nseindia.com/content/circulars/FA46730.pdf"
+quote = "Rs. 3.25 each side per lakh"
+note = "fragment verbatim via search (NSE/F&A/13028, 7 Sep 2009, effective 1 Oct 2009); FA46730's 'existing' column confirms 3.25 as at Dec 2020 (paraphrase). No circular dated 2018-09 to 2020-12 surfaced."
+
+[[rate]]
+id = "EXC-EQ-2021"
+charge = "exchange_txn"
+segments = "equity_intraday"
+applies = "both"
+base = "traded value"
+num = 345
+den = 10000000
+from = "2021-01-01"
+to = "2023-03-31"
+status = "assumption"
+value = "Rs 3.45 per lakh each side (first slab)"
+source = "https://archives.nseindia.com/content/circulars/FA46730.pdf"
+quote = "Trading members may be aware that there have been certain market exigencies due to broker member defaults."
+note = "quote verbatim via search; the slab values (3.45 / 3.40 / 3.35 / 3.30 / 3.25 / 3.20) are the tool's paraphrase of the table, repeated as FA56129's 'existing' column. FA46730 is dated 18 Dec 2020."
+
+[[rate]]
+id = "EXC-EQ-2023"
+charge = "exchange_txn"
+segments = "equity_intraday"
+applies = "both"
+base = "traded value"
+num = 325
+den = 10000000
+from = "2023-04-01"
+to = "2024-03-31"
+status = "assumption"
+value = "Rs 3.25 per lakh each side (first slab)"
+source = "https://archives.nseindia.com/content/circulars/FA56129.pdf"
+quote = "The above revision in transaction charges will be applicable with effect from April 01, 2023."
+note = "date verbatim via search; values paraphrase. FA56129 is dated 24 Mar 2023."
+
+[[rate]]
+id = "EXC-EQ-2024A"
+charge = "exchange_txn"
+segments = "equity_intraday"
+applies = "both"
+base = "traded value"
+num = 322
+den = 10000000
+from = "2024-04-01"
+to = "2024-09-30"
+status = "assumption"
+value = "Rs 3.22 per lakh each side (first slab)"
+source = "https://nsearchives.nseindia.com/content/circulars/FA61137.pdf"
+quote = "The above revision in transaction charges will be applicable with effect from April 01, 2024."
+note = "quote verbatim via search; 3.22 (first slab) and 2.97 (last) read, the middle slabs derived. FA61137 is dated 14 Mar 2024."
+
+[[rate]]
+id = "EXC-EQ-2024B"
+charge = "exchange_txn"
+segments = "equity_intraday"
+applies = "both"
+base = "traded value"
+num = 297
+den = 10000000
+from = "2024-10-01"
+to = "2026-02-28"
+status = "verified"
+value = "Rs 2.97 per lakh each side, the same for every member"
+source = "https://nsearchives.nseindia.com/content/circulars/FA64232.pdf"
+quote = "the Exchange has now decided to levy the following transaction charges to the Trading members: Cash Market: Rs. 2.97 each side per lakh of traded value"
+note = "verbatim via search. FA64232 is dated 27 Sep 2024, effective 1 Oct 2024, under SEBI/HO/MRD/TPD-1/P/CIR/2024/92 (true to label)."
+
+[[rate]]
+id = "EXC-EQ-2026"
+charge = "exchange_txn"
+segments = "equity_intraday"
+applies = "both"
+base = "traded value"
+num = 30699
+den = 1000000000
+from = "2026-03-01"
+to = "2026-10-31"
+status = "verified"
+value = "Rs 306.99 per crore each side"
+source = "https://nsearchives.nseindia.com/content/circulars/FA73061.pdf"
+quote = "The above revision will be applicable with effect from March 1, 2026."
+note = "date verbatim via search; 297 -> 306.99 is the tool's reading of the table, the same in more than five searches. FA73061 is dated 27 Feb 2026. No later circular found to 2026-10-31."
+
+[[rate]]
+id = "EXC-OPT-2009"
+charge = "exchange_txn"
+segments = "stock_option,index_option"
+applies = "both"
+base = "premium value"
+num = 5000
+den = 10000000
+from = "2018-09-01"
+to = "2020-12-31"
+status = "assumption"
+value = "Rs 50.00 per lakh of premium (slab above Rs 3 crore up to Rs 100 crore a month)"
+source = "https://archives.nseindia.com/content/circulars/FA46730.pdf"
+quote = "Up to Rs 3 Crores, Rs. 2,500/-"
+note = "fragment verbatim via search; the per-lakh slab values are FA46730's 'existing' column (paraphrase). The 'up to Rs 3 crore: Rs 2,500' first row is unclear (a fixed monthly amount, or an extraction artefact); the highest per-lakh rate is used."
+
+[[rate]]
+id = "EXC-OPT-2021"
+charge = "exchange_txn"
+segments = "stock_option,index_option"
+applies = "both"
+base = "premium value"
+num = 5300
+den = 10000000
+from = "2021-01-01"
+to = "2023-03-31"
+status = "assumption"
+value = "Rs 53.00 per lakh of premium (highest per-lakh slab)"
+source = "https://archives.nseindia.com/content/circulars/FA46730.pdf"
+quote = "Trading members may be aware that there have been certain market exigencies due to broker member defaults."
+note = "quote verbatim via search; 53.00 / 50.50 / 45.50 paraphrase, repeated as FA56129's 'existing' column."
+
+[[rate]]
+id = "EXC-OPT-2023"
+charge = "exchange_txn"
+segments = "stock_option,index_option"
+applies = "both"
+base = "premium value"
+num = 5000
+den = 10000000
+from = "2023-04-01"
+to = "2024-03-31"
+status = "assumption"
+value = "Rs 50.00 per lakh of premium (highest per-lakh slab)"
+source = "https://archives.nseindia.com/content/circulars/FA56129.pdf"
+quote = "The above revision in transaction charges will be applicable with effect from April 01, 2023."
+note = "date verbatim via search; values paraphrase."
+
+[[rate]]
+id = "EXC-OPT-2024A"
+charge = "exchange_txn"
+segments = "stock_option,index_option"
+applies = "both"
+base = "premium value"
+num = 4950
+den = 10000000
+from = "2024-04-01"
+to = "2024-09-30"
+status = "assumption"
+value = "Rs 49.50 per lakh of premium (highest per-lakh slab)"
+source = "https://nsearchives.nseindia.com/content/circulars/FA61137.pdf"
+quote = "In order to optimise the overall cost of trading, the Exchange has now decided to reduce the transaction charges levied to the Trading members."
+note = "quote verbatim via search; 49.50 / 47.00 paraphrase."
+
+[[rate]]
+id = "EXC-OPT-2024B"
+charge = "exchange_txn"
+segments = "stock_option,index_option"
+applies = "both"
+base = "premium value"
+num = 3503
+den = 10000000
+from = "2024-10-01"
+to = "2026-02-28"
+status = "verified"
+value = "Rs 35.03 per lakh of premium each side, the same for every member"
+source = "https://nsearchives.nseindia.com/content/circulars/FA64232.pdf"
+quote = "Equity Options: Rs. 35.03 each side per lakh of premium value"
+note = "verbatim via search. One 'Equity Options' line: no separate index or stock option rate."
+
+[[rate]]
+id = "EXC-OPT-2026"
+charge = "exchange_txn"
+segments = "stock_option,index_option"
+applies = "both"
+base = "premium value"
+num = 355299
+den = 1000000000
+from = "2026-03-01"
+to = "2026-10-31"
+status = "verified"
+value = "Rs 3,552.99 per crore of premium each side"
+source = "https://nsearchives.nseindia.com/content/circulars/FA73061.pdf"
+quote = "The above revision will be applicable with effect from March 1, 2026."
+note = "date verbatim via search; 3,503 -> 3,552.99 is the tool's reading of the table (one search said the cell was garbled; the 3,553 total with IPFT is consistent)."
+
+# ===========================================================================
+# NSE INVESTOR PROTECTION FUND TRUST (IPFT) CONTRIBUTION — each side
+# ===========================================================================
+
+[[rate]]
+id = "IPFT-ALL-0"
+charge = "ipft"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "traded value (premium value for options)"
+num = 1
+den = 1000000000
+from = "2018-09-01"
+to = "2023-03-31"
+status = "assumption"
+value = "Rs 0.01 per crore each side"
+source = "https://archives.nseindia.com/content/circulars/FA56129.pdf"
+quote = "recalibrated the contribution from the existing Rs.0.01 per crore of traded value to Rs.10 per crore of the traded value"
+note = "near-verbatim via search (the tool set it inside its own sentence). Rs 0.01 was 'existing' in March 2023; that it applied from 2018-09-01 is assumed."
+
+[[rate]]
+id = "IPFT-EQ-2023"
+charge = "ipft"
+segments = "equity_intraday"
+applies = "both"
+base = "traded value"
+num = 10
+den = 10000000
+from = "2023-04-01"
+to = "2026-02-28"
+status = "verified"
+value = "Rs 10 per crore each side, charged on top of the transaction charge"
+source = "https://archives.nseindia.com/content/circulars/FA56129.pdf ; https://nsearchives.nseindia.com/content/circulars/FA73061.pdf"
+quote = "recalibrated the contribution from the existing Rs.0.01 per crore of traded value to Rs.10 per crore of the traded value"
+note = "near-verbatim via search."
+
+[[rate]]
+id = "IPFT-OPT-2023"
+charge = "ipft"
+segments = "stock_option,index_option"
+applies = "both"
+base = "premium value"
+num = 50
+den = 10000000
+from = "2023-04-01"
+to = "2026-02-28"
+status = "verified"
+value = "Rs 50 per crore of premium each side"
+source = "https://archives.nseindia.com/content/circulars/FA56129.pdf ; https://nsearchives.nseindia.com/content/circulars/FA73061.pdf"
+quote = "recalibrated the contribution from the existing Rs.0.01 per crore of traded value to Rs.10 per crore of the traded value"
+note = "the Rs 50 per crore of premium figure is paraphrase via search ('raised ... to Rs 50 per crore of traded premium value, up from Rs 0.01'); FA73061's table shows the same Rs 50 as the figure it replaced."
+
+[[rate]]
+id = "IPFT-ALL-2026"
+charge = "ipft"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "traded value (premium value for options)"
+num = 1
+den = 1000000000
+from = "2026-03-01"
+to = "2026-10-31"
+status = "verified"
+value = "Rs 0.01 per crore each side"
+source = "https://nsearchives.nseindia.com/content/circulars/FA73061.pdf"
+quote = "the Exchange has now decided to roll back the increase made in the Trading Member's contributions towards NSE IPFT at the level levied prior to April 1, 2023"
+note = "verbatim via search; the figure is the pre-April-2023 level (IPFT-ALL-0)."
+
+# ===========================================================================
+# CLEARING CHARGE (NSE Clearing Ltd)
+# ===========================================================================
+
+[[rate]]
+id = "CLR-ALL"
+charge = "clearing"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "traded value"
+num = 0
+den = 1
+from = "2018-09-01"
+to = "2026-10-31"
+status = "assumption"
+value = "nil to the client: the exchange pays NSE Clearing out of its transaction charge"
+source = "https://nsearchives.nseindia.com/web/sites/default/files/inline-files/NSE%20Earnings%2006May%202024%20final.pdf ; https://nsearchives.nseindia.com/corporate/BSE_19112024165318_NSEIntimation.pdf"
+quote = "The clearing and settlement charges paid to our subsidiary company, NSE Clearing Limited and Indian Clearing Corporation Limited owned by BSE"
+note = "verbatim via search (NSE Q4 FY24 call). No NSE or NSE Clearing circular stating nil was found; nil is an inference."
+
+# ===========================================================================
+# SEBI TURNOVER FEE — each side; options on premium
+# ===========================================================================
+
+[[rate]]
+id = "SEBI-15"
+charge = "sebi_fee"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "traded value (premium value for options)"
+num = 15
+den = 10000000
+from = "2018-09-01"
+to = "2019-03-31"
+status = "verified"
+value = "Rs 15 per crore (0.00015%)"
+source = "https://www.sebi.gov.in/sebi_data/meetingfiles/mar-2019/1553244864312_1.pdf"
+quote = "reducing the broker turnover fee (other than Debt Securities & Agri Commodity Derivative) from current Rs.15/- per crore to Rs. 10/-per crore"
+note = "verbatim via search (SEBI board memo, March 2019)."
+
+[[rate]]
+id = "SEBI-10A"
+charge = "sebi_fee"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "traded value (premium value for options)"
+num = 10
+den = 10000000
+from = "2019-04-01"
+to = "2020-05-31"
+status = "assumption"
+value = "Rs 10 per crore (0.0001%)"
+source = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListingAll=yes&search=Fees"
+quote = "Securities and Exchange Board of India (Payment of Fees)(Amendment) Regulations, 2019"
+note = "listing title verbatim via search, dated March 22, 2019. The first day is UNVERIFIED: 2019-04-01 is used; one non-official notice says 3 Apr 2019."
+
+[[rate]]
+id = "SEBI-5"
+charge = "sebi_fee"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "traded value (premium value for options)"
+num = 5
+den = 10000000
+from = "2020-06-01"
+to = "2021-03-31"
+status = "verified"
+value = "Rs 5 per crore: 50% of Rs 10, June 2020 to March 2021"
+source = "https://www.sebi.gov.in/media/press-releases/apr-2020/sebi-reduces-broker-turnover-fees-and-filing-fees-for-issuers_46571.html"
+quote = "The broker turnover fee will be reduced to 50% of the existing fee structure for the period June 2020 to March 2021."
+note = "verbatim via search (PR No. 24/2020, 27 Apr 2020), which adds: \"The benefit of the above reduction in fees will automatically be passed on to the investors as well.\" No implementing regulation or exchange circular was read."
+
+[[rate]]
+id = "SEBI-10B"
+charge = "sebi_fee"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "traded value (premium value for options)"
+num = 10
+den = 10000000
+from = "2021-04-01"
+to = "2026-10-31"
+status = "verified"
+value = "Rs 10 per crore (0.0001%)"
+source = "https://www.nseindia.com/static/invest/first-time-investor-sebi-turnover-fees-stt-other-levies"
+quote = "0.0001 per cent of the price at which the securities are purchased or sold (Rs.10 per crore)"
+note = "verbatim via search (a page updated after April 2026). The return to Rs 10 on 2021-04-01 follows from SEBI-5's end date. Options: 'turnover shall be computed on the basis of premium traded' (SEBI Stock Brokers Regulations schedule, verbatim via search)."
+
+# ===========================================================================
+# SECURITIES TRANSACTION TAX — Chapter VII, Finance (No. 2) Act 2004, s.98
+# ===========================================================================
+
+[[rate]]
+id = "STT-EQ"
+charge = "stt"
+segments = "equity_intraday"
+applies = "sell"
+base = "non-delivery value: offset quantity x the client's VWAP for the scrip and day"
+num = 25
+den = 100000
+from = "2018-09-01"
+to = "2026-10-31"
+status = "verified"
+value = "0.025%, seller"
+source = "https://www.incometaxindia.gov.in/w/section-98-55 ; https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf"
+quote = "Sale of an equity share in a company or a unit of an equity oriented fund [or a unit of a business trust], where— 0.025 per cent Seller (a) the transaction of such sale is entered into in a recognised stock exchange; and (b) the contract for the sale of such share or unit is settled otherwise than by the actual delivery or transfer of such share or unit."
+note = "verbatim via search; FATAX73524 (31 Mar 2026): \"0.025 per cent (No Change)\"."
+
+[[rate]]
+id = "STT-OPT-1"
+charge = "stt"
+segments = "stock_option,index_option"
+applies = "sell"
+base = "option premium value"
+num = 5
+den = 10000
+from = "2018-09-01"
+to = "2023-03-31"
+status = "verified"
+value = "0.05% of the premium, seller"
+source = "https://archives.nseindia.com/content/circulars/FATAX56235.pdf"
+quote = "(up to March 31, 2023 – 0.05%)"
+note = "source fragment via search (NSE circular 2/2023). That no Finance Act of 2020-2022 changed it was not searched directly; none surfaced."
+
+[[rate]]
+id = "STT-OPT-2"
+charge = "stt"
+segments = "stock_option,index_option"
+applies = "sell"
+base = "option premium value"
+num = 625
+den = 1000000
+from = "2023-04-01"
+to = "2024-09-30"
+status = "verified"
+value = "0.0625% of the premium, seller (Finance Act 2023)"
+source = "https://archives.nseindia.com/content/circulars/FATAX56235.pdf ; https://nsearchives.nseindia.com/content/circulars/FATAX63809.pdf"
+quote = "0.0625 per cent of the option premium"
+note = "verbatim via search (Budget 2024-25 memorandum describing the rate in force)."
+
+[[rate]]
+id = "STT-OPT-3"
+charge = "stt"
+segments = "stock_option,index_option"
+applies = "sell"
+base = "option premium value"
+num = 1
+den = 1000
+from = "2024-10-01"
+to = "2026-03-31"
+status = "verified"
+value = "0.1% of the premium, seller (Finance (No. 2) Act 2024)"
+source = "https://nsearchives.nseindia.com/content/circulars/FATAX63809.pdf"
+quote = "The Finance Act, 2024 (No. 2 of 2024), which received the Presidential assent on August 16, 2024, has revised the rate of levy of STT with effect from 1st day of October, 2024."
+note = "verbatim via search; FATAX73524: \"(upto March 31, 2026 – 0.10%)\"."
+
+[[rate]]
+id = "STT-OPT-4"
+charge = "stt"
+segments = "stock_option,index_option"
+applies = "sell"
+base = "option premium value"
+num = 15
+den = 10000
+from = "2026-04-01"
+to = "2026-10-31"
+status = "verified"
+value = "0.15% of the premium, seller (Finance Act 2026)"
+source = "https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf ; https://www.indiabudget.gov.in/doc/budget_speech.pdf"
+quote = "The Finance Act, 2026, which received the Presidential assent on March 30, 2026, has revised the following rates of levy of STT with effect from 1st day of April, 2026"
+note = "verbatim via search (identical across four queries). Budget speech: \"STT on options premium and exercise of options are both proposed to be raised to 0.15 percent from the present rate of 0.1 percent and 0.125 percent respectively\". No later change found to 2026-10-31."
+
+[[rate]]
+id = "STTX-IDX-1"
+charge = "stt_exercise"
+segments = "index_option"
+applies = "exercise"
+base = "settlement value: settlement price x quantity"
+num = 125
+den = 100000
+from = "2018-09-01"
+to = "2019-08-31"
+status = "verified"
+value = "0.125% of the SETTLEMENT PRICE, purchaser (holder who exercises)"
+source = "https://www.indiabudget.gov.in/budget2019-20/doc/memo.pdf ; https://www.nseindia.com/static/invest/first-time-investor-sebi-turnover-fees-stt-other-levies"
+quote = "As per the existing provisions section 99 of the Finance (No.2) Act, 2004, the value of taxable securities transaction in respect of sale of an option in securities, where option is exercised, shall be, the settlement price."
+note = "verbatim via search (identical in two queries); NSE: \"(prior to Septemebr 1, 2019 -on the settlement price)\" (its typo)."
+
+[[rate]]
+id = "STTX-IDX-2"
+charge = "stt_exercise"
+segments = "index_option"
+applies = "exercise"
+base = "intrinsic value: |settlement price - strike price| x quantity"
+num = 125
+den = 100000
+from = "2019-09-01"
+to = "2026-03-31"
+status = "verified"
+value = "0.125% of the intrinsic value, purchaser"
+source = "https://www.indiabudget.gov.in/budget2019-20/doc/memo.pdf ; https://www.nseindia.com/static/invest/first-time-investor-sebi-turnover-fees-stt-other-levies"
+quote = "It is proposed to amend the said section so as to provide that value of taxable securities transaction in respect of sale of an option in securities, where option is exercised, shall be the difference between the strike price and the settlement price. This amendment will take effect from 1st September, 2019."
+note = "verbatim via search (the Bill memorandum; NSE confirms \"Purchaser - On Intrinsic value w.e.f. 01.09.2019\")."
+
+[[rate]]
+id = "STTX-IDX-3"
+charge = "stt_exercise"
+segments = "index_option"
+applies = "exercise"
+base = "intrinsic value: |settlement price - strike price| x quantity"
+num = 15
+den = 10000
+from = "2026-04-01"
+to = "2026-10-31"
+status = "verified"
+value = "0.15% of the intrinsic value, purchaser (Finance Act 2026)"
+source = "https://www.nseindia.com/static/products-services/equity-derivatives-securities-transaction-tax ; https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf"
+quote = "RATES W.E.F. APRIL 1, 2026 ... Sale of an option in securities, where option is exercised | 0.15 per cent | 0.125 per cent | Purchaser"
+note = "table cells verbatim via search. CONFLICT: two of six reads of FATAX73524 said 'No Change' for this row; the NSE STT page, the budget speech, the Key Features document and the s.98 page all say 0.15%."
+
+[[rate]]
+id = "STTX-STK"
+charge = "stt_exercise"
+segments = "stock_option"
+applies = "exercise"
+base = "physically settled since SEBI moved stock derivatives to delivery"
+num = 0
+den = 1
+from = "2018-09-01"
+to = "2026-10-31"
+status = "unknown"
+value = "UNVERIFIED: the STT on a stock option settled by delivery was not reached"
+source = "none reached"
+quote = "none"
+note = "the search budget ran out before this was searched. The oracle prices no stock-option exercise."
+
+# ===========================================================================
+# STAMP DUTY — buyer only from 2020-07-01 (Indian Stamp Act, as amended by
+# the Finance Act 2019, and the 2019 collection Rules)
+# ===========================================================================
+
+[[rate]]
+id = "STAMP-STATE"
+charge = "stamp"
+segments = "equity_intraday,stock_option,index_option"
+applies = "buy"
+base = "set by the client's state of residence"
+num = 0
+den = 1
+from = "2018-09-01"
+to = "2020-06-30"
+status = "unknown"
+value = "UNVERIFIED: state stamp duty. Maharashtra is the state assumed (the broker and NSE are in Mumbai, and Maharashtra waived its duty for non-residents, so a Maharashtra resident is the case its rate governs) — its rate was not reached"
+source = "http://www.nseindia.com/regulations/member-compliance-stamp-duty ; https://www.indiacode.nic.in/bitstream/123456789/22026/1/the_maharashtra_stamp_act,_1958.pdf"
+quote = "The Govt. of Maharashtra vide its Order No. Mudrank 2006/CR/290/M-1 dated May 23, 2006 had in public interest waived the stamp duty on the instruments of record of transaction relating to sale and purchase of securities by Trading Members and investors who are residing outside the State of Maharashtra."
+note = "verbatim via search. The Maharashtra Stamp Act text reached is 'as on 8th April 2025' and its rate sub-item was cut off; no delivery, non-delivery, futures or options rate, and no cap, was reached."
+
+[[rate]]
+id = "STAMP-EQ"
+charge = "stamp"
+segments = "equity_intraday"
+applies = "buy"
+base = "buy value (market value of the security bought)"
+num = 3
+den = 100000
+from = "2020-07-01"
+to = "2026-10-31"
+status = "verified"
+value = "0.003%, buyer only"
+source = "https://www.indiacode.nic.in/ViewFileUploaded?path=AC_CEN_2_2_00036_189902_1523339055436%2Frulesindividualfile%2F&file=stamp_act%2C_2019.pdf ; https://www.pib.gov.in/PressReleasePage.aspx?PRID=1635399"
+quote = "transfer of security other than debenture on non-delivery basis"
+note = "Schedule I entry verbatim via search; 0.003% is the tool's reading of the same Gazette PDF. Liability: \"in the case of sale of security through stock exchange, by the buyer of such security\". PIB: \"... will come into effect from tomorrow, i.e. 1st July, 2020 vide notifications dated 30th March, 2020.\""
+
+[[rate]]
+id = "STAMP-OPT"
+charge = "stamp"
+segments = "stock_option,index_option"
+applies = "buy"
+base = "premium paid by the buyer"
+num = 3
+den = 100000
+from = "2020-07-01"
+to = "2026-10-31"
+status = "verified"
+value = "0.003% of the premium, buyer only"
+source = "https://www.indiacode.nic.in/bitstream/123456789/15510/5/A1899-2%20.pdf"
+quote = "the market value for calculating the stamp-duty shall be, in the case of— (i) options in any securities, the premium paid by the buyer"
+note = "verbatim via search (s.21 proviso); Schedule entry \"options (equity and commodity)\"; 0.003% is the tool's reading. Index options read as 'options in any securities'."
+
+# ===========================================================================
+# GST — 18% on the fee base
+# ===========================================================================
+
+[[rate]]
+id = "GST-18"
+charge = "gst"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "brokerage + exchange transaction charge + IPFT + clearing (+ SEBI fee from 2022-07-18)"
+num = 18
+den = 100
+from = "2018-09-01"
+to = "2026-10-31"
+status = "verified"
+value = "18%: 9% CGST + 9% SGST, or 18% IGST"
+source = "https://gstcouncil.gov.in/sites/default/files/2024-02/gstservicerates.pdf ; https://cbic-gst.gov.in/hindi/pdf/central-tax-rate/Notification11-CGST.pdf"
+quote = "15 Heading 9971 (vii) Financial and related services 9 9 18"
+note = "verbatim via search (Notification 11/2017-CT(Rate), from 2017-07-01). No change from the 22 Sep 2025 rate rationalisation surfaced; that broking stayed at 18% is not stated by any source reached. Which lines bear GST: Dhan's formula \"18% on brokerage + transaction charges + SEBI Turnover + IPFT/Other Tax\" (verbatim via search, dhan.co/pricing); no NSE or CBIC text was reached for the exchange-charge part."
+
+[[rate]]
+id = "GST-SEBI-0"
+charge = "gst_on_sebi_fee"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "flag: 0 = the SEBI fee is outside the GST base"
+num = 0
+den = 1
+from = "2018-09-01"
+to = "2022-07-17"
+status = "assumption"
+value = "no GST on the SEBI fee: services by SEBI were exempt"
+source = "https://archives.nseindia.com/content/circulars/FATAX52993.pdf"
+quote = "the GST exemption granted to the services provided by SEBI is being withdrawn with effect from July 18, 2022."
+note = "verbatim via search (NSE circular 2/2022, 18 Jul 2022). That brokers levied none before is inferred from the exemption; no source says so directly."
+
+[[rate]]
+id = "GST-SEBI-1"
+charge = "gst_on_sebi_fee"
+segments = "equity_intraday,stock_option,index_option"
+applies = "both"
+base = "flag: 1 = the SEBI fee is inside the GST base"
+num = 1
+den = 1
+from = "2022-07-18"
+to = "2026-10-31"
+status = "verified"
+value = "GST at 18% on the SEBI fee, collected from clients"
+source = "https://www.sebi.gov.in/sebi_data/faqfiles/mar-2023/1678853311186.pdf ; https://archives.nseindia.com/content/circulars/FATAX52993.pdf"
+quote = "the fees and other charges payable to SEBI shall be subject to GST at the rate of 18% with effect from July 18, 2022."
+note = "verbatim via search. NSE: \"the SEBI has advised the Exchange to direct the trading members to levy GST @ 18% on the fees payable to SEBI, from their clients\"."
