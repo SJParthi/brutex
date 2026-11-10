@@ -36,6 +36,19 @@ description  = "The condition bit table and the 384-bit mask. Bit index is ident
 workspace = true
 
 # ---------------------------------------------------------------------------
+# The o1p99 attack (cloud lane, 10 Nov 2026): every claim `ratio` times by its
+# minimum, re-timed per call at 1, 10^2, 10^4 and 10^6 with p50 and p99
+# printed, failing when the p99 grows past the factor each row states. Same
+# shape as `ratio`: no framework, no dependency, not run by `cargo test`.
+# DECLARED BEFORE `ratio` ON PURPOSE: gate 14's manifest reader keeps the last
+# of two adjacent [[bench]] blocks, and the one it must keep is `ratio`.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "o1p99"
+harness = false
+test    = false
+
+# ---------------------------------------------------------------------------
 # THE BOUND IS RE-MEASURED, NOT ASSERTED. Gate 14 refuses a crate that claims a
 # constant cost and never measures it, and `ConditionMask::hits` is the sweep's
 # inner loop -- the one operation called more often than everything else in the

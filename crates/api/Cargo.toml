@@ -104,6 +104,19 @@ serde_json = { workspace = true }
 [lints]
 workspace = true
 
+# ---------------------------------------------------------------------------
+# The o1p99 attack (cloud lane, 10 Nov 2026): every claim `ratio` times by its
+# minimum, re-timed per call at 1, 10^2, 10^4 and 10^6 with p50 and p99
+# printed, failing when the p99 grows past the factor each row states. Same
+# shape as `ratio`: no framework, no dependency, not run by `cargo test`.
+# DECLARED BEFORE `ratio` ON PURPOSE: gate 14's manifest reader keeps the last
+# of two adjacent [[bench]] blocks, and the one it must keep is `ratio`.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "o1p99"
+harness = false
+test    = false
+
 # Gate 8 — per-request page cost stays constant as the instrument set grows.
 # `harness = false` because there is no benchmarking framework in this
 # repository: every ratio is integer arithmetic over `Instant`, and a framework
