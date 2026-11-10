@@ -681,10 +681,15 @@ fn two_readers_racing_a_writer_see_only_whole_committed_prefixes() {
     let all: Vec<Bar> = batches.concat();
     drop(BarFile::open_or_create(&root, month(), SYMBOL).unwrap());
     let writing = AtomicBool::new(true);
+    // The writer starts only once both readers run, so the race is real.
+    let readers_up = AtomicU64::new(0);
 
     let (writer_locked, reports) = std::thread::scope(|scope| {
         let writer = scope.spawn(|| {
             let mut locked = 0_u32;
+            while readers_up.load(Ordering::Acquire) < 2 {
+                std::thread::yield_now();
+            }
             for batch in &batches {
                 loop {
                     match BarFile::open_or_create(&root, month(), SYMBOL) {
@@ -706,6 +711,7 @@ fn two_readers_racing_a_writer_see_only_whole_committed_prefixes() {
         let reader = || {
             let mut report = String::new();
             let (mut seen, mut locked) = (0_u32, 0_u32);
+            readers_up.fetch_add(1, Ordering::AcqRel);
             while writing.load(Ordering::Acquire) {
                 match read_back(&root) {
                     Ok(bars) => {
