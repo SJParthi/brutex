@@ -108,3 +108,12 @@ crates/spikefade/src/v2.rs:39:5: replace parse_settings -> Option<(usize, usize,
 crates/spikefade/src/v2.rs:39:5: replace parse_settings -> Option<(usize, usize, usize, usize)> with Some((1, 0, 0, 0))
 crates/spikefade/src/v2.rs:39:5: replace parse_settings -> Option<(usize, usize, usize, usize)> with Some((1, 1, 1, 0))
 crates/spikefade/src/v2.rs:195:39: replace + with - in r1_overlaps
+crates/spikefade/src/v2.rs:196:83: replace < with == in r1_overlaps
+crates/spikefade/src/v2.rs:242:5: replace expiry_class -> (String, i64) with ("xyzzy".into(), 1)
+crates/spikefade/src/v2.rs:252:24: replace == with != in expiry_class
+crates/spikefade/src/v2.rs:270:5: replace raw_1m -> Result<HashMap<u32, BTreeMap<usize, [i64; 5]>>, String> with Ok(HashMap::from_iter([(0, BTreeMap::from_iter([(1, [0; 5])]))]))
+crates/spikefade/src/v2.rs:270:5: replace raw_1m -> Result<HashMap<u32, BTreeMap<usize, [i64; 5]>>, String> with Ok(HashMap::from_iter([(1, BTreeMap::from_iter([(1, [0; 5])]))]))
+crates/spikefade/src/v2.rs:375:234: replace * with / in blocks_md
+crates/spikefade/src/v2.rs:424:55: replace / with % in evidence_md
+crates/spikefade/src/v2.rs:437:65: replace * with + in evidence_md
+crates/spikefade/src/v2.rs:461:57: replace / with * in evidence_md
