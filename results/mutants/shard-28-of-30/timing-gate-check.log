@@ -1,0 +1,19 @@
+# split18::tests::v32rb_split_o1_gates on the UNMUTATED test binary (debug), same 14-skip list as the main run (the 9 spikefade ones apply)
+# binary: target/debug/deps/spikefade-0d6a8ddfb8b217ef built from 15fd4f4 by 'cargo test --locked -p spikefade'; cwd crates/spikefade; box: 4 vCPU
+# 2026-11-16T13:12:59Z A: one run at a time, 4 runs
+[alone1] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 5.76s
+[alone2] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 5.59s
+[alone3] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 5.77s
+[alone4] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 5.61s
+# 2026-11-16T13:13:22Z B: two runs at a time (what --jobs 2 does), 2 loops x 4 runs
+[a1] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.55s
+[a2] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.77s
+[a3] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.77s
+[a4] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.51s
+[b1] test split18::tests::v32rb_split_o1_gates ... FAILED
+[b1] 97 months: account p99 4052738 ns
+[b1] test result: FAILED. 157 passed; 1 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.88s
+[b2] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.49s
+[b3] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.90s
+[b4] test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 9.47s
+# 2026-11-16T13:14:01Z end

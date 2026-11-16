@@ -1,0 +1,3 @@
+crates/spikefade/src/kit.rs:707:29: delete field sha from struct Self expression in Plan::parse
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((true, true, "xyzzy".into()))
+crates/spikefade/src/slice.rs:143:5: replace zstd_c -> Result<Vec<u8>, String> with Ok(vec![0])

@@ -1,0 +1,20 @@
+crates/spikefade/src/ckmerge.rs:41:26: delete field batches from struct Stats expression in merge
+crates/spikefade/src/ckmerge.rs:366:5: replace cmd_ckpt_canon -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:288:100: replace / with % in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:396:5: replace ident -> (u32, u16, u8) with (1, 0, 1)
+crates/spikefade/src/ckmerge.rs:396:5: replace ident -> (u32, u16, u8) with (1, 1, 1)
+crates/spikefade/src/kit.rs:222:17: replace || with && in from_args
+crates/spikefade/src/kit.rs:230:55: replace >= with < in from_args
+crates/spikefade/src/kit.rs:235:28: replace || with && in from_args
+crates/spikefade/src/kit.rs:474:9: delete match arm "hostname" in tool
+crates/spikefade/src/kit.rs:517:5: replace now_ist -> Option<String> with Some(String::new())
+crates/spikefade/src/kit.rs:557:42: replace / with % in proc_cpu_s
+crates/spikefade/src/kit.rs:599:10: replace > with == in strict_check
+crates/spikefade/src/kit.rs:635:50: replace && with || in probe_tools
+crates/spikefade/src/kit.rs:778:70: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:812:9: delete match arm (Some(p), None) in fp_part
+crates/spikefade/src/kit.rs:1021:13: replace == with != in check_inputs
+crates/spikefade/src/kit.rs:1174:36: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1317:22: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1409:5: replace provenance -> Vec<(String, String)> with vec![("xyzzy".into(), "xyzzy".into())]
+crates/spikefade/src/slice.rs:105:13: replace && with || in root_day_digest
