@@ -1,0 +1,1 @@
+crates/spikefade/src/report3.rs:3722:13: replace && with || in trade_row
