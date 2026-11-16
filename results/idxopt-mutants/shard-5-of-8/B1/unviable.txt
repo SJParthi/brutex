@@ -1,1 +1,4 @@
 crates/sniper_host/src/sec.rs:858:20: replace += with *= in build_family_ctx
+crates/sniper_host/src/sec.rs:1054:5: replace values -> (Vec<OuterValue>, Vec<VSpec>, Wiring) with (vec![], vec![Default::default()], Default::default())
+crates/sniper_host/src/sec.rs:1054:5: replace values -> (Vec<OuterValue>, Vec<VSpec>, Wiring) with (vec![Default::default()], vec![], Default::default())
+crates/sniper_host/src/sec.rs:1054:5: replace values -> (Vec<OuterValue>, Vec<VSpec>, Wiring) with (vec![Default::default()], vec![Default::default()], Default::default())

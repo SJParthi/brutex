@@ -373,3 +373,103 @@ crates/sniper_host/src/sec.rs:1013:53: replace & with | in SecFamily::pass
 crates/sniper_host/src/sec.rs:1017:21: delete match arm 0 in SecFamily::pass
 crates/sniper_host/src/sec.rs:1018:21: delete match arm 1 in SecFamily::pass
 crates/sniper_host/src/sec.rs:1021:51: replace >= with < in SecFamily::pass
+crates/sniper_host/src/sec.rs:1023:136: replace >= with < in SecFamily::pass
+crates/sniper_host/src/sec.rs:1024:149: replace == with != in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:92: replace && with || in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:87: replace != with == in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:79: replace & with | in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:79: replace & with ^ in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:110: replace == with != in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:104: replace != with == in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:98: replace & with | in SecFamily::pass
+crates/sniper_host/src/sec.rs:1025:98: replace & with ^ in SecFamily::pass
+crates/sniper_host/src/sec.rs:1032:9: replace SecFamily::htf -> Option<HtfRead> with None
+crates/sniper_host/src/sec.rs:1032:9: replace SecFamily::htf -> Option<HtfRead> with Some(Default::default())
+crates/sniper_host/src/sec.rs:1032:34: replace + with - in SecFamily::htf
+crates/sniper_host/src/sec.rs:1032:34: replace + with * in SecFamily::htf
+crates/sniper_host/src/sec.rs:1032:38: replace * with + in SecFamily::htf
+crates/sniper_host/src/sec.rs:1032:38: replace * with / in SecFamily::htf
+crates/sniper_host/src/sec.rs:1033:30: replace + with - in SecFamily::htf
+crates/sniper_host/src/sec.rs:1033:30: replace + with * in SecFamily::htf
+crates/sniper_host/src/sec.rs:1039:9: replace SecFamily::kept -> Bits with Default::default()
+crates/sniper_host/src/sec.rs:1054:5: replace values -> (Vec<OuterValue>, Vec<VSpec>, Wiring) with (vec![], vec![], Default::default())
+crates/sniper_host/src/sec.rs:1060:65: replace >= with < in values
+crates/sniper_host/src/sec.rs:1058:31: delete ! in values
+crates/sniper_host/src/sec.rs:1064:12: delete ! in values
+crates/sniper_host/src/sec.rs:1071:16: replace += with -= in values
+crates/sniper_host/src/sec.rs:1071:16: replace += with *= in values
+crates/sniper_host/src/sec.rs:1078:13: delete match arm "C-IDX" in values
+crates/sniper_host/src/sec.rs:1083:13: delete match arm "C-COL" in values
+crates/sniper_host/src/sec.rs:1089:13: delete match arm "K-DOW" in values
+crates/sniper_host/src/sec.rs:1094:13: delete match arm "T-ST" in values
+crates/sniper_host/src/sec.rs:1111:13: delete match arm "T-EMA" in values
+crates/sniper_host/src/sec.rs:1126:13: delete match arm "V-BB" in values
+crates/sniper_host/src/sec.rs:1137:13: delete match arm "C-BODY" | "C-UW" | "C-LW" | "C-RNG" | "V-RVOL" | "C-GAP" | "P-CHG" | "G-PDH" | "G-PDL" | "L-CPRW" in values
+crates/sniper_host/src/sec.rs:1154:13: delete match arm "L-PIV" | "L-CPR" in values
+crates/sniper_host/src/sec.rs:1166:13: delete match arm "L-PIVW" | "L-PIVM" | "L-CPRWK" | "L-CPRMO" in values
+crates/sniper_host/src/sec.rs:1179:13: delete match arm "L-CPRWKW" | "L-CPRMOW" in values
+crates/sniper_host/src/sec.rs:1189:13: delete match arm "V-BBW" in values
+crates/sniper_host/src/sec.rs:1201:13: delete match arm "C-PAT" in values
+crates/sniper_host/src/sec.rs:1218:71: replace match guard lay.n_htf > 0 with true in values
+crates/sniper_host/src/sec.rs:1218:71: replace match guard lay.n_htf > 0 with false in values
+crates/sniper_host/src/sec.rs:1265:67: replace match guard lay.ctx.is_some() with true in values
+crates/sniper_host/src/sec.rs:1265:67: replace match guard lay.ctx.is_some() with false in values
+crates/sniper_host/src/sec.rs:1281:35: replace match guard lay.ctx.is_some() with true in values
+crates/sniper_host/src/sec.rs:1281:35: replace match guard lay.ctx.is_some() with false in values
+crates/sniper_host/src/sec.rs:1085:37: replace == with != in values
+crates/sniper_host/src/sec.rs:1100:59: replace == with != in values
+crates/sniper_host/src/sec.rs:1100:53: replace == with != in values
+crates/sniper_host/src/sec.rs:1101:55: replace == with != in values
+crates/sniper_host/src/sec.rs:1101:76: delete ! in values
+crates/sniper_host/src/sec.rs:1103:100: replace + with - in values
+crates/sniper_host/src/sec.rs:1103:100: replace + with * in values
+crates/sniper_host/src/sec.rs:1103:78: replace + with - in values
+crates/sniper_host/src/sec.rs:1103:78: replace + with * in values
+crates/sniper_host/src/sec.rs:1103:95: replace * with + in values
+crates/sniper_host/src/sec.rs:1103:95: replace * with / in values
+crates/sniper_host/src/sec.rs:1103:87: replace + with - in values
+crates/sniper_host/src/sec.rs:1103:87: replace + with * in values
+crates/sniper_host/src/sec.rs:1103:83: replace * with + in values
+crates/sniper_host/src/sec.rs:1103:83: replace * with / in values
+crates/sniper_host/src/sec.rs:1115:51: replace && with || in values
+crates/sniper_host/src/sec.rs:1115:40: replace == with != in values
+crates/sniper_host/src/sec.rs:1115:59: replace == with != in values
+crates/sniper_host/src/sec.rs:1116:51: replace == with != in values
+crates/sniper_host/src/sec.rs:1116:45: replace == with != in values
+crates/sniper_host/src/sec.rs:1119:97: replace + with - in values
+crates/sniper_host/src/sec.rs:1119:97: replace + with * in values
+crates/sniper_host/src/sec.rs:1119:75: replace + with - in values
+crates/sniper_host/src/sec.rs:1119:75: replace + with * in values
+crates/sniper_host/src/sec.rs:1119:92: replace * with + in values
+crates/sniper_host/src/sec.rs:1119:92: replace * with / in values
+crates/sniper_host/src/sec.rs:1119:84: replace + with - in values
+crates/sniper_host/src/sec.rs:1119:84: replace + with * in values
+crates/sniper_host/src/sec.rs:1119:80: replace * with + in values
+crates/sniper_host/src/sec.rs:1119:80: replace * with / in values
+crates/sniper_host/src/sec.rs:1131:95: replace + with - in values
+crates/sniper_host/src/sec.rs:1131:95: replace + with * in values
+crates/sniper_host/src/sec.rs:1131:70: replace + with - in values
+crates/sniper_host/src/sec.rs:1131:70: replace + with * in values
+crates/sniper_host/src/sec.rs:1131:90: replace * with + in values
+crates/sniper_host/src/sec.rs:1131:90: replace * with / in values
+crates/sniper_host/src/sec.rs:1131:79: replace + with - in values
+crates/sniper_host/src/sec.rs:1131:79: replace + with * in values
+crates/sniper_host/src/sec.rs:1131:75: replace * with + in values
+crates/sniper_host/src/sec.rs:1131:75: replace * with / in values
+crates/sniper_host/src/sec.rs:1143:50: replace + with - in values
+crates/sniper_host/src/sec.rs:1143:50: replace + with * in values
+crates/sniper_host/src/sec.rs:1145:45: replace && with || in values
+crates/sniper_host/src/sec.rs:1145:48: delete ! in values
+crates/sniper_host/src/sec.rs:1146:61: replace + with - in values
+crates/sniper_host/src/sec.rs:1146:61: replace + with * in values
+crates/sniper_host/src/sec.rs:1146:49: replace + with - in values
+crates/sniper_host/src/sec.rs:1146:49: replace + with * in values
+crates/sniper_host/src/sec.rs:1146:53: replace * with + in values
+crates/sniper_host/src/sec.rs:1146:53: replace * with / in values
+crates/sniper_host/src/sec.rs:1155:32: replace == with != in values
+crates/sniper_host/src/sec.rs:1158:63: replace | with & in values
+crates/sniper_host/src/sec.rs:1158:63: replace | with ^ in values
+crates/sniper_host/src/sec.rs:1158:108: replace << with >> in values
+crates/sniper_host/src/sec.rs:1160:63: replace | with & in values
+crates/sniper_host/src/sec.rs:1160:63: replace | with ^ in values
+crates/sniper_host/src/sec.rs:1160:108: replace << with >> in values
