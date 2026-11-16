@@ -494,3 +494,110 @@ crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<
 crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (0, -1))]), 0))
 crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (0, -1))]), 1))
 crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (-1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (-1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (-1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (-1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (-1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, String::new()), (-1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (0, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (0, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (0, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (0, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (0, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (0, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (-1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (-1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (-1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (-1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (-1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((0, "xyzzy".into()), (-1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (0, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (0, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (0, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (0, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (0, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (0, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (-1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (-1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (-1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (-1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (-1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, String::new()), (-1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (0, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (0, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (0, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (0, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (0, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (0, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (-1, 0))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (-1, 0))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (-1, 1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (-1, 1))]), 1))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (-1, -1))]), 0))
+crates/spikefade/src/fix34.rs:742:9: replace ElmTable::parse -> Result<(HashMap<(u32, String), (i32, i32)>, u32), String> with Ok((HashMap::from_iter([((1, "xyzzy".into()), (-1, -1))]), 1))
+crates/spikefade/src/fix34.rs:742:49: delete ! in ElmTable::parse
+crates/spikefade/src/fix34.rs:742:73: delete ! in ElmTable::parse
+crates/spikefade/src/fix34.rs:744:12: delete ! in ElmTable::parse
+crates/spikefade/src/fix34.rs:754:16: delete ! in ElmTable::parse
+crates/spikefade/src/fix34.rs:778:5: replace elm_pre -> Option<i32> with None
+crates/spikefade/src/fix34.rs:778:5: replace elm_pre -> Option<i32> with Some(0)
+crates/spikefade/src/fix34.rs:778:5: replace elm_pre -> Option<i32> with Some(1)
+crates/spikefade/src/fix34.rs:778:5: replace elm_pre -> Option<i32> with Some(-1)
+crates/spikefade/src/fix34.rs:778:8: delete ! in elm_pre
+crates/spikefade/src/fix34.rs:829:9: replace StampTable::parse -> Result<Vec<StampRow>, String> with Ok(vec![])
+crates/spikefade/src/fix34.rs:829:73: delete ! in StampTable::parse
+crates/spikefade/src/fix34.rs:829:49: delete ! in StampTable::parse
+crates/spikefade/src/fix34.rs:831:12: delete ! in StampTable::parse
+crates/spikefade/src/fix34.rs:840:49: replace || with && in StampTable::parse
+crates/spikefade/src/fix34.rs:840:21: replace > with < in StampTable::parse
+crates/spikefade/src/fix34.rs:840:33: replace < with == in StampTable::parse
+crates/spikefade/src/fix34.rs:840:33: replace < with > in StampTable::parse
+crates/spikefade/src/fix34.rs:840:33: replace < with <= in StampTable::parse
+crates/spikefade/src/fix34.rs:840:45: replace < with == in StampTable::parse
+crates/spikefade/src/fix34.rs:840:45: replace < with > in StampTable::parse
+crates/spikefade/src/fix34.rs:840:45: replace < with <= in StampTable::parse
+crates/spikefade/src/fix34.rs:840:85: replace >= with < in StampTable::parse
+crates/spikefade/src/fix34.rs:853:9: replace StampTable::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with None
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((0, 0))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((0, 1))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((0, -1))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((1, 0))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((1, 1))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((1, -1))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((-1, 0))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((-1, 1))
+crates/spikefade/src/fix34.rs:863:5: replace stamp_rates -> Option<(i128, i128)> with Some((-1, -1))
+crates/spikefade/src/fix34.rs:863:8: delete ! in stamp_rates
+crates/spikefade/src/fix34.rs:875:45: replace < with == in stamp_rates
+crates/spikefade/src/fix34.rs:875:45: replace < with > in stamp_rates
+crates/spikefade/src/fix34.rs:880:37: replace <= with > in stamp_rates
+crates/spikefade/src/fix34.rs:886:5: replace stamp_class -> Option<String> with Some(String::new())
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 0), (0, 0))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 0), (-1, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 1), (0, 1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 1), (1, 0))]))
