@@ -65,3 +65,35 @@ crates/spikefade/src/report.rs:45:36: replace - with + in pctile
 crates/spikefade/src/report.rs:45:36: replace - with / in pctile
 crates/spikefade/src/report.rs:117:46: replace == with != in cmd_run
 crates/spikefade/src/report.rs:132:91: replace + with - in cmd_run
+crates/spikefade/src/report.rs:249:32: replace += with -= in cmd_run
+crates/spikefade/src/report.rs:338:29: replace += with *= in cmd_run
+crates/spikefade/src/report.rs:443:164: replace + with * in cmd_run
+crates/spikefade/src/report.rs:444:41: replace += with *= in cmd_run
+crates/spikefade/src/report.rs:445:47: replace > with >= in cmd_run
+crates/spikefade/src/report.rs:448:55: replace && with || in cmd_run
+crates/spikefade/src/report.rs:449:45: replace += with -= in cmd_run
+crates/spikefade/src/report.rs:464:33: replace += with -= in cmd_run
+crates/spikefade/src/report.rs:468:62: replace > with < in cmd_run
+crates/spikefade/src/report.rs:483:68: replace * with + in cmd_run
+crates/spikefade/src/report.rs:498:48: replace == with != in cmd_run
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![], vec![])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![], vec![0])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![], vec![1])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![0], vec![])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![0], vec![1])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![0], vec![0])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![1], vec![])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![1], vec![0])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![1], vec![1])]
+crates/spikefade/src/report.rs:533:48: replace == with != in level_samples
+crates/spikefade/src/report.rs:547:5: replace levels_from -> Levels with Default::default()
+crates/spikefade/src/report.rs:564:5: replace r2 -> u64 with 0
+crates/spikefade/src/report.rs:564:5: replace r2 -> u64 with 1
+crates/spikefade/src/report.rs:568:13: replace / with * in r2
+crates/spikefade/src/report.rs:569:11: replace *= with /= in r2
+crates/spikefade/src/report.rs:571:8: replace / with * in r2
+crates/spikefade/src/report.rs:582:13: replace ^= with &= in bench_windows
+crates/spikefade/src/report.rs:584:13: replace ^= with &= in bench_windows
+crates/spikefade/src/report.rs:598:24: replace + with - in bench_windows
+crates/spikefade/src/report.rs:603:13: replace == with != in bench_windows
