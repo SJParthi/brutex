@@ -1,0 +1,279 @@
+crates/spikefade/src/acct.rs:479:307: delete field pk_margin from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:486:5: replace n_of -> i64 with 0
+crates/spikefade/src/acct.rs:486:5: replace n_of -> i64 with 1
+crates/spikefade/src/acct.rs:486:5: replace n_of -> i64 with -1
+crates/spikefade/src/acct.rs:493:5: replace n_of_s -> i64 with 0
+crates/spikefade/src/acct.rs:493:5: replace n_of_s -> i64 with 1
+crates/spikefade/src/acct.rs:493:5: replace n_of_s -> i64 with -1
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:588:9: replace Tops::offer_keyed with ()
+crates/spikefade/src/acct.rs:612:9: replace Tops::import -> Self with Default::default()
+crates/spikefade/src/cal.rs:9:35: replace + with -
+crates/spikefade/src/cal.rs:9:35: replace + with *
+crates/spikefade/src/cal.rs:9:27: replace * with +
+crates/spikefade/src/cal.rs:9:27: replace * with /
+crates/spikefade/src/cal.rs:9:40: replace * with +
+crates/spikefade/src/cal.rs:9:40: replace * with /
+crates/spikefade/src/cal.rs:13:35: replace + with *
+crates/spikefade/src/cal.rs:13:27: replace * with +
+crates/spikefade/src/cal.rs:13:27: replace * with /
+crates/spikefade/src/cal.rs:15:34: replace + with -
+crates/spikefade/src/cal.rs:15:34: replace + with *
+crates/spikefade/src/cal.rs:15:26: replace * with +
+crates/spikefade/src/cal.rs:15:26: replace * with /
+crates/spikefade/src/cal.rs:15:39: replace * with +
+crates/spikefade/src/cal.rs:15:39: replace * with /
+crates/spikefade/src/cal.rs:17:37: replace + with -
+crates/spikefade/src/cal.rs:17:37: replace + with *
+crates/spikefade/src/cal.rs:17:29: replace * with +
+crates/spikefade/src/cal.rs:17:29: replace * with /
+crates/spikefade/src/cal.rs:17:42: replace * with +
+crates/spikefade/src/cal.rs:17:42: replace * with /
+crates/spikefade/src/cal.rs:19:35: replace + with -
+crates/spikefade/src/cal.rs:19:27: replace * with +
+crates/spikefade/src/cal.rs:19:35: replace + with *
+crates/spikefade/src/cal.rs:19:27: replace * with /
+crates/spikefade/src/cal.rs:19:40: replace * with +
+crates/spikefade/src/cal.rs:19:40: replace * with /
+crates/spikefade/src/cal.rs:24:5: replace at_sod -> i64 with 0
+crates/spikefade/src/cal.rs:24:5: replace at_sod -> i64 with 1
+crates/spikefade/src/cal.rs:24:5: replace at_sod -> i64 with -1
+crates/spikefade/src/cal.rs:24:34: replace * with + in at_sod
+crates/spikefade/src/cal.rs:24:34: replace * with / in at_sod
+crates/spikefade/src/cal.rs:24:25: replace - with + in at_sod
+crates/spikefade/src/cal.rs:24:25: replace - with / in at_sod
+crates/spikefade/src/cal.rs:24:19: replace + with - in at_sod
+crates/spikefade/src/cal.rs:24:19: replace + with * in at_sod
+crates/spikefade/src/cal.rs:24:10: replace * with + in at_sod
+crates/spikefade/src/cal.rs:30:5: replace sod_of -> i64 with 0
+crates/spikefade/src/cal.rs:30:5: replace sod_of -> i64 with 1
+crates/spikefade/src/cal.rs:30:5: replace sod_of -> i64 with -1
+crates/spikefade/src/cal.rs:30:26: replace + with - in sod_of
+crates/spikefade/src/cal.rs:30:26: replace + with * in sod_of
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, 0, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, 0, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, 0, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, 1, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, 1, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, 1, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, -1, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, -1, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (0, -1, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, 0, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, 0, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, 0, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, 1, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, 1, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, 1, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, -1, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, -1, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (1, -1, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, 0, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, 0, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, 0, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, 1, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, 1, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, 1, -1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, -1, 0)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, -1, 1)
+crates/spikefade/src/cal.rs:36:5: replace civil -> (i64, i64, i64) with (-1, -1, -1)
+crates/spikefade/src/cal.rs:36:17: replace + with - in civil
+crates/spikefade/src/cal.rs:36:17: replace + with * in civil
+crates/spikefade/src/cal.rs:38:17: replace - with + in civil
+crates/spikefade/src/cal.rs:38:17: replace - with / in civil
+crates/spikefade/src/cal.rs:38:23: replace * with + in civil
+crates/spikefade/src/cal.rs:38:23: replace * with / in civil
+crates/spikefade/src/cal.rs:39:65: replace / with * in civil
+crates/spikefade/src/cal.rs:39:65: replace / with % in civil
+crates/spikefade/src/cal.rs:39:20: replace - with + in civil
+crates/spikefade/src/cal.rs:39:20: replace - with / in civil
+crates/spikefade/src/cal.rs:39:26: replace / with % in civil
+crates/spikefade/src/cal.rs:39:26: replace / with * in civil
+crates/spikefade/src/cal.rs:39:39: replace / with % in civil
+crates/spikefade/src/cal.rs:39:39: replace / with * in civil
+crates/spikefade/src/cal.rs:39:54: replace / with % in civil
+crates/spikefade/src/cal.rs:39:54: replace / with * in civil
+crates/spikefade/src/cal.rs:40:17: replace + with - in civil
+crates/spikefade/src/cal.rs:40:17: replace + with * in civil
+crates/spikefade/src/cal.rs:40:23: replace * with / in civil
+crates/spikefade/src/cal.rs:40:23: replace * with + in civil
+crates/spikefade/src/cal.rs:41:19: replace - with + in civil
+crates/spikefade/src/cal.rs:41:19: replace - with / in civil
+crates/spikefade/src/cal.rs:41:42: replace - with + in civil
+crates/spikefade/src/cal.rs:41:42: replace - with / in civil
+crates/spikefade/src/cal.rs:41:32: replace + with - in civil
+crates/spikefade/src/cal.rs:41:32: replace + with * in civil
+crates/spikefade/src/cal.rs:41:26: replace * with + in civil
+crates/spikefade/src/cal.rs:41:26: replace * with / in civil
+crates/spikefade/src/cal.rs:41:38: replace / with % in civil
+crates/spikefade/src/cal.rs:41:38: replace / with * in civil
+crates/spikefade/src/cal.rs:41:48: replace / with % in civil
+crates/spikefade/src/cal.rs:41:48: replace / with * in civil
+crates/spikefade/src/cal.rs:42:28: replace / with % in civil
+crates/spikefade/src/cal.rs:42:28: replace / with * in civil
+crates/spikefade/src/cal.rs:42:23: replace + with - in civil
+crates/spikefade/src/cal.rs:42:23: replace + with * in civil
+crates/spikefade/src/cal.rs:42:17: replace * with + in civil
+crates/spikefade/src/cal.rs:42:17: replace * with / in civil
+crates/spikefade/src/cal.rs:43:38: replace + with - in civil
+crates/spikefade/src/cal.rs:43:38: replace + with * in civil
+crates/spikefade/src/cal.rs:43:17: replace - with + in civil
+crates/spikefade/src/cal.rs:43:17: replace - with / in civil
+crates/spikefade/src/cal.rs:43:34: replace / with % in civil
+crates/spikefade/src/cal.rs:43:34: replace / with * in civil
+crates/spikefade/src/cal.rs:43:29: replace + with - in civil
+crates/spikefade/src/cal.rs:43:29: replace + with * in civil
+crates/spikefade/src/cal.rs:43:24: replace * with + in civil
+crates/spikefade/src/cal.rs:43:24: replace * with / in civil
+crates/spikefade/src/cal.rs:44:19: replace < with == in civil
+crates/spikefade/src/cal.rs:44:19: replace < with > in civil
+crates/spikefade/src/cal.rs:44:19: replace < with <= in civil
+crates/spikefade/src/cal.rs:44:29: replace + with - in civil
+crates/spikefade/src/cal.rs:44:29: replace + with * in civil
+crates/spikefade/src/cal.rs:44:45: replace - with + in civil
+crates/spikefade/src/cal.rs:44:45: replace - with / in civil
+crates/spikefade/src/cal.rs:45:11: replace <= with > in civil
+crates/spikefade/src/cal.rs:45:20: replace + with - in civil
+crates/spikefade/src/cal.rs:45:20: replace + with * in civil
+crates/spikefade/src/cal.rs:51:5: replace days_from_civil -> i64 with 0
+crates/spikefade/src/cal.rs:51:5: replace days_from_civil -> i64 with 1
+crates/spikefade/src/cal.rs:51:5: replace days_from_civil -> i64 with -1
+crates/spikefade/src/cal.rs:51:18: replace <= with > in days_from_civil
+crates/spikefade/src/cal.rs:51:27: replace - with + in days_from_civil
+crates/spikefade/src/cal.rs:51:27: replace - with / in days_from_civil
+crates/spikefade/src/cal.rs:53:17: replace - with + in days_from_civil
+crates/spikefade/src/cal.rs:53:17: replace - with / in days_from_civil
+crates/spikefade/src/cal.rs:53:23: replace * with + in days_from_civil
+crates/spikefade/src/cal.rs:53:23: replace * with / in days_from_civil
+crates/spikefade/src/cal.rs:54:19: replace > with == in days_from_civil
+crates/spikefade/src/cal.rs:54:19: replace > with < in days_from_civil
+crates/spikefade/src/cal.rs:54:27: replace - with + in days_from_civil
+crates/spikefade/src/cal.rs:54:27: replace - with / in days_from_civil
+crates/spikefade/src/cal.rs:54:42: replace + with - in days_from_civil
+crates/spikefade/src/cal.rs:54:42: replace + with * in days_from_civil
+crates/spikefade/src/cal.rs:55:38: replace - with + in days_from_civil
+crates/spikefade/src/cal.rs:55:38: replace - with / in days_from_civil
+crates/spikefade/src/cal.rs:55:34: replace + with - in days_from_civil
+crates/spikefade/src/cal.rs:55:34: replace + with * in days_from_civil
+crates/spikefade/src/cal.rs:55:30: replace / with % in days_from_civil
+crates/spikefade/src/cal.rs:55:30: replace / with * in days_from_civil
+crates/spikefade/src/cal.rs:55:25: replace + with - in days_from_civil
+crates/spikefade/src/cal.rs:55:25: replace + with * in days_from_civil
+crates/spikefade/src/cal.rs:55:20: replace * with + in days_from_civil
+crates/spikefade/src/cal.rs:55:20: replace * with / in days_from_civil
+crates/spikefade/src/cal.rs:56:47: replace + with - in days_from_civil
+crates/spikefade/src/cal.rs:56:47: replace + with * in days_from_civil
+crates/spikefade/src/cal.rs:56:35: replace - with / in days_from_civil
+crates/spikefade/src/cal.rs:56:25: replace + with - in days_from_civil
+crates/spikefade/src/cal.rs:56:25: replace + with * in days_from_civil
+crates/spikefade/src/cal.rs:56:19: replace * with + in days_from_civil
+crates/spikefade/src/cal.rs:56:19: replace * with / in days_from_civil
+crates/spikefade/src/cal.rs:56:31: replace / with % in days_from_civil
+crates/spikefade/src/cal.rs:56:31: replace / with * in days_from_civil
+crates/spikefade/src/cal.rs:56:41: replace / with % in days_from_civil
+crates/spikefade/src/cal.rs:56:41: replace / with * in days_from_civil
+crates/spikefade/src/cal.rs:57:25: replace - with + in days_from_civil
+crates/spikefade/src/cal.rs:57:25: replace - with / in days_from_civil
+crates/spikefade/src/cal.rs:57:19: replace + with - in days_from_civil
+crates/spikefade/src/cal.rs:57:19: replace + with * in days_from_civil
+crates/spikefade/src/cal.rs:57:9: replace * with + in days_from_civil
+crates/spikefade/src/cal.rs:57:9: replace * with / in days_from_civil
+crates/spikefade/src/cal.rs:63:5: replace parse_day -> Option<i64> with None
+crates/spikefade/src/cal.rs:63:5: replace parse_day -> Option<i64> with Some(0)
+crates/spikefade/src/cal.rs:63:5: replace parse_day -> Option<i64> with Some(1)
+crates/spikefade/src/cal.rs:63:5: replace parse_day -> Option<i64> with Some(-1)
+crates/spikefade/src/cal.rs:67:31: delete ! in parse_day
+crates/spikefade/src/cal.rs:67:57: delete ! in parse_day
+crates/spikefade/src/cal.rs:76:5: replace day_of_ymd -> i64 with 0
+crates/spikefade/src/cal.rs:76:5: replace day_of_ymd -> i64 with 1
+crates/spikefade/src/cal.rs:76:5: replace day_of_ymd -> i64 with -1
+crates/spikefade/src/cal.rs:76:18: replace / with % in day_of_ymd
+crates/spikefade/src/cal.rs:76:18: replace / with * in day_of_ymd
+crates/spikefade/src/cal.rs:77:26: replace % with / in day_of_ymd
+crates/spikefade/src/cal.rs:77:26: replace % with + in day_of_ymd
+crates/spikefade/src/cal.rs:77:19: replace / with % in day_of_ymd
+crates/spikefade/src/cal.rs:77:19: replace / with * in day_of_ymd
+crates/spikefade/src/cal.rs:78:18: replace % with / in day_of_ymd
+crates/spikefade/src/cal.rs:78:18: replace % with + in day_of_ymd
+crates/spikefade/src/cal.rs:85:5: replace ymd_of -> u32 with 0
+crates/spikefade/src/cal.rs:85:5: replace ymd_of -> u32 with 1
+crates/spikefade/src/cal.rs:86:40: replace + with - in ymd_of
+crates/spikefade/src/cal.rs:86:40: replace + with * in ymd_of
+crates/spikefade/src/cal.rs:86:30: replace + with - in ymd_of
+crates/spikefade/src/cal.rs:86:30: replace + with * in ymd_of
+crates/spikefade/src/cal.rs:86:21: replace * with + in ymd_of
+crates/spikefade/src/cal.rs:86:21: replace * with / in ymd_of
+crates/spikefade/src/cal.rs:86:34: replace * with + in ymd_of
+crates/spikefade/src/cal.rs:86:34: replace * with / in ymd_of
+crates/spikefade/src/cal.rs:92:5: replace fmt_day -> String with String::new()
+crates/spikefade/src/cal.rs:92:5: replace fmt_day -> String with "xyzzy".into()
+crates/spikefade/src/cal.rs:108:5: replace fmt_us -> String with String::new()
+crates/spikefade/src/cal.rs:114:5: replace fmt_rs -> String with String::new()
+crates/spikefade/src/cal.rs:114:5: replace fmt_rs -> String with "xyzzy".into()
+crates/spikefade/src/cal.rs:114:17: replace < with == in fmt_rs
+crates/spikefade/src/cal.rs:114:17: replace < with > in fmt_rs
+crates/spikefade/src/cal.rs:116:15: replace / with % in fmt_rs
+crates/spikefade/src/cal.rs:116:15: replace / with * in fmt_rs
+crates/spikefade/src/cal.rs:117:15: replace % with / in fmt_rs
+crates/spikefade/src/cal.rs:117:15: replace % with + in fmt_rs
+crates/spikefade/src/cal.rs:122:18: replace && with || in fmt_rs
+crates/spikefade/src/cal.rs:122:39: replace == with != in fmt_rs
+crates/spikefade/src/cal.rs:122:35: replace % with / in fmt_rs
+crates/spikefade/src/cal.rs:122:30: replace - with + in fmt_rs
+crates/spikefade/src/charges.rs:49:5: replace trade_day -> Option<TradeDay> with None
+crates/spikefade/src/charges.rs:55:5: replace today -> i64 with 0
+crates/spikefade/src/charges.rs:55:5: replace today -> i64 with 1
+crates/spikefade/src/charges.rs:55:5: replace today -> i64 with -1
+crates/spikefade/src/charges.rs:85:21: replace < with == in rates_on
+crates/spikefade/src/charges.rs:85:21: replace < with > in rates_on
+crates/spikefade/src/charges.rs:85:105: replace * with + in rates_on
+crates/spikefade/src/charges.rs:85:105: replace * with / in rates_on
+crates/spikefade/src/charges.rs:87:53: replace / with % in rates_on
+crates/spikefade/src/charges.rs:87:53: replace / with * in rates_on
+crates/spikefade/src/charges.rs:89:20: replace < with > in rates_on
+crates/spikefade/src/charges.rs:92:73: replace * with + in rates_on
+crates/spikefade/src/charges.rs:92:73: replace * with / in rates_on
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (0, 0)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (0, 1)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (0, -1)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (1, 0)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (1, 1)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (1, -1)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (-1, 0)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (-1, 1)
+crates/spikefade/src/charges.rs:103:5: replace charges_est -> (i64, i64) with (-1, -1)
+crates/spikefade/src/charges.rs:104:29: replace - with / in charges_est
+crates/spikefade/src/charges.rs:109:69: replace * with / in charges_est
+crates/spikefade/src/charges.rs:112:33: replace * with + in charges_est
+crates/spikefade/src/charges.rs:112:33: replace * with / in charges_est
+crates/spikefade/src/charges.rs:113:35: replace + with * in charges_est
+crates/spikefade/src/charges.rs:113:26: replace * with + in charges_est
+crates/spikefade/src/charges.rs:113:26: replace * with / in charges_est
+crates/spikefade/src/charges.rs:115:27: replace * with / in charges_est
+crates/spikefade/src/charges.rs:118:55: replace + with * in charges_est
+crates/spikefade/src/charges.rs:118:51: replace * with + in charges_est
+crates/spikefade/src/charges.rs:118:51: replace * with / in charges_est
+crates/spikefade/src/charges.rs:118:73: replace * with + in charges_est
+crates/spikefade/src/charges.rs:118:73: replace * with / in charges_est
+crates/spikefade/src/charges.rs:121:47: replace * with + in charges_est
+crates/spikefade/src/charges.rs:121:47: replace * with / in charges_est
+crates/spikefade/src/charges.rs:121:41: replace + with - in charges_est
+crates/spikefade/src/charges.rs:121:41: replace + with * in charges_est
+crates/spikefade/src/charges.rs:121:67: replace * with + in charges_est
+crates/spikefade/src/charges.rs:121:67: replace * with / in charges_est
+crates/spikefade/src/charges.rs:122:52: replace * with + in charges_est
+crates/spikefade/src/charges.rs:122:52: replace * with / in charges_est
+crates/spikefade/src/charges.rs:122:46: replace + with - in charges_est
+crates/spikefade/src/charges.rs:122:46: replace + with * in charges_est
+crates/spikefade/src/charges.rs:122:72: replace * with + in charges_est
+crates/spikefade/src/charges.rs:122:72: replace * with / in charges_est
+crates/spikefade/src/charges.rs:123:57: replace + with - in charges_est
+crates/spikefade/src/charges.rs:123:57: replace + with * in charges_est
+crates/spikefade/src/charges.rs:123:65: replace * with + in charges_est
+crates/spikefade/src/charges.rs:123:65: replace * with / in charges_est

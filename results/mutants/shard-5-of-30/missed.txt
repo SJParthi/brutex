@@ -1,0 +1,241 @@
+crates/spikefade/src/acct.rs:479:286: delete field ndays from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:479:293: delete field spike from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:570:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((0, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:577:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (1, vec![vec![((-1, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:591:28: replace < with == in Tops::offer_keyed
+crates/spikefade/src/acct.rs:591:28: replace < with > in Tops::offer_keyed
+crates/spikefade/src/acct.rs:591:28: replace < with <= in Tops::offer_keyed
+crates/spikefade/src/acct.rs:593:56: replace > with == in Tops::offer_keyed
+crates/spikefade/src/acct.rs:593:56: replace > with < in Tops::offer_keyed
+crates/spikefade/src/acct.rs:593:56: replace > with >= in Tops::offer_keyed
+crates/spikefade/src/acct.rs:606:9: replace Tops::nviews -> usize with 0
+crates/spikefade/src/acct.rs:606:9: replace Tops::nviews -> usize with 1
+crates/spikefade/src/cal.rs:13:35: replace + with -
+crates/spikefade/src/cal.rs:13:39: replace * with +
+crates/spikefade/src/cal.rs:13:39: replace * with /
+crates/spikefade/src/cal.rs:24:10: replace * with / in at_sod
+crates/spikefade/src/cal.rs:39:48: replace - with + in civil
+crates/spikefade/src/cal.rs:39:48: replace - with / in civil
+crates/spikefade/src/cal.rs:39:33: replace + with - in civil
+crates/spikefade/src/cal.rs:39:33: replace + with * in civil
+crates/spikefade/src/cal.rs:54:19: replace > with >= in days_from_civil
+crates/spikefade/src/cal.rs:56:35: replace - with + in days_from_civil
+crates/spikefade/src/cal.rs:67:54: replace || with && in parse_day
+crates/spikefade/src/cal.rs:67:28: replace || with && in parse_day
+crates/spikefade/src/cal.rs:99:5: replace fmt_sod -> String with String::new()
+crates/spikefade/src/cal.rs:99:5: replace fmt_sod -> String with "xyzzy".into()
+crates/spikefade/src/cal.rs:99:10: replace < with == in fmt_sod
+crates/spikefade/src/cal.rs:99:10: replace < with > in fmt_sod
+crates/spikefade/src/cal.rs:99:10: replace < with <= in fmt_sod
+crates/spikefade/src/cal.rs:108:5: replace fmt_us -> String with "xyzzy".into()
+crates/spikefade/src/cal.rs:108:11: replace <= with > in fmt_us
+crates/spikefade/src/cal.rs:114:17: replace < with <= in fmt_rs
+crates/spikefade/src/cal.rs:122:14: replace > with == in fmt_rs
+crates/spikefade/src/cal.rs:122:14: replace > with < in fmt_rs
+crates/spikefade/src/cal.rs:122:14: replace > with >= in fmt_rs
+crates/spikefade/src/cal.rs:122:35: replace % with + in fmt_rs
+crates/spikefade/src/cal.rs:122:30: replace - with / in fmt_rs
+crates/spikefade/src/charges.rs:68:38: replace * with + in rates_on
+crates/spikefade/src/charges.rs:68:38: replace * with / in rates_on
+crates/spikefade/src/charges.rs:70:18: replace < with == in rates_on
+crates/spikefade/src/charges.rs:70:18: replace < with > in rates_on
+crates/spikefade/src/charges.rs:70:18: replace < with <= in rates_on
+crates/spikefade/src/charges.rs:71:23: replace * with + in rates_on
+crates/spikefade/src/charges.rs:71:23: replace * with / in rates_on
+crates/spikefade/src/charges.rs:72:25: replace < with == in rates_on
+crates/spikefade/src/charges.rs:72:25: replace < with > in rates_on
+crates/spikefade/src/charges.rs:72:25: replace < with <= in rates_on
+crates/spikefade/src/charges.rs:73:23: replace * with + in rates_on
+crates/spikefade/src/charges.rs:73:23: replace * with / in rates_on
+crates/spikefade/src/charges.rs:74:25: replace < with == in rates_on
+crates/spikefade/src/charges.rs:74:25: replace < with > in rates_on
+crates/spikefade/src/charges.rs:74:25: replace < with <= in rates_on
+crates/spikefade/src/charges.rs:75:23: replace * with + in rates_on
+crates/spikefade/src/charges.rs:75:23: replace * with / in rates_on
+crates/spikefade/src/charges.rs:77:23: replace * with + in rates_on
+crates/spikefade/src/charges.rs:77:23: replace * with / in rates_on
+crates/spikefade/src/charges.rs:82:38: replace * with + in rates_on
+crates/spikefade/src/charges.rs:82:38: replace * with / in rates_on
+crates/spikefade/src/charges.rs:85:21: replace < with <= in rates_on
+crates/spikefade/src/charges.rs:89:20: replace < with == in rates_on
+crates/spikefade/src/charges.rs:89:20: replace < with <= in rates_on
+crates/spikefade/src/charges.rs:94:83: replace * with + in rates_on
+crates/spikefade/src/charges.rs:94:83: replace * with / in rates_on
+crates/spikefade/src/charges.rs:95:32: replace < with == in rates_on
+crates/spikefade/src/charges.rs:95:32: replace < with > in rates_on
+crates/spikefade/src/charges.rs:95:32: replace < with <= in rates_on
+crates/spikefade/src/charges.rs:96:40: replace >= with < in rates_on
+crates/spikefade/src/charges.rs:96:113: replace * with + in rates_on
+crates/spikefade/src/charges.rs:96:113: replace * with / in rates_on
+crates/spikefade/src/charges.rs:96:142: replace * with + in rates_on
+crates/spikefade/src/charges.rs:96:142: replace * with / in rates_on
+crates/spikefade/src/charges.rs:103:30: replace == with != in charges_est
+crates/spikefade/src/charges.rs:104:29: replace - with + in charges_est
+crates/spikefade/src/charges.rs:105:23: replace && with || in charges_est
+crates/spikefade/src/charges.rs:105:41: replace > with == in charges_est
+crates/spikefade/src/charges.rs:105:41: replace > with < in charges_est
+crates/spikefade/src/charges.rs:105:41: replace > with >= in charges_est
+crates/spikefade/src/charges.rs:107:66: replace * with + in charges_est
+crates/spikefade/src/charges.rs:107:66: replace * with / in charges_est
+crates/spikefade/src/charges.rs:107:37: replace * with + in charges_est
+crates/spikefade/src/charges.rs:107:37: replace * with / in charges_est
+crates/spikefade/src/charges.rs:108:119: replace * with + in charges_est
+crates/spikefade/src/charges.rs:108:119: replace * with / in charges_est
+crates/spikefade/src/charges.rs:108:37: replace * with + in charges_est
+crates/spikefade/src/charges.rs:108:37: replace * with / in charges_est
+crates/spikefade/src/charges.rs:108:96: replace + with - in charges_est
+crates/spikefade/src/charges.rs:108:96: replace + with * in charges_est
+crates/spikefade/src/charges.rs:108:66: replace + with - in charges_est
+crates/spikefade/src/charges.rs:108:66: replace + with * in charges_est
+crates/spikefade/src/charges.rs:109:99: replace * with + in charges_est
+crates/spikefade/src/charges.rs:109:99: replace * with / in charges_est
+crates/spikefade/src/charges.rs:109:69: replace * with + in charges_est
+crates/spikefade/src/charges.rs:110:33: replace * with + in charges_est
+crates/spikefade/src/charges.rs:110:33: replace * with / in charges_est
+crates/spikefade/src/charges.rs:110:47: replace + with - in charges_est
+crates/spikefade/src/charges.rs:110:47: replace + with * in charges_est
+crates/spikefade/src/charges.rs:111:26: replace * with + in charges_est
+crates/spikefade/src/charges.rs:111:26: replace * with / in charges_est
+crates/spikefade/src/charges.rs:111:40: replace + with - in charges_est
+crates/spikefade/src/charges.rs:111:40: replace + with * in charges_est
+crates/spikefade/src/charges.rs:113:35: replace + with - in charges_est
+crates/spikefade/src/charges.rs:113:67: replace * with + in charges_est
+crates/spikefade/src/charges.rs:113:67: replace * with / in charges_est
+crates/spikefade/src/charges.rs:114:34: replace * with + in charges_est
+crates/spikefade/src/charges.rs:114:34: replace * with / in charges_est
+crates/spikefade/src/charges.rs:114:49: replace + with - in charges_est
+crates/spikefade/src/charges.rs:114:49: replace + with * in charges_est
+crates/spikefade/src/charges.rs:115:27: replace * with + in charges_est
+crates/spikefade/src/charges.rs:116:100: replace * with + in charges_est
+crates/spikefade/src/charges.rs:116:100: replace * with / in charges_est
+crates/spikefade/src/charges.rs:117:33: replace + with - in charges_est
+crates/spikefade/src/charges.rs:117:33: replace + with * in charges_est
+crates/spikefade/src/charges.rs:117:25: replace * with + in charges_est
+crates/spikefade/src/charges.rs:117:25: replace * with / in charges_est
+crates/spikefade/src/charges.rs:118:55: replace + with - in charges_est
+crates/spikefade/src/charges.rs:121:32: replace + with - in charges_est
+crates/spikefade/src/charges.rs:121:32: replace + with * in charges_est
+crates/spikefade/src/charges.rs:122:37: replace + with - in charges_est
+crates/spikefade/src/charges.rs:122:37: replace + with * in charges_est
+crates/spikefade/src/charges.rs:122:32: replace + with - in charges_est
+crates/spikefade/src/charges.rs:122:32: replace + with * in charges_est
+crates/spikefade/src/charges.rs:123:47: replace + with - in charges_est
+crates/spikefade/src/charges.rs:123:47: replace + with * in charges_est
+crates/spikefade/src/charges.rs:123:38: replace + with - in charges_est
+crates/spikefade/src/charges.rs:123:38: replace + with * in charges_est
+crates/spikefade/src/charges.rs:123:29: replace + with - in charges_est
+crates/spikefade/src/charges.rs:123:29: replace + with * in charges_est
+crates/spikefade/src/charges.rs:124:41: replace || with && in charges_est
+crates/spikefade/src/charges.rs:124:29: replace || with && in charges_est
+crates/spikefade/src/charges.rs:124:25: replace > with == in charges_est
+crates/spikefade/src/charges.rs:124:25: replace > with < in charges_est
+crates/spikefade/src/charges.rs:124:25: replace > with >= in charges_est
+crates/spikefade/src/charges.rs:124:37: replace > with == in charges_est
+crates/spikefade/src/charges.rs:124:37: replace > with < in charges_est
