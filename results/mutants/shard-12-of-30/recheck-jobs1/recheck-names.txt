@@ -1,0 +1,26 @@
+crates/spikefade/src/report3.rs:3650:60: replace > with < in trade_row
+crates/spikefade/src/report3.rs:3713:43: replace > with >= in trade_row
+crates/spikefade/src/report3.rs:3717:32: replace < with > in trade_row
+crates/spikefade/src/report3.rs:3738:23: replace > with == in trade_row
+crates/spikefade/src/report3.rs:3822:37: delete field day from struct crate::v32::Row32 expression in row32_of
+crates/spikefade/src/report3.rs:3822:128: replace + with * in row32_of
+crates/spikefade/src/report3.rs:3837:49: replace + with * in row32_of
+crates/spikefade/src/report3.rs:3838:43: replace / with % in row32_of
+crates/spikefade/src/report3.rs:3843:65: replace / with % in row32_of
+crates/spikefade/src/report3.rs:3893:28: replace > with >= in row32_of
+crates/spikefade/src/report3.rs:3946:75: replace && with || in row32_of
+crates/spikefade/src/report3.rs:4123:72: replace * with + in write3
+crates/spikefade/src/report3.rs:4353:36: replace / with * in write3
+crates/spikefade/src/report3.rs:4758:65: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4762:98: replace < with <= in hand_sample
+crates/spikefade/src/report3.rs:4869:25: replace += with -= in dedup_ratio
+crates/spikefade/src/report3.rs:4869:25: replace += with *= in dedup_ratio
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 1, 1, 0, 0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 1, 1, 0, 0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 0, 0, 0, 0, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 0, 0, 0, 0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 0, 0, 0, 0, 1, 1, 1, 1)
