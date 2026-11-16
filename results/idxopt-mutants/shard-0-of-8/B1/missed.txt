@@ -1,0 +1,146 @@
+crates/sniper_host/src/lib.rs:63:5: replace law_line -> String with String::new()
+crates/sniper_host/src/lib.rs:81:5: replace refuse_if_red -> Result<(), String> with Ok(())
+crates/sniper_host/src/lib.rs:98:5: replace ist_now -> String with String::new()
+crates/sniper_host/src/lib.rs:63:5: replace law_line -> String with "xyzzy".into()
+crates/sniper_host/src/lib.rs:98:5: replace ist_now -> String with "xyzzy".into()
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with None
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((0, 0))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((0, 1))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((0, -1))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((1, 0))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((1, 1))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((1, -1))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((-1, 0))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((-1, 1))
+crates/sniper_host/src/cands.rs:93:5: replace ratio -> Option<(i128, i128)> with Some((-1, -1))
+crates/sniper_host/src/cands.rs:99:28: replace != with == in ctx_of
+crates/sniper_host/src/cands.rs:105:33: replace && with || in ctx_of
+crates/sniper_host/src/cands.rs:125:5: replace build -> Result<Family, String> with Ok(Default::default())
+crates/sniper_host/src/cands.rs:160:9: replace CandBuilder::push -> Option<Cand> with None
+crates/sniper_host/src/cands.rs:162:26: replace && with || in CandBuilder::push
+crates/sniper_host/src/cands.rs:162:70: replace < with == in CandBuilder::push
+crates/sniper_host/src/cands.rs:162:70: replace < with > in CandBuilder::push
+crates/sniper_host/src/cands.rs:162:70: replace < with <= in CandBuilder::push
+crates/sniper_host/src/cands.rs:171:29: replace - with + in CandBuilder::push
+crates/sniper_host/src/cands.rs:171:29: replace - with / in CandBuilder::push
+crates/sniper_host/src/cands.rs:171:58: replace - with + in CandBuilder::push
+crates/sniper_host/src/cands.rs:171:58: replace - with / in CandBuilder::push
+crates/sniper_host/src/cands.rs:171:49: replace * with + in CandBuilder::push
+crates/sniper_host/src/cands.rs:171:49: replace * with / in CandBuilder::push
+crates/sniper_host/src/cands.rs:175:25: replace && with || in CandBuilder::push
+crates/sniper_host/src/cands.rs:175:36: replace < with == in CandBuilder::push
+crates/sniper_host/src/cands.rs:175:36: replace < with > in CandBuilder::push
+crates/sniper_host/src/cands.rs:175:36: replace < with <= in CandBuilder::push
+crates/sniper_host/src/cands.rs:176:12: delete ! in CandBuilder::push
+crates/sniper_host/src/cands.rs:177:27: replace += with -= in CandBuilder::push
+crates/sniper_host/src/cands.rs:177:27: replace += with *= in CandBuilder::push
+crates/sniper_host/src/cands.rs:179:62: replace += with -= in CandBuilder::push
+crates/sniper_host/src/cands.rs:179:62: replace += with *= in CandBuilder::push
+crates/sniper_host/src/cands.rs:208:56: replace - with + in CandBuilder::push
+crates/sniper_host/src/cands.rs:208:56: replace - with / in CandBuilder::push
+crates/sniper_host/src/cands.rs:208:24: replace + with - in CandBuilder::push
+crates/sniper_host/src/cands.rs:208:24: replace + with * in CandBuilder::push
+crates/sniper_host/src/cands.rs:208:19: replace * with + in CandBuilder::push
+crates/sniper_host/src/cands.rs:208:19: replace * with / in CandBuilder::push
+crates/sniper_host/src/cands.rs:227:5: replace kernel_rows -> Vec<Row> with vec![]
+crates/sniper_host/src/cands.rs:227:5: replace kernel_rows -> Vec<Row> with vec![Default::default()]
+crates/sniper_host/src/cands.rs:227:25: delete ! in kernel_rows
+crates/sniper_host/src/cands.rs:244:5: replace signal_exit -> Option<(i64, bool)> with None
+crates/sniper_host/src/cands.rs:244:5: replace signal_exit -> Option<(i64, bool)> with Some((0, true))
+crates/sniper_host/src/cands.rs:244:5: replace signal_exit -> Option<(i64, bool)> with Some((0, false))
+crates/sniper_host/src/cands.rs:244:5: replace signal_exit -> Option<(i64, bool)> with Some((1, true))
+crates/sniper_host/src/cands.rs:244:5: replace signal_exit -> Option<(i64, bool)> with Some((1, false))
+crates/sniper_host/src/cands.rs:244:5: replace signal_exit -> Option<(i64, bool)> with Some((-1, true))
+crates/sniper_host/src/cands.rs:244:5: replace signal_exit -> Option<(i64, bool)> with Some((-1, false))
+crates/sniper_host/src/cands.rs:245:64: replace == with != in signal_exit
+crates/sniper_host/src/cands.rs:248:13: delete match arm ExitKind::Supertrend(p, f) | ExitKind::SupertrendOrClock(p, f, _) in signal_exit
+crates/sniper_host/src/cands.rs:249:13: delete match arm ExitKind::Ema(p) in signal_exit
+crates/sniper_host/src/cands.rs:248:143: replace != with == in signal_exit
+crates/sniper_host/src/cands.rs:250:67: replace == with != in signal_exit
+crates/sniper_host/src/cands.rs:251:53: replace * with + in signal_exit
+crates/sniper_host/src/cands.rs:251:53: replace * with / in signal_exit
+crates/sniper_host/src/cands.rs:252:40: replace < with == in signal_exit
+crates/sniper_host/src/cands.rs:252:40: replace < with > in signal_exit
+crates/sniper_host/src/cands.rs:252:40: replace < with <= in signal_exit
+crates/sniper_host/src/cands.rs:252:61: replace > with == in signal_exit
+crates/sniper_host/src/cands.rs:252:61: replace > with < in signal_exit
+crates/sniper_host/src/cands.rs:252:61: replace > with >= in signal_exit
+crates/sniper_host/src/cands.rs:257:101: replace && with || in signal_exit
+crates/sniper_host/src/cands.rs:257:115: replace == with != in signal_exit
+crates/sniper_host/src/cands.rs:258:19: replace + with - in signal_exit
+crates/sniper_host/src/cands.rs:258:19: replace + with * in signal_exit
+crates/sniper_host/src/cands.rs:260:19: replace != with == in signal_exit
+crates/sniper_host/src/cands.rs:263:22: replace || with && in signal_exit
+crates/sniper_host/src/cands.rs:263:36: replace == with != in signal_exit
+crates/sniper_host/src/cands.rs:266:11: replace += with -= in signal_exit
+crates/sniper_host/src/cands.rs:266:11: replace += with *= in signal_exit
+crates/sniper_host/src/cands.rs:274:5: replace xe_with -> bool with true
+crates/sniper_host/src/cands.rs:274:5: replace xe_with -> bool with false
+crates/sniper_host/src/cands.rs:274:51: replace == with != in xe_with
+crates/sniper_host/src/cands.rs:275:41: replace * with + in xe_with
+crates/sniper_host/src/cands.rs:275:41: replace * with / in xe_with
+crates/sniper_host/src/cands.rs:276:23: replace > with == in xe_with
+crates/sniper_host/src/cands.rs:276:23: replace > with < in xe_with
+crates/sniper_host/src/cands.rs:276:23: replace > with >= in xe_with
+crates/sniper_host/src/cands.rs:276:44: replace < with == in xe_with
+crates/sniper_host/src/cands.rs:276:44: replace < with > in xe_with
+crates/sniper_host/src/cands.rs:276:44: replace < with <= in xe_with
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![(String::new(), vec![])]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![(String::new(), vec![0])]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![(String::new(), vec![1])]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![(String::new(), vec![-1])]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![("xyzzy".into(), vec![])]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![("xyzzy".into(), vec![0])]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![("xyzzy".into(), vec![1])]
+crates/sniper_host/src/cands.rs:308:5: replace terms -> Vec<(String, Vec<i64>)> with vec![("xyzzy".into(), vec![-1])]
+crates/sniper_host/src/cands.rs:315:37: replace match guard *st > 0 && hi >= lo with true in terms
+crates/sniper_host/src/cands.rs:315:37: replace match guard *st > 0 && hi >= lo with false in terms
+crates/sniper_host/src/cands.rs:315:45: replace && with || in terms
+crates/sniper_host/src/cands.rs:315:41: replace > with == in terms
+crates/sniper_host/src/cands.rs:315:41: replace > with < in terms
+crates/sniper_host/src/cands.rs:315:41: replace > with >= in terms
+crates/sniper_host/src/cands.rs:315:51: replace >= with < in terms
+crates/sniper_host/src/cands.rs:315:75: replace / with % in terms
+crates/sniper_host/src/cands.rs:315:75: replace / with * in terms
+crates/sniper_host/src/cands.rs:315:69: replace - with + in terms
+crates/sniper_host/src/cands.rs:315:69: replace - with / in terms
+crates/sniper_host/src/cands.rs:315:92: replace + with - in terms
+crates/sniper_host/src/cands.rs:315:92: replace + with * in terms
+crates/sniper_host/src/cands.rs:315:96: replace * with + in terms
+crates/sniper_host/src/cands.rs:315:96: replace * with / in terms
+crates/sniper_host/src/cands.rs:329:5: replace list_labels -> Vec<String> with vec![]
+crates/sniper_host/src/cands.rs:329:5: replace list_labels -> Vec<String> with vec![String::new()]
+crates/sniper_host/src/cands.rs:329:5: replace list_labels -> Vec<String> with vec!["xyzzy".into()]
+crates/sniper_host/src/cands.rs:335:5: replace radix_of -> u64 with 0
+crates/sniper_host/src/cands.rs:335:5: replace radix_of -> u64 with 1
+crates/sniper_host/src/cands.rs:337:67: replace * with + in radix_of
+crates/sniper_host/src/cands.rs:337:67: replace * with / in radix_of
+crates/sniper_host/src/cands.rs:337:111: replace == with != in radix_of
+crates/sniper_host/src/cands.rs:348:7: replace + with - in radix_of
+crates/sniper_host/src/cands.rs:348:7: replace + with * in radix_of
+crates/sniper_host/src/cands.rs:348:14: replace * with + in radix_of
+crates/sniper_host/src/cands.rs:348:14: replace * with / in radix_of
+crates/sniper_host/src/cands.rs:352:5: replace cmp_ok -> bool with true
+crates/sniper_host/src/cands.rs:352:5: replace cmp_ok -> bool with false
+crates/sniper_host/src/cands.rs:353:31: replace * with + in cmp_ok
+crates/sniper_host/src/cands.rs:353:31: replace * with / in cmp_ok
+crates/sniper_host/src/cands.rs:355:9: delete match arm "GE" in cmp_ok
+crates/sniper_host/src/cands.rs:356:9: delete match arm "LE" in cmp_ok
+crates/sniper_host/src/cands.rs:357:9: delete match arm "LT" in cmp_ok
+crates/sniper_host/src/cands.rs:355:21: replace >= with < in cmp_ok
+crates/sniper_host/src/cands.rs:356:21: replace <= with > in cmp_ok
+crates/sniper_host/src/cands.rs:357:21: replace < with == in cmp_ok
+crates/sniper_host/src/cands.rs:357:21: replace < with > in cmp_ok
+crates/sniper_host/src/cands.rs:357:21: replace < with <= in cmp_ok
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with None
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((0, 0))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((0, 1))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((0, -1))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((1, 0))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((1, 1))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((1, -1))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((-1, 0))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((-1, 1))
+crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((-1, -1))
+crates/sniper_host/src/cands.rs:363:22: replace * with + in pct100

@@ -1,0 +1,3 @@
+crates/sniper_kernel/src/bits.rs:71:23: replace &= with |= in Bits::ones
+crates/sniper_kernel/src/bits.rs:71:28: replace - with / in Bits::ones
+crates/sniper_kernel/src/ladder.rs:142:18: replace < with <= in Ladder::bucket

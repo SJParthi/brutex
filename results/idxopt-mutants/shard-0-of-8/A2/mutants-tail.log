@@ -1,0 +1,15 @@
+Found 58 mutants to test
+ok       Unmutated baseline in 5s build + 1s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/costs/src/option_clock.rs:100:27: replace - with + in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:100:27: replace - with / in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:101:20: replace >= with < in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:101:40: replace - with + in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:101:40: replace - with / in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:103:19: replace > with >= in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:103:42: replace + with * in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:105:26: replace + with * in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:106:35: replace - with + in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:106:35: replace - with / in day_number in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:106:31: replace / with % in day_number in 1s build + 1s test
+58 mutants tested in 69s: 11 missed, 47 caught

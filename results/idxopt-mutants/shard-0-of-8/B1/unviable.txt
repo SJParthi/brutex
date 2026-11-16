@@ -1,0 +1,3 @@
+crates/sniper_host/src/cands.rs:97:5: replace ctx_of -> CandleCtx with Default::default()
+crates/sniper_host/src/cands.rs:112:5: replace cfgs -> (SeriesCfg, SeriesCfg) with (Default::default(), Default::default())
+crates/sniper_host/src/cands.rs:160:9: replace CandBuilder::push -> Option<Cand> with Some(Default::default())

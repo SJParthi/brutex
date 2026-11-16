@@ -1,0 +1,53 @@
+Found 123 mutants to test
+ok       Unmutated baseline in 0s build + 0s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/sniper_kernel/src/lib.rs:50:5: replace refuse_if_red -> Result<(), &'static str> with Ok(()) in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:31:9: replace Bits::len -> usize with 0 in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:31:9: replace Bits::len -> usize with 1 in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:37:9: replace Bits::is_empty -> bool with true in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:37:9: replace Bits::is_empty -> bool with false in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:37:16: replace == with != in Bits::is_empty in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:42:14: replace < with <= in Bits::set in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:9: replace Bits::get -> bool with true in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:9: replace Bits::get -> bool with false in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:20: replace && with || in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:11: replace < with == in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:11: replace < with <= in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:11: replace < with > in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:36: replace / with % in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:36: replace / with * in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:78: replace == with != in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:74: replace & with | in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:74: replace & with ^ in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:61: replace >> with << in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:67: replace % with / in Bits::get in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/bits.rs:52:67: replace % with + in Bits::get in 0s build + 0s test
+TIMEOUT  crates/sniper_kernel/src/bits.rs:71:23: replace &= with |= in Bits::ones in 0s build + 20s test
+MISSED   crates/sniper_kernel/src/code.rs:67:9: replace Code::divmod -> Option<(Self, u64)> with None in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:67:9: replace Code::divmod -> Option<(Self, u64)> with Some((Default::default(), 0)) in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:67:9: replace Code::divmod -> Option<(Self, u64)> with Some((Default::default(), 1)) in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:67:14: replace == with != in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:73:35: replace | with & in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:73:35: replace | with ^ in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:73:28: replace << with >> in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:74:25: replace / with % in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:74:25: replace / with * in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:75:23: replace % with / in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:75:23: replace % with + in Code::divmod in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with None in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with Some(vec![]) in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with Some(vec![0]) in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with Some(vec![1]) in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/code.rs:92:16: replace == with != in Code::digits in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:45:9: replace <impl std::fmt::Display for LadderErr>::fmt -> std::fmt::Result with Ok(Default::default()) in 0s build + 0s test
+TIMEOUT  crates/sniper_kernel/src/bits.rs:71:28: replace - with / in Bits::ones in 0s build + 20s test
+MISSED   crates/sniper_kernel/src/ladder.rs:64:41: replace || with && in range in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:64:28: replace || with && in range in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:64:47: replace < with == in range in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:64:47: replace < with <= in range in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:72:20: replace > with == in range in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:72:44: replace - with + in range in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:72:20: replace > with >= in range in 0s build + 0s test
+MISSED   crates/sniper_kernel/src/ladder.rs:72:44: replace - with / in range in 0s build + 0s test
+TIMEOUT  crates/sniper_kernel/src/ladder.rs:142:18: replace < with <= in Ladder::bucket in 0s build + 20s test
+123 mutants tested in 75s: 46 missed, 69 caught, 5 unviable, 3 timeouts

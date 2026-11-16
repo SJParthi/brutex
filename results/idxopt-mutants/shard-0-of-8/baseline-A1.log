@@ -1,0 +1,118 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded miniz_oxide v0.8.9
+  Downloaded cfg-if v1.0.4
+  Downloaded flate2 v1.1.9
+  Downloaded simd-adler32 v0.3.10
+  Downloaded twox-hash v2.1.5
+  Downloaded adler2 v2.0.1
+  Downloaded crc32fast v1.5.0
+  Downloaded ruzstd v0.9.1
+   Compiling crc32fast v1.5.0
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling cfg-if v1.0.4
+   Compiling core v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/core)
+   Compiling telemetry v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/telemetry)
+   Compiling miniz_oxide v0.8.9
+   Compiling twox-hash v2.1.5
+   Compiling ruzstd v0.9.1
+   Compiling flate2 v1.1.9
+   Compiling common_fill v2.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/pinned/common-fill-v21)
+   Compiling store v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/store)
+   Compiling costs v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/costs)
+   Compiling idx_cal v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/idx_cal)
+   Compiling idx_f1 v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/idx_f1)
+   Compiling opt_pos v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/opt_pos)
+    Finished `test` profile [unoptimized] target(s) in 9.66s
+     Running unittests src/lib.rs (/root/tgt-A/debug/deps/idx_cal-c4ad5436b8c7dfd3)
+
+running 8 tests
+test bhav::tests::paisa_texts ... ok
+test bhav::tests::rows_of_both_forms ... ok
+test cal::tests::eff_follows_the_session_table_and_keeps_dates_after_it ... ok
+test crc::tests::check_value ... ok
+test cal::tests::holiday_shift_with_a_late_listing_rolls_on_the_true_day ... ok
+test cal::tests::redated_series_join_by_identity_and_the_naive_reading_is_red ... ok
+test listing::tests::listing_rows_parse_with_actual_dates ... ok
+test day::tests::civil_round_trips_and_weekdays ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/root/tgt-A/debug/deps/idx_f1-d6a685828f2dd346)
+
+running 5 tests
+test host_size::tests::half_way_takes_the_lower_count_and_zero_only_at_twice_the_target ... ok
+test host_size::tests::the_account_base_cuts_to_the_largest_count_that_fits ... ok
+test host_size::tests::closest_equals_the_plain_definition_and_never_below_floor ... ok
+test c11_cross::c11_equals_the_host_closest_on_an_exhaustive_grid ... ok
+test c11_cross::c11_equals_the_host_closest_on_cash_shapes ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running unittests src/lib.rs (/root/tgt-A/debug/deps/opt_pos-1f30b7f8e7316f68)
+
+running 60 tests
+test chain::tests::itm_fit_rules ... ok
+test freeze::tests::one_order_maximum_and_dated_rows ... ok
+test chain::tests::lot_rule_c17_d9 ... ok
+test intraday::tests::n_without_a_whole_lot_is_zero_qty_and_the_row_stays ... ok
+test intraday::tests::d2_the_1510_square_off_is_the_strategys_own_order ... ok
+test intraday::tests::f3_entry_1505_on_the_expiry_day_uses_the_expiring_contract_and_its_leftover_is_valued_the_worse_way ... ok
+test ladder::tests::runs_expand ... ok
+test newpx::tests::data_law_agree_reads_the_corrected_seconds ... ok
+test newpx::tests::data_law_both_takes_the_worse_of_two_sources_and_holes_the_second ... ok
+test newpx::tests::data_law_cuts_the_derivatives_halt_and_the_window ... ok
+test ladder::c27::ix_c27_listed ... ok
+test newpx::tests::data_law_empty_and_not_in_pack ... ok
+test newpx::tests::data_law_one_source_only_second_has_no_fill ... ok
+test newpx::tests::data_law_missing_member_is_a_whole_session_hole_with_no_rows ... ok
+test newpx::tests::data_law_unchecked_day_keeps_the_ticks_and_holes_the_session ... ok
+test newpx::tests::fails_and_day_file_round_trip ... ok
+test pack::block_tests::newpx_block_round_trips ... ok
+test pack::tests::fe_ghost_listed_strike_is_counted_in_the_depth ... ok
+test pack::tests::lot_state_equals_lot_at ... ok
+test newpx::tests::walk_flags_hole_span_on_an_order_over_a_failed_second ... ok
+test acct::tests::ledger_base_q7_cash_short_and_reuse ... ok
+test pack::tests::runs_merge_consecutive_equal_seconds ... ok
+test pos::tests::b1_close_split_after_a_freeze_cut ... ok
+test pos::tests::b2_sequential_open_waits_for_the_last_close_unit ... ok
+test pos::tests::b2_n1_roll_sequential_rolls_same_decision_refused ... ok
+test intraday::tests::xc_clock_b1_cut_and_rewalk_on_the_option_tape ... ok
+test pos::tests::b6_leftover_settles_and_the_window_starts_at_w0 ... ok
+test pos::tests::b3_folder_name_is_never_the_expiry ... ok
+test pos::tests::d_s8_1_exit_during_the_entry_fill_holds_only_known_units ... ok
+test pos::tests::b3_redated_series_rolls_on_its_true_day ... ok
+test pos::tests::d_s8_2_same_session_entry_window_starts_at_e0 ... ok
+test pos::tests::data_end_open_position_bought_on_the_last_session_valued_from_e0 ... ok
+test pos::tests::carry_skips_the_muhurat_session ... ok
+test pos::tests::data_end_open_position_valued_whole_at_the_last_session_worst_print ... ok
+test pos::tests::data_end_same_session_buy_is_valued_from_e0 ... ok
+test pos::tests::data_end_rest_is_valued_at_the_worst_print_of_the_last_session ... ok
+test pos::tests::f4_exit_at_1500_on_the_roll_day_is_exit_only ... ok
+test pos::tests::f4_flip_while_the_close_fills_sends_no_open_leg ... ok
+test pos::tests::k11_entry_pick_reads_prints_strictly_before_t ... ok
+test pos::tests::f4_flip_while_the_open_fills_exits_the_filled_units ... ok
+test pos::tests::f4_flip_after_the_open_completed_exits_the_new_contract ... ok
+test pos::tests::k11_protection_reference_is_the_last_print_before_the_anchor ... ok
+test pos::tests::k11_spot_strictly_before_the_decision ... ok
+test pos::tests::k11_roll_open_reads_prints_strictly_before_t2 ... ok
+test pos::tests::mixed_reopen_waits_for_every_close_of_the_instant ... ok
+test pos::tests::data_end_valuation_on_a_hole_session_carries_the_hole ... ok
+test pos::tests::mixed_closes_of_one_instant_settle_before_any_reopen ... ok
+test pos::tests::s42_5_entry_rest_cancelled_at_the_roll_and_counted ... ok
+test pos::tests::w4r_one_slot_formula_for_pos_and_acct ... ok
+test price::tests::d1_bullet1_worse_carries_its_own_sale_order ... ok
+test pos::tests::s47_roll_at_1500_open_at_t2_exit_from_new_contract ... ok
+test price::tests::d1_otm_leftover_settles_at_zero_and_is_booked ... ok
+test price::tests::d1_itm_leftover_2019_08_29_notional_stt_settlement_worse ... ok
+test price::tests::dated_fno_end ... ok
+test price::tests::xc_clock_and_the_b1_cut ... ok
+test sess::tests::d5_session_facts_are_data ... ok
+test sess::tests::w4r_muhurat_rows_are_data_and_carries_skip_them ... ok
+test price::tests::d1_settlement_2026_04_07_at_the_dated_0_15_pct ... ok
+test pos::tests::slot_rule_base_over_n_is_the_headline_fixed_beside ... ok
+test pos::tests::w4_production_source_worse_of_two_and_hole_flag_end_to_end ... ok
+
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+

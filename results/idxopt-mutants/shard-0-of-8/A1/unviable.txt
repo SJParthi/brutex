@@ -1,0 +1,8 @@
+crates/idx_cal/src/lib.rs:32:9: replace fno_end::era_start -> Day with Default::default()
+crates/idx_cal/src/bhav.rs:134:5: replace index_rows -> Result<Vec<Row>, String> with Ok(vec![Default::default()])
+crates/idx_cal/src/crc.rs:12:13: replace < with <= in table
+crates/idx_cal/src/crc.rs:17:15: replace += with -= in table
+crates/idx_cal/src/crc.rs:17:15: replace += with *= in table
+crates/idx_cal/src/crc.rs:20:11: replace += with -= in table
+crates/idx_cal/src/crc.rs:20:11: replace += with *= in table
+crates/idx_cal/src/day.rs:9:5: replace from_civil -> Day with Default::default()

@@ -1,0 +1,3 @@
+crates/idx_cal/src/cal.rs:143:15: replace == with != in find
+crates/idx_cal/src/cal.rs:346:15: replace += with -= in build
+crates/idx_cal/src/cal.rs:346:15: replace += with *= in build

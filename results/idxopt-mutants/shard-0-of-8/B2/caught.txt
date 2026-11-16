@@ -1,0 +1,69 @@
+crates/sniper_kernel/src/lib.rs:36:5: replace law -> &'static str with ""
+crates/sniper_kernel/src/lib.rs:36:5: replace law -> &'static str with "xyzzy"
+crates/sniper_kernel/src/bits.rs:21:9: replace Bits::full -> Self with Default::default()
+crates/sniper_kernel/src/bits.rs:42:9: replace Bits::set with ()
+crates/sniper_kernel/src/bits.rs:42:14: replace < with == in Bits::set
+crates/sniper_kernel/src/bits.rs:42:14: replace < with > in Bits::set
+crates/sniper_kernel/src/bits.rs:43:47: replace / with % in Bits::set
+crates/sniper_kernel/src/bits.rs:43:47: replace / with * in Bits::set
+crates/sniper_kernel/src/bits.rs:45:16: replace |= with &= in Bits::set
+crates/sniper_kernel/src/bits.rs:45:25: replace << with >> in Bits::set
+crates/sniper_kernel/src/bits.rs:45:31: replace % with / in Bits::set
+crates/sniper_kernel/src/bits.rs:45:31: replace % with + in Bits::set
+crates/sniper_kernel/src/bits.rs:57:9: replace Bits::and_with with ()
+crates/sniper_kernel/src/bits.rs:58:16: replace &= with |= in Bits::and_with
+crates/sniper_kernel/src/bits.rs:64:9: replace Bits::ones -> impl Iterator<Item = usize>+'_ with ::std::iter::empty()
+crates/sniper_kernel/src/bits.rs:64:9: replace Bits::ones -> impl Iterator<Item = usize>+'_ with ::std::iter::once(0)
+crates/sniper_kernel/src/bits.rs:64:9: replace Bits::ones -> impl Iterator<Item = usize>+'_ with ::std::iter::once(1)
+crates/sniper_kernel/src/bits.rs:67:22: replace == with != in Bits::ones
+crates/sniper_kernel/src/bits.rs:71:28: replace - with + in Bits::ones
+crates/sniper_kernel/src/bits.rs:72:34: replace + with - in Bits::ones
+crates/sniper_kernel/src/bits.rs:72:34: replace + with * in Bits::ones
+crates/sniper_kernel/src/bits.rs:72:29: replace * with + in Bits::ones
+crates/sniper_kernel/src/bits.rs:72:29: replace * with / in Bits::ones
+crates/sniper_kernel/src/bits.rs:81:9: replace Bits::count -> usize with 0
+crates/sniper_kernel/src/bits.rs:81:9: replace Bits::count -> usize with 1
+crates/sniper_kernel/src/code.rs:26:9: replace <impl PartialOrd for Code>::partial_cmp -> Option<Ordering> with None
+crates/sniper_kernel/src/code.rs:34:9: replace Code::mul_add -> Option<Self> with None
+crates/sniper_kernel/src/code.rs:34:9: replace Code::mul_add -> Option<Self> with Some(Default::default())
+crates/sniper_kernel/src/code.rs:37:85: replace + with - in Code::mul_add
+crates/sniper_kernel/src/code.rs:37:85: replace + with * in Code::mul_add
+crates/sniper_kernel/src/code.rs:37:69: replace * with + in Code::mul_add
+crates/sniper_kernel/src/code.rs:37:69: replace * with / in Code::mul_add
+crates/sniper_kernel/src/code.rs:38:34: replace & with | in Code::mul_add
+crates/sniper_kernel/src/code.rs:38:34: replace & with ^ in Code::mul_add
+crates/sniper_kernel/src/code.rs:39:23: replace >> with << in Code::mul_add
+crates/sniper_kernel/src/code.rs:41:18: replace != with == in Code::mul_add
+crates/sniper_kernel/src/code.rs:48:9: replace Code::mixed -> Option<Self> with None
+crates/sniper_kernel/src/code.rs:48:9: replace Code::mixed -> Option<Self> with Some(Default::default())
+crates/sniper_kernel/src/code.rs:50:18: replace >= with < in Code::mixed
+crates/sniper_kernel/src/code.rs:61:9: replace Code::plus -> Option<Self> with None
+crates/sniper_kernel/src/code.rs:61:9: replace Code::plus -> Option<Self> with Some(Default::default())
+crates/sniper_kernel/src/code.rs:98:9: replace Code::hex -> String with String::new()
+crates/sniper_kernel/src/code.rs:98:9: replace Code::hex -> String with "xyzzy".into()
+crates/sniper_kernel/src/ladder.rs:56:5: replace range -> Result<Vec<i64>, LadderErr> with Ok(vec![])
+crates/sniper_kernel/src/ladder.rs:56:5: replace range -> Result<Vec<i64>, LadderErr> with Ok(vec![0])
+crates/sniper_kernel/src/ladder.rs:56:5: replace range -> Result<Vec<i64>, LadderErr> with Ok(vec![1])
+crates/sniper_kernel/src/ladder.rs:56:5: replace range -> Result<Vec<i64>, LadderErr> with Ok(vec![-1])
+crates/sniper_kernel/src/ladder.rs:58:18: replace != with == in range
+crates/sniper_kernel/src/ladder.rs:64:36: replace <= with > in range
+crates/sniper_kernel/src/ladder.rs:64:47: replace < with > in range
+crates/sniper_kernel/src/ladder.rs:69:13: replace <= with > in range
+crates/sniper_kernel/src/ladder.rs:72:20: replace > with < in range
+crates/sniper_kernel/src/ladder.rs:87:31: replace || with && in Ladder::long_of
+crates/sniper_kernel/src/ladder.rs:87:23: replace != with == in Ladder::long_of
+crates/sniper_kernel/src/ladder.rs:107:30: replace == with != in Ladder::short_of
+crates/sniper_kernel/src/ladder.rs:120:9: replace Ladder::values -> usize with 0
+crates/sniper_kernel/src/ladder.rs:120:9: replace Ladder::values -> usize with 1
+crates/sniper_kernel/src/ladder.rs:120:27: replace + with - in Ladder::values
+crates/sniper_kernel/src/ladder.rs:120:27: replace + with * in Ladder::values
+crates/sniper_kernel/src/ladder.rs:126:9: replace Ladder::passes -> bool with true
+crates/sniper_kernel/src/ladder.rs:126:9: replace Ladder::passes -> bool with false
+crates/sniper_kernel/src/ladder.rs:128:28: replace >= with < in Ladder::passes
+crates/sniper_kernel/src/ladder.rs:129:28: replace <= with > in Ladder::passes
+crates/sniper_kernel/src/ladder.rs:137:9: replace Ladder::bucket -> u16 with 0
+crates/sniper_kernel/src/ladder.rs:137:9: replace Ladder::bucket -> u16 with 1
+crates/sniper_kernel/src/ladder.rs:138:16: replace <= with > in Ladder::bucket
+crates/sniper_kernel/src/ladder.rs:142:18: replace < with == in Ladder::bucket
+crates/sniper_kernel/src/ladder.rs:142:18: replace < with > in Ladder::bucket
+crates/sniper_kernel/src/ladder.rs:143:26: replace + with - in Ladder::bucket

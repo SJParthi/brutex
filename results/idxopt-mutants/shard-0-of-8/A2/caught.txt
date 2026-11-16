@@ -1,0 +1,47 @@
+crates/costs/src/option_clock.rs:100:5: replace day_number -> i64 with 0
+crates/costs/src/option_clock.rs:100:5: replace day_number -> i64 with -1
+crates/costs/src/option_clock.rs:100:18: replace <= with > in day_number
+crates/costs/src/option_clock.rs:100:5: replace day_number -> i64 with 1
+crates/costs/src/option_clock.rs:101:48: replace / with % in day_number
+crates/costs/src/option_clock.rs:101:48: replace / with * in day_number
+crates/costs/src/option_clock.rs:102:17: replace - with + in day_number
+crates/costs/src/option_clock.rs:102:17: replace - with / in day_number
+crates/costs/src/option_clock.rs:102:23: replace * with + in day_number
+crates/costs/src/option_clock.rs:102:23: replace * with / in day_number
+crates/costs/src/option_clock.rs:103:19: replace > with == in day_number
+crates/costs/src/option_clock.rs:103:19: replace > with < in day_number
+crates/costs/src/option_clock.rs:103:27: replace - with + in day_number
+crates/costs/src/option_clock.rs:103:27: replace - with / in day_number
+crates/costs/src/option_clock.rs:103:42: replace + with - in day_number
+crates/costs/src/option_clock.rs:105:39: replace - with + in day_number
+crates/costs/src/option_clock.rs:105:39: replace - with / in day_number
+crates/costs/src/option_clock.rs:105:35: replace + with - in day_number
+crates/costs/src/option_clock.rs:105:35: replace + with * in day_number
+crates/costs/src/option_clock.rs:105:31: replace / with % in day_number
+crates/costs/src/option_clock.rs:105:31: replace / with * in day_number
+crates/costs/src/option_clock.rs:105:26: replace + with - in day_number
+crates/costs/src/option_clock.rs:105:21: replace * with + in day_number
+crates/costs/src/option_clock.rs:105:21: replace * with / in day_number
+crates/costs/src/option_clock.rs:106:47: replace + with - in day_number
+crates/costs/src/option_clock.rs:106:47: replace + with * in day_number
+crates/costs/src/option_clock.rs:106:25: replace + with - in day_number
+crates/costs/src/option_clock.rs:106:25: replace + with * in day_number
+crates/costs/src/option_clock.rs:106:19: replace * with + in day_number
+crates/costs/src/option_clock.rs:106:19: replace * with / in day_number
+crates/costs/src/option_clock.rs:106:31: replace / with * in day_number
+crates/costs/src/option_clock.rs:106:41: replace / with % in day_number
+crates/costs/src/option_clock.rs:106:41: replace / with * in day_number
+crates/costs/src/option_clock.rs:107:26: replace - with + in day_number
+crates/costs/src/option_clock.rs:107:26: replace - with / in day_number
+crates/costs/src/option_clock.rs:107:20: replace + with - in day_number
+crates/costs/src/option_clock.rs:107:20: replace + with * in day_number
+crates/costs/src/option_clock.rs:107:10: replace * with + in day_number
+crates/costs/src/option_clock.rs:107:10: replace * with / in day_number
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, 0, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, 0, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, 0, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, 1, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, 1, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, 1, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, -1, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, -1, 1)

@@ -1,0 +1,5 @@
+crates/sniper_kernel/src/bits.rs:43:13: replace && with || in Bits::set
+crates/sniper_kernel/src/code.rs:13:9: replace <impl Ord for Code>::cmp -> Ordering with Default::default()
+crates/sniper_kernel/src/code.rs:26:9: replace <impl PartialOrd for Code>::partial_cmp -> Option<Ordering> with Some(Default::default())
+crates/sniper_kernel/src/ladder.rs:86:9: replace Ladder::long_of -> Result<Self, LadderErr> with Ok(Default::default())
+crates/sniper_kernel/src/ladder.rs:103:9: replace Ladder::short_of -> Result<Self, LadderErr> with Ok(Default::default())

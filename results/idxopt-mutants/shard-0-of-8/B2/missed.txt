@@ -1,0 +1,46 @@
+crates/sniper_kernel/src/lib.rs:50:5: replace refuse_if_red -> Result<(), &'static str> with Ok(())
+crates/sniper_kernel/src/bits.rs:31:9: replace Bits::len -> usize with 0
+crates/sniper_kernel/src/bits.rs:31:9: replace Bits::len -> usize with 1
+crates/sniper_kernel/src/bits.rs:37:9: replace Bits::is_empty -> bool with true
+crates/sniper_kernel/src/bits.rs:37:9: replace Bits::is_empty -> bool with false
+crates/sniper_kernel/src/bits.rs:37:16: replace == with != in Bits::is_empty
+crates/sniper_kernel/src/bits.rs:42:14: replace < with <= in Bits::set
+crates/sniper_kernel/src/bits.rs:52:9: replace Bits::get -> bool with true
+crates/sniper_kernel/src/bits.rs:52:9: replace Bits::get -> bool with false
+crates/sniper_kernel/src/bits.rs:52:20: replace && with || in Bits::get
+crates/sniper_kernel/src/bits.rs:52:11: replace < with == in Bits::get
+crates/sniper_kernel/src/bits.rs:52:11: replace < with <= in Bits::get
+crates/sniper_kernel/src/bits.rs:52:11: replace < with > in Bits::get
+crates/sniper_kernel/src/bits.rs:52:36: replace / with % in Bits::get
+crates/sniper_kernel/src/bits.rs:52:36: replace / with * in Bits::get
+crates/sniper_kernel/src/bits.rs:52:78: replace == with != in Bits::get
+crates/sniper_kernel/src/bits.rs:52:74: replace & with | in Bits::get
+crates/sniper_kernel/src/bits.rs:52:74: replace & with ^ in Bits::get
+crates/sniper_kernel/src/bits.rs:52:61: replace >> with << in Bits::get
+crates/sniper_kernel/src/bits.rs:52:67: replace % with / in Bits::get
+crates/sniper_kernel/src/bits.rs:52:67: replace % with + in Bits::get
+crates/sniper_kernel/src/code.rs:67:9: replace Code::divmod -> Option<(Self, u64)> with None
+crates/sniper_kernel/src/code.rs:67:9: replace Code::divmod -> Option<(Self, u64)> with Some((Default::default(), 0))
+crates/sniper_kernel/src/code.rs:67:9: replace Code::divmod -> Option<(Self, u64)> with Some((Default::default(), 1))
+crates/sniper_kernel/src/code.rs:67:14: replace == with != in Code::divmod
+crates/sniper_kernel/src/code.rs:73:35: replace | with & in Code::divmod
+crates/sniper_kernel/src/code.rs:73:35: replace | with ^ in Code::divmod
+crates/sniper_kernel/src/code.rs:73:28: replace << with >> in Code::divmod
+crates/sniper_kernel/src/code.rs:74:25: replace / with % in Code::divmod
+crates/sniper_kernel/src/code.rs:74:25: replace / with * in Code::divmod
+crates/sniper_kernel/src/code.rs:75:23: replace % with / in Code::divmod
+crates/sniper_kernel/src/code.rs:75:23: replace % with + in Code::divmod
+crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with None
+crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with Some(vec![])
+crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with Some(vec![0])
+crates/sniper_kernel/src/code.rs:85:9: replace Code::digits -> Option<Vec<u64>> with Some(vec![1])
+crates/sniper_kernel/src/code.rs:92:16: replace == with != in Code::digits
+crates/sniper_kernel/src/ladder.rs:45:9: replace <impl std::fmt::Display for LadderErr>::fmt -> std::fmt::Result with Ok(Default::default())
+crates/sniper_kernel/src/ladder.rs:64:41: replace || with && in range
+crates/sniper_kernel/src/ladder.rs:64:28: replace || with && in range
+crates/sniper_kernel/src/ladder.rs:64:47: replace < with == in range
+crates/sniper_kernel/src/ladder.rs:64:47: replace < with <= in range
+crates/sniper_kernel/src/ladder.rs:72:20: replace > with == in range
+crates/sniper_kernel/src/ladder.rs:72:44: replace - with + in range
+crates/sniper_kernel/src/ladder.rs:72:20: replace > with >= in range
+crates/sniper_kernel/src/ladder.rs:72:44: replace - with / in range

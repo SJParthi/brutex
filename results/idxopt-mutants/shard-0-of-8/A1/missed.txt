@@ -1,0 +1,136 @@
+crates/idx_cal/src/lib.rs:25:40: replace + with -
+crates/idx_cal/src/lib.rs:25:33: replace * with +
+crates/idx_cal/src/lib.rs:25:33: replace * with /
+crates/idx_cal/src/lib.rs:25:45: replace * with +
+crates/idx_cal/src/lib.rs:25:45: replace * with /
+crates/idx_cal/src/lib.rs:27:44: replace + with -
+crates/idx_cal/src/lib.rs:27:44: replace + with *
+crates/idx_cal/src/lib.rs:27:37: replace * with +
+crates/idx_cal/src/lib.rs:27:37: replace * with /
+crates/idx_cal/src/lib.rs:27:49: replace * with +
+crates/idx_cal/src/lib.rs:27:49: replace * with /
+crates/idx_cal/src/lib.rs:38:9: replace fno_end::regular_end -> i64 with 0
+crates/idx_cal/src/lib.rs:38:9: replace fno_end::regular_end -> i64 with 1
+crates/idx_cal/src/lib.rs:38:9: replace fno_end::regular_end -> i64 with -1
+crates/idx_cal/src/lib.rs:38:14: replace >= with < in fno_end::regular_end
+crates/idx_cal/src/bhav.rs:12:5: replace u16_at -> Option<u16> with None
+crates/idx_cal/src/lib.rs:25:40: replace + with *
+crates/idx_cal/src/bhav.rs:12:5: replace u16_at -> Option<u16> with Some(0)
+crates/idx_cal/src/bhav.rs:12:5: replace u16_at -> Option<u16> with Some(1)
+crates/idx_cal/src/bhav.rs:12:53: replace + with - in u16_at
+crates/idx_cal/src/bhav.rs:12:53: replace + with * in u16_at
+crates/idx_cal/src/bhav.rs:15:5: replace u32_at -> Option<u32> with None
+crates/idx_cal/src/bhav.rs:15:5: replace u32_at -> Option<u32> with Some(0)
+crates/idx_cal/src/bhav.rs:15:5: replace u32_at -> Option<u32> with Some(1)
+crates/idx_cal/src/bhav.rs:15:53: replace + with - in u32_at
+crates/idx_cal/src/bhav.rs:15:53: replace + with * in u32_at
+crates/idx_cal/src/bhav.rs:15:70: replace + with - in u32_at
+crates/idx_cal/src/bhav.rs:15:70: replace + with * in u32_at
+crates/idx_cal/src/bhav.rs:15:87: replace + with - in u32_at
+crates/idx_cal/src/bhav.rs:15:87: replace + with * in u32_at
+crates/idx_cal/src/bhav.rs:24:5: replace read_single_member -> Result<Vec<u8>, String> with Ok(vec![])
+crates/idx_cal/src/bhav.rs:24:5: replace read_single_member -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/idx_cal/src/bhav.rs:24:5: replace read_single_member -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/idx_cal/src/bhav.rs:31:26: replace == with != in read_single_member
+crates/idx_cal/src/bhav.rs:35:14: replace <= with > in read_single_member
+crates/idx_cal/src/bhav.rs:38:11: replace -= with += in read_single_member
+crates/idx_cal/src/bhav.rs:38:11: replace -= with /= in read_single_member
+crates/idx_cal/src/bhav.rs:41:32: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:41:32: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:42:16: replace != with == in read_single_member
+crates/idx_cal/src/bhav.rs:45:43: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:45:43: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:46:23: replace != with == in read_single_member
+crates/idx_cal/src/bhav.rs:49:32: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:49:32: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:50:47: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:50:47: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:51:48: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:51:48: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:52:45: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:52:45: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:53:24: replace != with == in read_single_member
+crates/idx_cal/src/bhav.rs:56:43: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:56:43: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:57:43: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:57:43: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:58:33: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:58:33: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:58:26: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:58:26: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:58:21: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:58:21: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:59:35: replace + with - in read_single_member
+crates/idx_cal/src/bhav.rs:59:35: replace + with * in read_single_member
+crates/idx_cal/src/bhav.rs:69:18: replace != with == in read_single_member
+crates/idx_cal/src/bhav.rs:78:5: replace bhav_path -> Option<PathBuf> with None
+crates/idx_cal/src/bhav.rs:78:5: replace bhav_path -> Option<PathBuf> with Some(Default::default())
+crates/idx_cal/src/bhav.rs:111:63: replace || with && in paisa
+crates/idx_cal/src/bhav.rs:111:21: replace || with && in paisa
+crates/idx_cal/src/bhav.rs:116:19: replace > with >= in paisa
+crates/idx_cal/src/bhav.rs:126:19: delete - in paisa
+crates/idx_cal/src/bhav.rs:178:77: replace != with == in index_rows
+crates/idx_cal/src/cal.rs:23:10: replace > with >= in eff
+crates/idx_cal/src/cal.rs:163:16: replace && with || in resolve
+crates/idx_cal/src/cal.rs:164:64: replace == with != in resolve
+crates/idx_cal/src/cal.rs:170:55: replace += with *= in resolve
+crates/idx_cal/src/cal.rs:171:33: replace += with -= in resolve
+crates/idx_cal/src/cal.rs:171:33: replace += with *= in resolve
+crates/idx_cal/src/cal.rs:175:42: replace && with || in resolve
+crates/idx_cal/src/cal.rs:175:26: replace && with || in resolve
+crates/idx_cal/src/cal.rs:180:67: replace == with != in resolve
+crates/idx_cal/src/cal.rs:185:27: replace && with || in resolve
+crates/idx_cal/src/cal.rs:186:19: replace - with / in resolve
+crates/idx_cal/src/cal.rs:260:19: replace + with - in build
+crates/idx_cal/src/cal.rs:260:19: replace + with * in build
+crates/idx_cal/src/cal.rs:268:43: replace - with + in build
+crates/idx_cal/src/cal.rs:268:43: replace - with / in build
+crates/idx_cal/src/cal.rs:269:22: replace || with && in build
+crates/idx_cal/src/cal.rs:269:25: delete ! in build
+crates/idx_cal/src/cal.rs:269:12: delete ! in build
+crates/idx_cal/src/cal.rs:271:28: replace match guard shift <= 3 with true in build
+crates/idx_cal/src/cal.rs:271:28: replace match guard shift <= 3 with false in build
+crates/idx_cal/src/cal.rs:271:34: replace <= with > in build
+crates/idx_cal/src/cal.rs:304:56: replace > with >= in build
+crates/idx_cal/src/cal.rs:312:62: replace <= with > in build
+crates/idx_cal/src/cal.rs:332:23: replace + with * in build
+crates/idx_cal/src/cal.rs:332:23: replace + with - in build
+crates/idx_cal/src/cal.rs:333:17: replace <= with > in build
+crates/idx_cal/src/cal.rs:333:23: replace && with || in build
+crates/idx_cal/src/cal.rs:333:28: replace <= with > in build
+crates/idx_cal/src/cal.rs:337:30: replace += with *= in build
+crates/idx_cal/src/cal.rs:340:30: replace += with *= in build
+crates/idx_cal/src/cal.rs:343:31: replace && with || in build
+crates/idx_cal/src/cal.rs:343:36: replace <= with > in build
+crates/idx_cal/src/cal.rs:367:12: delete ! in build
+crates/idx_cal/src/cal.rs:392:5: replace monthly_weekday -> u32 with 0
+crates/idx_cal/src/cal.rs:392:5: replace monthly_weekday -> u32 with 1
+crates/idx_cal/src/cal.rs:392:21: replace + with - in monthly_weekday
+crates/idx_cal/src/cal.rs:392:21: replace + with * in monthly_weekday
+crates/idx_cal/src/cal.rs:392:15: replace * with + in monthly_weekday
+crates/idx_cal/src/cal.rs:392:15: replace * with / in monthly_weekday
+crates/idx_cal/src/cal.rs:393:14: replace == with != in monthly_weekday
+crates/idx_cal/src/cal.rs:394:14: replace <= with > in monthly_weekday
+crates/idx_cal/src/cal.rs:396:21: replace <= with > in monthly_weekday
+crates/idx_cal/src/cal.rs:398:21: replace <= with > in monthly_weekday
+crates/idx_cal/src/cal.rs:403:17: replace <= with > in monthly_weekday
+crates/idx_cal/src/cal.rs:414:5: replace weekly_weekday -> u32 with 0
+crates/idx_cal/src/cal.rs:414:5: replace weekly_weekday -> u32 with 1
+crates/idx_cal/src/cal.rs:414:14: replace == with != in weekly_weekday
+crates/idx_cal/src/cal.rs:415:14: replace <= with > in weekly_weekday
+crates/idx_cal/src/cal.rs:416:17: replace <= with > in weekly_weekday
+crates/idx_cal/src/cal.rs:427:5: replace classes -> BTreeMap<Day, bool> with BTreeMap::new()
+crates/idx_cal/src/cal.rs:427:5: replace classes -> BTreeMap<Day, bool> with BTreeMap::from_iter([(Default::default(), true)])
+crates/idx_cal/src/cal.rs:427:5: replace classes -> BTreeMap<Day, bool> with BTreeMap::from_iter([(Default::default(), false)])
+crates/idx_cal/src/cal.rs:433:31: replace != with == in classes
+crates/idx_cal/src/cal.rs:434:15: replace -= with += in classes
+crates/idx_cal/src/cal.rs:434:15: replace -= with /= in classes
+crates/idx_cal/src/cal.rs:436:87: replace && with || in classes
+crates/idx_cal/src/cal.rs:436:75: replace && with || in classes
+crates/idx_cal/src/cal.rs:436:65: replace == with != in classes
+crates/idx_cal/src/cal.rs:436:82: replace <= with > in classes
+crates/idx_cal/src/cal.rs:436:94: replace >= with < in classes
+crates/idx_cal/src/cal.rs:436:99: replace - with / in classes
+crates/idx_cal/src/cal.rs:436:99: replace - with + in classes
+crates/idx_cal/src/day.rs:10:40: replace - with + in from_civil
+crates/idx_cal/src/day.rs:10:40: replace - with / in from_civil
