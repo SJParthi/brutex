@@ -1,0 +1,15 @@
+crates/spikefade/src/report3.rs:2093:9: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2124:17: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2160:17: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2229:29: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2288:29: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2287:37: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2544:9: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2543:9: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2549:9: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2575:17: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2635:17: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2734:41: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2751:53: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2798:33: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2884:29: replace && with || in stage_b_day_major_v33
