@@ -137,3 +137,35 @@ crates/spikefade/src/kit.rs:191:52: replace || with && in from_args
 crates/spikefade/src/kit.rs:209:55: replace > with == in from_args
 crates/spikefade/src/kit.rs:209:55: replace > with >= in from_args
 crates/spikefade/src/kit.rs:218:33: replace == with != in from_args
+crates/spikefade/src/kit.rs:222:17: replace || with && in from_args
+crates/spikefade/src/kit.rs:222:51: delete ! in from_args
+crates/spikefade/src/kit.rs:222:78: replace && with || in from_args
+crates/spikefade/src/kit.rs:222:56: replace && with || in from_args
+crates/spikefade/src/kit.rs:226:50: replace || with && in from_args
+crates/spikefade/src/kit.rs:226:12: delete ! in from_args
+crates/spikefade/src/kit.rs:226:53: delete ! in from_args
+crates/spikefade/src/kit.rs:230:55: replace >= with < in from_args
+crates/spikefade/src/kit.rs:235:28: replace || with && in from_args
+crates/spikefade/src/kit.rs:235:19: delete ! in from_args
+crates/spikefade/src/kit.rs:238:14: replace && with || in from_args
+crates/spikefade/src/kit.rs:255:101: replace == with != in shard_walks
+crates/spikefade/src/kit.rs:272:18: replace > with == in parse_set
+crates/spikefade/src/kit.rs:272:18: replace > with >= in parse_set
+crates/spikefade/src/kit.rs:333:30: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:336:42: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:336:32: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:355:22: replace > with >= in Sha256::update
+crates/spikefade/src/kit.rs:463:16: delete ! in tool
+crates/spikefade/src/kit.rs:473:9: delete match arm "ps" in tool
+crates/spikefade/src/kit.rs:474:9: delete match arm "hostname" in tool
+crates/spikefade/src/kit.rs:491:5: replace utc_now -> u64 with 1
+crates/spikefade/src/kit.rs:517:5: replace now_ist -> Option<String> with None
+crates/spikefade/src/kit.rs:517:5: replace now_ist -> Option<String> with Some(String::new())
+crates/spikefade/src/kit.rs:517:5: replace now_ist -> Option<String> with Some("xyzzy".into())
+crates/spikefade/src/kit.rs:540:5: replace rss_kb -> Option<u64> with Some(0)
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with None
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(0.0)
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(1.0)
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(-1.0)
+crates/spikefade/src/kit.rs:553:8: delete ! in proc_cpu_s
+crates/spikefade/src/kit.rs:557:42: replace / with * in proc_cpu_s

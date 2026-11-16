@@ -1,3 +1,12 @@
 crates/spikefade/src/kit.rs:142:11: replace += with -= in args_digest
 crates/spikefade/src/kit.rs:142:11: replace += with *= in args_digest
 crates/spikefade/src/kit.rs:148:15: replace += with -= in args_digest
+crates/spikefade/src/kit.rs:354:9: replace Sha256::update with ()
+crates/spikefade/src/kit.rs:355:22: replace > with == in Sha256::update
+crates/spikefade/src/kit.rs:355:22: replace > with < in Sha256::update
+crates/spikefade/src/kit.rs:356:28: replace - with + in Sha256::update
+crates/spikefade/src/kit.rs:360:23: replace += with -= in Sha256::update
+crates/spikefade/src/kit.rs:360:23: replace += with *= in Sha256::update
+crates/spikefade/src/kit.rs:362:26: replace == with != in Sha256::update
+crates/spikefade/src/kit.rs:373:12: delete ! in Sha256::update
+crates/spikefade/src/kit.rs:398:9: replace Sha256::update_pad with ()
