@@ -1,0 +1,4 @@
+crates/spikefade/src/report.rs:1400:20: replace ^ with | in twin
+crates/spikefade/src/report.rs:1413:111: replace < with <= in twin
+crates/spikefade/src/report.rs:1447:5: replace manifest_stats -> (f64, BTreeMap<String, u64>) with (-1.0, BTreeMap::from_iter([("xyzzy".into(), 1)]))
+crates/spikefade/src/report.rs:1762:41: replace < with > in v2_top
