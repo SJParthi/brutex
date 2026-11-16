@@ -1,0 +1,79 @@
+crates/spikefade/src/p3.rs:28:5: replace to_v21 -> Option<Rule> with None
+crates/spikefade/src/p3.rs:29:9: delete match arm XRule::Stop{x} in to_v21
+crates/spikefade/src/p3.rs:31:9: delete match arm XRule::Target{x} in to_v21
+crates/spikefade/src/p3.rs:32:9: delete match arm XRule::TimeExit{secs} in to_v21
+crates/spikefade/src/p3.rs:30:9: delete match arm XRule::QuickCut{x} in to_v21
+crates/spikefade/src/p3.rs:33:9: delete match arm XRule::GoPositive{secs} in to_v21
+crates/spikefade/src/p3.rs:34:9: delete match arm XRule::Trail{act, dist} in to_v21
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, 0, 1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, 0, -1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, 1, 0))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, 1, 1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, 1, -1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, -1, 0))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, -1, -1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, 0, 0))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, 0, 1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, 0, -1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, 1, 0))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, 1, 1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, 1, -1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, -1, 0))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, -1, 1))
+crates/spikefade/src/p3.rs:41:9: delete match arm XRule::StopAt{level} in new_kind
+crates/spikefade/src/p3.rs:42:9: delete match arm XRule::TargetAt{level} in new_kind
+crates/spikefade/src/p3.rs:43:9: delete match arm XRule::TrailPct{act, bp} in new_kind
+crates/spikefade/src/p3.rs:44:9: delete match arm XRule::ArmedStop{act, off} in new_kind
+crates/spikefade/src/p3.rs:45:9: delete match arm XRule::TimedStop{after, off} in new_kind
+crates/spikefade/src/p3.rs:57:5: replace cmd_p3 -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/p3.rs:57:5: replace cmd_p3 -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/p3.rs:57:49: replace == with != in cmd_p3
+crates/spikefade/src/p3.rs:57:76: replace + with * in cmd_p3
+crates/spikefade/src/p3.rs:60:71: replace && with || in cmd_p3
+crates/spikefade/src/p3.rs:60:65: replace == with != in cmd_p3
+crates/spikefade/src/p3.rs:65:42: replace == with != in cmd_p3
+crates/spikefade/src/p3.rs:66:16: delete ! in cmd_p3
+crates/spikefade/src/p3.rs:66:36: replace == with != in cmd_p3
+crates/spikefade/src/p3.rs:84:106: replace == with != in cmd_p3
+crates/spikefade/src/p3.rs:97:28: replace |= with &= in cmd_p3
+crates/spikefade/src/p3.rs:97:33: replace << with >> in cmd_p3
+crates/spikefade/src/p3.rs:104:22: replace != with == in cmd_p3
+crates/spikefade/src/p3.rs:133:58: replace || with && in cmd_p3
+crates/spikefade/src/p3.rs:133:42: replace != with == in cmd_p3
+crates/spikefade/src/p3.rs:138:86: replace * with + in cmd_p3
+crates/spikefade/src/p3.rs:138:86: replace * with / in cmd_p3
+crates/spikefade/src/p3.rs:144:117: replace != with == in cmd_p3
+crates/spikefade/src/p3.rs:144:105: replace & with | in cmd_p3
+crates/spikefade/src/p3.rs:144:105: replace & with ^ in cmd_p3
+crates/spikefade/src/p3.rs:144:110: replace << with >> in cmd_p3
+crates/spikefade/src/p3.rs:155:76: replace * with + in cmd_p3
+crates/spikefade/src/p3.rs:155:76: replace * with / in cmd_p3
+crates/spikefade/src/p3.rs:161:42: replace += with -= in cmd_p3
+crates/spikefade/src/p3.rs:161:42: replace += with *= in cmd_p3
+crates/spikefade/src/p3.rs:163:46: replace != with == in cmd_p3
+crates/spikefade/src/p3.rs:164:50: replace += with -= in cmd_p3
+crates/spikefade/src/p3.rs:164:50: replace += with *= in cmd_p3
+crates/spikefade/src/p3.rs:166:61: replace < with == in cmd_p3
+crates/spikefade/src/p3.rs:166:61: replace < with <= in cmd_p3
+crates/spikefade/src/p3.rs:176:42: replace += with -= in cmd_p3
+crates/spikefade/src/p3.rs:176:42: replace += with *= in cmd_p3
+crates/spikefade/src/p3.rs:178:57: replace != with == in cmd_p3
+crates/spikefade/src/p3.rs:179:50: replace += with -= in cmd_p3
+crates/spikefade/src/p3.rs:179:50: replace += with *= in cmd_p3
+crates/spikefade/src/p3.rs:181:61: replace < with == in cmd_p3
+crates/spikefade/src/p3.rs:181:61: replace < with > in cmd_p3
+crates/spikefade/src/p3.rs:181:61: replace < with <= in cmd_p3
+crates/spikefade/src/p3.rs:187:42: replace += with *= in cmd_p3
+crates/spikefade/src/p3.rs:190:178: delete - in cmd_p3
+crates/spikefade/src/p3.rs:191:46: replace += with -= in cmd_p3
+crates/spikefade/src/p3.rs:191:46: replace += with *= in cmd_p3
+crates/spikefade/src/p3.rs:192:94: replace < with == in cmd_p3
+crates/spikefade/src/p3.rs:192:94: replace < with > in cmd_p3
+crates/spikefade/src/p3.rs:192:94: replace < with <= in cmd_p3
+crates/spikefade/src/p3.rs:216:34: replace += with -= in cmd_p3
+crates/spikefade/src/p3.rs:216:34: replace += with *= in cmd_p3
+crates/spikefade/src/p3.rs:221:32: replace += with -= in cmd_p3
+crates/spikefade/src/p3.rs:221:32: replace += with *= in cmd_p3
+crates/spikefade/src/read.rs:26:51: replace + with *
+crates/spikefade/src/read.rs:26:32: replace - with +
+crates/spikefade/src/read.rs:28:49: replace / with *

@@ -1,0 +1,3 @@
+crates/spikefade/src/p3.rs:28:5: replace to_v21 -> Option<Rule> with Some(Default::default())
+crates/spikefade/src/p3.rs:166:49: replace && with || in cmd_p3
+crates/spikefade/src/p3.rs:181:49: replace && with || in cmd_p3

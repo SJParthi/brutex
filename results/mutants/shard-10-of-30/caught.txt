@@ -1,0 +1,51 @@
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with None
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, 0, 0))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((0, -1, 1))
+crates/spikefade/src/p3.rs:40:5: replace new_kind -> Option<(u8, i64, i64)> with Some((1, -1, -1))
+crates/spikefade/src/p3.rs:57:76: replace + with - in cmd_p3
+crates/spikefade/src/p3.rs:166:61: replace < with > in cmd_p3
+crates/spikefade/src/p3.rs:187:42: replace += with -= in cmd_p3
+crates/spikefade/src/read.rs:26:51: replace + with -
+crates/spikefade/src/read.rs:26:32: replace - with /
+crates/spikefade/src/read.rs:28:49: replace / with %
+crates/spikefade/src/read.rs:28:30: replace - with +
+crates/spikefade/src/read.rs:28:30: replace - with /
+crates/spikefade/src/read.rs:40:5: replace nliq -> usize with 0
+crates/spikefade/src/read.rs:40:5: replace nliq -> usize with 1
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (0, 0, 0)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (0, 0, 1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (0, 0, -1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (0, 1, 0)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (0, 1, 1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (0, 1, -1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (1, 0, 0)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (1, 0, 1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (1, 0, -1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (1, 1, 0)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (1, 1, 1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (1, 1, -1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (-1, 0, 0)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (-1, 0, 1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (-1, 0, -1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (-1, 1, 0)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (-1, 1, 1)
+crates/spikefade/src/read.rs:67:5: replace wilder -> (i64, u32, i64) with (-1, 1, -1)
+crates/spikefade/src/read.rs:70:18: replace < with == in wilder
+crates/spikefade/src/read.rs:70:18: replace < with > in wilder
+crates/spikefade/src/read.rs:70:18: replace < with <= in wilder
+crates/spikefade/src/read.rs:71:28: replace + with - in wilder
+crates/spikefade/src/read.rs:71:28: replace + with * in wilder
+crates/spikefade/src/read.rs:72:30: replace + with - in wilder
+crates/spikefade/src/read.rs:72:30: replace + with * in wilder
+crates/spikefade/src/read.rs:73:23: replace == with != in wilder
+crates/spikefade/src/read.rs:73:43: replace / with % in wilder
+crates/spikefade/src/read.rs:73:43: replace / with * in wilder
+crates/spikefade/src/read.rs:73:35: replace * with + in wilder
+crates/spikefade/src/read.rs:73:35: replace * with / in wilder
+crates/spikefade/src/read.rs:75:42: replace / with % in wilder
+crates/spikefade/src/read.rs:75:42: replace / with * in wilder
+crates/spikefade/src/read.rs:75:28: replace + with - in wilder
+crates/spikefade/src/read.rs:75:28: replace + with * in wilder
+crates/spikefade/src/read.rs:75:23: replace * with + in wilder
+crates/spikefade/src/read.rs:75:23: replace * with / in wilder
+crates/spikefade/src/read.rs:75:33: replace * with + in wilder
