@@ -1,0 +1,3 @@
+PACKAGE sniper_host files=26 regions=23.86% functions=24.85% lines=28.12% (2615/9299)
+PACKAGE sniper_kernel files=7 regions=86.37% functions=82.81% lines=87.80% (439/500)
+PACKAGE wf_sweep files=7 regions=74.95% functions=75.52% lines=80.56% (1098/1363)

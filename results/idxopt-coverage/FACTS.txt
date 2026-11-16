@@ -1,0 +1,8 @@
+# FACTS 2026-11-16 16:03:56 UTC
+job cov; result branch cloud-results/idxopt-coverage; source branch cloud/idxopt-v3-20261116; source commit 10dacdd629ee7052c4ca3fe2312b3af275cda172
+manifest 366 files, sha256 e082593fbc5101f8691bc68b08846e44bc5a0388be924c91d79f75416d4cff30 (expected e082593fbc5101f8691bc68b08846e44bc5a0388be924c91d79f75416d4cff30)
+uname Linux 6.18.44-fc-v470 x86_64; nproc 4
+mem_total_kib 16473776; cgroup memory.max n/a
+disk_free_kib 30385500
+rustc 1.97.1 (8bab26f4f 2026-07-14); cargo 1.97.1 (c980f4866 2026-06-30)
+tools:  cargo-llvm-cov 0.9.1

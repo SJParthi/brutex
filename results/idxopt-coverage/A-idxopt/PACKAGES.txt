@@ -1,0 +1,7 @@
+PACKAGE core files=11 regions=4.59% functions=6.01% lines=4.26% (58/1362)
+PACKAGE costs files=25 regions=99.16% functions=99.21% lines=99.46% (12040/12105)
+PACKAGE idx_cal files=8 regions=45.81% functions=44.94% lines=46.43% (540/1163)
+PACKAGE idx_f1 files=2 regions=94.74% functions=94.74% lines=94.27% (181/192)
+PACKAGE opt_pos files=11 regions=81.14% functions=68.56% lines=81.36% (2108/2591)
+PACKAGE store files=27 regions=0.00% functions=0.00% lines=0.00% (0/15815)
+PACKAGE telemetry files=12 regions=0.00% functions=0.00% lines=0.00% (0/3026)

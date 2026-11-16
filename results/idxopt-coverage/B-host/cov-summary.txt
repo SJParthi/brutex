@@ -1,0 +1,44 @@
+Filename                               Regions    Missed Regions     Cover   Functions  Missed Functions  Executed       Lines      Missed Lines     Cover    Branches   Missed Branches     Cover
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+sniper_host/src/bin/sniper-host.rs         417               417     0.00%          37                37     0.00%         141               141     0.00%           0                 0         -
+sniper_host/src/bin/sniper-q.rs            161               161     0.00%          11                11     0.00%          62                62     0.00%           0                 0         -
+sniper_host/src/cands.rs                  1874              1624    13.34%         117               107     8.55%         720               603    16.25%           0                 0         -
+sniper_host/src/ctxdials.rs               1329               817    38.53%          86                46    46.51%         462               270    41.56%           0                 0         -
+sniper_host/src/db.rs                      401               161    59.85%          40                26    35.00%         165                65    60.61%           0                 0         -
+sniper_host/src/esn1.rs                   1247              1247     0.00%          42                42     0.00%         386               386     0.00%           0                 0         -
+sniper_host/src/idx.rs                    1584              1371    13.45%          61                48    21.31%         532               439    17.48%           0                 0         -
+sniper_host/src/idxpos.rs                 4353              3488    19.87%         195               139    28.72%        1413              1060    24.98%           0                 0         -
+sniper_host/src/instr.rs                   711                53    92.55%          52                 5    90.38%         312                24    92.31%           0                 0         -
+sniper_host/src/law.rs                      12                 3    75.00%           1                 0   100.00%          12                 3    75.00%           0                 0         -
+sniper_host/src/lib.rs                      52                23    55.77%           9                 5    44.44%          35                12    65.71%           0                 0         -
+sniper_host/src/monitor.rs                 227               195    14.10%          18                15    16.67%          79                65    17.72%           0                 0         -
+sniper_host/src/newday.rs                   49                 4    91.84%           2                 0   100.00%          18                 1    94.44%           0                 0         -
+sniper_host/src/posgroups.rs               878                57    93.51%          36                 7    80.56%         307                20    93.49%           0                 0         -
+sniper_host/src/price.rs                   884                76    91.40%          37                 9    75.68%         341                27    92.08%           0                 0         -
+sniper_host/src/query.rs                    76                 3    96.05%           6                 0   100.00%          31                 0   100.00%           0                 0         -
+sniper_host/src/rows.rs                    567               470    17.11%          54                47    12.96%         200               160    20.00%           0                 0         -
+sniper_host/src/search.rs                 3487              3065    12.10%         145               120    17.24%        1138               984    13.53%           0                 0         -
+sniper_host/src/sec.rs                    2623              2623     0.00%         133               133     0.00%         877               877     0.00%           0                 0         -
+sniper_host/src/secrun.rs                 4276              4276     0.00%         180               180     0.00%        1301              1301     0.00%           0                 0         -
+sniper_host/src/sha.rs                     487                39    91.99%          15                 4    73.33%         171                16    90.64%           0                 0         -
+sniper_host/src/size.rs                    321                 8    97.51%          14                 1    92.86%         129                 6    95.35%           0                 0         -
+sniper_host/src/sweep.rs                   632                62    90.19%          27                 3    88.89%         309                24    92.23%           0                 0         -
+sniper_host/src/twin.rs                     53                 0   100.00%           3                 0   100.00%          20                 0   100.00%           0                 0         -
+sniper_host/src/wfio.rs                    213               213     0.00%          24                24     0.00%          86                86     0.00%           0                 0         -
+sniper_host/src/words.rs                   152               152     0.00%           7                 7     0.00%          52                52     0.00%           0                 0         -
+sniper_kernel/src/bits.rs                   70                 7    90.00%          13                 2    84.62%          50                 6    88.00%           0                 0         -
+sniper_kernel/src/code.rs                  152                 8    94.74%           8                 0   100.00%          61                 2    96.72%           0                 0         -
+sniper_kernel/src/ladder.rs                242                72    70.25%          19                 7    63.16%         104                30    71.15%           0                 0         -
+sniper_kernel/src/lib.rs                    12                 3    75.00%           2                 0   100.00%          10                 2    80.00%           0                 0         -
+sniper_kernel/src/line.rs                  404                37    90.84%          10                 0   100.00%         187                13    93.05%           0                 0         -
+sniper_kernel/src/scale.rs                  78                 1    98.72%           3                 0   100.00%          34                 0   100.00%           0                 0         -
+sniper_kernel/src/steps.rs                  84                14    83.33%           9                 2    77.78%          54                 8    85.19%           0                 0         -
+wf_sweep/src/acc.rs                       1994               270    86.46%          61                 4    93.44%         731                52    92.89%           0                 0         -
+wf_sweep/src/dd.rs                          16                 1    93.75%           2                 0   100.00%           8                 0   100.00%           0                 0         -
+wf_sweep/src/lib.rs                         32                11    65.62%           7                 3    57.14%          23                 9    60.87%           0                 0         -
+wf_sweep/src/lists.rs                      261                60    77.01%          18                 1    94.44%         137                19    86.13%           0                 0         -
+wf_sweep/src/tests_fast.rs                 734                16    97.82%          22                 0   100.00%         250                 7    97.20%           0                 0         -
+wf_sweep/src/tests_wf.rs                   561               561     0.00%          26                26     0.00%         171               171     0.00%           0                 0         -
+wf_sweep/src/views.rs                      114                11    90.35%           7                 1    85.71%          43                 7    83.72%           0                 0         -
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+TOTAL                                    31820             21680    31.87%        1559              1062    31.88%       11162              7010    37.20%           0                 0         -
