@@ -1,0 +1,13 @@
+crates/spikefade/src/split18.rs:91:28: delete field days from struct Self expression in SCal::from_days
+crates/spikefade/src/split18.rs:852:9: replace Fig18::worst_day -> i64 with 0
+crates/spikefade/src/split18.rs:1024:9: replace Fig18c::of -> Self with Default::default()
+crates/spikefade/src/split18.rs:1028:9: replace Fig18c::words -> String with String::new()
+crates/spikefade/src/split18.rs:1111:28: delete field dst from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:49: delete field items from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:68: delete field pre from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:85: delete field suf from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1115:22: replace += with *= in Sel18::merge
+crates/spikefade/src/split18.rs:1355:52: delete ! in account
+crates/spikefade/src/split18.rs:1419:17: replace % with + in account
+crates/spikefade/src/split18.rs:1499:47: replace < with == in fig_words
+crates/spikefade/src/split18.rs:1564:35: replace += with *= in section
