@@ -1,0 +1,44 @@
+crates/spikefade/src/mtable.rs:357:68: replace && with || in exact_at
+crates/spikefade/src/mtable.rs:357:71: delete ! in exact_at
+crates/spikefade/src/mtable.rs:421:34: replace == with != in cmd_margincheck
+crates/spikefade/src/mtable.rs:449:33: replace match guard (Some(p.exact), Some(p.span), Some(p.premium), Some(p.elm), Some(p.nse_only), label.clone()) == want with false in cmd_margincheck
+crates/spikefade/src/mtable.rs:473:5: replace cmd_margincheck2 -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/mtable.rs:473:5: replace cmd_margincheck2 -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/mtable.rs:496:11: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:86: replace + with * in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:78: replace * with / in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:158: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:526:16: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:527:29: replace < with == in cmd_margincheck2
+crates/spikefade/src/mtable.rs:540:12: replace += with -= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:610:5: replace strict_span -> Parts with Default::default()
+crates/spikefade/src/mtable.rs:610:52: replace || with && in strict_span
+crates/spikefade/src/mtable.rs:610:8: delete ! in strict_span
+crates/spikefade/src/mtable.rs:610:55: delete ! in strict_span
+crates/spikefade/src/mtable.rs:614:18: replace - with + in strict_span
+crates/spikefade/src/mtable.rs:614:18: replace - with / in strict_span
+crates/spikefade/src/mtable.rs:619:13: delete field span from struct Parts expression in strict_span
+crates/spikefade/src/mtable.rs:619:19: delete field premium from struct Parts expression in strict_span
+crates/spikefade/src/mtable.rs:619:28: delete field nse_only from struct Parts expression in strict_span
+crates/spikefade/src/mtable.rs:619:38: delete field exact from struct Parts expression in strict_span
+crates/spikefade/src/stress.rs:42:5: replace stressed -> Result<i64, String> with Ok(0)
+crates/spikefade/src/stress.rs:42:5: replace stressed -> Result<i64, String> with Ok(1)
+crates/spikefade/src/stress.rs:42:5: replace stressed -> Result<i64, String> with Ok(-1)
+crates/spikefade/src/stress.rs:42:16: replace == with != in stressed
+crates/spikefade/src/stress.rs:45:94: replace + with - in stressed
+crates/spikefade/src/stress.rs:45:94: replace + with * in stressed
+crates/spikefade/src/stress.rs:45:69: replace * with + in stressed
+crates/spikefade/src/stress.rs:45:69: replace * with / in stressed
+crates/spikefade/src/stress.rs:45:89: replace + with - in stressed
+crates/spikefade/src/stress.rs:45:89: replace + with * in stressed
+crates/spikefade/src/stress.rs:46:71: replace * with + in stressed
+crates/spikefade/src/stress.rs:46:71: replace * with / in stressed
+crates/spikefade/src/stress.rs:46:91: replace - with + in stressed
+crates/spikefade/src/stress.rs:46:91: replace - with / in stressed
+crates/spikefade/src/stress.rs:54:22: replace - with + in stressed
+crates/spikefade/src/stress.rs:54:22: replace - with / in stressed
+crates/spikefade/src/stress.rs:54:13: replace - with + in stressed
+crates/spikefade/src/stress.rs:54:13: replace - with / in stressed
+crates/spikefade/src/stress.rs:68:98: replace / with % in adverse_bp
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 1, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 0, 0)

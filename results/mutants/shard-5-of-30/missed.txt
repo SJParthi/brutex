@@ -1,0 +1,118 @@
+crates/spikefade/src/mtable.rs:325:36: replace match guard r.oth_h < 0 with false in exact_at
+crates/spikefade/src/mtable.rs:325:44: replace < with > in exact_at
+crates/spikefade/src/mtable.rs:325:44: replace < with == in exact_at
+crates/spikefade/src/mtable.rs:325:44: replace < with <= in exact_at
+crates/spikefade/src/mtable.rs:389:5: replace num_paisa -> Option<i64> with None
+crates/spikefade/src/mtable.rs:389:5: replace num_paisa -> Option<i64> with Some(0)
+crates/spikefade/src/mtable.rs:389:5: replace num_paisa -> Option<i64> with Some(1)
+crates/spikefade/src/mtable.rs:389:5: replace num_paisa -> Option<i64> with Some(-1)
+crates/spikefade/src/mtable.rs:399:5: replace cmd_margincheck -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/mtable.rs:399:5: replace cmd_margincheck -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/mtable.rs:404:53: replace == with != in cmd_margincheck
+crates/spikefade/src/mtable.rs:413:11: replace += with -= in cmd_margincheck
+crates/spikefade/src/mtable.rs:413:11: replace += with *= in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:101: replace + with - in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:101: replace + with * in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:61: replace + with - in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:53: replace * with + in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:61: replace + with * in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:53: replace * with / in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:96: replace * with + in cmd_margincheck
+crates/spikefade/src/mtable.rs:416:96: replace * with / in cmd_margincheck
+crates/spikefade/src/mtable.rs:421:42: replace || with && in cmd_margincheck
+crates/spikefade/src/mtable.rs:421:51: replace == with != in cmd_margincheck
+crates/spikefade/src/mtable.rs:429:51: replace < with == in cmd_margincheck
+crates/spikefade/src/mtable.rs:429:51: replace < with > in cmd_margincheck
+crates/spikefade/src/mtable.rs:429:51: replace < with <= in cmd_margincheck
+crates/spikefade/src/mtable.rs:449:33: replace match guard (Some(p.exact), Some(p.span), Some(p.premium), Some(p.elm), Some(p.nse_only), label.clone()) == want with true in cmd_margincheck
+crates/spikefade/src/mtable.rs:449:126: replace == with != in cmd_margincheck
+crates/spikefade/src/mtable.rs:450:20: replace += with -= in cmd_margincheck
+crates/spikefade/src/mtable.rs:450:20: replace += with *= in cmd_margincheck
+crates/spikefade/src/mtable.rs:451:142: replace += with -= in cmd_margincheck
+crates/spikefade/src/mtable.rs:451:142: replace += with *= in cmd_margincheck
+crates/spikefade/src/mtable.rs:484:61: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:489:87: delete - in cmd_margincheck2
+crates/spikefade/src/mtable.rs:496:11: replace += with -= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:126: replace + with - in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:126: replace + with * in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:86: replace + with - in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:78: replace * with + in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:121: replace * with + in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:121: replace * with / in cmd_margincheck2
+crates/spikefade/src/mtable.rs:504:51: replace < with == in cmd_margincheck2
+crates/spikefade/src/mtable.rs:504:51: replace < with > in cmd_margincheck2
+crates/spikefade/src/mtable.rs:504:51: replace < with <= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:508:35: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:13: delete match arm (Some((label, mlot)), Some((Some(wm), wfit, Some(slot)))) in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:109: replace && with || in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:94: replace && with || in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:81: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:103: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:526:16: replace += with -= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:527:29: replace < with > in cmd_margincheck2
+crates/spikefade/src/mtable.rs:527:29: replace < with <= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:540:12: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:546:63: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:550:21: replace != with == in cmd_margincheck2
+crates/spikefade/src/mtable.rs:554:26: replace + with - in cmd_margincheck2
+crates/spikefade/src/mtable.rs:554:26: replace + with * in cmd_margincheck2
+crates/spikefade/src/mtable.rs:556:26: replace && with || in cmd_margincheck2
+crates/spikefade/src/mtable.rs:556:33: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:557:16: replace += with -= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:557:16: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:576:5: replace cmd_margin_one -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/mtable.rs:576:5: replace cmd_margin_one -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/mtable.rs:576:49: replace == with != in cmd_margin_one
+crates/spikefade/src/mtable.rs:576:76: replace + with - in cmd_margin_one
+crates/spikefade/src/mtable.rs:576:76: replace + with * in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:46: replace + with - in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:46: replace + with * in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:38: replace * with + in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:38: replace * with / in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:51: replace * with + in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:51: replace * with / in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:151: replace * with + in cmd_margin_one
+crates/spikefade/src/mtable.rs:584:151: replace * with / in cmd_margin_one
+crates/spikefade/src/mtable.rs:587:47: replace < with == in cmd_margin_one
+crates/spikefade/src/mtable.rs:587:47: replace < with > in cmd_margin_one
+crates/spikefade/src/mtable.rs:587:47: replace < with <= in cmd_margin_one
+crates/spikefade/src/stress.rs:61:5: replace adverse_bp -> i64 with 0
+crates/spikefade/src/stress.rs:61:5: replace adverse_bp -> i64 with 1
+crates/spikefade/src/stress.rs:61:5: replace adverse_bp -> i64 with -1
+crates/spikefade/src/stress.rs:62:10: replace <= with > in adverse_bp
+crates/spikefade/src/stress.rs:65:17: replace + with - in adverse_bp
+crates/spikefade/src/stress.rs:65:17: replace + with * in adverse_bp
+crates/spikefade/src/stress.rs:65:24: replace * with + in adverse_bp
+crates/spikefade/src/stress.rs:65:24: replace * with / in adverse_bp
+crates/spikefade/src/stress.rs:68:98: replace / with * in adverse_bp
+crates/spikefade/src/stress.rs:68:88: replace * with + in adverse_bp
+crates/spikefade/src/stress.rs:68:88: replace * with / in adverse_bp
+crates/spikefade/src/stress.rs:68:75: replace - with + in adverse_bp
+crates/spikefade/src/stress.rs:68:75: replace - with / in adverse_bp
+crates/spikefade/src/stress.rs:69:96: replace / with % in adverse_bp
+crates/spikefade/src/stress.rs:69:96: replace / with * in adverse_bp
+crates/spikefade/src/stress.rs:69:86: replace * with + in adverse_bp
+crates/spikefade/src/stress.rs:69:86: replace * with / in adverse_bp
+crates/spikefade/src/stress.rs:69:74: replace - with + in adverse_bp
+crates/spikefade/src/stress.rs:69:74: replace - with / in adverse_bp
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 0, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 0, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 0, -1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 1, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 1, -1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, -1, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, -1, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, -1, -1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, 0, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, 0, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, 0, -1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, 1, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, 1, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, 1, -1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, -1, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, -1, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 1, -1, -1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 0, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 0, -1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 1, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 1, 1)
