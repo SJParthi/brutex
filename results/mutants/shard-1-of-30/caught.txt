@@ -1,0 +1,267 @@
+crates/costs/src/dated.rs:56:51: replace + with -
+crates/costs/src/dated.rs:56:51: replace + with *
+crates/costs/src/dated.rs:146:47: replace && with || in DatedTable<V>::value_on
+crates/costs/src/dated.rs:142:26: replace <= with > in DatedTable<V>::value_on
+crates/costs/src/dated.rs:225:9: replace DatedTable<V>::is_shipping_shape -> bool with true
+crates/costs/src/dated.rs:284:5: replace has_content -> bool with true
+crates/costs/src/dated.rs:286:12: delete ! in has_content
+crates/costs/src/dated.rs:305:5: replace str_eq -> bool with true
+crates/costs/src/dated.rs:314:21: replace && with || in str_eq
+crates/costs/src/charge_error.rs:143:9: replace <impl fmt::Display for ChargeError>::fmt -> fmt::Result with Ok(Default::default())
+crates/costs/src/day.rs:113:9: replace Weekday::index -> u8 with 0
+crates/costs/src/day.rs:113:9: replace Weekday::index -> u8 with 1
+crates/costs/src/day.rs:131:9: replace Weekday::days_until -> u8 with 1
+crates/costs/src/day.rs:131:9: replace Weekday::days_until -> u8 with 0
+crates/costs/src/day.rs:131:45: replace % with + in Weekday::days_until
+crates/costs/src/day.rs:131:45: replace % with / in Weekday::days_until
+crates/costs/src/day.rs:131:29: replace - with + in Weekday::days_until
+crates/costs/src/day.rs:131:29: replace - with / in Weekday::days_until
+crates/costs/src/day.rs:131:25: replace + with - in Weekday::days_until
+crates/costs/src/day.rs:131:25: replace + with * in Weekday::days_until
+crates/costs/src/day.rs:137:9: replace Weekday::days_since -> u8 with 0
+crates/costs/src/day.rs:137:9: replace Weekday::days_since -> u8 with 1
+crates/costs/src/day.rs:137:45: replace % with / in Weekday::days_since
+crates/costs/src/day.rs:137:45: replace % with + in Weekday::days_since
+crates/costs/src/day.rs:137:27: replace - with + in Weekday::days_since
+crates/costs/src/day.rs:137:27: replace - with / in Weekday::days_since
+crates/costs/src/day.rs:137:23: replace + with - in Weekday::days_since
+crates/costs/src/day.rs:137:23: replace + with * in Weekday::days_since
+crates/costs/src/day.rs:147:9: replace Weekday::is_trading_weekday -> bool with true
+crates/costs/src/day.rs:147:9: replace Weekday::is_trading_weekday -> bool with false
+crates/costs/src/day.rs:147:9: delete ! in Weekday::is_trading_weekday
+crates/costs/src/day.rs:153:9: replace Weekday::as_str -> &'static str with ""
+crates/costs/src/day.rs:153:9: replace Weekday::as_str -> &'static str with "xyzzy"
+crates/costs/src/day.rs:167:9: replace <impl fmt::Display for Weekday>::fmt -> fmt::Result with Ok(Default::default())
+crates/costs/src/day.rs:271:9: replace TradeDay::year -> u16 with 1
+crates/costs/src/day.rs:271:9: replace TradeDay::year -> u16 with 0
+crates/costs/src/day.rs:277:9: replace TradeDay::month -> u8 with 1
+crates/costs/src/day.rs:277:9: replace TradeDay::month -> u8 with 0
+crates/costs/src/day.rs:283:9: replace TradeDay::day -> u8 with 0
+crates/costs/src/day.rs:283:9: replace TradeDay::day -> u8 with 1
+crates/costs/src/day.rs:300:9: replace TradeDay::same_day -> bool with true
+crates/costs/src/day.rs:315:13: delete match arm 0 in TradeDay::weekday
+crates/costs/src/day.rs:316:13: delete match arm 1 in TradeDay::weekday
+crates/costs/src/day.rs:317:13: delete match arm 2 in TradeDay::weekday
+crates/costs/src/day.rs:318:13: delete match arm 3 in TradeDay::weekday
+crates/costs/src/day.rs:319:13: delete match arm 4 in TradeDay::weekday
+crates/costs/src/day.rs:320:13: delete match arm 5 in TradeDay::weekday
+crates/costs/src/day.rs:314:29: replace + with - in TradeDay::weekday
+crates/costs/src/day.rs:314:29: replace + with * in TradeDay::weekday
+crates/costs/src/day.rs:363:12: delete ! in TradeDay::from_ordinal
+crates/costs/src/day.rs:431:48: replace - with + in TradeDay::with_day_in_same_month
+crates/costs/src/day.rs:431:48: replace - with / in TradeDay::with_day_in_same_month
+crates/costs/src/day.rs:431:35: replace + with - in TradeDay::with_day_in_same_month
+crates/costs/src/day.rs:431:35: replace + with * in TradeDay::with_day_in_same_month
+crates/costs/src/day.rs:445:46: replace - with + in TradeDay::earlier_in_same_month
+crates/costs/src/day.rs:445:46: replace - with / in TradeDay::earlier_in_same_month
+crates/costs/src/day.rs:455:9: replace TradeDay::next_month -> (u16, u8) with (0, 0)
+crates/costs/src/day.rs:455:9: replace TradeDay::next_month -> (u16, u8) with (0, 1)
+crates/costs/src/day.rs:455:9: replace TradeDay::next_month -> (u16, u8) with (1, 0)
+crates/costs/src/day.rs:455:9: replace TradeDay::next_month -> (u16, u8) with (1, 1)
+crates/costs/src/day.rs:455:23: replace == with != in TradeDay::next_month
+crates/costs/src/day.rs:456:24: replace + with - in TradeDay::next_month
+crates/costs/src/day.rs:456:24: replace + with * in TradeDay::next_month
+crates/costs/src/day.rs:458:36: replace + with - in TradeDay::next_month
+crates/costs/src/day.rs:458:36: replace + with * in TradeDay::next_month
+crates/costs/src/day.rs:466:9: replace <impl fmt::Display for TradeDay>::fmt -> fmt::Result with Ok(Default::default())
+crates/costs/src/day.rs:502:17: replace - with + in days_from_civil
+crates/costs/src/day.rs:502:23: replace * with + in days_from_civil
+crates/costs/src/day.rs:502:23: replace * with / in days_from_civil
+crates/costs/src/day.rs:503:68: replace - with + in days_from_civil
+crates/costs/src/day.rs:503:68: replace - with / in days_from_civil
+crates/costs/src/day.rs:504:35: replace - with + in days_from_civil
+crates/costs/src/day.rs:505:25: replace - with + in days_from_civil
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (0, 0, 0)
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (0, 0, 1)
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (0, 1, 0)
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (0, 1, 1)
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (1, 0, 0)
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (1, 0, 1)
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (1, 1, 0)
+crates/costs/src/day.rs:533:5: replace civil_from_days -> (u16, u8, u8) with (1, 1, 1)
+crates/costs/src/day.rs:533:21: replace + with - in civil_from_days
+crates/costs/src/day.rs:533:21: replace + with * in civil_from_days
+crates/costs/src/day.rs:534:17: replace / with % in civil_from_days
+crates/costs/src/day.rs:534:17: replace / with * in civil_from_days
+crates/costs/src/day.rs:535:17: replace - with + in civil_from_days
+crates/costs/src/day.rs:535:17: replace - with / in civil_from_days
+crates/costs/src/day.rs:535:23: replace * with + in civil_from_days
+crates/costs/src/day.rs:535:23: replace * with / in civil_from_days
+crates/costs/src/day.rs:536:66: replace / with % in civil_from_days
+crates/costs/src/day.rs:536:66: replace / with * in civil_from_days
+crates/costs/src/day.rs:536:49: replace - with + in civil_from_days
+crates/costs/src/day.rs:536:49: replace - with / in civil_from_days
+crates/costs/src/day.rs:536:34: replace + with - in civil_from_days
+crates/costs/src/day.rs:536:34: replace + with * in civil_from_days
+crates/costs/src/day.rs:536:20: replace - with + in civil_from_days
+crates/costs/src/day.rs:536:20: replace - with / in civil_from_days
+crates/costs/src/day.rs:536:26: replace / with % in civil_from_days
+crates/costs/src/day.rs:536:26: replace / with * in civil_from_days
+crates/costs/src/day.rs:536:40: replace / with % in civil_from_days
+crates/costs/src/day.rs:536:40: replace / with * in civil_from_days
+crates/costs/src/day.rs:536:55: replace / with % in civil_from_days
+crates/costs/src/day.rs:536:55: replace / with * in civil_from_days
+crates/costs/src/day.rs:537:19: replace - with + in civil_from_days
+crates/costs/src/day.rs:537:42: replace - with + in civil_from_days
+crates/costs/src/day.rs:537:42: replace - with / in civil_from_days
+crates/costs/src/day.rs:537:32: replace + with - in civil_from_days
+crates/costs/src/day.rs:537:32: replace + with * in civil_from_days
+crates/costs/src/day.rs:537:26: replace * with + in civil_from_days
+crates/costs/src/day.rs:537:26: replace * with / in civil_from_days
+crates/costs/src/day.rs:537:38: replace / with % in civil_from_days
+crates/costs/src/day.rs:537:38: replace / with * in civil_from_days
+crates/costs/src/day.rs:537:48: replace / with % in civil_from_days
+crates/costs/src/day.rs:537:48: replace / with * in civil_from_days
+crates/costs/src/day.rs:538:28: replace / with % in civil_from_days
+crates/costs/src/day.rs:538:28: replace / with * in civil_from_days
+crates/costs/src/day.rs:538:23: replace + with - in civil_from_days
+crates/costs/src/day.rs:538:23: replace + with * in civil_from_days
+crates/costs/src/day.rs:538:17: replace * with + in civil_from_days
+crates/costs/src/day.rs:538:17: replace * with / in civil_from_days
+crates/costs/src/day.rs:539:40: replace + with - in civil_from_days
+crates/costs/src/day.rs:539:19: replace - with + in civil_from_days
+crates/costs/src/day.rs:539:36: replace / with % in civil_from_days
+crates/costs/src/day.rs:539:36: replace / with * in civil_from_days
+crates/costs/src/day.rs:539:31: replace + with - in civil_from_days
+crates/costs/src/day.rs:539:31: replace + with * in civil_from_days
+crates/costs/src/day.rs:539:26: replace * with + in civil_from_days
+crates/costs/src/day.rs:539:26: replace * with / in civil_from_days
+crates/costs/src/day.rs:540:23: replace < with == in civil_from_days
+crates/costs/src/day.rs:540:23: replace < with > in civil_from_days
+crates/costs/src/day.rs:540:23: replace < with <= in civil_from_days
+crates/costs/src/day.rs:540:33: replace + with - in civil_from_days
+crates/costs/src/day.rs:540:33: replace + with * in civil_from_days
+crates/costs/src/day.rs:540:49: replace - with + in civil_from_days
+crates/costs/src/day.rs:541:32: replace + with - in civil_from_days
+crates/costs/src/day.rs:541:32: replace + with * in civil_from_days
+crates/costs/src/day.rs:541:20: replace + with - in civil_from_days
+crates/costs/src/day.rs:541:20: replace + with * in civil_from_days
+crates/costs/src/day.rs:541:26: replace * with + in civil_from_days
+crates/costs/src/day.rs:541:26: replace * with / in civil_from_days
+crates/costs/src/day.rs:541:43: replace <= with > in civil_from_days
+crates/costs/src/dhan_calc.rs:51:47: replace * with +
+crates/costs/src/dhan_calc.rs:51:47: replace * with /
+crates/costs/src/dhan_calc.rs:55:62: replace / with %
+crates/costs/src/dhan_calc.rs:55:62: replace / with *
+crates/costs/src/dhan_calc.rs:60:35: replace * with +
+crates/costs/src/dhan_calc.rs:60:35: replace * with /
+crates/costs/src/dhan_calc.rs:61:35: replace * with +
+crates/costs/src/dhan_calc.rs:61:35: replace * with /
+crates/costs/src/dhan_calc.rs:75:24: replace * with +
+crates/costs/src/dhan_calc.rs:75:24: replace * with /
+crates/costs/src/dhan_calc.rs:137:17: replace <= with > in quote
+crates/costs/src/dhan_calc.rs:142:28: replace && with || in quote
+crates/costs/src/dhan_calc.rs:152:60: replace + with - in quote
+crates/costs/src/dhan_calc.rs:152:60: replace + with * in quote
+crates/costs/src/dhan_calc.rs:283:25: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:283:25: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:290:34: replace * with + in page_lines
+crates/costs/src/dhan_calc.rs:290:34: replace * with / in page_lines
+crates/costs/src/dhan_calc.rs:291:23: replace * with + in page_lines
+crates/costs/src/dhan_calc.rs:291:23: replace * with / in page_lines
+crates/costs/src/dhan_calc.rs:292:67: replace * with + in page_lines
+crates/costs/src/dhan_calc.rs:292:67: replace * with / in page_lines
+crates/costs/src/dhan_calc.rs:293:24: replace * with + in page_lines
+crates/costs/src/dhan_calc.rs:293:24: replace * with / in page_lines
+crates/costs/src/dhan_calc.rs:294:34: replace && with || in page_lines
+crates/costs/src/dhan_calc.rs:300:68: replace * with + in page_lines
+crates/costs/src/dhan_calc.rs:300:68: replace * with / in page_lines
+crates/costs/src/dhan_calc.rs:301:61: replace * with + in page_lines
+crates/costs/src/dhan_calc.rs:301:61: replace * with / in page_lines
+crates/costs/src/dhan_calc.rs:301:41: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:301:41: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:302:72: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:302:72: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:302:66: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:302:66: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:302:58: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:302:58: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:302:52: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:302:52: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:302:45: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:302:45: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:302:27: replace + with - in page_lines
+crates/costs/src/dhan_calc.rs:302:27: replace + with * in page_lines
+crates/costs/src/dhan_calc.rs:339:33: replace * with / in order_lines
+crates/costs/src/dhan_calc.rs:339:33: replace * with + in order_lines
+crates/costs/src/dhan_calc.rs:345:24: replace * with + in order_lines
+crates/costs/src/dhan_calc.rs:345:24: replace * with / in order_lines
+crates/costs/src/dhan_calc.rs:346:34: replace && with || in order_lines
+crates/costs/src/dhan_calc.rs:346:48: replace > with == in order_lines
+crates/costs/src/dhan_calc.rs:346:48: replace > with < in order_lines
+crates/costs/src/dhan_calc.rs:346:48: replace > with >= in order_lines
+crates/costs/src/dhan_calc.rs:354:21: replace * with + in order_lines
+crates/costs/src/dhan_calc.rs:354:21: replace * with / in order_lines
+crates/costs/src/dhan_calc.rs:357:40: replace * with + in order_lines
+crates/costs/src/dhan_calc.rs:357:40: replace * with / in order_lines
+crates/costs/src/dhan_calc.rs:359:45: replace * with + in order_lines
+crates/costs/src/dhan_calc.rs:359:45: replace * with / in order_lines
+crates/costs/src/dhan_calc.rs:359:26: replace + with - in order_lines
+crates/costs/src/dhan_calc.rs:359:26: replace + with * in order_lines
+crates/costs/src/dhan_calc.rs:377:5: replace side_value -> Result<Option<Paisa>, ChargeError> with Ok(None)
+crates/costs/src/dhan_calc.rs:377:5: replace side_value -> Result<Option<Paisa>, ChargeError> with Ok(Some(Default::default()))
+crates/costs/src/dhan_calc.rs:380:20: replace <= with > in side_value
+crates/costs/src/dhan_calc.rs:394:5: replace order_brokerage -> i128 with 0
+crates/costs/src/dhan_calc.rs:394:5: replace order_brokerage -> i128 with 1
+crates/costs/src/dhan_calc.rs:394:5: replace order_brokerage -> i128 with -1
+crates/costs/src/dhan_calc.rs:402:38: replace * with + in order_brokerage
+crates/costs/src/dhan_calc.rs:402:38: replace * with / in order_brokerage
+crates/costs/src/dhan_calc.rs:422:9: replace DhanQuote::quantity -> i64 with 0
+crates/costs/src/dhan_calc.rs:422:9: replace DhanQuote::quantity -> i64 with 1
+crates/costs/src/dhan_calc.rs:422:9: replace DhanQuote::quantity -> i64 with -1
+crates/costs/src/dhan_calc.rs:427:9: replace DhanQuote::buy_value -> Option<Paisa> with None
+crates/costs/src/dhan_calc.rs:432:9: replace DhanQuote::sell_value -> Option<Paisa> with None
+crates/costs/src/dhan_calc.rs:461:9: replace DhanQuote::brokerage -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:469:9: replace DhanQuote::exchange_charge -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:477:9: replace DhanQuote::sebi -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:485:9: replace DhanQuote::stt -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:493:9: replace DhanQuote::stamp -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:501:9: replace DhanQuote::gst -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:509:9: replace DhanQuote::dp -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:520:9: replace DhanQuote::total -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:537:9: replace DhanQuote::net_pnl -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:559:9: replace DhanQuote::points_to_breakeven -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/dhan_calc.rs:566:41: replace >= with < in DhanQuote::points_to_breakeven
+crates/costs/src/dhan_calc.rs:566:58: replace - with + in DhanQuote::points_to_breakeven
+crates/costs/src/dhan_calc.rs:566:58: replace - with / in DhanQuote::points_to_breakeven
+crates/costs/src/dhan_calc.rs:567:22: replace + with - in DhanQuote::points_to_breakeven
+crates/costs/src/dhan_calc.rs:567:22: replace + with * in DhanQuote::points_to_breakeven
+crates/costs/src/dhan_calc.rs:576:9: replace <impl fmt::Display for DhanQuote>::fmt -> fmt::Result with Ok(Default::default())
+crates/costs/src/equity_clock.rs:77:9: replace Clock::label -> &'static str with "xyzzy"
+crates/costs/src/equity_clock.rs:77:9: replace Clock::label -> &'static str with ""
+crates/costs/src/equity_clock.rs:217:9: replace TwoClock::quantity -> i64 with 0
+crates/costs/src/equity_clock.rs:217:9: replace TwoClock::quantity -> i64 with 1
+crates/costs/src/equity_clock.rs:217:9: replace TwoClock::quantity -> i64 with -1
+crates/costs/src/equity_clock.rs:248:9: replace TwoClock::version -> &'static str with ""
+crates/costs/src/equity_clock.rs:248:9: replace TwoClock::version -> &'static str with "xyzzy"
+crates/costs/src/equity_clock.rs:342:5: replace dhan_data_api_month -> (Paisa, Paisa) with (Default::default(), Default::default())
+crates/costs/src/equity_clock.rs:365:5: replace measure_rates_on -> Vec<u64> with vec![]
+crates/costs/src/equity_clock.rs:365:5: replace measure_rates_on -> Vec<u64> with vec![0]
+crates/costs/src/equity_clock.rs:365:5: replace measure_rates_on -> Vec<u64> with vec![1]
+crates/costs/src/equity_clock.rs:393:48: replace + with * in synthetic_trade
+crates/costs/src/equity_clock.rs:430:5: replace measure_price_trade -> Result<Vec<u64>, ChargeError> with Ok(vec![])
+crates/costs/src/equity_clock.rs:430:5: replace measure_price_trade -> Result<Vec<u64>, ChargeError> with Ok(vec![0])
+crates/costs/src/equity_clock.rs:430:5: replace measure_price_trade -> Result<Vec<u64>, ChargeError> with Ok(vec![1])
+crates/costs/src/equity_clock.rs:448:5: replace measure_worst -> Result<Vec<u64>, ChargeError> with Ok(vec![])
+crates/costs/src/equity_clock.rs:448:5: replace measure_worst -> Result<Vec<u64>, ChargeError> with Ok(vec![0])
+crates/costs/src/equity_clock.rs:448:5: replace measure_worst -> Result<Vec<u64>, ChargeError> with Ok(vec![1])
+crates/costs/src/equity_dated.rs:252:9: replace DatedRow::covers -> bool with true
+crates/costs/src/equity_dated.rs:252:9: replace DatedRow::covers -> bool with false
+crates/costs/src/equity_dated.rs:256:27: delete ! in DatedRow::covers
+crates/costs/src/equity_dated.rs:269:25: replace * with + in pct
+crates/costs/src/equity_dated.rs:269:25: replace * with / in pct
+crates/costs/src/equity_dated.rs:758:5: replace follows -> bool with true
+crates/costs/src/equity_dated.rs:768:5: replace is_series -> bool with true
+crates/costs/src/equity_dated.rs:794:5: replace is_per_crore -> bool with true
+crates/costs/src/equity_dated.rs:795:28: replace && with || in is_per_crore
+crates/costs/src/equity_dated.rs:822:12: delete ! in in_force
+crates/costs/src/equity_dated.rs:864:47: replace + with - in EquityRates::exchange_rate
+crates/costs/src/equity_dated.rs:864:47: replace + with * in EquityRates::exchange_rate
+crates/costs/src/equity_dated.rs:872:9: replace EquityRates::stamp_is_state -> bool with true
+crates/costs/src/equity_dated.rs:872:9: replace EquityRates::stamp_is_state -> bool with false
+crates/costs/src/equity_dated.rs:879:9: replace EquityRates::row_ids -> [&'static str; 10] with [""; 10]
+crates/costs/src/equity_dated.rs:879:9: replace EquityRates::row_ids -> [&'static str; 10] with ["xyzzy"; 10]
+crates/costs/src/equity_dated.rs:958:5: replace check_window -> Result<(), ChargeError> with Ok(())
+crates/costs/src/equity_dated.rs:1118:5: replace half_up -> i128 with 0
+crates/costs/src/equity_dated.rs:1118:5: replace half_up -> i128 with 1
+crates/costs/src/equity_dated.rs:1118:5: replace half_up -> i128 with -1

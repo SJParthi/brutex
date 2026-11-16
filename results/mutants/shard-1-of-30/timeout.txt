@@ -1,0 +1,7 @@
+crates/costs/src/day.rs:292:22: replace < with <= in TradeDay::before
+crates/costs/src/day.rs:504:35: replace - with / in days_from_civil
+crates/costs/src/day.rs:504:25: replace + with - in days_from_civil
+crates/costs/src/day.rs:537:19: replace - with / in civil_from_days
+crates/costs/src/day.rs:539:40: replace + with * in civil_from_days
+crates/costs/src/day.rs:539:19: replace - with / in civil_from_days
+crates/costs/src/day.rs:540:49: replace - with / in civil_from_days
