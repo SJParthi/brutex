@@ -1,0 +1,15 @@
+crates/spikefade/src/v2.rs:270:5: replace raw_1m -> Result<HashMap<u32, BTreeMap<usize, [i64; 5]>>, String> with Ok(HashMap::from_iter([(1, BTreeMap::from_iter([(1, [-1; 5])]))]))
+crates/spikefade/src/v2.rs:327:73: replace < with <= in rows_in
+crates/spikefade/src/v2.rs:333:5: replace usable_words -> String with "xyzzy".into()
+crates/spikefade/src/v2.rs:289:45: replace - with / in raw_1m
+crates/spikefade/src/v2.rs:365:55: replace < with > in blocks_md
+crates/spikefade/src/v2.rs:369:32: replace - with + in blocks_md
+crates/spikefade/src/v2.rs:375:200: replace * with / in blocks_md
+crates/spikefade/src/v2.rs:491:8: delete ! in evidence_md
+crates/spikefade/src/v2.rs:494:168: replace == with != in evidence_md
+crates/spikefade/src/v2.rs:515:30: replace + with * in remark_peak
+crates/spikefade/src/kern.rs:159:59: replace > with == in month_ok
+crates/spikefade/src/kern.rs:159:59: replace > with >= in month_ok
+crates/spikefade/src/kern.rs:166:22: replace += with *= in close_month
+crates/spikefade/src/kern.rs:246:12: delete ! in Pieces::group_end
+crates/spikefade/src/kern.rs:313:23: replace < with <= in flush
