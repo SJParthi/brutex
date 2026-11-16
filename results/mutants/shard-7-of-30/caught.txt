@@ -1,0 +1,37 @@
+crates/spikefade/src/screen.rs:750:25: replace == with != in generate
+crates/spikefade/src/screen.rs:777:17: replace && with || in rank_at
+crates/spikefade/src/screen.rs:789:67: replace >= with < in rank_at
+crates/spikefade/src/trade.rs:40:5: replace share_on -> bool with false
+crates/spikefade/src/trade.rs:40:70: replace == with != in share_on
+crates/spikefade/src/trade.rs:40:66: replace & with | in share_on
+crates/spikefade/src/trade.rs:40:66: replace & with ^ in share_on
+crates/spikefade/src/trade.rs:40:60: replace >> with << in share_on
+crates/spikefade/src/trade.rs:59:27: replace * with +
+crates/spikefade/src/trade.rs:59:27: replace * with /
+crates/spikefade/src/trade.rs:136:5: replace prev_prints -> Vec<i64> with vec![]
+crates/spikefade/src/trade.rs:136:5: replace prev_prints -> Vec<i64> with vec![0]
+crates/spikefade/src/trade.rs:136:5: replace prev_prints -> Vec<i64> with vec![1]
+crates/spikefade/src/trade.rs:136:5: replace prev_prints -> Vec<i64> with vec![-1]
+crates/spikefade/src/trade.rs:139:55: replace && with || in prev_prints
+crates/spikefade/src/trade.rs:139:42: replace && with || in prev_prints
+crates/spikefade/src/trade.rs:139:28: replace && with || in prev_prints
+crates/spikefade/src/trade.rs:139:24: replace > with == in prev_prints
+crates/spikefade/src/trade.rs:139:24: replace > with < in prev_prints
+crates/spikefade/src/trade.rs:139:24: replace > with >= in prev_prints
+crates/spikefade/src/trade.rs:139:38: replace > with == in prev_prints
+crates/spikefade/src/trade.rs:139:38: replace > with < in prev_prints
+crates/spikefade/src/trade.rs:139:51: replace > with == in prev_prints
+crates/spikefade/src/trade.rs:139:51: replace > with < in prev_prints
+crates/spikefade/src/trade.rs:139:65: replace >= with < in prev_prints
+crates/spikefade/src/trade.rs:140:17: replace == with != in prev_prints
+crates/spikefade/src/trade.rs:175:21: replace - with / in DayTape::with_reading
+crates/spikefade/src/trade.rs:179:32: replace == with != in DayTape::with_reading
+crates/spikefade/src/trade.rs:179:94: replace - with + in DayTape::with_reading
+crates/spikefade/src/trade.rs:179:94: replace - with / in DayTape::with_reading
+crates/spikefade/src/trade.rs:192:286: replace && with || in DayTape::tape
+crates/spikefade/src/trade.rs:192:289: delete ! in DayTape::tape
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 0, 0, 1, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 0, 1, 1, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 0, 1, 1, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 0, 0, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 0, 1, 0, 1, false)
