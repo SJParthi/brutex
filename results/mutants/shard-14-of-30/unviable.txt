@@ -1,0 +1,16 @@
+crates/spikefade/src/kern.rs:659:22: replace && with || in step3g
+crates/spikefade/src/kern.rs:669:18: replace && with || in step3g
+crates/spikefade/src/kern.rs:689:18: replace && with || in step3g
+crates/spikefade/src/kern.rs:703:14: replace && with || in step3g
+crates/spikefade/src/kern.rs:814:5: replace detail3 -> (Vec<Dec3>, Sum, Acc) with (vec![Default::default()], Default::default(), Default::default())
+crates/spikefade/src/kern.rs:1006:25: replace - with + in decision_code
+crates/spikefade/src/kern.rs:1012:37: replace - with + in decision_code
+crates/spikefade/src/kern.rs:1018:61: replace - with + in decision_code
+crates/spikefade/src/kern.rs:1029:201: replace - with + in dedup_groups
+crates/spikefade/src/kern.rs:1143:13: replace && with || in walk_accs
+crates/spikefade/src/menu.rs:441:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:440:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:439:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:438:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:624:5: replace rule_at -> Result<(XRule, bool), u8> with Ok((Default::default(), true))
+crates/spikefade/src/menu.rs:624:5: replace rule_at -> Result<(XRule, bool), u8> with Ok((Default::default(), false))

@@ -1,0 +1,12 @@
+crates/spikefade/src/kern.rs:777:15: replace += with *= in walk_account
+crates/spikefade/src/kern.rs:777:20: replace + with - in walk_account
+crates/spikefade/src/kern.rs:777:20: replace + with * in walk_account
+crates/spikefade/src/kern.rs:779:15: replace += with *= in walk_account
+crates/spikefade/src/kern.rs:863:15: replace += with *= in walk_day
+crates/spikefade/src/kern.rs:863:20: replace + with - in walk_day
+crates/spikefade/src/kern.rs:863:20: replace + with * in walk_day
+crates/spikefade/src/kern.rs:865:15: replace += with *= in walk_day
+crates/spikefade/src/kern.rs:904:15: replace += with *= in walk_day_core
+crates/spikefade/src/kern.rs:904:20: replace + with - in walk_day_core
+crates/spikefade/src/kern.rs:904:20: replace + with * in walk_day_core
+crates/spikefade/src/kern.rs:906:15: replace += with *= in walk_day_core

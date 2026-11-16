@@ -1,0 +1,254 @@
+crates/spikefade/src/kern.rs:672:37: delete - in step3g
+crates/spikefade/src/kern.rs:688:23: replace += with -= in step3g
+crates/spikefade/src/kern.rs:688:23: replace += with *= in step3g
+crates/spikefade/src/kern.rs:690:26: replace += with -= in step3g
+crates/spikefade/src/kern.rs:695:15: replace & with | in step3g
+crates/spikefade/src/kern.rs:718:5: replace out_of_decision -> Option<Out> with None
+crates/spikefade/src/kern.rs:718:5: replace out_of_decision -> Option<Out> with Some(Default::default())
+crates/spikefade/src/kern.rs:745:5: replace seg_of -> u8 with 0
+crates/spikefade/src/kern.rs:761:15: replace += with -= in walk_account
+crates/spikefade/src/kern.rs:765:15: replace += with -= in walk_account
+crates/spikefade/src/kern.rs:761:15: replace += with *= in walk_account
+crates/spikefade/src/kern.rs:796:568: replace == with != in sum_of
+crates/spikefade/src/kern.rs:849:15: replace += with -= in walk_day
+crates/spikefade/src/kern.rs:849:15: replace += with *= in walk_day
+crates/spikefade/src/kern.rs:854:23: replace == with != in walk_day
+crates/spikefade/src/kern.rs:854:64: replace || with && in walk_day
+crates/spikefade/src/kern.rs:855:15: replace += with -= in walk_day
+crates/spikefade/src/kern.rs:855:15: replace += with *= in walk_day
+crates/spikefade/src/kern.rs:892:15: replace += with -= in walk_day_core
+crates/spikefade/src/kern.rs:892:15: replace += with *= in walk_day_core
+crates/spikefade/src/kern.rs:895:23: replace == with != in walk_day_core
+crates/spikefade/src/kern.rs:895:64: replace || with && in walk_day_core
+crates/spikefade/src/kern.rs:896:15: replace += with -= in walk_day_core
+crates/spikefade/src/kern.rs:896:15: replace += with *= in walk_day_core
+crates/spikefade/src/kern.rs:961:19: replace += with -= in replay_day
+crates/spikefade/src/kern.rs:971:31: replace + with * in replay_day
+crates/spikefade/src/kern.rs:975:31: replace + with - in replay_day
+crates/spikefade/src/kern.rs:977:31: replace + with - in replay_day
+crates/spikefade/src/kern.rs:995:5: replace finish_p -> Sum with Default::default()
+crates/spikefade/src/kern.rs:1005:78: replace || with && in decision_code
+crates/spikefade/src/kern.rs:1005:33: replace || with && in decision_code
+crates/spikefade/src/kern.rs:1006:25: replace - with / in decision_code
+crates/spikefade/src/kern.rs:1012:37: replace - with / in decision_code
+crates/spikefade/src/kern.rs:1018:61: replace - with / in decision_code
+crates/spikefade/src/kern.rs:1029:201: replace - with / in dedup_groups
+crates/spikefade/src/kern.rs:1057:5: replace fnv -> u64 with 0
+crates/spikefade/src/kern.rs:1057:5: replace fnv -> u64 with 1
+crates/spikefade/src/kern.rs:1059:11: replace ^= with |= in fnv
+crates/spikefade/src/kern.rs:1059:11: replace ^= with &= in fnv
+crates/spikefade/src/kern.rs:1115:54: replace && with || in walk_accs
+crates/spikefade/src/kern.rs:1115:39: replace && with || in walk_accs
+crates/spikefade/src/kern.rs:1115:49: replace == with != in walk_accs
+crates/spikefade/src/kern.rs:1115:44: replace % with / in walk_accs
+crates/spikefade/src/kern.rs:1124:27: replace == with != in walk_accs
+crates/spikefade/src/kern.rs:1124:47: replace || with && in walk_accs
+crates/spikefade/src/kern.rs:1135:56: replace != with == in walk_accs
+crates/spikefade/src/kern.rs:1143:22: replace > with >= in walk_accs
+crates/spikefade/src/kern.rs:1145:88: replace - with + in walk_accs
+crates/spikefade/src/kern.rs:1176:27: replace * with + in step_weighted
+crates/spikefade/src/kern.rs:1176:27: replace * with / in step_weighted
+crates/spikefade/src/kern.rs:1180:18: replace >= with < in step_weighted
+crates/spikefade/src/kern.rs:1226:53: replace % with / in walk_dedup
+crates/spikefade/src/kern.rs:1226:53: replace % with + in walk_dedup
+crates/spikefade/src/menu.rs:67:9: replace Kind::parse -> Option<Self> with None
+crates/spikefade/src/menu.rs:67:9: replace Kind::parse -> Option<Self> with Some(Default::default())
+crates/spikefade/src/menu.rs:68:13: delete match arm "SLP" in Kind::parse
+crates/spikefade/src/menu.rs:69:13: delete match arm "SLA1" in Kind::parse
+crates/spikefade/src/menu.rs:70:13: delete match arm "SLA5" in Kind::parse
+crates/spikefade/src/menu.rs:71:13: delete match arm "SLH" in Kind::parse
+crates/spikefade/src/menu.rs:72:13: delete match arm "SLS" in Kind::parse
+crates/spikefade/src/menu.rs:74:13: delete match arm "GO" in Kind::parse
+crates/spikefade/src/menu.rs:75:13: delete match arm "BE" in Kind::parse
+crates/spikefade/src/menu.rs:76:13: delete match arm "TT" in Kind::parse
+crates/spikefade/src/menu.rs:77:13: delete match arm "TRP" in Kind::parse
+crates/spikefade/src/menu.rs:78:13: delete match arm "TRR" in Kind::parse
+crates/spikefade/src/menu.rs:79:13: delete match arm "TRA" in Kind::parse
+crates/spikefade/src/menu.rs:80:13: delete match arm "TPP" in Kind::parse
+crates/spikefade/src/menu.rs:81:13: delete match arm "TPA" in Kind::parse
+crates/spikefade/src/menu.rs:82:13: delete match arm "TPF" in Kind::parse
+crates/spikefade/src/menu.rs:83:13: delete match arm "TPT" in Kind::parse
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(Vec::new()), Vec::leak(Vec::new()))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(Vec::new()), Vec::leak(vec![0]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(Vec::new()), Vec::leak(vec![1]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(Vec::new()), Vec::leak(vec![-1]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![0]), Vec::leak(Vec::new()))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![0]), Vec::leak(vec![0]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![0]), Vec::leak(vec![1]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![0]), Vec::leak(vec![-1]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![1]), Vec::leak(Vec::new()))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![1]), Vec::leak(vec![0]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![1]), Vec::leak(vec![1]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![1]), Vec::leak(vec![-1]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![-1]), Vec::leak(Vec::new()))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![-1]), Vec::leak(vec![0]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![-1]), Vec::leak(vec![1]))
+crates/spikefade/src/menu.rs:91:9: replace Kind::allowed -> (&'static[i64], &'static[i64]) with (Vec::leak(vec![-1]), Vec::leak(vec![-1]))
+crates/spikefade/src/menu.rs:114:9: replace Kind::families -> &'static[&'static str] with Vec::leak(Vec::new())
+crates/spikefade/src/menu.rs:114:9: replace Kind::families -> &'static[&'static str] with Vec::leak(vec![""])
+crates/spikefade/src/menu.rs:114:9: replace Kind::families -> &'static[&'static str] with Vec::leak(vec!["xyzzy"])
+crates/spikefade/src/menu.rs:129:9: replace Kind::word -> &'static str with ""
+crates/spikefade/src/menu.rs:129:9: replace Kind::word -> &'static str with "xyzzy"
+crates/spikefade/src/menu.rs:153:9: replace Kind::trail -> bool with true
+crates/spikefade/src/menu.rs:153:9: replace Kind::trail -> bool with false
+crates/spikefade/src/menu.rs:159:9: replace Kind::sl -> bool with true
+crates/spikefade/src/menu.rs:159:9: replace Kind::sl -> bool with false
+crates/spikefade/src/menu.rs:174:5: replace sha_of -> String with String::new()
+crates/spikefade/src/menu.rs:174:5: replace sha_of -> String with "xyzzy".into()
+crates/spikefade/src/menu.rs:178:5: replace fam_rank -> Option<u8> with None
+crates/spikefade/src/menu.rs:178:5: replace fam_rank -> Option<u8> with Some(0)
+crates/spikefade/src/menu.rs:178:5: replace fam_rank -> Option<u8> with Some(1)
+crates/spikefade/src/menu.rs:178:37: replace == with != in fam_rank
+crates/spikefade/src/menu.rs:187:9: replace Menu::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/menu.rs:198:9: replace Menu::parse -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/menu.rs:203:35: replace || with && in Menu::parse
+crates/spikefade/src/menu.rs:207:16: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:208:22: replace != with == in Menu::parse
+crates/spikefade/src/menu.rs:217:16: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:222:33: replace || with && in Menu::parse
+crates/spikefade/src/menu.rs:222:16: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:222:36: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:233:25: replace != with == in Menu::parse
+crates/spikefade/src/menu.rs:241:26: replace != with == in Menu::parse
+crates/spikefade/src/menu.rs:247:47: replace == with != in Menu::parse
+crates/spikefade/src/menu.rs:251:21: delete match arm Kind::TrP in Menu::parse
+crates/spikefade/src/menu.rs:252:21: delete match arm Kind::TrR in Menu::parse
+crates/spikefade/src/menu.rs:251:37: replace == with != in Menu::parse
+crates/spikefade/src/menu.rs:252:37: replace == with != in Menu::parse
+crates/spikefade/src/menu.rs:255:24: replace || with && in Menu::parse
+crates/spikefade/src/menu.rs:255:20: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:255:27: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:262:12: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:271:9: replace Menu::of_ident -> Option<usize> with None
+crates/spikefade/src/menu.rs:271:9: replace Menu::of_ident -> Option<usize> with Some(0)
+crates/spikefade/src/menu.rs:271:9: replace Menu::of_ident -> Option<usize> with Some(1)
+crates/spikefade/src/menu.rs:277:9: replace Menu::len -> usize with 0
+crates/spikefade/src/menu.rs:277:9: replace Menu::len -> usize with 1
+crates/spikefade/src/menu.rs:283:9: replace Menu::is_empty -> bool with true
+crates/spikefade/src/menu.rs:283:9: replace Menu::is_empty -> bool with false
+crates/spikefade/src/menu.rs:327:5: replace slot_rule -> Result<Option<(usize, u8)>, String> with Ok(None)
+crates/spikefade/src/menu.rs:327:5: replace slot_rule -> Result<Option<(usize, u8)>, String> with Ok(Some((0, 0)))
+crates/spikefade/src/menu.rs:327:5: replace slot_rule -> Result<Option<(usize, u8)>, String> with Ok(Some((1, 0)))
+crates/spikefade/src/menu.rs:327:5: replace slot_rule -> Result<Option<(usize, u8)>, String> with Ok(Some((1, 1)))
+crates/spikefade/src/menu.rs:327:12: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:328:24: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:332:9: delete match arm "SL" in slot_rule
+crates/spikefade/src/menu.rs:345:9: delete match arm "GO" in slot_rule
+crates/spikefade/src/menu.rs:346:9: delete match arm "BE" in slot_rule
+crates/spikefade/src/menu.rs:351:9: delete match arm "TM" in slot_rule
+crates/spikefade/src/menu.rs:352:9: delete match arm "TS" in slot_rule
+crates/spikefade/src/menu.rs:363:9: delete match arm "TP" in slot_rule
+crates/spikefade/src/menu.rs:337:17: delete match arm "A5" in slot_rule
+crates/spikefade/src/menu.rs:339:17: delete match arm "S" in slot_rule
+crates/spikefade/src/menu.rs:340:17: delete match arm "V" in slot_rule
+crates/spikefade/src/menu.rs:357:17: delete match arm "R" in slot_rule
+crates/spikefade/src/menu.rs:358:17: delete match arm "A" in slot_rule
+crates/spikefade/src/menu.rs:366:17: delete match arm ["GP", j, g] in slot_rule
+crates/spikefade/src/menu.rs:368:17: delete match arm [k, v] in slot_rule
+crates/spikefade/src/menu.rs:370:25: delete match arm "P" in slot_rule
+crates/spikefade/src/menu.rs:371:25: delete match arm "A" in slot_rule
+crates/spikefade/src/menu.rs:372:25: delete match arm "F" in slot_rule
+crates/spikefade/src/menu.rs:373:25: delete match arm "T" in slot_rule
+crates/spikefade/src/menu.rs:388:9: delete match arm "SL" in slot_rule
+crates/spikefade/src/menu.rs:389:9: delete match arm "GO" in slot_rule
+crates/spikefade/src/menu.rs:390:9: delete match arm "BE" in slot_rule
+crates/spikefade/src/menu.rs:391:9: delete match arm "TT" in slot_rule
+crates/spikefade/src/menu.rs:392:9: delete match arm "TM" in slot_rule
+crates/spikefade/src/menu.rs:393:9: delete match arm "TS" in slot_rule
+crates/spikefade/src/menu.rs:394:9: delete match arm "TP" in slot_rule
+crates/spikefade/src/menu.rs:389:24: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:390:24: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:391:24: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:392:24: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:393:32: replace && with || in slot_rule
+crates/spikefade/src/menu.rs:393:68: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:394:81: replace || with && in slot_rule
+crates/spikefade/src/menu.rs:394:100: replace && with || in slot_rule
+crates/spikefade/src/menu.rs:394:153: replace || with && in slot_rule
+crates/spikefade/src/menu.rs:394:137: replace == with != in slot_rule
+crates/spikefade/src/menu.rs:394:156: delete ! in slot_rule
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![], 0, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![], 1, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![0], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![0], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![1], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![1], 0, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![1], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![], vec![1], 1, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![], 1, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![0], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![0], 0, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![0], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![1], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![1], 0, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![1], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![0], vec![1], 1, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![], 0, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![0], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![0], 0, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![0], 1, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![0], 1, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![1], 0, String::new()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![1], 0, "xyzzy".into()))
+crates/spikefade/src/menu.rs:408:5: replace parse_setting -> Result<(Vec<u16>, Vec<u8>, u16, String), String> with Ok((vec![1], vec![1], 1, "xyzzy".into()))
+crates/spikefade/src/menu.rs:413:20: replace != with == in parse_setting
+crates/spikefade/src/menu.rs:429:38: replace == with != in parse_setting
+crates/spikefade/src/menu.rs:434:18: replace == with != in parse_setting
+crates/spikefade/src/menu.rs:439:27: replace == with != in parse_setting
+crates/spikefade/src/menu.rs:441:25: replace <= with > in parse_setting
+crates/spikefade/src/menu.rs:447:18: replace != with == in parse_setting
+crates/spikefade/src/menu.rs:450:67: replace == with != in parse_setting
+crates/spikefade/src/menu.rs:452:76: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:452:64: replace == with != in parse_setting
+crates/spikefade/src/menu.rs:452:86: replace <= with > in parse_setting
+crates/spikefade/src/menu.rs:452:82: replace * with + in parse_setting
+crates/spikefade/src/menu.rs:452:82: replace * with / in parse_setting
+crates/spikefade/src/menu.rs:455:76: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:455:64: replace == with != in parse_setting
+crates/spikefade/src/menu.rs:455:81: replace <= with > in parse_setting
+crates/spikefade/src/menu.rs:473:9: replace Sets::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/menu.rs:475:19: delete field sha from struct Self expression in Sets::load
+crates/spikefade/src/menu.rs:475:35: delete field name from struct Self expression in Sets::load
+crates/spikefade/src/menu.rs:484:9: replace Sets::parse -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/menu.rs:494:22: replace != with == in Sets::parse
+crates/spikefade/src/menu.rs:502:17: delete match arm "S1" in Sets::parse
+crates/spikefade/src/menu.rs:503:17: delete match arm "S2" in Sets::parse
+crates/spikefade/src/menu.rs:504:17: delete match arm "S3" in Sets::parse
+crates/spikefade/src/menu.rs:505:17: delete match arm "S4" in Sets::parse
+crates/spikefade/src/menu.rs:509:17: delete match arm "1" in Sets::parse
+crates/spikefade/src/menu.rs:510:17: delete match arm "0" in Sets::parse
+crates/spikefade/src/menu.rs:514:20: replace != with == in Sets::parse
+crates/spikefade/src/menu.rs:520:17: delete match arm "SEARCH" in Sets::parse
+crates/spikefade/src/menu.rs:521:17: delete match arm "SEARCH1D" in Sets::parse
+crates/spikefade/src/menu.rs:522:17: delete match arm "COMPARISON" in Sets::parse
+crates/spikefade/src/menu.rs:525:23: replace != with == in Sets::parse
+crates/spikefade/src/menu.rs:528:16: delete ! in Sets::parse
+crates/spikefade/src/menu.rs:531:16: delete ! in Sets::parse
+crates/spikefade/src/menu.rs:536:25: replace != with == in Sets::parse
+crates/spikefade/src/menu.rs:539:81: replace && with || in Sets::parse
+crates/spikefade/src/menu.rs:539:93: replace == with != in Sets::parse
+crates/spikefade/src/menu.rs:545:25: delete match arm Kind::TpP in Sets::parse
+crates/spikefade/src/menu.rs:546:25: delete match arm Kind::Time in Sets::parse
+crates/spikefade/src/menu.rs:547:25: delete match arm Kind::SlP in Sets::parse
+crates/spikefade/src/menu.rs:545:87: replace == with != in Sets::parse
+crates/spikefade/src/menu.rs:546:89: replace == with != in Sets::parse
+crates/spikefade/src/menu.rs:571:9: replace Sets::select -> Result<Vec<usize>, String> with Ok(vec![])
+crates/spikefade/src/menu.rs:571:9: replace Sets::select -> Result<Vec<usize>, String> with Ok(vec![0])
+crates/spikefade/src/menu.rs:571:9: replace Sets::select -> Result<Vec<usize>, String> with Ok(vec![1])
+crates/spikefade/src/menu.rs:571:16: replace == with != in Sets::select
+crates/spikefade/src/menu.rs:624:43: replace / with % in rule_at
+crates/spikefade/src/menu.rs:624:43: replace / with * in rule_at
+crates/spikefade/src/menu.rs:624:37: replace + with - in rule_at
+crates/spikefade/src/menu.rs:624:37: replace + with * in rule_at
+crates/spikefade/src/menu.rs:624:33: replace * with + in rule_at
+crates/spikefade/src/menu.rs:624:33: replace * with / in rule_at
+crates/spikefade/src/menu.rs:625:37: replace / with % in rule_at
+crates/spikefade/src/menu.rs:625:37: replace / with * in rule_at
+crates/spikefade/src/menu.rs:625:33: replace * with + in rule_at
+crates/spikefade/src/menu.rs:625:33: replace * with / in rule_at
