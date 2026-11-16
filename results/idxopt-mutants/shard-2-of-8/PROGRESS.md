@@ -1,2 +1,3 @@
 - 2026-11-16 16:15:49 UTC BOX 2026-11-16 16:08:51 UTC set B1 start: shard 2/8 | A1 done | A2 done | B2 done | B1 163 of 481
 - 2026-11-16 16:28:03 UTC BOX 2026-11-16 16:08:51 UTC set B1 start: shard 2/8 | A1 done | A2 done | B2 done | B1 437 of 481
+- 2026-11-16 16:33:30 UTC BOX 2026-11-16 16:30:16 UTC BOX DONE: set=ALL mutants=945 caught=299 missed=620 timeout=5 unviable=21 | A1 done | A2 done | B2 done | B1 done
