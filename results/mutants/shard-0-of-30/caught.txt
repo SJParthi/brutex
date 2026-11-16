@@ -1,0 +1,12 @@
+crates/core/src/instrument.rs:50:9: replace Exchange::as_str -> &'static str with ""
+crates/core/src/instrument.rs:50:9: replace Exchange::as_str -> &'static str with "xyzzy"
+crates/core/src/instrument.rs:170:18: replace match guard year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) with true in Expiry::days_in_month
+crates/core/src/instrument.rs:170:18: replace match guard year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) with false in Expiry::days_in_month
+crates/core/src/instrument.rs:171:17: replace && with || in Expiry::days_in_month
+crates/core/src/instrument.rs:171:47: replace || with && in Expiry::days_in_month
+crates/core/src/instrument.rs:171:21: delete ! in Expiry::days_in_month
+crates/core/src/price.rs:68:9: replace Paisa::raw -> i64 with 0
+crates/core/src/price.rs:68:9: replace Paisa::raw -> i64 with 1
+crates/core/src/price.rs:68:9: replace Paisa::raw -> i64 with -1
+crates/core/src/symbol.rs:89:9: replace Symbol::as_str -> &str with ""
+crates/core/src/symbol.rs:89:9: replace Symbol::as_str -> &str with "xyzzy"
