@@ -49,3 +49,107 @@ crates/spikefade/src/read.rs:75:28: replace + with * in wilder
 crates/spikefade/src/read.rs:75:23: replace * with + in wilder
 crates/spikefade/src/read.rs:75:23: replace * with / in wilder
 crates/spikefade/src/read.rs:75:33: replace * with + in wilder
+crates/spikefade/src/read.rs:75:33: replace * with / in wilder
+crates/spikefade/src/read.rs:75:50: replace + with - in wilder
+crates/spikefade/src/read.rs:211:9: replace Prep::k_of -> usize with 0
+crates/spikefade/src/read.rs:211:9: replace Prep::k_of -> usize with 1
+crates/spikefade/src/read.rs:211:28: replace - with + in Prep::k_of
+crates/spikefade/src/read.rs:211:28: replace - with / in Prep::k_of
+crates/spikefade/src/read.rs:211:66: replace - with + in Prep::k_of
+crates/spikefade/src/read.rs:217:9: replace Prep::atr1_at -> Option<i64> with None
+crates/spikefade/src/read.rs:217:9: replace Prep::atr1_at -> Option<i64> with Some(0)
+crates/spikefade/src/read.rs:217:9: replace Prep::atr1_at -> Option<i64> with Some(1)
+crates/spikefade/src/read.rs:217:9: replace Prep::atr1_at -> Option<i64> with Some(-1)
+crates/spikefade/src/read.rs:217:46: replace / with % in Prep::atr1_at
+crates/spikefade/src/read.rs:217:46: replace / with * in Prep::atr1_at
+crates/spikefade/src/read.rs:217:36: replace - with + in Prep::atr1_at
+crates/spikefade/src/read.rs:217:36: replace - with / in Prep::atr1_at
+crates/spikefade/src/read.rs:226:9: replace Prep::atr5_at -> Option<i64> with None
+crates/spikefade/src/read.rs:226:9: replace Prep::atr5_at -> Option<i64> with Some(0)
+crates/spikefade/src/read.rs:226:9: replace Prep::atr5_at -> Option<i64> with Some(1)
+crates/spikefade/src/read.rs:226:9: replace Prep::atr5_at -> Option<i64> with Some(-1)
+crates/spikefade/src/read.rs:226:46: replace / with % in Prep::atr5_at
+crates/spikefade/src/read.rs:226:46: replace / with * in Prep::atr5_at
+crates/spikefade/src/read.rs:226:36: replace - with + in Prep::atr5_at
+crates/spikefade/src/read.rs:226:36: replace - with / in Prep::atr5_at
+crates/spikefade/src/read.rs:233:9: replace Prep::sq_between -> (u128, u64) with (0, 0)
+crates/spikefade/src/read.rs:233:9: replace Prep::sq_between -> (u128, u64) with (0, 1)
+crates/spikefade/src/read.rs:233:9: replace Prep::sq_between -> (u128, u64) with (1, 0)
+crates/spikefade/src/read.rs:233:9: replace Prep::sq_between -> (u128, u64) with (1, 1)
+crates/spikefade/src/read.rs:243:9: replace Prep::liq_at -> (u32, u32) with (0, 0)
+crates/spikefade/src/read.rs:243:9: replace Prep::liq_at -> (u32, u32) with (0, 1)
+crates/spikefade/src/read.rs:243:9: replace Prep::liq_at -> (u32, u32) with (1, 0)
+crates/spikefade/src/read.rs:243:9: replace Prep::liq_at -> (u32, u32) with (1, 1)
+crates/spikefade/src/read.rs:243:93: replace - with + in Prep::liq_at
+crates/spikefade/src/read.rs:243:93: replace - with / in Prep::liq_at
+crates/spikefade/src/read.rs:247:28: replace >= with < in Prep::liq_at
+crates/spikefade/src/read.rs:248:30: replace - with + in Prep::liq_at
+crates/spikefade/src/read.rs:248:30: replace - with / in Prep::liq_at
+crates/spikefade/src/read.rs:250:44: replace - with + in Prep::liq_at
+crates/spikefade/src/read.rs:250:44: replace - with / in Prep::liq_at
+crates/spikefade/src/read.rs:252:39: replace - with + in Prep::liq_at
+crates/spikefade/src/read.rs:252:39: replace - with / in Prep::liq_at
+crates/spikefade/src/read.rs:253:31: replace + with * in Prep::liq_at
+crates/spikefade/src/read.rs:253:26: replace - with + in Prep::liq_at
+crates/spikefade/src/read.rs:253:26: replace - with / in Prep::liq_at
+crates/spikefade/src/read.rs:256:103: replace - with + in Prep::liq_at
+crates/spikefade/src/read.rs:256:103: replace - with / in Prep::liq_at
+crates/spikefade/src/read.rs:256:99: replace + with * in Prep::liq_at
+crates/spikefade/src/read.rs:256:99: replace + with - in Prep::liq_at
+crates/spikefade/src/read.rs:256:114: replace << with >> in Prep::liq_at
+crates/spikefade/src/read.rs:265:9: replace Prep::liq_plain -> (u32, u32) with (0, 0)
+crates/spikefade/src/read.rs:265:9: replace Prep::liq_plain -> (u32, u32) with (0, 1)
+crates/spikefade/src/read.rs:265:9: replace Prep::liq_plain -> (u32, u32) with (1, 0)
+crates/spikefade/src/read.rs:265:9: replace Prep::liq_plain -> (u32, u32) with (1, 1)
+crates/spikefade/src/read.rs:265:114: replace && with || in Prep::liq_plain
+crates/spikefade/src/read.rs:265:101: replace && with || in Prep::liq_plain
+crates/spikefade/src/read.rs:265:87: replace && with || in Prep::liq_plain
+crates/spikefade/src/read.rs:265:69: replace == with != in Prep::liq_plain
+crates/spikefade/src/read.rs:265:74: replace && with || in Prep::liq_plain
+crates/spikefade/src/read.rs:265:83: replace > with == in Prep::liq_plain
+crates/spikefade/src/read.rs:265:83: replace > with < in Prep::liq_plain
+crates/spikefade/src/read.rs:265:83: replace > with >= in Prep::liq_plain
+crates/spikefade/src/read.rs:265:97: replace > with == in Prep::liq_plain
+crates/spikefade/src/read.rs:265:97: replace > with < in Prep::liq_plain
+crates/spikefade/src/read.rs:265:97: replace > with >= in Prep::liq_plain
+crates/spikefade/src/read.rs:265:110: replace > with == in Prep::liq_plain
+crates/spikefade/src/read.rs:265:110: replace > with < in Prep::liq_plain
+crates/spikefade/src/read.rs:265:124: replace >= with < in Prep::liq_plain
+crates/spikefade/src/read.rs:267:21: replace - with + in Prep::liq_plain
+crates/spikefade/src/read.rs:267:21: replace - with / in Prep::liq_plain
+crates/spikefade/src/read.rs:269:19: replace += with -= in Prep::liq_plain
+crates/spikefade/src/read.rs:269:19: replace += with *= in Prep::liq_plain
+crates/spikefade/src/read.rs:272:19: replace += with -= in Prep::liq_plain
+crates/spikefade/src/read.rs:272:19: replace += with *= in Prep::liq_plain
+crates/spikefade/src/read.rs:283:5: replace liq_pass -> bool with true
+crates/spikefade/src/read.rs:283:5: replace liq_pass -> bool with false
+crates/spikefade/src/read.rs:286:9: delete match arm 2 in liq_pass
+crates/spikefade/src/read.rs:287:9: delete match arm 3 in liq_pass
+crates/spikefade/src/read.rs:290:9: delete match arm 6 in liq_pass
+crates/spikefade/src/read.rs:292:9: delete match arm 8 in liq_pass
+crates/spikefade/src/read.rs:293:9: delete match arm 9 in liq_pass
+crates/spikefade/src/read.rs:286:18: replace >= with < in liq_pass
+crates/spikefade/src/read.rs:287:18: replace >= with < in liq_pass
+crates/spikefade/src/read.rs:289:18: replace <= with > in liq_pass
+crates/spikefade/src/read.rs:290:18: replace <= with > in liq_pass
+crates/spikefade/src/read.rs:292:24: replace && with || in liq_pass
+crates/spikefade/src/read.rs:292:18: replace >= with < in liq_pass
+crates/spikefade/src/read.rs:292:31: replace <= with > in liq_pass
+crates/spikefade/src/read.rs:319:9: replace Cal3::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/read.rs:331:23: replace += with *= in Cal3::load
+crates/spikefade/src/read.rs:334:18: replace == with != in Cal3::load
+crates/spikefade/src/read.rs:346:9: replace Cal3::add_specials with ()
+crates/spikefade/src/read.rs:346:26: delete ! in Cal3::add_specials
+crates/spikefade/src/read.rs:355:26: replace == with != in Cal3::add_specials
+crates/spikefade/src/read.rs:356:31: replace % with / in Cal3::add_specials
+crates/spikefade/src/read.rs:356:31: replace % with + in Cal3::add_specials
+crates/spikefade/src/read.rs:365:68: replace + with * in Cal3::add_specials
+crates/spikefade/src/read.rs:365:68: replace + with - in Cal3::add_specials
+crates/spikefade/src/read.rs:375:9: replace Cal3::regular -> bool with true
+crates/spikefade/src/read.rs:375:9: replace Cal3::regular -> bool with false
+crates/spikefade/src/read.rs:375:64: replace && with || in Cal3::regular
+crates/spikefade/src/read.rs:375:38: replace && with || in Cal3::regular
+crates/spikefade/src/read.rs:375:34: replace < with == in Cal3::regular
+crates/spikefade/src/read.rs:375:34: replace < with > in Cal3::regular
+crates/spikefade/src/read.rs:375:34: replace < with <= in Cal3::regular
+crates/spikefade/src/read.rs:375:41: delete ! in Cal3::regular
