@@ -40,3 +40,101 @@ crates/spikefade/src/split18.rs:969:19: replace != with == in Split::wf
 crates/spikefade/src/split18.rs:1024:150: replace == with != in Fig18c::of
 crates/spikefade/src/split18.rs:1028:9: replace Fig18c::words -> String with "xyzzy".into()
 crates/spikefade/src/split18.rs:1051:11: replace > with >= in passed
+crates/spikefade/src/split18.rs:1110:9: replace Sel18::merge with ()
+crates/spikefade/src/split18.rs:1111:28: delete field dst from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:49: delete field items from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:68: delete field pre from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:85: delete field suf from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1114:19: replace += with -= in Sel18::merge
+crates/spikefade/src/split18.rs:1114:19: replace += with *= in Sel18::merge
+crates/spikefade/src/split18.rs:1115:22: replace += with -= in Sel18::merge
+crates/spikefade/src/split18.rs:1117:21: replace += with -= in Sel18::merge
+crates/spikefade/src/split18.rs:1117:21: replace += with *= in Sel18::merge
+crates/spikefade/src/split18.rs:1207:5: replace better_pick -> bool with true
+crates/spikefade/src/split18.rs:1207:5: replace better_pick -> bool with false
+crates/spikefade/src/split18.rs:1221:9: replace Sel18::batch_start -> Self with Default::default()
+crates/spikefade/src/split18.rs:1229:9: replace Sel18::absorb with ()
+crates/spikefade/src/split18.rs:1233:22: replace += with -= in Sel18::absorb
+crates/spikefade/src/split18.rs:1233:22: replace += with *= in Sel18::absorb
+crates/spikefade/src/split18.rs:1235:21: replace += with -= in Sel18::absorb
+crates/spikefade/src/split18.rs:1235:21: replace += with *= in Sel18::absorb
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 0, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 0, 1, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 0, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (0, 1, 1, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 0, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 0, 1, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 0, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![0], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![0], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![0], vec![1], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![1], vec![], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![1], vec![0], vec![])
+crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![1], vec![1], vec![])
+crates/spikefade/src/split18.rs:1290:5: replace better -> bool with true
+crates/spikefade/src/split18.rs:1290:5: replace better -> bool with false
+crates/spikefade/src/split18.rs:1290:16: replace || with && in better
+crates/spikefade/src/split18.rs:1290:8: replace > with < in better
+crates/spikefade/src/split18.rs:1290:8: replace > with >= in better
+crates/spikefade/src/split18.rs:1290:38: replace < with == in better
+crates/spikefade/src/split18.rs:1290:38: replace < with > in better
+crates/spikefade/src/split18.rs:1290:38: replace < with <= in better

@@ -205,3 +205,33 @@ crates/spikefade/src/split18.rs:1051:51: replace >= with < in passed
 crates/spikefade/src/split18.rs:1051:47: replace * with + in passed
 crates/spikefade/src/split18.rs:1051:47: replace * with / in passed
 crates/spikefade/src/split18.rs:1051:71: replace * with + in passed
+crates/spikefade/src/split18.rs:1051:71: replace * with / in passed
+crates/spikefade/src/split18.rs:1115:22: replace += with *= in Sel18::merge
+crates/spikefade/src/split18.rs:1135:5: replace fig_line -> String with String::new()
+crates/spikefade/src/split18.rs:1135:5: replace fig_line -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1139:5: replace fig_of -> Result<Fig18, String> with Ok(Default::default())
+crates/spikefade/src/split18.rs:1143:5: replace c_line -> String with String::new()
+crates/spikefade/src/split18.rs:1143:5: replace c_line -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1147:5: replace c_of -> Result<Fig18c, String> with Ok(Default::default())
+crates/spikefade/src/split18.rs:1153:5: replace sp_line -> String with String::new()
+crates/spikefade/src/split18.rs:1153:5: replace sp_line -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1171:5: replace s18b_line -> String with String::new()
+crates/spikefade/src/split18.rs:1161:5: replace sp_of -> Result<SpStat, String> with Ok(Default::default())
+crates/spikefade/src/split18.rs:1171:5: replace s18b_line -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1183:40: replace == with != in s18b_parse
+crates/spikefade/src/split18.rs:1193:5: replace ckpt_lines_of -> Vec<String> with vec![]
+crates/spikefade/src/split18.rs:1193:5: replace ckpt_lines_of -> Vec<String> with vec![String::new()]
+crates/spikefade/src/split18.rs:1193:5: replace ckpt_lines_of -> Vec<String> with vec!["xyzzy".into()]
+crates/spikefade/src/split18.rs:1214:9: replace Sel18::ckpt_lines -> Vec<String> with vec![]
+crates/spikefade/src/split18.rs:1214:9: replace Sel18::ckpt_lines -> Vec<String> with vec![String::new()]
+crates/spikefade/src/split18.rs:1214:9: replace Sel18::ckpt_lines -> Vec<String> with vec!["xyzzy".into()]
+crates/spikefade/src/split18.rs:1266:17: delete match arm "S18" in Sel18::ckpt_restore
+crates/spikefade/src/split18.rs:1262:9: replace Sel18::ckpt_restore -> Result<(), String> with Ok(())
+crates/spikefade/src/split18.rs:1271:17: delete match arm "S18N" in Sel18::ckpt_restore
+crates/spikefade/src/split18.rs:1272:17: delete match arm "S18B" in Sel18::ckpt_restore
+crates/spikefade/src/split18.rs:1271:64: delete ! in Sel18::ckpt_restore
+crates/spikefade/src/split18.rs:1290:8: replace > with == in better
+crates/spikefade/src/split18.rs:1290:32: replace && with || in better
+crates/spikefade/src/split18.rs:1290:23: replace == with != in better
+crates/spikefade/src/split18.rs:1296:5: replace fresh_ok -> bool with true
+crates/spikefade/src/split18.rs:1296:5: replace fresh_ok -> bool with false
