@@ -1,0 +1,44 @@
+   Compiling core v0.1.0 (/root/v34t/crates/core)
+   Compiling greeks v0.1.0 (/root/v34t/crates/greeks)
+   Compiling common_fill v2.4.0 (/root/v34t/pinned/common-fill-v26)
+   Compiling costs v0.1.0 (/root/v34t/crates/costs)
+   Compiling spikefade v0.1.0 (/root/v34t/crates/spikefade)
+warning: unused imports: `VIEW_LETTERS` and `VIEW_NAMES`
+  --> crates/spikefade/src/report3.rs:21:42
+   |
+21 | use crate::acct::{NVIEW, SEv, Sum, Tops, VIEW_LETTERS, VIEW_NAMES};
+   |                                          ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DayEvents` and `Ent`
+  --> crates/spikefade/src/report3.rs:30:27
+   |
+30 | use crate::screen::{self, DayEvents, Ent, Levels, NCFG, TFS, cfg_parts};
+   |                           ^^^^^^^^^  ^^^
+
+warning: unused imports: `out_of`, `record_base`, and `size_event`
+  --> crates/spikefade/src/stage.rs:23:72
+   |
+23 | use crate::trade::{BASE_S, BaseErr, EvT, NL, Out, Paths, Refuse, Trip, out_of, record_base, size_event, trip, truncate};
+   |                                                                        ^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused variable: `u`
+   --> crates/spikefade/src/screen.rs:521:74
+    |
+521 |         c.unds.iter().enumerate().filter(|(_, u)| u.kind == 0).map(|(ui, u)| {
+    |                                                                          ^ help: if this is intentional, prefix it with an underscore: `_u`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `group` is never read
+   --> crates/spikefade/src/kern.rs:367:13
+    |
+367 |             group = None;
+    |             ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+397 |         group = Some((be, q.piece));
+    |         --------------------------- `group` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
