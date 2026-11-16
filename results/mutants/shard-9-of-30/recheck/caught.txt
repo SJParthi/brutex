@@ -1,0 +1,1 @@
+crates/spikefade/src/screen.rs:503:30: delete field lists from struct DayEvents expression in generate

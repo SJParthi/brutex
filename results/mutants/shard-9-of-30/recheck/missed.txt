@@ -1,0 +1,47 @@
+crates/spikefade/src/report.rs:858:23: delete - in peak_margin
+crates/spikefade/src/report.rs:929:51: replace - with + in write_results
+crates/spikefade/src/report.rs:944:50: replace + with - in write_results
+crates/spikefade/src/report.rs:944:46: replace * with / in write_results
+crates/spikefade/src/report.rs:944:37: replace * with + in write_results
+crates/spikefade/src/report.rs:944:37: replace * with / in write_results
+crates/spikefade/src/report.rs:1018:82: replace > with == in write_results
+crates/spikefade/src/report.rs:1018:82: replace > with >= in write_results
+crates/spikefade/src/report.rs:1025:61: replace || with && in write_results
+crates/spikefade/src/report.rs:1035:84: replace || with && in write_results
+crates/spikefade/src/report.rs:1051:95: replace / with % in write_results
+crates/spikefade/src/report.rs:1066:219: replace + with * in write_results
+crates/spikefade/src/report.rs:1079:21: replace += with *= in write_results
+crates/spikefade/src/report.rs:1289:22: replace == with != in write_results
+crates/spikefade/src/report.rs:1337:70: replace > with < in write_results
+crates/spikefade/src/report.rs:1400:25: replace >> with << in twin
+crates/spikefade/src/report.rs:1401:20: replace ^ with & in twin
+crates/spikefade/src/report.rs:1413:111: replace < with <= in twin
+crates/spikefade/src/report.rs:1447:5: replace manifest_stats -> (f64, BTreeMap<String, u64>) with (-1.0, BTreeMap::new())
+crates/spikefade/src/report.rs:1495:29: replace += with *= in extreme_section
+crates/spikefade/src/report.rs:1496:43: replace < with > in extreme_section
+crates/spikefade/src/report.rs:1503:25: replace += with *= in extreme_section
+crates/spikefade/src/report.rs:1573:16: delete ! in extreme_section
+crates/spikefade/src/report.rs:1645:80: replace == with != in v2_top
+crates/spikefade/src/report.rs:1650:12: delete ! in v2_top
+crates/spikefade/src/report.rs:1775:27: delete field list from struct Sum expression in v2_top
+crates/spikefade/src/report.rs:1775:36: delete field x from struct Sum expression in v2_top
+crates/spikefade/src/report.rs:1775:72: delete field n from struct Sum expression in v2_top
+crates/spikefade/src/report.rs:1853:101: replace > with == in v2_top
+crates/spikefade/src/report.rs:1970:27: delete field trades from struct GapStat expression in gap_stat
+crates/spikefade/src/report.rs:1982:78: replace * with + in gap_stat
+crates/spikefade/src/report.rs:1990:26: replace += with *= in gap_stat
+crates/spikefade/src/report.rs:2009:5: replace checker_rows -> HashMap<(String, String), Vec<String>> with HashMap::from_iter([((String::new(), String::new()), vec![String::new()])])
+crates/spikefade/src/report.rs:2179:105: replace && with || in v21_top
+crates/spikefade/src/report.rs:2348:26: delete field nb from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:30: delete field ng from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:34: delete field ua from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:38: delete field ug from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:42: delete field rv from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:46: delete field uv from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:50: delete field first_before_t from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2357:33: replace - with + in row_gap
+crates/spikefade/src/screen.rs:37:40: replace * with +
+crates/spikefade/src/screen.rs:503:61: delete field raw_n from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:503:88: delete field raw_tiny from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:503:118: delete field first_open_ref from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:503:154: delete field after_cut from struct DayEvents expression in generate
