@@ -76,3 +76,45 @@ crates/spikefade/src/slice.rs:482:59: replace < with == in check_slice_equal
 crates/spikefade/src/slice.rs:482:59: replace < with > in check_slice_equal
 crates/spikefade/src/slice.rs:483:129: replace + with - in check_slice_equal
 crates/spikefade/src/slice.rs:483:129: replace + with * in check_slice_equal
+crates/spikefade/src/slice.rs:484:22: replace != with == in check_slice_equal
+crates/spikefade/src/slice.rs:484:79: replace != with == in check_slice_equal
+crates/spikefade/src/slice.rs:484:98: replace != with == in check_slice_equal
+crates/spikefade/src/slice.rs:484:117: replace != with == in check_slice_equal
+crates/spikefade/src/slice.rs:484:135: replace != with == in check_slice_equal
+crates/spikefade/src/synth.rs:29:9: replace Rng::next -> u64 with 0
+crates/spikefade/src/synth.rs:29:9: replace Rng::next -> u64 with 1
+crates/spikefade/src/synth.rs:31:16: replace ^ with | in Rng::next
+crates/spikefade/src/synth.rs:31:21: replace >> with << in Rng::next
+crates/spikefade/src/synth.rs:37:9: replace Rng::below -> u64 with 0
+crates/spikefade/src/synth.rs:37:9: replace Rng::below -> u64 with 1
+crates/spikefade/src/synth.rs:37:14: replace == with != in Rng::below
+crates/spikefade/src/synth.rs:37:44: replace % with / in Rng::below
+crates/spikefade/src/synth.rs:37:44: replace % with + in Rng::below
+crates/spikefade/src/synth.rs:53:59: replace + with - in month_last_thursday
+crates/spikefade/src/synth.rs:61:5: replace day -> (Cube, SecTape) with (Default::default(), Default::default())
+crates/spikefade/src/synth.rs:63:68: replace + with - in day
+crates/spikefade/src/synth.rs:63:64: replace * with + in day
+crates/spikefade/src/synth.rs:63:64: replace * with / in day
+crates/spikefade/src/synth.rs:65:58: replace < with == in day
+crates/spikefade/src/synth.rs:69:59: replace + with * in day
+crates/spikefade/src/synth.rs:71:95: replace - with + in day
+crates/spikefade/src/synth.rs:71:24: replace + with - in day
+crates/spikefade/src/synth.rs:74:15: replace += with *= in day
+crates/spikefade/src/synth.rs:74:64: replace - with + in day
+crates/spikefade/src/synth.rs:74:64: replace - with / in day
+crates/spikefade/src/synth.rs:74:77: replace / with % in day
+crates/spikefade/src/synth.rs:89:26: replace / with % in day
+crates/spikefade/src/synth.rs:89:22: delete - in day
+crates/spikefade/src/synth.rs:92:25: replace += with *= in day
+crates/spikefade/src/synth.rs:95:135: delete - in day
+crates/spikefade/src/synth.rs:98:65: replace + with - in day
+crates/spikefade/src/synth.rs:98:65: replace + with * in day
+crates/spikefade/src/synth.rs:98:51: replace + with - in day
+crates/spikefade/src/synth.rs:98:51: replace + with * in day
+crates/spikefade/src/synth.rs:117:23: replace + with - in day
+crates/spikefade/src/synth.rs:119:93: replace + with - in day
+crates/spikefade/src/synth.rs:119:192: replace + with - in day
+crates/spikefade/src/synth.rs:130:28: replace && with || in day
+crates/spikefade/src/synth.rs:130:22: replace >= with < in day
+crates/spikefade/src/synth.rs:130:33: replace < with == in day
+crates/spikefade/src/synth.rs:131:40: replace * with / in day
