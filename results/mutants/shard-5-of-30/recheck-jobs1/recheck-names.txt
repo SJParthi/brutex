@@ -1,0 +1,56 @@
+crates/spikefade/src/mtable.rs:421:34: replace == with != in cmd_margincheck
+crates/spikefade/src/mtable.rs:449:33: replace match guard (Some(p.exact), Some(p.span), Some(p.premium), Some(p.elm), Some(p.nse_only), label.clone()) == want with false in cmd_margincheck
+crates/spikefade/src/mtable.rs:473:5: replace cmd_margincheck2 -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/mtable.rs:473:5: replace cmd_margincheck2 -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/mtable.rs:496:11: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:86: replace + with * in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:78: replace * with / in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:158: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:526:16: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:527:29: replace < with == in cmd_margincheck2
+crates/spikefade/src/mtable.rs:540:12: replace += with -= in cmd_margincheck2
+crates/spikefade/src/stress.rs:68:98: replace / with % in adverse_bp
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 1, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 0, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (1, -1, 1, 0)
+crates/spikefade/src/stress.rs:78:61: replace / with % in dist
+crates/spikefade/src/stress.rs:78:57: replace * with / in dist
+crates/spikefade/src/sw.rs:192:8: delete ! in words32
+crates/spikefade/src/sw.rs:298:26: replace == with != in from_args
+crates/spikefade/src/sw.rs:311:20: replace && with || in from_args
+crates/spikefade/src/sw.rs:376:48: replace == with != in from_args
+crates/spikefade/src/report.rs:117:46: replace == with != in cmd_run
+crates/spikefade/src/report.rs:132:91: replace + with - in cmd_run
+crates/spikefade/src/report.rs:249:32: replace += with -= in cmd_run
+crates/spikefade/src/report.rs:338:29: replace += with *= in cmd_run
+crates/spikefade/src/report.rs:443:164: replace + with * in cmd_run
+crates/spikefade/src/report.rs:444:41: replace += with *= in cmd_run
+crates/spikefade/src/report.rs:445:47: replace > with >= in cmd_run
+crates/spikefade/src/report.rs:448:55: replace && with || in cmd_run
+crates/spikefade/src/report.rs:449:45: replace += with -= in cmd_run
+crates/spikefade/src/report.rs:464:33: replace += with -= in cmd_run
+crates/spikefade/src/report.rs:468:62: replace > with < in cmd_run
+crates/spikefade/src/report.rs:483:68: replace * with + in cmd_run
+crates/spikefade/src/report.rs:498:48: replace == with != in cmd_run
+crates/spikefade/src/report.rs:533:48: replace == with != in level_samples
+crates/spikefade/src/report.rs:582:13: replace ^= with &= in bench_windows
+crates/spikefade/src/report.rs:584:13: replace ^= with &= in bench_windows
+crates/spikefade/src/report.rs:598:24: replace + with - in bench_windows
+crates/spikefade/src/report.rs:603:13: replace == with != in bench_windows
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("", 0)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("xyzzy", 1)]), Default::default(), 0))
+crates/spikefade/src/report.rs:710:39: replace += with -= in pick_detail
+crates/spikefade/src/report.rs:710:39: replace += with *= in pick_detail
+crates/spikefade/src/report.rs:721:36: replace * with + in pick_detail
+crates/spikefade/src/report.rs:724:18: replace += with -= in pick_detail
+crates/spikefade/src/report.rs:736:76: replace + with * in pick_detail
+crates/spikefade/src/report.rs:737:58: replace / with * in pick_detail
+crates/spikefade/src/report.rs:737:54: replace * with / in pick_detail
+crates/spikefade/src/report.rs:853:5: replace peak_margin -> i64 with 1
+crates/spikefade/src/report.rs:925:43: replace == with != in write_results
+crates/spikefade/src/report.rs:929:51: replace - with + in write_results
+crates/spikefade/src/report.rs:1066:160: replace + with * in write_results
+crates/spikefade/src/report.rs:1115:32: replace && with || in write_results
+crates/spikefade/src/report.rs:1199:170: replace && with || in write_results
+crates/spikefade/src/report.rs:1199:176: replace == with != in write_results
+crates/spikefade/src/report.rs:1306:165: replace == with != in write_results
