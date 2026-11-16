@@ -1,0 +1,106 @@
+[package]
+name         = "opt_pos"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "S5 + S6 of SNIPER-IDXOPT-PLAN-v3.1 (first slice): the option-chain readings (the dated freeze table and one-order maximum, the listed ladder, lots C17 / D9, the busiest rule REQ 49 corrected + note 7, the A2 / s23a ITM-fit rule) and the shared option pricer's intraday path on 1-s blocks (entry, exit, square-off, both protection paths, REQ 70a pay, charges by costs::option_clock). Read only on every input."
+build = false
+autobenches = false
+autoexamples = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "idx-eq"
+path = "src/bin_eq.rs"
+
+[[bin]]
+name = "itm-pick"
+path = "src/bin_itm.rs"
+
+[[bin]]
+name = "g-roll"
+path = "src/bin_groll.rs"
+
+# WAVE 4 (S5): the index option pack (DP-IDXITM, DP-IDXLEAD, DP-IDXNEED, DP-NEWPX-IDXOPT).
+[[bin]]
+name = "idx-pack"
+path = "src/bin_pack.rs"
+
+# WAVE 4 (S6 positional half): the one account re-walk (P-ACCT1 / P-ACCT2).
+[[bin]]
+name = "idx-acct"
+path = "src/bin_acct.rs"
+
+[features]
+# K11 mutant ix_c27_listed (plan v2 F1, red first): the ladder of session d is read from the bhavcopy dated ON d (look-ahead).
+m_c27_listed = []
+# WAVE 4 named mutants (check-build-idx-S1-S6 D1, D3), each red on its named test in price.rs:
+# m_d1_lo_order: the S15 bullet 1 reading of an expiry-day leftover carries no sale order again (too kind by Rs 23.60).
+m_d1_lo_order = []
+# m_d3_raw_freeze: the per-leg reading slices by the raw freeze instead of the whole-lot one-order maximum.
+m_d3_raw_freeze = []
+# INDEX S8 builder (plan v3.1 s4.7 (17), src/pos.rs): each must turn a pos_tests case red.
+m_idx_spot = []
+m_idx_roll_lead = []
+m_idx_settle = []
+m_idx_redate = []
+m_idx_folder = []
+m_idx_settle_window = []
+m_idx_roll_funds = []
+m_idx_close_one_order = []
+m_idx_roll_late = []
+# S8 BUILDER s8b (check-build-idx-S7-S10 D-S8-1 / D-S8-2, MAIN-RULINGS-S7-S10 item 2), src/pos.rs: each must turn a pos_tests case red.
+m_idx_exit_cut = []
+m_idx_flip_open = []
+m_idx_w0_same_session = []
+m_idx_roll_group = []
+# RESUMED WAVE 4 (src/newpx.rs, the DATA law of the production source): a decoder-failure second reads the KINDER source.
+m_newpx_kinder = []
+# RESUMED WAVE 4 (check-build-idx-S1-S6 F-e, src/pack.rs + src/bin_itm.rs): a listed strike with no store folder is dropped again.
+m_fe_drop_ghosts = []
+# S7 BUILDER wave 4 (MAIN-RULINGS-S7-S10 item 3, D2): the 15:10 square-off charged as the BROKER's order (Dhan's auto square-off fee on
+# top) instead of the strategy's own order; must turn intraday::tests::d2_* red.
+m_d2_broker_sq = []
+# S7 BUILDER wave 4 resumed (lane B's P3 set on the index positional legs, plan v3.1 s4.7 (17) "with lane B's P3 set"):
+# m_pos_leader: the ENTRY pick reads prints at or after the entry decision (lane B's full-day leader mapped to the A2 ITM fit); must turn
+#   pos::tests::k11_entry_pick_reads_prints_strictly_before_t red.
+m_pos_leader = []
+# m_pos_ref: the protection reference reads the FIRST print at or after the anchor (lane B's P3 (d)); must turn
+#   pos::tests::k11_protection_reference_is_the_last_print_before_the_anchor red.
+m_pos_ref = []
+# S7 BUILDER wave 4 resumed again (plan v3.1 s4.3a B2 / s4.4 / s4.7 (15), the data end; the NIFTY 60m LONG positional canary stopped on
+# "no next session for the carry"), each must turn its named pos::tests::data_end_* case red:
+# m_idx_data_end_error: an exit rest that finds no session after the last one stops the run again (the S8b reading);
+m_idx_data_end_error = []
+# m_idx_data_end_kind: open_at_data_end valued from the closing order's decision instead of the last session's first block (kinder);
+m_idx_data_end_kind = []
+# m_idx_data_end_e0: open_at_data_end valued from the session's first block even when the trip was bought that session (before E0).
+m_idx_data_end_e0 = []
+# W4 REPAIR (check-wave4-S9.md D-W4-1 / D-W4-2, the checker's exact fixes), each must turn its named pos::tests case red:
+# m_idx_data_end_standin: a stream with no exit before the data end (the DATA_END sentinel) is forced out at the final4 STAND-IN exit (the
+#   last session's index close, or 1 s after its entry when later) again; caught by
+#   pos::tests::data_end_open_position_valued_whole_at_the_last_session_worst_print.
+m_idx_data_end_standin = []
+# m_idx_carry_muhurat: a carried exit rest goes to the next session even when it is a Muhurat session (the final4 reading, against plan
+#   s4.4 / Q39 "positions are held through"); caught by pos::tests::carry_skips_the_muhurat_session.
+m_idx_carry_muhurat = []
+# W4 REPAIR r3 (check-wave4-S9-r2.md D-R2-1, the checker's exact fix): m_idx_data_end_nohole: the data-end valuation's span test is
+#   skipped (TripOut.hole stays false although the valuation window [W0, F&O end) overlaps a DATA-law hole: the w4r reading); caught by
+#   pos::tests::data_end_valuation_on_a_hole_session_carries_the_hole.
+m_idx_data_end_nohole = []
+
+[dependencies]
+common_fill = { path = "../../pinned/common-fill-v21" }
+costs       = { path = "../costs", version = "0.1.0" }
+idx_cal     = { path = "../idx_cal" }
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+store       = { path = "../store", version = "0.1.0" }
+# WAVE 4 (S5): the pack's zstd frames (the decoder the store reader and idx_cal already link; its encoder at Fastest).
+ruzstd      = { version = "0.9.1", default-features = false, features = ["std", "hash"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,1114 @@
+//! The only way a store path is built.
+//!
+//! `docs/05-decisions.md` D-0019 locks the shape:
+//!
+//! ```text
+//! bars/<vendor>/<exchange>/<segment>/<symbol>/<timeframe>/<yyyy-mm>.bin
+//! bars/groww/NSE/INDEX/NIFTY/1min/2024-06.bin
+//! bars/dhan/NSE/INDEX/NIFTY/1min/2024-06.bin
+//! ```
+//!
+//! The vendor is the **first** segment so a vendor can be added, re-pulled or
+//! deleted by touching one directory and nothing else. That was prose and a
+//! directory naming habit; `docs/04-invariants.md` X-12 ("each vendor writes
+//! only under its own path prefix") named a test that did not exist, and
+//! nothing in code held the property up.
+//!
+//! # What the type enforces
+//!
+//! * The first segment is a [`Vendor`], not a string. A `&str` there could
+//!   name any vendor, or none: code holding `Vendor::Groww` could write into
+//!   `bars/dhan/…` and nothing would refuse it, and D-0019 deliberately keeps
+//!   no provenance field inside the file, so it would be indistinguishable
+//!   afterwards. `CLAUDE.md` §6's reasoning applies exactly — a parameter that
+//!   can be set can be set wrongly and silently.
+//! * The vendor segment is written first, always, by the one renderer.
+//! * Every remaining segment is checked before a [`StorePath`] exists at all,
+//!   so a path that could leave its vendor prefix is unconstructible rather
+//!   than unlikely. A separator, a `..`, a leading `/`, or an empty segment is
+//!   refused **by name** — see [`PathError`].
+//! * Segments are **case-canonical**: the vendor is lower case because
+//!   `Vendor::as_str` is, and the exchange, segment and symbol are upper case
+//!   because `brutex_core`'s types are. A non-canonical segment is refused,
+//!   not folded.
+//!
+//! # Why case is refused rather than tolerated
+//!
+//! Measured: on this repository's development machine (APFS, case-insensitive)
+//! `bars/groww/…` and `bars/GROWW/…` are **one** file, so writing the second
+//! destroys the first — one vendor overwriting another through the very API
+//! that exists to make that impossible. On the CI runner (ext4,
+//! case-sensitive) the same two inputs are **two** directory trees, silently
+//! splitting one vendor's history in half. Same code, two different silent
+//! failures, chosen by the host. That is the identical argument that rejected
+//! a host-dependent block length, applied to the path — `CLAUDE.md` §3 rule 5.
+//!
+//! `brutex_core::symbol::Symbol::new` already upper-cases so `nifty` and
+//! `NIFTY` cannot become two instruments; [`StorePath::new`] taking a raw
+//! `&str` was a public door around that normalisation.
+//!
+//! # What it does **not** enforce
+//!
+//! [`StorePath::to_path_buf`] guarantees a **lexical** property. No component
+//! is `..`, none is absolute, so the rendered path cannot climb out of
+//! `root/bars/<vendor>/` *as text*. A symlink at any component defeats that —
+//! a `bars/groww` symlink pointing at `bars/dhan` sends every groww write into
+//! dhan's files while satisfying every assertion the isolation test makes.
+//! This type resolves nothing; the bar writer refuses the links it finds
+//! (`crate::file::BarFile::open_or_create`, CE-62, D-2686), and a directory
+//! link swapped in between its walk and its open is the window it leaves,
+//! because per-component `openat` needs `unsafe`. Stated here rather than
+//! implied away.
+//!
+//! `store::unit::vendor_prefix_isolated` is the test X-12 names.
+//!
+//! # Cost
+//!
+//! Construction is a bounded scan of at most [`MAX_SEGMENT_LEN`] bytes per
+//! segment over a fixed number of segments — constant, independent of how many
+//! instruments, vendors or months exist. It allocates nothing:
+//! [`StorePath`] borrows its segments and [`std::fmt::Display`] writes them
+//! straight into the caller's sink. [`StorePath::to_path_buf`] is the one
+//! allocating entry point, and it takes two bounded allocations — counted
+//! there, not rounded down to a nicer number.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use brutex_core::instrument::{Contract, InstrumentKey, Kind};
+use brutex_core::symbol::SYMBOL_CAPACITY;
+use brutex_core::vendor::Vendor;
+
+/// The directory every bar file lives under.
+pub const STORE_ROOT: &str = "bars";
+
+/// The longest a single path segment may be.
+///
+/// Matches `brutex_core::symbol::SYMBOL_CAPACITY`, because the symbol is the
+/// longest segment and a store path that could not hold a legal symbol would
+/// be a second, quieter limit on what can be stored. The assertion below is
+/// the whole of that promise: raising `SYMBOL_CAPACITY` without raising this
+/// is a compile error, not a refusal discovered by a `for_key` call on the one
+/// symbol long enough to trip it.
+pub const MAX_SEGMENT_LEN: usize = 24;
+
+const _: () = assert!(MAX_SEGMENT_LEN == SYMBOL_CAPACITY);
+
+/// The longest a timeframe segment can be.
+///
+/// The timeframe is not caller text — it is one of [`Timeframe::KNOWN`], so
+/// its bound is the longest name in that table rather than
+/// [`MAX_SEGMENT_LEN`].
+///
+/// Written down and then **checked against the table**, for the same reason
+/// [`MAX_VENDOR_LEN`] is: a computed maximum would silently widen [`MAX_LEN`]
+/// the day a longer rung appeared, where the assertion below is a compile error
+/// at the moment [`Timeframe::KNOWN`] changes.
+///
+/// It was `4` while the table held only `1min` and `1day`. The intraday rungs
+/// lifted it to `5` — `15min`, `30min` and `60min` all reach it.
+/// `store::unit::a_maximal_path_fits_the_declared_bound` proves the bound is
+/// reached and not merely sufficient.
+pub const MAX_TIMEFRAME_LEN: usize = 5;
+
+const _: () = {
+    // Named one by one rather than looped, for the reason `Vendor::ALL` is
+    // destructured above: a new rung must be a COMPILE ERROR here, not a name
+    // a loop silently accepts. Indexing the slice would also trip
+    // `clippy::indexing_slicing`, which this workspace denies.
+    assert!(Timeframe::DAY_1.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_1.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_3.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_5.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_15.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_30.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_60.name.len() <= MAX_TIMEFRAME_LEN);
+    // The bound must be REACHED, or it is loose rather than tight.
+    assert!(Timeframe::MINUTE_15.name.len() == MAX_TIMEFRAME_LEN);
+};
+const _: () = assert!(MAX_TIMEFRAME_LEN <= MAX_SEGMENT_LEN);
+
+/// The longest vendor segment.
+///
+/// Derived from `Vendor::ALL` rather than written down: a vendor with a longer
+/// name would otherwise widen the longest legal path without widening the
+/// bound. Adding a vendor changes `Vendor::ALL`'s length, which makes the
+/// destructuring in `longest_vendor` a compile error rather than a silent
+/// drift — which matters, because `crates/core` is not this crate's to watch.
+///
+/// It is written down and then **checked against the table**, rather than
+/// computed from it. A computed maximum would silently widen [`MAX_LEN`] the
+/// day a longer vendor appeared; the assertion below is a compile error
+/// instead, at the moment `Vendor::ALL` changes — and `crates/core` is not
+/// this crate's to watch. Adding a vendor also changes the table's length,
+/// which makes the destructuring itself a compile error.
+///
+/// `store::unit::every_vendor_is_a_legal_segment` proves the bound is reached,
+/// so it is tight rather than merely sufficient.
+pub const MAX_VENDOR_LEN: usize = 8;
+
+const _: () = {
+    // Destructured rather than looped, so a new vendor is a COMPILE ERROR here
+    // and not a path segment that quietly exceeds the bound. `truedata` is
+    // eight bytes and lifted this ceiling from five.
+    let [groww, dhan, truedata, gdfl, zerodha] = Vendor::ALL;
+    assert!(groww.as_str().len() <= MAX_VENDOR_LEN);
+    assert!(dhan.as_str().len() <= MAX_VENDOR_LEN);
+    assert!(truedata.as_str().len() <= MAX_VENDOR_LEN);
+    assert!(gdfl.as_str().len() <= MAX_VENDOR_LEN);
+    // `zerodha` is seven bytes and did not move the ceiling. It is asserted
+    // here anyway, because this block's value is that EVERY vendor is checked —
+    // one left out is a path segment that quietly exceeds the bound, which is
+    // the failure the destructure exists to make impossible.
+    assert!(zerodha.as_str().len() <= MAX_VENDOR_LEN);
+};
+const _: () = assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN);
+
+/// The longest file extension, dot included.
+///
+/// Checked against [`FileKind::ALL`] the same way and for the same reason: a
+/// new sibling file with a longer extension is a compile error here rather
+/// than a path that quietly exceeds [`MAX_LEN`].
+pub const MAX_EXTENSION_LEN: usize = 8;
+
+const _: () = {
+    let [
+        bars,
+        checksums,
+        overlay,
+        greeks,
+        lock,
+        overlay_checksums,
+        greek_checksums,
+        time_index,
+        provenance,
+        sort_index,
+        sealed_bars,
+        month_summary,
+    ] = FileKind::ALL;
+    assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(overlay.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(greeks.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(lock.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(overlay_checksums.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(greek_checksums.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(time_index.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(provenance.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(sort_index.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(sealed_bars.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(month_summary.extension().len() <= MAX_EXTENSION_LEN);
+};
+
+/// The length of a rendered path, root excluded, when every segment is at its
+/// cap.
+///
+/// Tight, not merely sufficient: the longest legal path is exactly this many
+/// bytes, and `store::unit::a_maximal_path_fits_the_declared_bound` asserts
+/// the equality by building one. A bound with slack in it is a bound nobody
+/// notices going wrong.
+pub const MAX_LEN: usize = STORE_ROOT.len()
+    + 1 + MAX_VENDOR_LEN          // "/groww"
+    + 3 * (1 + MAX_SEGMENT_LEN)   // exchange, segment, symbol
+    + 1 + MAX_TIMEFRAME_LEN       // "/1min"
+    + 1 + 7                       // "/yyyy-mm"
+    + MAX_EXTENSION_LEN;
+
+/// Which case a segment is canonically written in.
+///
+/// Not a preference: it is which of `brutex_core`'s types renders that
+/// segment. `Vendor::as_str` is lower case, `Exchange::as_str`,
+/// `Segment::as_str` and `Symbol` are upper case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SegmentCase {
+    /// ASCII letters must be lower case, as `Vendor::as_str` renders them.
+    Lower,
+    /// ASCII letters must be upper case, as `Symbol` renders them.
+    Upper,
+}
+
+/// Why a path was refused.
+///
+/// Every variant names the offending field, because "invalid path" sends the
+/// operator to guess which of six segments was wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PathError {
+    /// A segment was empty. An empty segment collapses two directory levels
+    /// into one and silently files data somewhere else.
+    EmptySegment {
+        /// Which segment.
+        field: &'static str,
+    },
+    /// A segment was `.` or `..`.
+    ///
+    /// `..` is the escape: one of them leaves the vendor prefix, two leave the
+    /// store. Refused by name rather than by the byte rule below so the reason
+    /// is legible in the error.
+    Traversal {
+        /// Which segment.
+        field: &'static str,
+    },
+    /// A segment held a byte outside the allowed set.
+    ///
+    /// The set is ASCII letters, digits, `-`, `_` and `&` — the same set
+    /// `brutex_core::symbol::Symbol` admits. A separator (`/` or `\`) lands
+    /// here, which is also what refuses an absolute path: it begins with one.
+    IllegalByte {
+        /// Which segment.
+        field: &'static str,
+        /// The byte that was refused.
+        byte: u8,
+    },
+    /// A segment held a letter in the wrong case.
+    ///
+    /// Refused rather than folded, and refused rather than accepted: two
+    /// segments differing only in case are two files on a case-sensitive
+    /// filesystem and one file on a case-insensitive one, so tolerating them
+    /// makes the on-disk result depend on the host.
+    NotCanonicalCase {
+        /// Which segment.
+        field: &'static str,
+        /// The letter that was in the wrong case.
+        byte: u8,
+    },
+    /// A segment was longer than [`MAX_SEGMENT_LEN`].
+    SegmentTooLong {
+        /// Which segment.
+        field: &'static str,
+        /// How long it was.
+        len: usize,
+    },
+    /// No timeframe of that length is defined.
+    ///
+    /// `docs/05-decisions.md` D-0015: minute bars only, until a minute-level
+    /// result earns the upgrade. A new timeframe is a new row in
+    /// [`Timeframe::KNOWN`], not a string a caller invents.
+    UnknownTimeframe {
+        /// The length asked for, in seconds.
+        secs: u32,
+    },
+    /// A month outside `1..=12`.
+    MonthOutOfRange {
+        /// The month asked for.
+        month: u8,
+    },
+    /// A year outside `1970..=9999`.
+    ///
+    /// Below 1970 no bar can exist — timestamps are microseconds since the
+    /// Unix epoch. Above 9999 the four-digit rendering would lie.
+    YearOutOfRange {
+        /// The year asked for.
+        year: u16,
+    },
+    /// The instrument needs a contract name, which this builder does not form.
+    ///
+    /// D-0019 files a future or an option under its **contract**, not its
+    /// underlying — `NIFTY` alone would put every expiry in one directory.
+    /// Forming a contract segment needs the expiry and strike rendering that
+    /// belongs beside `InstrumentKey`, and it does not exist yet. Refused by
+    /// name rather than filed under the underlying, which would silently merge
+    /// distinct series.
+    ContractPathUnsupported,
+}
+
+impl fmt::Display for PathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::EmptySegment { field } => write!(f, "path segment {field} is empty"),
+            Self::Traversal { field } => {
+                write!(f, "path segment {field} is a traversal and would escape")
+            }
+            Self::IllegalByte { field, byte } => {
+                write!(f, "path segment {field} holds byte {byte:#04x}")
+            }
+            Self::NotCanonicalCase { field, byte } => {
+                write!(
+                    f,
+                    "path segment {field} holds byte {byte:#04x} in the wrong case"
+                )
+            }
+            Self::SegmentTooLong { field, len } => {
+                write!(
+                    f,
+                    "path segment {field} is {len} bytes, max {MAX_SEGMENT_LEN}"
+                )
+            }
+            Self::UnknownTimeframe { secs } => write!(f, "no timeframe of {secs} seconds"),
+            Self::MonthOutOfRange { month } => write!(f, "month {month} is not 1..=12"),
+            Self::YearOutOfRange { year } => write!(f, "year {year} is not 1970..=9999"),
+            Self::ContractPathUnsupported => {
+                f.write_str("a futures or options path needs a contract segment")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PathError {}
+
+/// A bar length, as both a number of seconds and a path segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timeframe {
+    secs: u32,
+    name: &'static str,
+}
+
+impl Timeframe {
+    /// One-minute bars — what the engine sweeps.
+    pub const MINUTE_1: Self = Self {
+        secs: 60,
+        name: "1min",
+    };
+
+    /// Three-minute bars.
+    ///
+    /// # Why three, which is not a power of anything
+    ///
+    /// The operator's gap-leg rule reads *yesterday's last candle* against
+    /// *today's first candle*, and three minutes is the rung it is written for.
+    /// Its first bar of the day is a full bar on any grid: the open is 555
+    /// minutes past IST midnight and three divides 555, so a grid counted from
+    /// midnight and one counted from the open coincide. `pull::fold` counts
+    /// from the open, so every intraday rung it writes — thirty and sixty
+    /// included — begins the day at 09:15. A short bar, where a rung leaves
+    /// one, is the session's LAST, and which rungs leave one depends on the
+    /// venue's session length (D-1447).
+    pub const MINUTE_3: Self = Self {
+        secs: 180,
+        name: "3min",
+    };
+
+    /// One-second bars — the rung the two archive feeds' files actually hold.
+    ///
+    /// # Why the store gains a rung below the minute
+    ///
+    /// `TrueData` and GDFL sell folders of per-second files. `docs/08-vendor-
+    /// samples.md` measured them at one row per whole second with no sub-second
+    /// field, so a second IS their finest record and it is what an operator
+    /// buys. The store had no directory for it, so a request for that rung
+    /// parsed, passed `served()`, and was then refused at the WRITE boundary —
+    /// the operator could ask for the thing he had paid for and nothing could
+    /// file it.
+    ///
+    /// # It is not intraday-aligned, and under the open anchor that is fine
+    ///
+    /// [`Self::aligns_with_the_open`] asks whether a rung divides the 555
+    /// minutes from IST midnight to the open, and answers `false` here because
+    /// its length is not a whole number of minutes at all. That predicate is
+    /// about a MIDNIGHT-anchored grid; `pull::fold` anchors an intraday rung at
+    /// the OPEN, where one second tiles the session exactly — 22,500 of them,
+    /// with no stub at either end.
+    ///
+    /// # What it unlocks, without another line being written
+    ///
+    /// `pull::ingest::derived_from` computes the derived set from this table:
+    /// every rung strictly coarser than the source whose length is a whole
+    /// multiple of it. One second divides all eight rungs above, so a
+    /// one-second ingest now files the second AND folds it into 1, 2, 3, 5, 10,
+    /// 15, 30 and 60 minutes — because the rule reads the table rather than a
+    /// list somebody has to remember to edit.
+    pub const SECOND_1: Self = Self {
+        secs: 1,
+        name: "1s",
+    };
+
+    /// Two-minute bars.
+    ///
+    /// **Does not divide 555** — 277.5 — so a grid counted from IST midnight
+    /// would open the day at 09:14 with one minute of trade.
+    /// [`Self::aligns_with_the_open`] answers `false` for it. `pull::fold`
+    /// counts from the open, so the bars it files here begin at 09:15; the
+    /// predicate matters to a writer whose bars arrive on someone else's
+    /// grid (D-1447).
+    ///
+    /// It is in [`Self::KNOWN`] because the store's job is to have somewhere to
+    /// FILE a rung, and the alignment question belongs to whoever produces the
+    /// bar. D-0132 conflated the two: it removed five rungs from
+    /// `Granularity::store_timeframe` on an alignment argument, which is a fold
+    /// property being enforced by a path table. A directory is not a claim that
+    /// the bars inside it are aligned; the predicate is.
+    pub const MINUTE_2: Self = Self {
+        secs: 120,
+        name: "2min",
+    };
+
+    /// Five-minute bars. Divides 555; no stub at either end of the session.
+    pub const MINUTE_5: Self = Self {
+        secs: 300,
+        name: "5min",
+    };
+
+    /// Ten-minute bars.
+    ///
+    /// **Does not divide 555** — 55.5 — so the same caution as [`Self::MINUTE_2`]
+    /// applies: a grid counted from midnight would give it a five-minute opening
+    /// stub, and the open-anchored grid `pull::fold` writes does not.
+    pub const MINUTE_10: Self = Self {
+        secs: 600,
+        name: "10min",
+    };
+
+    /// Fifteen-minute bars. The coarsest rung that still divides 555.
+    pub const MINUTE_15: Self = Self {
+        secs: 900,
+        name: "15min",
+    };
+
+    /// Thirty-minute bars. **Does not divide 555** — 18.5 — so a grid counted
+    /// from IST midnight would open the session with a 15-minute stub stamped
+    /// 09:00. `pull::fold` counts from the open, so the bars it files here
+    /// begin at 09:15, and the 375-minute index session ends with a 15-minute
+    /// bar at 15:15. See [`Self::MINUTE_3`] and D-1447.
+    pub const MINUTE_30: Self = Self {
+        secs: 1_800,
+        name: "30min",
+    };
+
+    /// Sixty-minute bars. **Does not divide 555** — 9.25 — so a grid counted
+    /// from IST midnight would open the session with a 45-minute stub stamped
+    /// 09:00. `pull::fold` counts from the open, so the bars it files here
+    /// begin at 09:15, and the 375-minute index session ends with a 15-minute
+    /// bar at 15:15. See [`Self::MINUTE_3`] and D-1447.
+    pub const MINUTE_60: Self = Self {
+        secs: 3_600,
+        name: "60min",
+    };
+
+    /// One-day bars — what a backfill lands FIRST.
+    ///
+    /// # Why this exists beside the minute
+    ///
+    /// The stated backfill is ~800 instruments from 2020 to yesterday. At the
+    /// vendors' published caps that is **81 windows per instrument** at one
+    /// minute and **14** at day level — 5.8× fewer requests for the same span.
+    /// So the daily pass runs to completion first and the minute pass follows,
+    /// which is the operator's own sequencing and is also the cheaper way to
+    /// discover that a feed, a symbol or a date range is wrong.
+    ///
+    /// D-0015 deferred every timeframe but the minute and **built the seam for
+    /// exactly this**: `timeframe_secs` is already a `u32` of seconds in the
+    /// header, and the path is `…/<symbol>/<tf>/<yyyy-mm>.bin`, so a new rung
+    /// is a new directory and nothing else. No format change, no migration, and
+    /// every existing `1min` file keeps its bytes and its meaning. See D-0054.
+    ///
+    /// 86,400 seconds. A calendar day, not a session — the store addresses bars
+    /// by index and the timeframe names their spacing, so a daily bar is one
+    /// record per trading day whatever the session's length was.
+    pub const DAY_1: Self = Self {
+        secs: 86_400,
+        name: "1day",
+    };
+
+    /// Every timeframe this build stores.
+    ///
+    /// The daily rung is FIRST because a backfill lands it first, and because
+    /// `from_secs` walks this list — an order that matches the order things are
+    /// written costs nothing and reads honestly.
+    pub const KNOWN: &'static [Self] = &[
+        Self::DAY_1,
+        Self::SECOND_1,
+        Self::MINUTE_1,
+        Self::MINUTE_2,
+        Self::MINUTE_3,
+        Self::MINUTE_5,
+        Self::MINUTE_10,
+        Self::MINUTE_15,
+        Self::MINUTE_30,
+        Self::MINUTE_60,
+    ];
+
+    /// The number of minutes from IST midnight to the NSE open, 09:15.
+    ///
+    /// A rung's bars align with the open exactly when its length divides this.
+    pub const OPEN_MINUTES_PAST_IST_MIDNIGHT: u32 = 9 * 60 + 15;
+
+    /// Does a grid counted from IST midnight on this rung land on 09:15?
+    ///
+    /// Equivalently: do the midnight-counted grid and the open-counted grid
+    /// coincide at this rung? It is NOT a statement about `pull::fold`, which
+    /// counts every intraday rung from the open, so every bar it files begins
+    /// the session at 09:15 whatever this answers. False means a bar that
+    /// arrives already stamped by someone else — a vendor's bar at this rung —
+    /// could sit on either grid, and the two put the first edge at different
+    /// minutes. `pull::vendor::Granularity::store_timeframe` refuses such a bar
+    /// on that ground. D-1447.
+    #[must_use]
+    pub const fn aligns_with_the_open(self) -> bool {
+        self.secs.is_multiple_of(60)
+            && Self::OPEN_MINUTES_PAST_IST_MIDNIGHT.is_multiple_of(self.secs / 60)
+    }
+
+    /// The timeframe of `secs` seconds.
+    ///
+    /// # Errors
+    ///
+    /// [`PathError::UnknownTimeframe`] naming the length. There is no
+    /// derived-name fallback: a directory called `300s` that no reader looks
+    /// for is data written into a hole.
+    pub fn from_secs(secs: u32) -> Result<Self, PathError> {
+        Self::KNOWN
+            .iter()
+            .copied()
+            .find(|tf| tf.secs == secs)
+            .ok_or(PathError::UnknownTimeframe { secs })
+    }
+
+    /// Seconds per bar. Matches `Header::timeframe_secs`.
+    #[must_use]
+    pub const fn secs(self) -> u32 {
+        self.secs
+    }
+
+    /// The path segment.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.name
+    }
+}
+
+/// The month a bar file covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct YearMonth {
+    year: u16,
+    month: u8,
+}
+
+impl YearMonth {
+    /// Builds a month.
+    ///
+    /// # Errors
+    ///
+    /// [`PathError::YearOutOfRange`] outside `1970..=9999`, or
+    /// [`PathError::MonthOutOfRange`] outside `1..=12`.
+    pub const fn new(year: u16, month: u8) -> Result<Self, PathError> {
+        if year < 1970 || year > 9999 {
+            return Err(PathError::YearOutOfRange { year });
+        }
+        if month == 0 || month > 12 {
+            return Err(PathError::MonthOutOfRange { month });
+        }
+        Ok(Self { year, month })
+    }
+
+    /// The year.
+    #[must_use]
+    pub const fn year(self) -> u16 {
+        self.year
+    }
+
+    /// The month, `1..=12`.
+    #[must_use]
+    pub const fn month(self) -> u8 {
+        self.month
+    }
+
+    /// The month's IST span, `[from, until)` in epoch microseconds.
+    ///
+    /// # IST, because that is how a bar is assigned to a file
+    ///
+    /// `pull::ingest::months_in` files a bar under
+    /// `IstMoment::from_epoch_secs(ts).day().year_month()`, so the month `2024-06`
+    /// is 2024-06-01 00:00 IST up to, not including, 2024-07-01 00:00 IST. A UTC
+    /// span would move both edges by five and a half hours and refuse the first
+    /// 330 minutes of every month the writer legitimately sends here.
+    /// `pull::session` asserts at compile time that its offset equals
+    /// [`IST_OFFSET_SECS`], so the two cannot drift.
+    ///
+    /// # O(1)
+    ///
+    /// Two civil-to-day conversions, each a fixed handful of integer
+    /// operations; no table, no loop. Every legal month (`1970..=9999`) is
+    /// inside `i64` microseconds with five orders of magnitude to spare, so
+    /// the arithmetic cannot overflow. The constant shape is read from the
+    /// source; no bench times it, so the cost is UNVERIFIED as a measurement
+    /// (`docs/06-limits.md`, D-0915). The values are pinned by
+    /// `store::admission::the_ist_month_bounds_are_the_ones_pull_assigns`.
+    #[must_use]
+    pub const fn ist_bounds_micros(self) -> (i64, i64) {
+        let year = self.year as i64;
+        let month = self.month as i64;
+        let (next_year, next_month) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
+        (
+            ist_midnight_micros(year, month),
+            ist_midnight_micros(next_year, next_month),
+        )
+    }
+}
+
+/// The IST offset from UTC, in seconds: +05:30.
+///
+/// A copy of `pull::session::IST_OFFSET_SECS`, which this crate cannot name —
+/// `pull` depends on `store`. `pull::session` pins the two equal with a
+/// compile-time assertion.
+pub const IST_OFFSET_SECS: i64 = 5 * 3_600 + 30 * 60;
+
+/// 00:00 IST on the first of `month` in `year`, in epoch microseconds.
+///
+/// Howard Hinnant's `days_from_civil`, specialised to the first of a month.
+/// Called only with `year` in `1970..=10000` and `month` in `1..=12`.
+const fn ist_midnight_micros(year: i64, month: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let shifted = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * shifted + 2) / 5;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    (days * 86_400 - IST_OFFSET_SECS) * 1_000_000
+}
+
+impl fmt::Display for YearMonth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04}-{:02}", self.year, self.month)
+    }
+}
+
+/// Which of a month's sibling files this path names.
+///
+/// `docs/02-store-format.md` §6, §8 and §9. The overlay is a separate file at
+/// its own stride precisely so the base record stays 56 bytes forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FileKind {
+    /// The bar records.
+    Bars,
+    /// Bar block checksums — one per [`crate::layout::Layout`] block.
+    Checksums,
+    /// Computed overlay fields, at their own stride.
+    Overlay,
+    /// Computed greeks — implied volatility, delta, gamma, vega, theta, rho,
+    /// moneyness and the provenance that makes the row reproducible — at their
+    /// own stride.
+    ///
+    /// **A third file rather than a wider overlay**, and the reason is a rule
+    /// rather than a preference: [`crate::format::Overlay`] is exactly 24 bytes
+    /// with a compile-time assert, five greeks do not fit, and `CLAUDE.md` §3
+    /// rule 8 forbids mutating a format version in place. §4's row banning a
+    /// dynamic schema names the alternative outright — *"a new field is a new
+    /// file version at its own stride"*. See [`crate::format::GREEK_MAGIC`].
+    Greeks,
+    /// The advisory lock a writer holds for the month.
+    ///
+    /// `docs/02-store-format.md` §9: "One writer per file, enforced by an
+    /// advisory lock, and the lock is a leaf — never held while acquiring
+    /// another." [`crate::header::Header::commit`]'s crash argument is
+    /// conditioned on exactly one writer, so the lock needs a name that is
+    /// derived the same way every other sibling is, rather than invented at
+    /// the call site by string concatenation.
+    Lock,
+    /// Overlay block checksums, isolated from bars and computed greeks.
+    OverlayChecksums,
+    /// Greek block checksums, isolated from bars and vendor overlays.
+    GreekChecksums,
+    /// The bar file's time index: slot occupancy and counts that turn a
+    /// timestamp into a row in a constant number of reads. Derived from the
+    /// bars, maintained by `BarFile::append`, never a record stream itself.
+    /// See [`crate::time_index`]. D-2329.
+    TimeIndex,
+    /// Where the month's bars came from: one fixed-size record per landing
+    /// that appended to the month, append-only, at its own format version.
+    /// Written after the bars it names are committed and never touching them.
+    /// See [`crate::provenance`]. D-3334.
+    Provenance,
+    /// The bar file's sort index: for each sortable column, the month's rows
+    /// ordered by value and then time, in runs appended after the bars they
+    /// order are committed. Derived from the bars, never a record stream
+    /// itself. See [`crate::sort_index`]. D-3349.
+    SortIndex,
+    /// The sealed form of a closed month (`.sbar` version 1): every committed
+    /// record, the committed header and the provenance image in one file
+    /// written once by rename and never opened for writing again. A sibling
+    /// kind with its own magic and version, as the time, sort and provenance
+    /// files are — NOT a bar [`crate::layout::Layout`]: it has no fixed
+    /// stride, so `base + 32768 + i * 56` is never asked of it, and the bar
+    /// doors refuse it as `NotABarPath` until the read door (SC-3) opens it.
+    /// See [`crate::sealed`]. D-4965.
+    SealedBars,
+    /// The month's summary while it is still being written (`.sum` version
+    /// 1): its minute and second index, extremes, bars per day and the input
+    /// faults a gap audit refuses on, behind a magic, in exactly the section
+    /// a sealed month carries. Derived from the bars, never a record stream.
+    /// See [`crate::month_summary`]. R3-06, D-4980.
+    MonthSummary,
+}
+
+impl FileKind {
+    /// Every sibling file a month has.
+    pub const ALL: [Self; 12] = [
+        Self::Bars,
+        Self::Checksums,
+        Self::Overlay,
+        Self::Greeks,
+        Self::Lock,
+        Self::OverlayChecksums,
+        Self::GreekChecksums,
+        Self::TimeIndex,
+        Self::Provenance,
+        Self::SortIndex,
+        Self::SealedBars,
+        Self::MonthSummary,
+    ];
+
+    /// The file extension, dot included.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Bars => ".bin",
+            Self::Checksums => ".crc",
+            Self::Overlay => ".ovl",
+            Self::Greeks => ".grk",
+            Self::Lock => ".lock",
+            Self::OverlayChecksums => ".ovl.crc",
+            Self::GreekChecksums => ".grk.crc",
+            Self::TimeIndex => ".tix",
+            Self::Provenance => ".prv",
+            Self::SortIndex => ".srt",
+            Self::SealedBars => ".sbar",
+            Self::MonthSummary => ".sum",
+        }
+    }
+
+    /// The integrity sibling for this record family. Non-record files have
+    /// no record checksum sibling and cannot be opened as a record stream.
+    #[must_use]
+    pub const fn checksums(self) -> Option<Self> {
+        match self {
+            Self::Bars => Some(Self::Checksums),
+            Self::Overlay => Some(Self::OverlayChecksums),
+            Self::Greeks => Some(Self::GreekChecksums),
+            Self::Checksums
+            | Self::Lock
+            | Self::OverlayChecksums
+            | Self::GreekChecksums
+            | Self::TimeIndex
+            | Self::Provenance
+            | Self::SortIndex
+            | Self::SealedBars
+            | Self::MonthSummary => None,
+        }
+    }
+}
+
+/// The pieces a store path is built from.
+///
+/// A struct rather than eight positional arguments: `exchange` and `segment`
+/// are both short uppercase strings, and swapping them at a call site would
+/// build a valid-looking path to the wrong place with nothing to catch it.
+#[derive(Debug, Clone, Copy)]
+pub struct PathParts<'a> {
+    /// The vendor. Becomes the first segment under [`STORE_ROOT`].
+    ///
+    /// A [`Vendor`], not a string: X-12 says each vendor writes only under its
+    /// own prefix, and a `&str` cannot carry that.
+    pub vendor: Vendor,
+    /// The exchange, e.g. `NSE`. Upper case.
+    pub exchange: &'a str,
+    /// The exchange segment, e.g. `INDEX`. Upper case.
+    pub segment: &'a str,
+    /// The underlying symbol, e.g. `NIFTY`. Upper case.
+    pub symbol: &'a str,
+    /// The contract, for a future or an option, and [`None`] for spot.
+    ///
+    /// A SEGMENT OF ITS OWN, below the underlying — see
+    /// [`brutex_core::instrument::Contract`] for why it is not part of the
+    /// symbol. `None` renders a path one level shallower, which is what a spot
+    /// instrument's path has always been.
+    pub contract: Option<Contract>,
+    /// The bar length.
+    pub timeframe: Timeframe,
+    /// The month the file covers.
+    pub month: YearMonth,
+    /// Which sibling file.
+    pub file: FileKind,
+}
+
+/// A validated store path. The only thing that renders one.
+///
+/// Borrows its segments, so building one allocates nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StorePath<'a> {
+    vendor: Vendor,
+    exchange: &'a str,
+    segment: &'a str,
+    symbol: &'a str,
+    /// The contract level, present only for a future or an option.
+    contract: Option<Contract>,
+    timeframe: Timeframe,
+    month: YearMonth,
+    file: FileKind,
+}
+
+impl<'a> StorePath<'a> {
+    /// Validates the parts and fixes the vendor as the first segment.
+    ///
+    /// The vendor is not re-checked: it is a [`Vendor`], a closed set of
+    /// lower-case literals, and `store::unit::every_vendor_is_a_legal_segment`
+    /// drives this module's own [`check_segment`] over all of them. A runtime
+    /// check would carry a refusal arm no input could reach.
+    ///
+    /// # Errors
+    ///
+    /// [`PathError`] naming the first segment that is empty, a traversal,
+    /// over-long, in the wrong case, or holds a byte outside the allowed set.
+    /// An absolute path and a nested path both land on the separator byte.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use brutex_core::vendor::Vendor;
+    /// # use store::path::{FileKind, PathError, PathParts, StorePath, Timeframe, YearMonth};
+    /// let path = StorePath::new(PathParts {
+    ///     vendor: Vendor::Groww,
+    ///     exchange: "NSE",
+    ///     segment: "INDEX",
+    ///     symbol: "NIFTY",
+    ///     contract: None,
+    ///     timeframe: Timeframe::MINUTE_1,
+    ///     month: YearMonth::new(2024, 6)?,
+    ///     file: FileKind::Bars,
+    /// })?;
+    /// assert_eq!(path.to_string(), "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.bin");
+    ///
+    /// let base = PathParts {
+    ///     vendor: Vendor::Groww,
+    ///     exchange: "NSE",
+    ///     segment: "INDEX",
+    ///     symbol: "NIFTY",
+    ///     contract: None,
+    ///     timeframe: Timeframe::MINUTE_1,
+    ///     month: YearMonth::new(2024, 6)?,
+    ///     file: FileKind::Bars,
+    /// };
+    ///
+    /// // A symbol that tries to climb out is refused, not sanitised.
+    /// assert!(StorePath::new(PathParts { symbol: "../dhan", ..base }).is_err());
+    ///
+    /// // And so is one that differs from the canonical form only in case,
+    /// // because "nifty" and "NIFTY" are two files on ext4 and one on APFS.
+    /// assert_eq!(
+    ///     StorePath::new(PathParts { symbol: "nifty", ..base }),
+    ///     Err(PathError::NotCanonicalCase { field: "symbol", byte: b'n' }),
+    /// );
+    /// # Ok::<(), PathError>(())
+    /// ```
+    pub fn new(parts: PathParts<'a>) -> Result<Self, PathError> {
+        check_segment("exchange", parts.exchange, SegmentCase::Upper)?;
+        check_segment("segment", parts.segment, SegmentCase::Upper)?;
+        check_segment("symbol", parts.symbol, SegmentCase::Upper)?;
+        // THE CONTRACT IS CHECKED LIKE ANY OTHER SEGMENT. It is rendered by
+        // `Contract`, not typed by an operator, but a segment that reaches the
+        // filesystem unchecked is the traversal this function exists to refuse
+        // — and a renderer is exactly the thing a later change could alter
+        // without anyone re-reading this call.
+        if let Some(ref contract) = parts.contract {
+            check_segment("contract", contract.as_str(), SegmentCase::Upper)?;
+        }
+        Ok(Self {
+            vendor: parts.vendor,
+            exchange: parts.exchange,
+            segment: parts.segment,
+            symbol: parts.symbol,
+            contract: parts.contract,
+            timeframe: parts.timeframe,
+            month: parts.month,
+            file: parts.file,
+        })
+    }
+
+    /// The path for one vendor's copy of one instrument.
+    ///
+    /// Takes the canonical identity from `crates/core` rather than three loose
+    /// strings, so the exchange, segment and symbol cannot disagree with the
+    /// key they came from.
+    ///
+    /// # Errors
+    ///
+    /// [`PathError::ContractPathUnsupported`] for a future or an option, which
+    /// D-0019 files under a contract segment this builder does not form. Plus
+    /// anything [`StorePath::new`] refuses.
+    pub fn for_key(
+        vendor: Vendor,
+        key: &'a InstrumentKey,
+        timeframe: Timeframe,
+        month: YearMonth,
+        file: FileKind,
+    ) -> Result<Self, PathError> {
+        // ONE CALL, BOTH SHAPES. `Contract::of` answers `None` for spot and a
+        // rendered segment for a derivative, so the branch that used to be a
+        // refusal is now the ordinary difference between two paths.
+        let contract = match key.kind {
+            Kind::Index | Kind::Equity => None,
+            other => Some(Contract::of(other).ok_or(PathError::ContractPathUnsupported)?),
+        };
+        Self::new(PathParts {
+            vendor,
+            exchange: key.exchange.as_str(),
+            segment: key.segment.as_str(),
+            symbol: key.underlying.as_str(),
+            contract,
+            timeframe,
+            month,
+            file,
+        })
+    }
+
+    /// The same month, naming a different sibling file.
+    ///
+    /// [`FileKind::Lock`]'s documentation says the lock "needs a name that is
+    /// derived the same way every other sibling is, rather than invented at the
+    /// call site by string concatenation". This is that derivation. Every
+    /// segment has already been checked, and the extension is a closed set, so
+    /// nothing here can fail — a writer that needs both `.bin` and `.lock`
+    /// takes them from one validated path instead of building two.
+    ///
+    /// `store::write::the_lock_is_the_bar_paths_sibling` is what holds that up.
+    #[must_use]
+    pub const fn with_file(self, file: FileKind) -> Self {
+        Self {
+            vendor: self.vendor,
+            exchange: self.exchange,
+            segment: self.segment,
+            symbol: self.symbol,
+            contract: self.contract,
+            timeframe: self.timeframe,
+            month: self.month,
+            file,
+        }
+    }
+
+    /// The vendor this path belongs to.
+    #[must_use]
+    pub const fn vendor(self) -> Vendor {
+        self.vendor
+    }
+
+    /// The vendor segment — the first segment under [`STORE_ROOT`].
+    #[must_use]
+    pub const fn vendor_segment(self) -> &'static str {
+        self.vendor.as_str()
+    }
+
+    /// The bar length.
+    #[must_use]
+    pub const fn timeframe(self) -> Timeframe {
+        self.timeframe
+    }
+
+    /// The month.
+    #[must_use]
+    pub const fn month(self) -> YearMonth {
+        self.month
+    }
+
+    /// Which sibling file.
+    #[must_use]
+    pub const fn file(self) -> FileKind {
+        self.file
+    }
+
+    /// The path under `root`.
+    ///
+    /// Two allocations, both bounded: the rendered relative path, and the
+    /// buffer it is joined into — reserved up front from [`MAX_LEN`] so
+    /// neither grows. Not one: `root` is an `OsStr`, which is not required to
+    /// be UTF-8, so the relative path cannot be rendered straight into it
+    /// through `fmt::Write`. Counted honestly rather than rounded down.
+    ///
+    /// # What this guarantees, exactly
+    ///
+    /// **Lexically**, no component is `.` or `..` and none is absolute, so the
+    /// rendered text cannot name anything outside `root/bars/<vendor>/`.
+    ///
+    /// **On a filesystem, it guarantees nothing.** A symlink at any component
+    /// redirects the whole subtree: with `root/bars/groww` linked to
+    /// `root/bars/dhan`, a write through a groww path lands in dhan's file
+    /// while still satisfying `starts_with(root/bars/groww)` and holding no
+    /// `Component::ParentDir`. This function does not resolve or refuse
+    /// links; the bar writer refuses the ones it finds and names the linked
+    /// component (CE-62, D-2686), with the window module docs state. The
+    /// earlier wording here claimed the filesystem property outright, which
+    /// was a failure hidden behind a claim.
+    #[must_use]
+    pub fn to_path_buf(self, root: &Path) -> PathBuf {
+        let mut out = PathBuf::with_capacity(root.as_os_str().len() + 1 + MAX_LEN);
+        out.push(root);
+        out.push(self.to_string());
+        out
+    }
+}
+
+impl fmt::Display for StorePath<'_> {
+    /// The one renderer. The vendor is written before anything that varies.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}/{}/{}/{}",
+            STORE_ROOT,
+            self.vendor.as_str(),
+            self.exchange,
+            self.segment,
+            self.symbol,
+        )?;
+        // THE CONTRACT LEVEL EXISTS ONLY WHERE THERE IS A CONTRACT. A spot
+        // path is unchanged, byte for byte, which is what keeps every bar file
+        // already on disk addressable by the same string that wrote it.
+        if let Some(ref contract) = self.contract {
+            write!(f, "/{contract}")?;
+        }
+        write!(
+            f,
+            "/{}/{}{}",
+            self.timeframe.as_str(),
+            self.month,
+            self.file.extension(),
+        )
+    }
+}
+
+/// Refuses anything that is not a plain, self-contained, canonically-cased
+/// directory name.
+///
+/// Public so the vendor table can be driven through the same function
+/// [`StorePath::new`] uses, rather than through a paraphrase of it in a test.
+///
+/// The illegal-byte scan runs over the whole segment **before** the case scan,
+/// so a segment that is both mis-cased and an escape attempt is reported as
+/// the escape. A traversal is the security-relevant fact; the case is a
+/// reproducibility one.
+///
+/// # Errors
+///
+/// [`PathError::EmptySegment`], [`PathError::SegmentTooLong`],
+/// [`PathError::Traversal`], [`PathError::IllegalByte`] or
+/// [`PathError::NotCanonicalCase`], checked in that order.
+pub fn check_segment(field: &'static str, text: &str, case: SegmentCase) -> Result<(), PathError> {
+    if text.is_empty() {
+        return Err(PathError::EmptySegment { field });
+    }
+    if text.len() > MAX_SEGMENT_LEN {
+        return Err(PathError::SegmentTooLong {
+            field,
+            len: text.len(),
+        });
+    }
+    if text == "." || text == ".." {
+        return Err(PathError::Traversal { field });
+    }
+    if let Some(byte) = text
+        .bytes()
+        .find(|b| !matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'&'))
+    {
+        return Err(PathError::IllegalByte { field, byte });
+    }
+    let wrong_case = match case {
+        SegmentCase::Lower => text.bytes().find(u8::is_ascii_uppercase),
+        SegmentCase::Upper => text.bytes().find(u8::is_ascii_lowercase),
+    };
+    match wrong_case {
+        Some(byte) => Err(PathError::NotCanonicalCase { field, byte }),
+        None => Ok(()),
+    }
+}

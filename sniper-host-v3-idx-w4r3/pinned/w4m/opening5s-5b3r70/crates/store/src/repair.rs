@@ -1,0 +1,1526 @@
+//! Explicit, bounded historical bar revisions; never a replacement of a month.
+//!
+//! See `crates/store/REPAIR.md` for the publication protocol, format, invariants,
+//! and the integration deliberately left to the calendar and ingest owners.
+//! All month filenames still come from [`StorePath`]. The separate revision
+//! root is outside the ordinary catalog's `bars/` tree. No rename, deletion,
+//! overlay copy, or change to append semantics is involved.
+//!
+//! **Served by every reader once promoted (D-3350, WP-13c).** A published
+//! revision is inert until [`crate::generation::promote`] appends the month's
+//! pointer record; from then on `BarFile::open_existing` opens it for every
+//! reader and the writer door refuses the original. [`repair_month`] is the
+//! whole repair: the served month's bars plus the offered ones, a held bar never
+//! dropped and never changed, published at the next free ordinal and promoted.
+
+use std::fmt;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
+use crate::file::{Admission, BarFile, StoreError, survey};
+use crate::flock::Flock;
+use crate::format::Bar;
+use crate::header::Header;
+use crate::path::{FileKind, StorePath};
+
+/// The largest value [`row_ceiling`] takes: 31 days of one-second bars
+/// ([`crate::path::Timeframe::SECOND_1`]), the finest rung the store files.
+/// A resource ceiling, not an assertion about calendar completeness.
+///
+/// **No refusal compares against this constant any more** (D-4875 (1),
+/// D-4898, IA-17): each of the four `RowLimit` sites asks [`row_ceiling`] for
+/// the month and rung of the path in hand, so a one-minute month is bounded at
+/// 44,640 rows and a February at 28 days of its rung, never at a 31-day
+/// one-second month's 2,678,400. The constant stays as the bound over every
+/// path, which `store::repair::the_flat_maximum_is_the_largest_ceiling_any_path_has`
+/// holds equal to the largest ceiling of any known rung.
+///
+/// It was 100,000, which no one-second month of a full session calendar fits
+/// under — 23 sessions of 22,500 seconds are 517,500 bars, and the GDFL
+/// NIFTY 2018-11 month is 22,949,312 bytes on the operator's store (10 Oct
+/// 2026), 409,224 records past its 32,768-byte header region — so every
+/// repair of one was refused `RowLimit` and the GDFL days a month lacks could
+/// never be back-filled (DB-N26, WP-12d). At 56 bytes a bar it bounds one
+/// repair's merged rows to 150 MB; what a repair holds beside them is
+/// `docs/06-limits.md` L-IA-26.
+pub const MAX_ROWS: usize = 31 * 86_400;
+
+/// The most bars `path`'s month can hold on `path`'s rung: the month's length
+/// over the rung's width. 2,678,400 for a 31-day one-second month, 44,640 for
+/// its one-minute month, 31 for its daily one; 28 days of the rung for a
+/// February. D-4875 (1), D-4898.
+///
+/// This is the ceiling every `RowLimit` refusal names, read from the path the
+/// caller already holds: no table of rungs, no table of months, and no
+/// instrument or vendor in it. On every intraday rung it is the writer's own
+/// `Admission::slots`; on the daily rung it is tighter, the month's days,
+/// where the writer admits any whole second and so bounds a header only by
+/// the month's seconds. More daily bars than the month has days are two bars
+/// in one day, which no repair is asked to carry.
+///
+/// O(1): two month bounds and one division, no I/O
+/// (`store::repair::the_row_ceiling_is_the_months_length_over_the_rungs_width`).
+#[must_use]
+pub const fn row_ceiling(path: StorePath<'_>) -> u64 {
+    let (from, until) = path.month().ist_bounds_micros();
+    // `until > from` for every month and a rung is at least one second, so the
+    // quotient is positive and fits.
+    ((until - from) / (path.timeframe().secs() as i64 * 1_000_000)).unsigned_abs()
+}
+
+/// Rows per commit when a revision's bars are written. L-IA-26, D-4898.
+///
+/// A revision used to be written as ONE commit of the whole merged series,
+/// and everything the writer does per commit was then done over a whole
+/// month at once: its encoded image of the batch, and the sort index's run,
+/// which reads the commit back and orders it six ways. Bench C-RP-01 measured
+/// that at a full one-second month on 11 Oct 2026: a peak resident set of
+/// 1,160,118,272 bytes, where the merged series is 150 MB. Written in commits
+/// of this many rows, what the writer holds per commit is bounded by the
+/// commit, whatever the month holds. One repair of the largest month, in a
+/// process of its own, then peaked at 537,411,584 bytes, and one of a month of
+/// real size (448,317 rows, still one commit) at 152,879,104 (12 Oct 2026,
+/// macOS, `/usr/bin/time -l`). `docs/06-limits.md` L-IA-26 names the terms;
+/// one of them is not this module's and still grows with the month, which is
+/// why the largest month is not at the merged series plus one commit.
+///
+/// 524,288 rows, because a commit is also a round of syncs, and a month
+/// should not pay more of them than it must: 23 regular sessions of 22,500
+/// seconds are 517,500 bars, so a one-second month of a full session calendar
+/// is still ONE commit, written as it always was, and only a month fuller
+/// than any session calendar is cut. The largest month there is takes 6
+/// commits, far under the 31 a sort index takes before the writer rewrites it
+/// whole (`sort_index::COMPACT_AT`), which would read the whole month back
+/// again; `store::repair::a_revision_is_written_in_commits_the_sort_index_never_compacts`
+/// holds the two apart.
+const WRITE_BATCH: usize = 524_288;
+
+/// What a caller's step between publication and promotion is handed: the
+/// revision's root, `<root>/bar-revisions-v1/<n>`. See [`repair_month_with`].
+pub type BeforePromote<'step> = &'step mut dyn FnMut(&Path) -> Result<(), String>;
+/// Maximum explicit revision ordinal per logical month. There is no scan for
+/// a free ordinal and exhausted ordinals are never reused for different data.
+pub const MAX_REVISIONS: u32 = 1_024;
+const MAGIC: &[u8; 8] = b"BRXREPV1";
+const RECEIPT_LEN: usize = 144;
+
+/// An explicit revision ordinal, independent of the bar file format version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Revision(u32);
+
+impl Revision {
+    /// Construct a bounded ordinal.
+    ///
+    /// # Errors
+    /// Refuses zero and ordinals above [`MAX_REVISIONS`].
+    pub const fn new(ordinal: u32) -> Result<Self, RepairError> {
+        if ordinal == 0 || ordinal > MAX_REVISIONS {
+            Err(RepairError::RevisionLimit)
+        } else {
+            Ok(Self(ordinal))
+        }
+    }
+
+    /// The stable ordinal used in the on-disk path.
+    #[must_use]
+    pub const fn ordinal(self) -> u32 {
+        self.0
+    }
+
+    fn root(self, root: &Path) -> PathBuf {
+        root.join("bar-revisions-v1").join(self.0.to_string())
+    }
+}
+
+/// `<root>/bar-revisions-v1/<n>`: the root a revision's month files are
+/// rendered under by the unmodified [`StorePath`].
+#[must_use]
+pub fn revision_root(root: &Path, revision: Revision) -> PathBuf {
+    revision.root(root)
+}
+
+/// Named refusals from the repair boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepairError {
+    /// A regular store validation or read failed.
+    Store(StoreError),
+    /// The ordinal is outside the fixed namespace.
+    RevisionLimit,
+    /// The source, offered or merged row count exceeds [`row_ceiling`] for
+    /// the month and rung of the path: more bars than the month can hold.
+    /// Refused before any bar is read and before anything is written.
+    RowLimit {
+        /// The rows counted.
+        rows: u64,
+        /// The most the month holds on its rung.
+        ceiling: u64,
+    },
+    /// The source has advanced since the caller prepared the merged rows.
+    StaleSource,
+    /// A source timestamp was omitted from the complete merged series.
+    MissingTimestamp(i64),
+    /// The original is not checksum protected, so verified repair is refused.
+    UnsealedSource,
+    /// A published ordinal already holds a different request.
+    Conflict,
+    /// Reserved or unexplained files have no valid completion receipt.
+    Incomplete(PathBuf),
+    /// The receipt is damaged, foreign, or disagrees with the bar header.
+    InvalidReceipt(PathBuf),
+    /// An offered bar at a stamp the served month holds carries other values.
+    /// The held bar is never changed by a repair; the month is refused whole,
+    /// naming the first such bar, and nothing is written (D-3350).
+    HeldBarDiffers {
+        /// The stamp both carry.
+        ts_micros: i64,
+        /// What the served month holds.
+        held: Box<Bar>,
+        /// What was offered.
+        offered: Box<Bar>,
+    },
+    /// The offered bars share no stamp with the served month, so nothing
+    /// proves they are on the price basis its held bars are on (a vendor that
+    /// back-adjusts as of the pull date, D-3323). Widen the window to include
+    /// a held session (D-3350).
+    NoBasisWitness,
+    /// A sibling indexed by record (an overlay or greeks file) exists beside
+    /// the month: inserting bars would shift every row it describes.
+    IndexedSibling(PathBuf),
+    /// A drop names a stamp the served month does not hold (R4-18). Refused
+    /// before anything is reserved or written: a door that drops named bars
+    /// never guesses which bar was meant.
+    UnheldStamp(i64),
+    /// A drop names EVERY bar the month holds (R4-18). No empty generation is
+    /// published: the caller records the whole month in the quarantine
+    /// ([`crate::quarantine`]) and every reader answers it by name.
+    WholeMonth {
+        /// The bars the month holds, every one named.
+        bars: u64,
+    },
+    /// A drop names nothing, or names stamps out of order or twice (R4-18).
+    NothingNamed,
+    /// The reason a drop or a restate carries is empty, past
+    /// [`crate::quarantine::MAX_REASON`] bytes, or holds a tab or a line break.
+    Reason(String),
+    /// The revision read back before promotion is not the bars published
+    /// (R4-18, the restate policy): nothing is promoted.
+    ReadBack {
+        /// The first record that differs.
+        index: u64,
+    },
+    /// The month is quarantined WHOLE (R4-18 repair 2): nothing of it is
+    /// served, so no door adds a bar to it or restates one. Refused before
+    /// anything is written.
+    Quarantined(crate::quarantine::Entry),
+    /// Whether the month is quarantined is not known (R4-18 repair 2): its
+    /// feed's index or ledger cannot be trusted, so a door cannot tell which
+    /// offered stamps the quarantine set aside. Refused before anything is
+    /// written; never read as "none".
+    QuarantineUnknown(crate::quarantine::QuarantineError),
+    /// The caller's step between publication and promotion refused
+    /// ([`repair_month_with`], D-4875 (5), D-4898). The revision named is
+    /// published, complete and NOT served: every reader still reads the
+    /// generation it read before. The same repair offered again finds the
+    /// revision ([`Published::Reused`]), runs the step again and promotes.
+    BeforePromote {
+        /// The published, unserved revision's root.
+        revision_root: PathBuf,
+        /// The step's own words, unchanged.
+        why: String,
+    },
+    /// A filesystem operation failed. Once receipt writing starts the complete
+    /// revision may be visible even if crash durability was not established.
+    Io {
+        /// The exact file or directory involved.
+        path: PathBuf,
+        /// The operation that failed.
+        operation: &'static str,
+        /// The host refusal.
+        kind: io::ErrorKind,
+        /// True means callers must not report that publication did not happen.
+        publication_may_be_visible: bool,
+    },
+}
+
+impl fmt::Display for RepairError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(f),
+            Self::RevisionLimit => f.write_str("repair revision ordinal outside 1..=1024"),
+            Self::RowLimit { rows, ceiling } => write!(
+                f,
+                "repair exceeds the row ceiling: {rows} rows against {ceiling}, the most this month holds on its timeframe; nothing was written"
+            ),
+            Self::StaleSource => f.write_str("repair source header changed; merge again"),
+            Self::MissingTimestamp(ts) => write!(f, "repair omits source timestamp {ts}"),
+            Self::UnsealedSource => f.write_str("repair requires checksum-protected source bars"),
+            Self::Conflict => f.write_str("repair revision already holds a different request"),
+            Self::Incomplete(path) => {
+                write!(f, "incomplete repair at {}; preserved", path.display())
+            }
+            Self::InvalidReceipt(path) => write!(f, "invalid repair receipt at {}", path.display()),
+            Self::HeldBarDiffers {
+                ts_micros,
+                held,
+                offered,
+            } => write!(
+                f,
+                "repair refused: the held bar at {ts_micros} would change (held o={} h={} l={} c={} v={} oi={}; offered o={} h={} l={} c={} v={} oi={}); a repair never changes a held bar, and nothing was written",
+                held.open,
+                held.high,
+                held.low,
+                held.close,
+                held.volume,
+                held.open_interest,
+                offered.open,
+                offered.high,
+                offered.low,
+                offered.close,
+                offered.volume,
+                offered.open_interest
+            ),
+            Self::NoBasisWitness => f.write_str(
+                "repair refused: no offered bar shares a stamp with the month's held bars, so nothing proves the vendor's price basis is unchanged since they were stored; widen the window to include a held session",
+            ),
+            Self::IndexedSibling(path) => write!(
+                f,
+                "repair refused: {} is indexed by record and inserting bars would shift every row it describes",
+                path.display()
+            ),
+            Self::UnheldStamp(ts) => write!(
+                f,
+                "drop refused: the month does not hold a bar at {ts}; a drop names only held bars, and nothing was written"
+            ),
+            Self::WholeMonth { bars } => write!(
+                f,
+                "drop names every one of the month's {bars} bars: no empty generation is published; record the whole month in the quarantine instead"
+            ),
+            Self::NothingNamed => f.write_str(
+                "drop refused: it names no bar, or names one out of order or twice; nothing was written",
+            ),
+            Self::Reason(why) => write!(f, "refused: {why}; nothing was written"),
+            Self::ReadBack { index } => write!(
+                f,
+                "restate refused: record {index} of the published revision does not read back as written; nothing was promoted"
+            ),
+            Self::Quarantined(entry) => write!(
+                f,
+                "refused: the month is quarantined whole ({} bar(s), {}; its ledger line at byte {}): nothing of it is served, so no repair or restate adds or changes a bar; nothing was written",
+                entry.bars,
+                entry.causes.said(),
+                entry.ledger_at
+            ),
+            Self::QuarantineUnknown(why) => write!(
+                f,
+                "refused: whether the month is quarantined is not known ({why}), so which offered bars the quarantine set aside is not known either; nothing was written"
+            ),
+            Self::BeforePromote {
+                revision_root,
+                why,
+            } => write!(
+                f,
+                "repair refused before promotion: {why}; the revision at {} is published and not served, and the same repair offered again runs this step again before it promotes",
+                revision_root.display()
+            ),
+            Self::Io {
+                path,
+                operation,
+                kind,
+                publication_may_be_visible,
+            } => write!(
+                f,
+                "{operation} {}: {kind:?}; publication may be visible: {publication_may_be_visible}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RepairError {}
+
+impl From<StoreError> for RepairError {
+    fn from(value: StoreError) -> Self {
+        Self::Store(value)
+    }
+}
+
+/// Whether this call created the revision or verified an exact completed retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Published {
+    /// Data, checksums, receipt, and directory entries were synced.
+    Created,
+    /// Exact bytes and source header matched; durability was re-established.
+    Reused,
+}
+
+/// A pinned revision reader. No append method or mutable bar handle is exposed.
+#[derive(Debug)]
+pub struct RevisionReader {
+    bars: BarFile,
+    source: Header,
+}
+
+impl RevisionReader {
+    /// Open exactly one published revision, without creating any files.
+    ///
+    /// # Errors
+    /// Refuses missing/torn receipts, missing locks, changed revision headers,
+    /// unsealed or oversized files, and the normal [`BarFile`] open failures.
+    /// Block CRC validation remains lazy and constant per record read.
+    pub fn open(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+        revision: Revision,
+    ) -> Result<Self, RepairError> {
+        check_kind(path)?;
+        let revision_root = revision.root(root);
+        let physical = path.to_path_buf(&revision_root);
+        let receipt_path = physical.with_extension("repair-v1");
+        let receipt = read_receipt(&receipt_path)?;
+        let (prefix, headers) = receipt.split_at(16);
+        let (magic, ordinal) = prefix.split_at(8);
+        let expected_ordinal = u64::from(revision.0).to_le_bytes();
+        if magic != MAGIC || ordinal != expected_ordinal {
+            return Err(RepairError::InvalidReceipt(receipt_path));
+        }
+        let (source_bytes, revision_bytes) = headers.split_at(64);
+        let source = Header::decode(source_bytes)
+            .map_err(|_| RepairError::InvalidReceipt(receipt_path.clone()))?;
+        // Unlike the legacy opener, revisions must never admit a missing lock.
+        // Every refusal below releases it through the guard's explicit unlock.
+        let lock_path = path.with_file(FileKind::Lock).to_path_buf(&revision_root);
+        let lock = shared_lock(lock_path.clone())?;
+        let bars = BarFile::open_existing(&revision_root, path, symbol_id)?;
+        check_header(path, bars.header())?;
+        if source.symbol_id != symbol_id
+            || source.timeframe_secs != path.timeframe().secs()
+            || encoded(bars.header())?.as_slice() != revision_bytes
+        {
+            return Err(RepairError::InvalidReceipt(receipt_path));
+        }
+        check_header(path, source)?;
+        io_at(
+            lock.release().map_err(io::Error::from),
+            &lock_path,
+            "release shared lock",
+            false,
+        )?;
+        Ok(Self { bars, source })
+    }
+
+    /// The original snapshot's header, retained in the completion receipt.
+    #[must_use]
+    pub const fn source_header(&self) -> Header {
+        self.source
+    }
+
+    /// The revision's committed bar header.
+    #[must_use]
+    pub const fn header(&self) -> Header {
+        self.bars.header()
+    }
+
+    /// Read through the existing fixed-stride and block-CRC contract.
+    ///
+    /// # Errors
+    /// Returns the same indexed-read refusals as [`BarFile::read_record`].
+    pub fn read_record(&self, index: u64) -> Result<Bar, StoreError> {
+        self.bars.read_record(index)
+    }
+
+    /// Locate a timestamp through the existing chronological read contract.
+    ///
+    /// # Errors
+    /// Returns the underlying bar read or integrity refusal.
+    pub fn first_at_or_after(&self, timestamp: i64) -> Result<u64, StoreError> {
+        self.bars.first_at_or_after(timestamp)
+    }
+}
+
+/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
+/// Publish a complete chronological merge as an explicit revision.
+///
+/// `expected_source` is the original reader's header when the merge was made.
+/// Every original timestamp must survive; values at those timestamps may be
+/// corrected. Calendar, month membership, provenance, and correction policy
+/// must be validated by the caller. The source stays shared-locked throughout.
+/// A completed byte-exact retry succeeds even if the original later advances.
+/// Work is O(source rows + merged rows), bounded by [`row_ceiling`]; reads retain
+/// their existing O(1) per-record cost. This never selects a current revision.
+///
+/// # Errors
+/// Refuses invalid batches before reserving anything; stale, unsealed, corrupt,
+/// or unlocked sources; missing source timestamps; differing completed retries;
+/// unfinished ordinals; and named I/O failures. Failed reservations are retained
+/// for inspection and never overwritten. Choose another ordinal after review.
+pub fn publish(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    revision: Revision,
+    expected_source: Header,
+    merged: &[Bar],
+) -> Result<Published, RepairError> {
+    check_kind(path)?;
+    check_rows(path, merged.len() as u64)?;
+    survey(merged)?;
+    // THE SAME PATH-DERIVED ADMISSION `BarFile::append` asks (D-0915): a
+    // revision is a write boundary too, and a merged bar outside the month or
+    // off the rung's grid would otherwise publish through it.
+    Admission::new(path.month(), path.timeframe().secs()).admit(merged)?;
+    check_header(path, expected_source)?;
+    let revision_root = revision.root(root);
+    let physical = path.to_path_buf(&revision_root);
+    let receipt_path = physical.with_extension("repair-v1");
+    let reservation = physical.with_extension("reserved-v1");
+    // Completed retries never rewrite any evidence, including their receipt.
+    if exists(&reservation)? {
+        let reader = RevisionReader::open(root, path, symbol_id, revision)?;
+        if reader.source_header() != expected_source
+            || reader.header().n_valid != merged.len() as u64
+        {
+            return Err(RepairError::Conflict);
+        }
+        for (index, offered) in merged.iter().enumerate() {
+            if reader.read_record(index as u64)? != *offered {
+                return Err(RepairError::Conflict);
+            }
+        }
+        sync_revision(root, path, &revision_root, &receipt_path)?;
+        return Ok(Published::Reused);
+    }
+
+    let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
+    let source_lock = shared_lock(lock_path.clone())?;
+    let source = BarFile::open_existing(root, path, symbol_id)?;
+    check_header(path, source.header())?;
+    if source.header() != expected_source {
+        return Err(RepairError::StaleSource);
+    }
+    retain_timestamps(&source, merged)?;
+    let published = write_revision(root, path, symbol_id, revision, expected_source, merged)?;
+    // Released explicitly, never by close: a descriptor duplicated into a child
+    // another thread spawned would otherwise keep the source locked. D-0693.
+    // A refusal here comes after a written revision, so it says the
+    // publication may be visible, because it is.
+    io_at(
+        source_lock.release().map_err(io::Error::from),
+        &lock_path,
+        "release shared lock",
+        true,
+    )?;
+    Ok(published)
+}
+
+/// THE DROP DOOR (R4-18; ING-01 a, RT-DATA-02 c, Z5): publish `revision` as
+/// the month WITHOUT exactly the bars stamped `drop`, every other bar byte
+/// for byte as `expected_source` holds it. The amendment of D-3350's "a
+/// repair adds bars and never drops one": a bar is dropped ONLY by its named
+/// stamp, with a cause the caller has ledgered first
+/// ([`crate::quarantine::record`], [`crate::quarantine::Scope::Dropping`]).
+///
+/// * **Never in place**: the source generation's files are opened for
+///   reading only and stay byte-identical; the new one is a revision under
+///   `bar-revisions-v1/<n>`, through the same reservation, write, read-back,
+///   receipt and syncs as [`publish`]. It is inert until
+///   [`crate::generation::promote`].
+/// * **Names, never guesses**: `drop` must be strictly ascending and every
+///   stamp in it held by the source, or the call is refused
+///   ([`RepairError::NothingNamed`], [`RepairError::UnheldStamp`]) before
+///   anything is reserved.
+/// * **No empty generation**: a `drop` naming every held bar is
+///   [`RepairError::WholeMonth`]; the caller records the month whole.
+/// * **Idempotent**: a completed revision at `revision` holding exactly the
+///   kept bars answers [`Published::Reused`]; another request there is
+///   [`RepairError::Conflict`].
+///
+/// # Cost
+///
+/// O(held) to read and compare, bounded by [`row_ceiling`], plus
+/// [`publish`]'s write. Not O(1), and not on a read path.
+///
+/// # Errors
+///
+/// [`publish`]'s refusals, [`RepairError::StaleSource`] when the source moved,
+/// [`RepairError::Reason`], and those named above.
+pub fn publish_without(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    revision: Revision,
+    expected_source: Header,
+    drop: &[i64],
+    reason: &str,
+) -> Result<Published, RepairError> {
+    check_kind(path)?;
+    check_named(drop)?;
+    crate::quarantine::check_reason(reason).map_err(|why| RepairError::Reason(why.to_string()))?;
+    check_header(path, expected_source)?;
+    let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
+    let source_lock = shared_lock(lock_path.clone())?;
+    let source = BarFile::open_existing(root, path, symbol_id)?;
+    check_header(path, source.header())?;
+    if source.header() != expected_source {
+        return Err(RepairError::StaleSource);
+    }
+    let kept = without(&source, drop)?;
+    if kept.is_empty() {
+        return Err(RepairError::WholeMonth {
+            bars: expected_source.n_valid,
+        });
+    }
+    survey(&kept)?;
+    Admission::new(path.month(), path.timeframe().secs()).admit(&kept)?;
+    let revision_root = revision.root(root);
+    let physical = path.to_path_buf(&revision_root);
+    let receipt_path = physical.with_extension("repair-v1");
+    let published = if exists(&physical.with_extension("reserved-v1"))? {
+        let reader = RevisionReader::open(root, path, symbol_id, revision)?;
+        if reader.source_header() != expected_source || reader.header().n_valid != kept.len() as u64
+        {
+            return Err(RepairError::Conflict);
+        }
+        for (index, bar) in kept.iter().enumerate() {
+            if reader.read_record(index as u64)? != *bar {
+                return Err(RepairError::Conflict);
+            }
+        }
+        sync_revision(root, path, &revision_root, &receipt_path)?;
+        Published::Reused
+    } else {
+        write_revision(root, path, symbol_id, revision, expected_source, &kept)?
+    };
+    io_at(
+        source_lock.release().map_err(io::Error::from),
+        &lock_path,
+        "release shared lock",
+        true,
+    )?;
+    Ok(published)
+}
+
+/// The offered bars a door that ADDS or RESTATES bars may take (R4-18
+/// repair 2): every one but those at a stamp the quarantine set aside
+/// ([`crate::quarantine::set_aside`]), which are held back and returned
+/// ascending; a month recorded whole is [`RepairError::Quarantined`], and a
+/// quarantine that cannot be read is [`RepairError::QuarantineUnknown`]. A
+/// re-pull of a share still holds the minutes its quarantine set aside, and a
+/// door that took them would serve them again under an index and a ledger
+/// that call them dropped. ONE rule for [`repair_month_with`] (the ingest's
+/// door) and [`restate_month`] (DLY-08's).
+///
+/// # Cost
+///
+/// One probe for a month no quarantine names; O(ledger + offered) for one a
+/// drop names. Never on a read path.
+fn outside_quarantine<'a>(
+    root: &Path,
+    path: StorePath<'_>,
+    offered: &'a [Bar],
+) -> Result<(std::borrow::Cow<'a, [Bar]>, Vec<i64>), RepairError> {
+    use crate::quarantine::SetAside;
+    match crate::quarantine::set_aside(root, path).map_err(RepairError::QuarantineUnknown)? {
+        SetAside::Nothing => Ok((std::borrow::Cow::Borrowed(offered), Vec::new())),
+        SetAside::Whole(entry) => Err(RepairError::Quarantined(entry)),
+        SetAside::Stamps(stamps) => {
+            let (kept, back): (Vec<Bar>, Vec<Bar>) = offered
+                .iter()
+                .copied()
+                .partition(|bar| stamps.binary_search(&bar.ts_micros).is_err());
+            let held_back: Vec<i64> = back.iter().map(|bar| bar.ts_micros).collect();
+            note_held_back(path, &held_back);
+            Ok((std::borrow::Cow::Owned(kept), held_back))
+        }
+    }
+}
+
+/// One `/logs` event naming the offered bars a door held back because the
+/// quarantine set their stamps aside: none is silent.
+fn note_held_back(path: StorePath<'_>, held_back: &[i64]) {
+    let (Some(first), Some(last)) = (held_back.first(), held_back.last()) else {
+        return;
+    };
+    let key = crate::quarantine::series_key(path);
+    let month = path.month().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(
+            "store.repair",
+            "offered bars at stamps the quarantine set aside were held back",
+        )
+        .with("feed", telemetry::Value::Str(path.vendor().as_str()))
+        .with("key", telemetry::Value::Str(&key))
+        .with("month", telemetry::Value::Str(&month))
+        .with("held_back", telemetry::Value::Uint(held_back.len() as u64))
+        .with("first", telemetry::Value::Int(*first))
+        .with("last", telemetry::Value::Int(*last)),
+    );
+}
+
+/// `drop` is not empty and strictly ascending.
+fn check_named(drop: &[i64]) -> Result<(), RepairError> {
+    if drop.is_empty() || drop.windows(2).any(|pair| matches!(pair, [a, b] if a >= b)) {
+        return Err(RepairError::NothingNamed);
+    }
+    Ok(())
+}
+
+/// Every bar of `source` not stamped in `drop`, in order; refuses a named
+/// stamp the source does not hold. One pass, O(held + named).
+fn without(source: &BarFile, drop: &[i64]) -> Result<Vec<Bar>, RepairError> {
+    let held = usize::try_from(source.header().n_valid).unwrap_or(usize::MAX);
+    let mut kept = Vec::with_capacity(held.saturating_sub(drop.len()));
+    let mut named = drop.iter().peekable();
+    for index in 0..source.header().n_valid {
+        let bar = source.read_record(index)?;
+        if let Some(unheld) = named.next_if(|at| **at < bar.ts_micros) {
+            return Err(RepairError::UnheldStamp(*unheld));
+        }
+        if named.next_if(|at| **at == bar.ts_micros).is_none() {
+            kept.push(bar);
+        }
+    }
+    if let Some(unheld) = named.next() {
+        return Err(RepairError::UnheldStamp(*unheld));
+    }
+    Ok(kept)
+}
+
+/// How [`repair_month`] compares an offered bar with the held bar at the same
+/// stamp. Fixed by the caller from what the instrument IS, never from the bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// Open interest is a measurement for this instrument. When it is not —
+    /// an index or a share (D-3322) — a held `0` and an offered null are the
+    /// same absence, and the held one is kept.
+    pub open_interest_applies: bool,
+    /// The vendor adjusts its prices as of the pull date (D-3323): the
+    /// offered bars must share at least one stamp with the held ones and agree
+    /// there, or nothing proves the two pulls are on one basis.
+    pub basis_witness: bool,
+}
+
+/// What [`repair_month`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonthRepair {
+    /// Every offered bar is already held, with the same values. Nothing was
+    /// written; the month is served as it was.
+    NothingNew {
+        /// The generation served: `0` is the original.
+        ordinal: u32,
+        /// Its committed records.
+        n_valid: u64,
+    },
+    /// A new generation is served: the held bars and the added ones.
+    Repaired {
+        /// The generation it replaced: `0` is the original.
+        from: u32,
+        /// The revision now served.
+        to: Revision,
+        /// Bars the replaced generation held, every one of them kept.
+        held: u64,
+        /// Bars added.
+        added: u64,
+        /// The stamps of the bars added, ascending: what the repair filled,
+        /// for a caller's ledger.
+        added_at: Vec<i64>,
+        /// The new generation's committed header.
+        header: Header,
+        /// Whether this call wrote the revision or found it already complete
+        /// (a crash between publication and promotion, resumed).
+        published: Published,
+        /// The promotion.
+        promoted: crate::generation::Promoted,
+        /// Ordinals stepped over because they hold another request or an
+        /// unfinished one, each with why. Never reused, never overwritten.
+        skipped: Vec<(u32, String)>,
+    },
+}
+
+/// Repair one month: serve a new generation holding every bar the served
+/// generation holds plus every offered bar it lacks. D-3350, WP-13c.
+///
+/// * **Never in place.** The served generation's files are not opened for
+///   writing; the new one is published under `bar-revisions-v1/<n>` by
+///   [`publish`] and made the served one by [`crate::generation::promote`].
+/// * **Never drops a held bar**, and never changes one: an offered bar at a
+///   held stamp must carry the held values ([`Policy`]), or the month is
+///   refused whole, naming the bar ([`RepairError::HeldBarDiffers`]).
+/// * **Idempotent and resumable.** Offered bars that are all held answer
+///   [`MonthRepair::NothingNew`]. A revision published and not promoted (a
+///   crash between the two) is found complete at its ordinal and promoted. An
+///   ordinal that holds another request or an unfinished one is stepped over
+///   and named, never reused.
+///
+/// A month that does not exist is [`StoreError::Missing`]: an ordinary append
+/// creates it, and a repair has nothing to keep.
+///
+/// # Cost
+///
+/// O(held + offered) to read and merge, bounded by [`row_ceiling`] (bench
+/// C-RP-01, `docs/06-limits.md` L-IA-26), plus what [`publish`] states; one
+/// probe per stepped-over ordinal, at most [`MAX_REVISIONS`]. Not O(1), and
+/// not on a read path.
+///
+/// # Errors
+///
+/// Every refusal of [`publish`] and [`crate::generation::promote`], the
+/// month's own read refusals, [`RepairError::HeldBarDiffers`],
+/// [`RepairError::NoBasisWitness`] and [`RepairError::IndexedSibling`].
+pub fn repair_month(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    offered: &[Bar],
+    policy: Policy,
+) -> Result<MonthRepair, RepairError> {
+    repair_month_with(root, path, symbol_id, offered, policy, None)
+}
+
+/// [`repair_month`], with one step of the caller's run between publication
+/// and promotion. D-4875 (5), D-4898, IA-17.
+///
+/// `before_promote` is called with the new revision's root
+/// ([`revision_root`]) after [`publish`] has returned, whether it wrote the
+/// revision ([`Published::Created`]) or found it complete
+/// ([`Published::Reused`]), and before [`crate::generation::promote`]. At that
+/// moment the revision is whole and durable and no reader is served from it,
+/// so a file the step writes beside the revision's bars becomes visible to
+/// readers in the same instant the bars do, at the promotion, and never
+/// before. It is how a caller's own sibling of the month (one this crate does
+/// not know and names no type of) follows the generation without a second
+/// merge: the merge, the held-bar check and the basis witness exist only here.
+///
+/// * **`None` is [`repair_month`]**, byte for byte: the wrapper passes it.
+/// * **Called at most once per call, and only for a revision about to be
+///   promoted.** Not for [`MonthRepair::NothingNew`], not for any refusal
+///   before or during publication, and not for an ordinal stepped over.
+/// * **A step that refuses stops the repair before the promotion**
+///   ([`RepairError::BeforePromote`], its words kept). The revision stays
+///   published and unserved; nothing is removed. The same repair offered again
+///   finds it ([`Published::Reused`]), runs the step again and promotes.
+/// * **The step must be repeatable.** It can run again after it refused, after
+///   a crash that tore what it was writing, and after a promotion that was
+///   refused behind it (a held lock), so it writes its file whole each time
+///   and treats what it finds there as its own earlier attempt.
+///
+/// # Cost
+///
+/// [`repair_month`]'s, plus the step's own.
+///
+/// # Errors
+///
+/// [`repair_month`]'s, and [`RepairError::BeforePromote`].
+pub fn repair_month_with(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    offered: &[Bar],
+    policy: Policy,
+    mut before_promote: Option<BeforePromote<'_>>,
+) -> Result<MonthRepair, RepairError> {
+    check_kind(path)?;
+    check_rows(path, offered.len() as u64)?;
+    survey(offered)?;
+    Admission::new(path.month(), path.timeframe().secs()).admit(offered)?;
+    let served = crate::generation::served(root, path)?;
+    let served_root = served.root(root);
+    for kind in [FileKind::Overlay, FileKind::Greeks] {
+        let sibling = path.with_file(kind).to_path_buf(&served_root);
+        if exists(&sibling)? {
+            return Err(RepairError::IndexedSibling(sibling));
+        }
+    }
+    let (header, merged, added_at, witnessed) = {
+        let source = BarFile::open_existing(root, path, symbol_id)?;
+        let header = source.header();
+        check_header(path, header)?;
+        // NEVER A BAR THE QUARANTINE SET ASIDE (R4-18 repair 2): a vendor
+        // re-pull still holds them, and they are not bars the month lacks.
+        // JUDGED ONCE THE SERVED MONTH IS OPEN: a drop ledgers its intent
+        // before its door promotes, so a month opened after that promotion
+        // meets the intent here, and one opened before it is refused at this
+        // repair's promotion (`RepairError::StaleSource`). Judged before the
+        // open, a drop landing between the two read as nothing set aside and
+        // its stamps were added back to the generation it promoted.
+        let (offered, _held_back) = outside_quarantine(root, path, offered)?;
+        let offered: &[Bar] = &offered;
+        let ceiling = row_ceiling(path);
+        let limit = |_| RepairError::RowLimit {
+            rows: header.n_valid,
+            ceiling,
+        };
+        let held = usize::try_from(header.n_valid).map_err(limit)?;
+        // RESERVED ONCE, AND NEVER PAST THE CEILING: held and offered bars
+        // that share stamps merge to fewer rows than their sum, and a month's
+        // merged rows cannot exceed what the month holds. A source that
+        // somehow merges past it grows the vector and is refused `RowLimit`
+        // by `publish`, named; it is never cut. L-IA-26.
+        let capacity = held
+            .saturating_add(offered.len())
+            .min(usize::try_from(ceiling).unwrap_or(usize::MAX));
+        let mut merged = Vec::with_capacity(capacity);
+        let mut offer = offered.iter().peekable();
+        let mut witnessed = 0u64;
+        let mut added_at = Vec::new();
+        for index in 0..header.n_valid {
+            let bar = source.read_record(index)?;
+            while let Some(early) = offer.next_if(|o| o.ts_micros < bar.ts_micros) {
+                added_at.push(early.ts_micros);
+                merged.push(*early);
+            }
+            if let Some(same) = offer.next_if(|o| o.ts_micros == bar.ts_micros) {
+                if !agrees(&bar, same, policy) {
+                    return Err(RepairError::HeldBarDiffers {
+                        ts_micros: bar.ts_micros,
+                        held: Box::new(bar),
+                        offered: Box::new(*same),
+                    });
+                }
+                witnessed += 1;
+            }
+            merged.push(bar);
+        }
+        for late in offer {
+            added_at.push(late.ts_micros);
+            merged.push(*late);
+        }
+        (header, merged, added_at, witnessed)
+    };
+    let added = added_at.len() as u64;
+    if added == 0 {
+        return Ok(MonthRepair::NothingNew {
+            ordinal: served.ordinal(),
+            n_valid: header.n_valid,
+        });
+    }
+    if policy.basis_witness && header.n_valid > 0 && witnessed == 0 {
+        return Err(RepairError::NoBasisWitness);
+    }
+    let mut skipped = Vec::new();
+    for ordinal in served.ordinal().saturating_add(1)..=MAX_REVISIONS {
+        let revision = Revision::new(ordinal)?;
+        match publish(root, path, symbol_id, revision, header, &merged) {
+            Ok(published) => {
+                // THE CALLER'S STEP, BETWEEN THE TWO (D-4875 (5)). The
+                // revision is whole and unserved; a refusal leaves it so.
+                if let Some(step) = before_promote.as_mut() {
+                    let revision_root = revision.root(root);
+                    step(&revision_root)
+                        .map_err(|why| RepairError::BeforePromote { revision_root, why })?;
+                }
+                let promoted = crate::generation::promote(root, path, symbol_id, revision)?;
+                let now = promoted.pointer();
+                let header = RevisionReader::open(root, path, symbol_id, now.revision)?.header();
+                return Ok(MonthRepair::Repaired {
+                    from: served.ordinal(),
+                    to: revision,
+                    held: (merged.len() as u64).saturating_sub(added),
+                    added,
+                    added_at,
+                    header,
+                    published,
+                    promoted,
+                    skipped,
+                });
+            }
+            // ANOTHER REQUEST OR AN UNFINISHED ONE HOLDS THIS ORDINAL. It is
+            // never reopened or overwritten; the next is tried, and this one
+            // is named to the caller.
+            Err(
+                why @ (RepairError::Conflict
+                | RepairError::Incomplete(_)
+                | RepairError::InvalidReceipt(_)),
+            ) => skipped.push((ordinal, why.to_string())),
+            Err(why) => return Err(why),
+        }
+    }
+    Err(RepairError::RevisionLimit)
+}
+
+/// What [`drop_month`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonthDrop {
+    /// The generation it replaced: `0` is the original.
+    pub from: u32,
+    /// The revision now served.
+    pub to: Revision,
+    /// Bars the replaced generation held.
+    pub held: u64,
+    /// Bars dropped: exactly the named ones.
+    pub dropped: u64,
+    /// The new generation's committed header.
+    pub header: Header,
+    /// Whether this call wrote the revision or found it complete.
+    pub published: Published,
+    /// The promotion.
+    pub promoted: crate::generation::Promoted,
+    /// Ordinals stepped over, each with why. Never reused.
+    pub skipped: Vec<(u32, String)>,
+}
+
+/// Serve a new generation of the month without the bars stamped `drop`
+/// ([`publish_without`] at the next free ordinal, then
+/// [`crate::generation::promote`]). R4-18.
+///
+/// The ordinal loop is [`repair_month_with`]'s: an ordinal holding another
+/// request or an unfinished one is stepped over and named, never reused; the
+/// 1,024th refusal is [`RepairError::RevisionLimit`], which the caller
+/// alerts on. A revision published and not promoted (a crash between the
+/// two) is found complete at its ordinal ([`Published::Reused`]) and
+/// promoted. The old generation stays byte-identical. The caller ledgers the
+/// drop BEFORE this call ([`crate::quarantine`]).
+///
+/// # Cost
+///
+/// O(held) per ordinal tried, bounded by [`row_ceiling`]. Not on a read path.
+///
+/// # Errors
+///
+/// [`publish_without`]'s and [`crate::generation::promote`]'s refusals, and
+/// [`RepairError::IndexedSibling`]: dropping a bar shifts every row an
+/// overlay or a greeks file indexes.
+pub fn drop_month(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    drop: &[i64],
+    reason: &str,
+) -> Result<MonthDrop, RepairError> {
+    check_kind(path)?;
+    check_named(drop)?;
+    let served = crate::generation::served(root, path)?;
+    refuse_indexed_siblings(path, &served.root(root))?;
+    let header = BarFile::open_existing(root, path, symbol_id)?.header();
+    check_header(path, header)?;
+    let mut skipped = Vec::new();
+    for ordinal in served.ordinal().saturating_add(1)..=MAX_REVISIONS {
+        let revision = Revision::new(ordinal)?;
+        match publish_without(root, path, symbol_id, revision, header, drop, reason) {
+            Ok(published) => {
+                let promoted = crate::generation::promote(root, path, symbol_id, revision)?;
+                let now = RevisionReader::open(root, path, symbol_id, promoted.pointer().revision)?
+                    .header();
+                return Ok(MonthDrop {
+                    from: served.ordinal(),
+                    to: revision,
+                    held: header.n_valid,
+                    dropped: drop.len() as u64,
+                    header: now,
+                    published,
+                    promoted,
+                    skipped,
+                });
+            }
+            Err(
+                why @ (RepairError::Conflict
+                | RepairError::Incomplete(_)
+                | RepairError::InvalidReceipt(_)),
+            ) => skipped.push((ordinal, why.to_string())),
+            Err(why) => return Err(why),
+        }
+    }
+    Err(RepairError::RevisionLimit)
+}
+
+fn refuse_indexed_siblings(path: StorePath<'_>, served_root: &Path) -> Result<(), RepairError> {
+    for kind in [FileKind::Overlay, FileKind::Greeks] {
+        let sibling = path.with_file(kind).to_path_buf(served_root);
+        if exists(&sibling)? {
+            return Err(RepairError::IndexedSibling(sibling));
+        }
+    }
+    Ok(())
+}
+
+/// THE RESTATE POLICY (DLY-08, R4-18): how [`restate_month`] takes a
+/// vendor's corrected values. Every held stamp is KEPT; an offered bar at a
+/// held stamp REPLACES the held values (a correction, counted and named); an
+/// offered bar at a stamp the month lacks is added — UNLESS the quarantine set
+/// that stamp aside, which a restate never serves again (R4-18 repair 2). The
+/// served generation flips only after the new revision has been read back
+/// whole and equals what was published. Which months are restated is the
+/// classifier's (R4-23); this is the door it calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Restate {
+    /// As [`Policy::open_interest_applies`]: when it does not apply, a held
+    /// `0` and an offered null are one absence and are not a correction.
+    pub open_interest_applies: bool,
+}
+
+/// What [`restate_month`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonthRestate {
+    /// Every offered bar is held with the same values, or held back because
+    /// the quarantine set its stamp aside: nothing written.
+    NothingNew {
+        /// The generation served.
+        ordinal: u32,
+        /// Offered stamps the quarantine set aside, never served again,
+        /// ascending.
+        held_back: Vec<i64>,
+    },
+    /// A new generation is served.
+    Restated {
+        /// The generation it replaced.
+        from: u32,
+        /// The revision now served.
+        to: Revision,
+        /// Bars kept, every held stamp among them.
+        held: u64,
+        /// The stamps whose values were corrected, ascending.
+        restated_at: Vec<i64>,
+        /// Bars added at stamps the month lacked.
+        added: u64,
+        /// Offered stamps the quarantine set aside, never served again,
+        /// ascending.
+        held_back: Vec<i64>,
+        /// The new generation's header.
+        header: Header,
+        /// Whether this call wrote the revision.
+        published: Published,
+        /// The promotion.
+        promoted: crate::generation::Promoted,
+        /// Ordinals stepped over, each with why.
+        skipped: Vec<(u32, String)>,
+    },
+}
+
+/// Publish the month with `corrected` bars under the [`Restate`] policy, and
+/// serve it only after reading it back. R4-18, DLY-08.
+///
+/// Never in place and never a dropped stamp ([`publish`] refuses one,
+/// [`RepairError::MissingTimestamp`]); the old generation stays
+/// byte-identical and is still addressable by its ordinal. NEVER A STAMP THE
+/// QUARANTINE SET ASIDE: those offered bars are held back and named
+/// (`held_back` in [`MonthRestate`]), and a month recorded whole is
+/// refused ([`RepairError::Quarantined`]). Every restate is one `store.restate`
+/// event on `/logs` with its reason and what changed; the journal line a run
+/// keeps (as `pull::ingest` keeps one for [`repair_month`]) is its caller's,
+/// from these same fields.
+///
+/// # Cost
+///
+/// O(held + offered) to merge, the same again to read back, bounded by
+/// [`row_ceiling`]; plus one probe, and one pass over the quarantine ledger
+/// for a month a drop names. Not on a read path.
+///
+/// # Errors
+///
+/// [`publish`]'s and [`crate::generation::promote`]'s refusals,
+/// [`RepairError::IndexedSibling`] when bars are added beside an indexed
+/// sibling, [`RepairError::ReadBack`], [`RepairError::Reason`],
+/// [`RepairError::Quarantined`] and [`RepairError::QuarantineUnknown`].
+pub fn restate_month(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    corrected: &[Bar],
+    policy: Restate,
+    reason: &str,
+) -> Result<MonthRestate, RepairError> {
+    check_kind(path)?;
+    crate::quarantine::check_reason(reason).map_err(|why| RepairError::Reason(why.to_string()))?;
+    check_rows(path, corrected.len() as u64)?;
+    survey(corrected)?;
+    Admission::new(path.month(), path.timeframe().secs()).admit(corrected)?;
+    let served = crate::generation::served(root, path)?;
+    let compare = Policy {
+        open_interest_applies: policy.open_interest_applies,
+        basis_witness: false,
+    };
+    let (header, merged, restated_at, added, held_back) = {
+        let source = BarFile::open_existing(root, path, symbol_id)?;
+        let header = source.header();
+        check_header(path, header)?;
+        // NEVER A STAMP THE QUARANTINE SET ASIDE, judged once the served
+        // month is open, as `repair_month_with` judges it and for its reason.
+        let (corrected, held_back) = outside_quarantine(root, path, corrected)?;
+        let corrected: &[Bar] = &corrected;
+        let held = usize::try_from(header.n_valid).unwrap_or(usize::MAX);
+        let mut merged = Vec::with_capacity(held.saturating_add(corrected.len()));
+        let mut offer = corrected.iter().peekable();
+        let (mut restated_at, mut added) = (Vec::new(), 0u64);
+        for index in 0..header.n_valid {
+            let bar = source.read_record(index)?;
+            while let Some(early) = offer.next_if(|o| o.ts_micros < bar.ts_micros) {
+                added += 1;
+                merged.push(*early);
+            }
+            match offer.next_if(|o| o.ts_micros == bar.ts_micros) {
+                Some(same) if !agrees(&bar, same, compare) => {
+                    restated_at.push(bar.ts_micros);
+                    merged.push(*same);
+                }
+                _ => merged.push(bar),
+            }
+        }
+        for late in offer {
+            added += 1;
+            merged.push(*late);
+        }
+        (header, merged, restated_at, added, held_back)
+    };
+    if restated_at.is_empty() && added == 0 {
+        return Ok(MonthRestate::NothingNew {
+            ordinal: served.ordinal(),
+            held_back,
+        });
+    }
+    if added > 0 {
+        refuse_indexed_siblings(path, &served.root(root))?;
+    }
+    let mut skipped = Vec::new();
+    for ordinal in served.ordinal().saturating_add(1)..=MAX_REVISIONS {
+        let revision = Revision::new(ordinal)?;
+        match publish(root, path, symbol_id, revision, header, &merged) {
+            Ok(published) => {
+                // READ BACK BEFORE THE FLIP: every record of the revision as
+                // a reader would open it, against what was published.
+                let reader = RevisionReader::open(root, path, symbol_id, revision)?;
+                for (index, bar) in merged.iter().enumerate() {
+                    if reader.read_record(index as u64)? != *bar {
+                        return Err(RepairError::ReadBack {
+                            index: index as u64,
+                        });
+                    }
+                }
+                let promoted = crate::generation::promote(root, path, symbol_id, revision)?;
+                let done = MonthRestate::Restated {
+                    from: served.ordinal(),
+                    to: revision,
+                    held: header.n_valid,
+                    restated_at,
+                    added,
+                    held_back,
+                    header: reader.header(),
+                    published,
+                    promoted,
+                    skipped,
+                };
+                note_restated(path, reason, &done);
+                return Ok(done);
+            }
+            Err(
+                why @ (RepairError::Conflict
+                | RepairError::Incomplete(_)
+                | RepairError::InvalidReceipt(_)),
+            ) => skipped.push((ordinal, why.to_string())),
+            Err(why) => return Err(why),
+        }
+    }
+    Err(RepairError::RevisionLimit)
+}
+
+/// One `store.restate` event for a restated month: why, the generations,
+/// and what changed (corrected, added, held back).
+fn note_restated(path: StorePath<'_>, reason: &str, done: &MonthRestate) {
+    let MonthRestate::Restated {
+        from,
+        to,
+        restated_at,
+        added,
+        held_back,
+        ..
+    } = done
+    else {
+        return;
+    };
+    let key = crate::quarantine::series_key(path);
+    let month = path.month().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("store.restate", "month restated to a new generation")
+            .with("feed", telemetry::Value::Str(path.vendor().as_str()))
+            .with("key", telemetry::Value::Str(&key))
+            .with("month", telemetry::Value::Str(&month))
+            .with("from_generation", telemetry::Value::Uint(u64::from(*from)))
+            .with(
+                "to_generation",
+                telemetry::Value::Uint(u64::from(to.ordinal())),
+            )
+            .with("restated", telemetry::Value::Uint(restated_at.len() as u64))
+            .with("added", telemetry::Value::Uint(*added))
+            .with("held_back", telemetry::Value::Uint(held_back.len() as u64))
+            .with("reason", telemetry::Value::Str(reason)),
+    );
+}
+
+/// Whether an offered bar says what the held bar at its stamp says.
+const fn agrees(held: &Bar, offered: &Bar, policy: Policy) -> bool {
+    same_bar(held, offered, policy.open_interest_applies)
+}
+
+/// Whether `offered` says what `held` says, the comparison [`repair_month`]
+/// makes at every held stamp: every field equal, except that where open
+/// interest is not a measurement for the instrument (`open_interest_applies`
+/// false: an index or a share, D-3322) a held `0` and an offered null are the
+/// same absence. O(1).
+///
+/// Public so that a caller which must ask the door's question before it hands
+/// the door a batch asks it in the door's own words, not in a copy of them:
+/// `pull::ingest`'s derived-rung check (R4-27 repair 1), where a share's
+/// derived month an earlier build wrote with open interest `0` meets this
+/// build's fold of the same minutes with it null.
+#[must_use]
+pub const fn same_bar(held: &Bar, offered: &Bar, open_interest_applies: bool) -> bool {
+    let interest = held.open_interest == offered.open_interest
+        || (!open_interest_applies
+            && (held.open_interest == 0 || held.open_interest == crate::format::OI_NULL)
+            && (offered.open_interest == 0 || offered.open_interest == crate::format::OI_NULL));
+    held.ts_micros == offered.ts_micros
+        && held.open == offered.open
+        && held.high == offered.high
+        && held.low == offered.low
+        && held.close == offered.close
+        && held.volume == offered.volume
+        && interest
+}
+
+fn retain_timestamps(source: &BarFile, merged: &[Bar]) -> Result<(), RepairError> {
+    let mut offered = merged.iter().peekable();
+    let mut previous = None;
+    for index in 0..source.records() {
+        let bar = source.read_record(index)?;
+        // Legacy files need not have been written by today's batch validator.
+        survey(std::slice::from_ref(&bar))?;
+        if previous.is_some_and(|ts| ts >= bar.ts_micros) {
+            return Err(RepairError::Store(StoreError::BatchNotOrdered {
+                at: index,
+                previous: previous.unwrap_or(bar.ts_micros),
+                next: bar.ts_micros,
+            }));
+        }
+        previous = Some(bar.ts_micros);
+        while offered
+            .peek()
+            .is_some_and(|row| row.ts_micros < bar.ts_micros)
+        {
+            offered.next();
+        }
+        if offered
+            .next()
+            .is_none_or(|row| row.ts_micros != bar.ts_micros)
+        {
+            return Err(RepairError::MissingTimestamp(bar.ts_micros));
+        }
+    }
+    Ok(())
+}
+
+fn write_revision(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    revision: Revision,
+    expected_source: Header,
+    merged: &[Bar],
+) -> Result<Published, RepairError> {
+    let revision_root = revision.root(root);
+    let physical = path.to_path_buf(&revision_root);
+    let receipt_path = physical.with_extension("repair-v1");
+    let reservation = physical.with_extension("reserved-v1");
+    let directory = physical
+        .parent()
+        .ok_or_else(|| RepairError::Incomplete(physical.clone()))?;
+    io_at(
+        fs::create_dir_all(directory),
+        directory,
+        "create revision directories",
+        false,
+    )?;
+    // create_new is the one-writer reservation. It is never removed, including
+    // after an interrupted write. No competing publisher can reopen this pair.
+    let reserved = io_at(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&reservation),
+        &reservation,
+        "reserve revision",
+        false,
+    )?;
+    io_at(reserved.sync_all(), &reservation, "sync reservation", false)?;
+    // A SEALED FORM IN THE NEW ORDINAL TOO (SC-4, D-5904): the read door
+    // opens a `.sbar` before the `.bin` (D-5899), so a raw revision written
+    // beside one would publish bars no reader opens. An ordinal holding any
+    // of these was written by someone else and is stepped over, never mixed.
+    for kind in [
+        FileKind::Bars,
+        FileKind::Checksums,
+        FileKind::Lock,
+        FileKind::TimeIndex,
+        FileKind::SealedBars,
+    ] {
+        let sibling = path.with_file(kind).to_path_buf(&revision_root);
+        if exists(&sibling)? {
+            return Err(RepairError::Incomplete(sibling));
+        }
+    }
+    if exists(&receipt_path)? {
+        return Err(RepairError::Incomplete(receipt_path));
+    }
+    let mut writer = BarFile::open_or_create(&revision_root, path, symbol_id)?;
+    // IN BOUNDED COMMITS, NEVER ONE (`WRITE_BATCH`, L-IA-26): what the writer
+    // holds per commit is then the commit's, not the month's. A write cut
+    // between two commits leaves bars with no receipt, which is the
+    // unfinished ordinal a single cut commit left: preserved, stepped over.
+    for batch in merged.chunks(WRITE_BATCH) {
+        writer.append(batch)?;
+    }
+    // Verify every written block before publishing its receipt.
+    for (index, offered) in merged.iter().enumerate() {
+        if writer.read_record(index as u64)? != *offered {
+            return Err(RepairError::Conflict);
+        }
+    }
+    // Make every new directory entry durable, not just the final month parent.
+    sync_ancestors(directory, root, false)?;
+    let mut receipt = Vec::with_capacity(RECEIPT_LEN);
+    receipt.extend_from_slice(MAGIC);
+    receipt.extend_from_slice(&u64::from(revision.0).to_le_bytes());
+    receipt.extend_from_slice(&encoded(expected_source)?);
+    receipt.extend_from_slice(&encoded(writer.header())?);
+    let mut marker = io_at(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&receipt_path),
+        &receipt_path,
+        "create receipt",
+        false,
+    )?;
+    io_at(
+        marker.write_all(&receipt),
+        &receipt_path,
+        "write receipt",
+        true,
+    )?;
+    io_at(marker.sync_all(), &receipt_path, "sync receipt", true)?;
+    sync_ancestors(directory, root, true)?;
+    Ok(Published::Created)
+}
+
+fn check_kind(path: StorePath<'_>) -> Result<(), RepairError> {
+    if path.file() != FileKind::Bars {
+        return Err(StoreError::NotABarPath { found: path.file() }.into());
+    }
+    Ok(())
+}
+
+/// Refuses `rows` past the most `path`'s month holds on its rung, before the
+/// caller reads a bar.
+fn check_rows(path: StorePath<'_>, rows: u64) -> Result<(), RepairError> {
+    let ceiling = row_ceiling(path);
+    if rows > ceiling {
+        return Err(RepairError::RowLimit { rows, ceiling });
+    }
+    Ok(())
+}
+
+fn check_header(path: StorePath<'_>, header: Header) -> Result<(), RepairError> {
+    check_rows(path, header.n_valid)?;
+    if !header.checksums_present() {
+        return Err(RepairError::UnsealedSource);
+    }
+    Ok(())
+}
+
+fn encoded(header: Header) -> Result<[u8; 64], RepairError> {
+    header
+        .commit()
+        .map(|commit| commit.bytes)
+        .map_err(|_| RepairError::Conflict)
+}
+
+fn read_receipt(path: &Path) -> Result<[u8; RECEIPT_LEN], RepairError> {
+    let mut file = match File::open(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(RepairError::Incomplete(path.to_path_buf()));
+        }
+        result => io_at(result, path, "open receipt", false)?,
+    };
+    if io_at(file.metadata(), path, "measure receipt", false)?.len() != RECEIPT_LEN as u64 {
+        return Err(RepairError::InvalidReceipt(path.to_path_buf()));
+    }
+    let mut bytes = [0; RECEIPT_LEN];
+    io_at(file.read_exact(&mut bytes), path, "read receipt", false)?;
+    Ok(bytes)
+}
+
+/// The lock at `path`, taken shared and non-blocking; a missing lock file is
+/// refused, never created.
+pub(crate) fn shared_lock(path: PathBuf) -> Result<Flock<File>, RepairError> {
+    let file = io_at(File::open(&path), &path, "open required lock", false)?;
+    match Flock::try_lock_shared(file, path.clone()) {
+        Ok(held) => Ok(held),
+        Err(TryLockError::WouldBlock) => Err(StoreError::Locked { path }.into()),
+        Err(TryLockError::Error(error)) => io_at(Err(error), &path, "lock shared", false),
+    }
+}
+
+fn exists(path: &Path) -> Result<bool, RepairError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        result => io_at(result, path, "inspect revision", false).map(|_| true),
+    }
+}
+
+fn sync_revision(
+    root: &Path,
+    path: StorePath<'_>,
+    revision_root: &Path,
+    receipt: &Path,
+) -> Result<(), RepairError> {
+    for sibling in [
+        path.to_path_buf(revision_root),
+        path.with_file(FileKind::Checksums)
+            .to_path_buf(revision_root),
+        receipt.to_path_buf(),
+    ] {
+        sync_file(&sibling, true)?;
+    }
+    sync_ancestors(
+        receipt
+            .parent()
+            .ok_or_else(|| RepairError::Incomplete(receipt.to_path_buf()))?,
+        root,
+        true,
+    )
+}
+
+fn sync_ancestors(mut directory: &Path, root: &Path, visible: bool) -> Result<(), RepairError> {
+    loop {
+        sync_file(directory, visible)?;
+        if directory == root {
+            return Ok(());
+        }
+        directory = directory
+            .parent()
+            .ok_or_else(|| RepairError::Incomplete(directory.to_path_buf()))?;
+    }
+}
+
+fn sync_file(path: &Path, visible: bool) -> Result<(), RepairError> {
+    let file = io_at(File::open(path), path, "open for sync", visible)?;
+    io_at(file.sync_all(), path, "sync", visible)
+}
+
+fn io_at<T>(
+    result: io::Result<T>,
+    path: &Path,
+    operation: &'static str,
+    visible: bool,
+) -> Result<T, RepairError> {
+    result.map_err(|error| RepairError::Io {
+        path: path.to_path_buf(),
+        operation,
+        kind: error.kind(),
+        publication_may_be_visible: visible,
+    })
+}
+
+#[cfg(test)]
+#[path = "repair_tests.rs"]
+mod tests;

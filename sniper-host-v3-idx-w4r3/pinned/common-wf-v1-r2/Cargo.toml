@@ -1,0 +1,100 @@
+[package]
+name = "common_wf"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.97"
+description = "THE common walk-forward and train/test CORE of Brutex, crate v1 (COMMON-WF-PLAN.md v5 sha 11136613fc95dcff with MAIN's binding amendments A1-A4, MAIN-SIGNED-COMMON-WF-20261113.md): windows as data, the standard views, the P11 words, the REQ 73 order, the E4 dial, grid / partition / row provenance, O(1) add / offer / verdict with deterministic step counters, the per-search method line, DB rows with a hash-chained audit. std only, no I/O, no float."
+publish = false
+build = false
+autobenches = false
+autoexamples = false
+autotests = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "wf_bench"
+path = "benches/wf_bench.rs"
+harness = false
+
+[features]
+# The red-first switch (plan section 3): under `red` the crate answers with the most LENIENT reading through the same API (booked
+# only, a missing year dropped, an outside trade dropped, cross readings printed as verdict words, ties by offer order, read sets
+# not checked and every declared grid read as EMPTY, the SESSION drawdown base with no open marks). A host refuses a headline or
+# search run built with it (`refuse_if_red`).
+red = []
+# The test-build double-offer check (P18, F3): keeps the offered codes per (Lists, partition) and refuses a second offer.
+offer_once_check = []
+# The named mutants (plan 11.4; the core ones): each breaks ONE property; the test suite must catch each one by a named test (a
+# build with any of them is RED too: refuse_if_red).
+m1 = []
+m3 = []
+m4 = []
+m5 = []
+m7 = []
+m10 = []
+m11 = []
+m16 = []
+m17 = []
+m22 = []
+m26 = []
+m27 = []
+m28 = []
+m29 = []
+m30 = []
+m34 = []
+m36 = []
+m37 = []
+m38 = []
+m42 = []
+m44 = []
+m45 = []
+# The repair of check-build-v1 (2026-11-13): one mutant per repaired guard; the suite must catch each.
+# m46: method_line takes the items as given (B1: no one-per-honest-row / same-search check).
+m46 = []
+# m47: a partition value with no declared provenance is read as RULED_FROM_TEXT (B2: the fail-closed check off).
+m47 = []
+# m48: MAIN's A2 ruling of ADANIENT alone not applied (B2: no W14K when the host leaves prov_universe out).
+m48 = []
+# m49: a carried trade booked in a run whose RULES declare no carried trades (F2).
+m49 = []
+# The repair of check-build-v1-r2 (2026-11-13, repair 2): one mutant per repaired guard of B1-R and the checker's two survivors.
+# m50: method_line counts an item of any view of an honest row (B1-R: no HEADLINE-view check; the checker's B1-P3).
+m50 = []
+# m51: method_line trusts the window sets as given (B1-R: a set doubled or dropped is read as more or fewer honest tests).
+m51 = []
+# m52: an extra item of a row that is not an honest row in use is silently dropped (the checker's surviving mutant Y3).
+m52 = []
+# m53: PartitionDef::declared skips the universe dimension (the checker's surviving mutant Y5).
+m53 = []
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = 1
+overflow-checks = true
+
+[profile.bench]
+inherits = "release"
+
+[lints.rust]
+unsafe_code            = "deny"
+missing_docs           = "warn"
+unreachable_pub        = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+unexpected_cfgs        = { level = "warn", check-cfg = [] }
+
+[lints.clippy]
+all                 = { level = "deny", priority = -1 }
+unwrap_used         = "deny"
+expect_used         = "deny"
+panic               = "deny"
+indexing_slicing    = "deny"
+float_arithmetic    = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss      = "deny"
+todo                = "deny"
+unimplemented       = "deny"
+dbg_macro           = "deny"

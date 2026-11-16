@@ -1,0 +1,50 @@
+[package]
+name = "feat_io"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+description = "The host side of common_feat v1 for the ADANIENT sniper: the Zerodha minute reader (store::file::BarFile, generation-aware), the GDFL tick-store reader keeping the LTQ = 0 new-price trade rows (LTQ0-HL-1), the bhavcopy extract, the dated session table, the reconciliation, the corporate-action check and undo, and the run driver. Read-only on every input."
+build = false
+autobenches = false
+autoexamples = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "feat-run"
+path = "src/main.rs"
+
+[features]
+# The red build: the minute candles come from the store's GDFL 1-s bars (traded rows only: LTQ0-HL-1 present) instead
+# of Zerodha's candles, and common_feat's OLD readings. CAL-1 / CAL-2 must be red under it.
+red = ["common_feat/red"]
+# The higher-timeframe feed puts candles at their START (m27): caught by OBF35 in common_feat and by the readings run.
+m_mtf_forming = ["common_feat/m_mtf_forming"]
+# REPAIR 1 (check-build-feat-v1 B2): the named host mutant: Zerodha candles that start before a segment (a special
+# session's open, a DR gap) are dropped again (v1); caught by tests/repair1.rs b2_*. The law tag reads RED.
+m_drop_straddle = ["common_feat/m_host"]
+# REPAIR 2 (check-build-sec.md B1 = check-build-feat-v1-r2 N1): the named host mutant: a volume-0 second inside a market-wide
+# halt is folded as a candle again (v1); caught by tests/repair2.rs n1_*. The law tag reads RED.
+m_halt0_folded = ["common_feat/m_host"]
+# S4 (r3, wave 4) named mutants, each caught by its named test (tests/idx_k11.rs, tests/idx_rows.rs):
+# m_k11: every context dial reads one step past S (the host's mutant moved with the readings into dials.rs; D-DTE counts to the TRUE expiry).
+m_k11 = ["common_feat/m_host"]
+# m_ix3: V-RVOL ON is accepted for a volume-0 (index) source.
+m_ix3 = ["common_feat/m_host"]
+# m_muhurat_kept: Muhurat candles reach an index signal stream again (Q39 broken).
+m_muhurat_kept = ["common_feat/m_host"]
+
+[dependencies]
+common_feat = { path = "../common_feat" }
+# THE EXISTING STORE READER (the one every round 3 / billions reader uses: store::file::BarFile::open_existing, which
+# resolves bar-generations-v1 pointers to bar-revisions-v1). Read only. Pinned by the sha256 of its source files in
+# LIFT.md / SHA256SUMS; the path is the round 3 REQ 70 tree (its store crate is byte-identical to engine-9's and g7's).
+store = { path = "../../../opening5s-5b3r70/crates/store", version = "0.1.0" }
+brutex_core = { path = "../../../opening5s-5b3r70/crates/core", package = "core", version = "0.1.0" }
+# The pure-Rust zstd decoder the project's pull crate uses for the tick store (pull::gdfl_tickstore::unzstd).
+ruzstd = { version = "0.9.1", default-features = false, features = ["std", "hash"] }
+
+[lints]
+workspace = true

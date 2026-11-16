@@ -1,0 +1,40 @@
+[package]
+name         = "idx_cal"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "S1 of SNIPER-IDXOPT-PLAN-v3.1: DP-IDXCAL (the dated NSE expiry calendar of NIFTY / BANKNIFTY from the F&O bhavcopy listings, true expiry days, re-dated series by contract identity, the G-CAL truth assertion), the dated official index close file, the dated F&O-end rows, the Muhurat list, the D-DTE closure list and the coverage report. Read only on every input."
+build = false
+autobenches = false
+autoexamples = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "idx-cal"
+path = "src/main.rs"
+
+[features]
+# K11 mutant m_idx_redate (plan s4.7 (17)): re-dated series are NOT joined by contract identity (the naive reading).
+# The G-CAL truth assertion must turn red under it (tests/gcal.rs).
+m_idx_redate = []
+# K11 mutant m_idx_cal (plan s4.7 (17)): the calendar row of session d is read from the file dated ON d (look-ahead).
+m_idx_cal = []
+
+[dependencies]
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+store       = { path = "../store", version = "0.1.0" }
+# The bhavcopy zips are read with the DEFLATE decoder only (one CSV member per zip; the zip directory is parsed here).
+flate2      = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# The pure-Rust zstd decoder of the tick store (as feat_io; ticks.rs is a copy of feat_io's with one split).
+ruzstd      = { version = "0.9.1", default-features = false, features = ["std", "hash"] }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "gen-served"
+path = "src/bin_served.rs"

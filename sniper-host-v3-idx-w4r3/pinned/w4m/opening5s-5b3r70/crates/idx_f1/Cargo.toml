@@ -1,0 +1,32 @@
+[package]
+name         = "idx_f1"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "S2 of SNIPER-IDXOPT-PLAN-v3.1: check-v21 F1, the replay of the earlier one-second index runs' fill rows (check-idx1s-early-A / -B: every trade file of the 10 finished idx1s runs) on crate v2.1's walk at the 1-second block, and the C11 vs host size.rs cross-test on cash shapes. Read only on every input."
+build = false
+autobenches = false
+autoexamples = false
+
+[[bin]]
+name = "f1-replay"
+path = "src/main.rs"
+
+[dependencies]
+common_fill = { path = "../../pinned/common-fill-v21" }
+idx_cal     = { path = "../idx_cal" }
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+store       = { path = "../store", version = "0.1.0" }
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# host_size.rs is a verbatim copy of the xcdb host's size.rs (sha16 e91c905212d1ee72); its two named mutants keep their names.
+m_s16q = []
+m_s16a = []

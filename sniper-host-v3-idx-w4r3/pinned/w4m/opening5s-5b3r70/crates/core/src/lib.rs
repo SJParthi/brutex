@@ -1,0 +1,39 @@
+//! Types, errors, the frozen condition table, and the trading calendar.
+//!
+//! This crate depends on nothing. That is a structural rule, not a
+//! preference: `crates/web` compiles to `wasm32-unknown-unknown` and is
+//! allowed exactly one dependency, this one. Every rule that both the server
+//! and the browser must agree on — how a price renders, what counts as a
+//! trading day, which bit means which condition — lives here and is compiled
+//! twice from one source, so the two cannot drift.
+//!
+//! See `docs/01-architecture.md` §2 and `docs/05-decisions.md` D-0009.
+//!
+//! # What is here
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`alias`] | every name an index goes by, and dated symbol changes, each sourced |
+//! | [`error`] | every error this crate can return |
+//! | [`instrument`] | the one identity every vendor resolves to |
+//! | [`isin`] | the cross-check that is deliberately not part of identity |
+//! | [`knob`] | how an environment value naming a folder or a switch is read |
+//! | [`price`] | paisa integers and the one float boundary |
+//! | [`secret_shape`] | whether a typed value has the shape of a pasted credential |
+//! | [`symbol`] | fixed-width symbols, one identity for every vendor |
+//! | [`universe`] | which lists a symbol belongs to |
+//! | [`vendor`] | one vendor master row in, one canonical key out |
+
+#![forbid(unsafe_code)]
+
+pub mod alias;
+pub mod blake3;
+pub mod error;
+pub mod instrument;
+pub mod isin;
+pub mod knob;
+pub mod price;
+pub mod secret_shape;
+pub mod symbol;
+pub mod universe;
+pub mod vendor;

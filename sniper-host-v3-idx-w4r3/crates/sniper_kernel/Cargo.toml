@@ -1,0 +1,29 @@
+[package]
+name = "sniper_kernel"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+description = "The sniper sweep kernel (SNIPER-ADANIENT-PLAN v2 section 8): the LINE engine over RSI x CCI x %R with FIRST mode and counted tie runs, ladders as data rows, outer bitsets, deterministic step counters. Pure: std only, no I/O, no float."
+build = false
+autobenches = false
+autoexamples = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# red-first: the OLD reading through the same API = the CUBE suffix reading B1 names (every qualifying candle of a session is a
+# trade; FIRST mode not applied). A host refuses a search run built with it.
+red = []
+# m-S2: a tie run counted as n - 1.
+m_s2 = []
+# m-S5: FIRST mode keeps the LATER candle.
+m_s5 = []
+# m-S19: a CLOSED last rung on an OPEN ladder (S8).
+m_s19 = []
+
+[dependencies]
+
+[lints]
+workspace = true

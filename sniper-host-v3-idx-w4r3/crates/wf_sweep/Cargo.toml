@@ -1,0 +1,34 @@
+[package]
+name = "wf_sweep"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+description = "The two common_wf ADDITIONS of decision D-S14 (SNIPER-ADANIENT-PLAN 8.3): SweepAcc (insert / remove in any order, learning months only, the year-part session trees of the exact max drawdown) and Lists::offer_learn (a counted tie run). STAGED in sniper-host-v1 because the common_wf v1 tree belongs to its own builder; written to be lifted into common_wf verbatim on MAIN's line, where SWEEP-EQ and OR-EQ run against common_wf's own Acc and offer. Pure: std only, no I/O, no float."
+build = false
+autobenches = false
+autoexamples = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# red-first: the LENIENT reading through the same API (a learning year part with no trade is dropped from E2; the drawdown read as
+# the sum of losses' largest single loss). A host refuses a search run built with it.
+red = []
+# m-S1: the sweep accepts a test-month trade.
+m_s1 = []
+# m-S6: the drawdown tree composes right to left.
+m_s6 = []
+# m-S14: the K5 path merges charged to the READ instead of the insert (the 1x/10x/100x per-event gate catches it).
+m_s14 = []
+# m_k17: the MISS money gap without the +1 paisa of an empty learning unit (SWEEP-EQ-MISS must catch it).
+m_k17 = []
+
+[dependencies]
+# Stage A: common_wf v1 at its repair 2 (SHA256SUMS sha16 5e01f0cf8fc749c7), linked from the PINNED copy pinned/common-wf-v1-r2 (re-pinned 2026-11-13 19:04 IST; the v1 pin pinned/common-wf-v1 is kept, unlinked): its drawdown monoid IS the
+# sweep tree's element, and its Acc / crit_val are the reference of SWEEP-EQ.
+common_wf = { path = "../../pinned/common-wf-v1-r2" }
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+[package]
+name = "common_feat"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+description = "THE common feature module of Brutex, v1 (REQ72-PLAN v4 A): RAW readings of candles, levels and calendar, O(1) a candle with deterministic step counters. Pure integer functions: std only, no I/O, no float."
+build = false
+autobenches = false
+autoexamples = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# The red-first switch: the named OLD readings through the same API (REQ72-PLAN A.1 `--features red`; a host refuses a
+# headline or search run built with it). OLD = the round 3 / bn conventions this version replaces:
+#   - Supertrend on the PAISA-rounded ATR of `indicators::dual_band_supertrend` (v1 holds ATR at S = 10^6);
+#   - Williams %R and CCI without the zero-range / zero-deviation refusal (they read 0 instead of `unknown`);
+#   - the higher-timeframe read of the FORMING candle (m27) is NOT part of red: it is mutant m_mtf_forming.
+red = []
+# Named mutants: each breaks ONE property; a named test must catch each (a build with any of them is RED too).
+m_mtf_forming = []      # m27 / m-S4: the higher timeframe's forming candle is read
+m_pattern_cross = []    # m19: the pattern ring is carried across the session boundary
+m_cidx_0915 = []        # m-S9: the candle index counted from a fixed 09:15:00 instead of the session table's open
+m_ca_future = []        # m20: a factor dated after the decision session is applied
+m_rvol_self = []        # F1: the decision session's own candle is inside the relative-volume mean
+m_rsi_flat_ready = []   # OBF34 / 3b-F6: a flat RSI window (G = L = 0) reads as ready (RSI 100)
+# REPAIR 1 (check-build-feat-v1.md B1-B3), each caught by its named test:
+m_mtf_reset_cross = []  # B1: the higher-timeframe slot ignores the K13 reset floor (reads a pre-ex-date candle after the reset)
+m_halt_ignored = []     # B3: a decision candle ending inside a market-wide halt is not refused
+m_cidx_floor = []       # B2: v1's floor candle index (a candle starting before the open is k = 0)
+m_host = []             # a named host-side mutant of feat_io is built in (the law tag reads RED)
+
+[dependencies]
+
+[lints]
+workspace = true

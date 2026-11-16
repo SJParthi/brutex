@@ -1,0 +1,47 @@
+# idxopt-v3 (INDEX BUILDER for MAIN 5b507203, Sat 14 Nov 2026): build steps S1-S6 of
+# state/sniper-req76-20261113/index-options-20261114/SNIPER-IDXOPT-PLAN-v3.1.md (signed in MAIN-SIGNED-IDXOPT-v3.1-20261114.md).
+# Members (every reused crate is a COPY, `cp -p -R -n`, never a link into another lane's tree):
+#   crates/core, crates/store, crates/telemetry, crates/costs : scratch/opening5s-5b3r70/crates/* (the sniper host's own pin;
+#       byte-identical to scratch/sniper-opt-beside/crates/*: diff -rq 0 lines). crates/costs gains ONE new module,
+#       `option_clock` (S3, plan s2 N2: the PORT of the robot's dated `rates_on` and the settle path of `charges`).
+#   crates/idx_cal  : S1, the data audit: DP-IDXCAL (the dated NSE expiry calendar, true expiry days, identity mapping,
+#       the G-CAL truth assertion), the dated official index close file, the dated F&O-end rows, the Muhurat list, the
+#       D-DTE closure list and the coverage report. Read only on every input.
+# pinned/common-fill-v21 = cp -p -R -n of scratch/common-fill-v21 (crate v2.1, SHA256SUMS 31 lines OK at copy, 14 Nov 23:3x IST);
+#   linked as a path dependency, never a member.
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/store", "crates/telemetry", "crates/costs", "crates/idx_cal", "crates/idx_f1", "crates/opt_pos"]
+exclude = ["pinned"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.97"
+license      = "UNLICENSED"
+publish      = false
+
+[workspace.lints.rust]
+unsafe_code            = "deny"
+missing_docs           = "warn"
+unreachable_pub        = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all                 = { level = "deny", priority = -1 }
+pedantic            = { level = "warn", priority = -1 }
+unwrap_used         = "deny"
+expect_used         = "deny"
+panic               = "deny"
+indexing_slicing    = "deny"
+float_arithmetic    = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss      = "deny"
+todo                = "deny"
+unimplemented       = "deny"
+dbg_macro           = "deny"
+
+[profile.release]
+opt-level = 3
+debug = 1
+overflow-checks = true

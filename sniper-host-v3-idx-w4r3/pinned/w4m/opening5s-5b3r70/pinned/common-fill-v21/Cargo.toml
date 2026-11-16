@@ -1,0 +1,70 @@
+[package]
+name = "common_fill"
+version = "2.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "THE common fill module of Brutex, crate v2.1 = crate v2 (THE STANDARD req70-2s: REQ 70 + 70a + 70b + 70c, changes C1-C8, gate G0) plus the numbered changes C9 (the block-length dial of REQ 73b, promoted from the idx1s lane build), C10 (gap tables, paired legs and the shared-volume ledger on every block length) and C11 (limits::size_units_closest, SNIPER s16), each with its red tests (CHANGES-v21.md). At the default 2-second block every reading is crate v2s, byte for byte. Pure integer functions: std only, no I/O, no float."
+publish = false
+# No build script: a build.rs dropped into this directory later must never run (the hosts' build glue also refuses unlisted files).
+build = false
+autobenches = false
+autoexamples = false
+autotests = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "cf_bench"
+path = "benches/cf_bench.rs"
+harness = false
+
+[features]
+# The red-first switch (design section 3, 10.4): under `red` the walk family returns the OLD rule through the same API: the per-second
+# REQ 58b core (1-second steps from the first printed second at or after T, the worse of the second and the next printed second, one
+# 5-paisa tick against the trader; `cmp::req58b`). A host refuses a headline or search run built with it (`refuse_if_red`, `RED`).
+red = []
+# The named mutants m1-m11 (design 10.4): each breaks ONE property; the test suite must catch each one (a build with any of them is RED too).
+m1 = []
+m2 = []
+m3 = []
+m4 = []
+m5 = []
+m6 = []
+m7 = []
+m8 = []
+m9 = []
+m10 = []
+m11 = []
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = 1
+overflow-checks = true
+
+[profile.bench]
+inherits = "release"
+
+# The tools' workspace lint set, copied (this crate sits outside every tool's workspace: design section 2).
+[lints.rust]
+unsafe_code            = "deny"
+missing_docs           = "warn"
+unreachable_pub        = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+unexpected_cfgs        = { level = "warn", check-cfg = [] }
+
+[lints.clippy]
+all                 = { level = "deny", priority = -1 }
+pedantic            = { level = "warn", priority = -1 }
+unwrap_used         = "deny"
+expect_used         = "deny"
+panic               = "deny"
+indexing_slicing    = "deny"
+float_arithmetic    = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss      = "deny"
+todo                = "deny"
+unimplemented       = "deny"
+dbg_macro           = "deny"

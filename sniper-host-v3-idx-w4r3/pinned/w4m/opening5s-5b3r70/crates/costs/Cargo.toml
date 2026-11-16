@@ -1,0 +1,73 @@
+[package]
+name         = "costs"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "Indian F&O statutory rates: the dated regime table, and the refusal that stands where a rate was never verified."
+
+# ---------------------------------------------------------------------------
+# ONE dependency, and every part of it is load-bearing.
+#
+#   Exchange  — NSE and BSE already exist as an enum in core, and the rate rows
+#               here are exchange-scoped because the circulars are. A second
+#               venue enum in this crate could drift from the store's.
+#   Paisa     — brokerage is money. CLAUDE.md section 7 fixes money at paisa
+#               integers, and core owns that type.
+#   Expiry    — the ONLY calendar validator in this workspace. `day::TradeDay`
+#               validates through it rather than writing a second leap-year
+#               rule that could disagree with the one the store already uses.
+#
+# There is NO dependency on the predecessor's `fno-math` crate and there never
+# can be: it links PyO3, which CLAUDE.md section 2 bans without exception, and
+# deny.toml lists `pyo3` by name. Its arithmetic was read; its binding was left
+# behind. See docs/05-decisions.md D-0039.
+# ---------------------------------------------------------------------------
+[dependencies]
+# The lib target is `brutex_core` and it MUST be referred to by that name: a
+# dependency key of `core` shadows the sysroot crate inside rustdoc's generated
+# doc-test harness. Proven four times now -- in core itself, in store, in pull,
+# and here.
+#
+# A version is required alongside the path: deny.toml sets wildcards = "deny",
+# and a path dependency with no version IS a wildcard.
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+# WAVE 4 (S4-S6 builder, check-build-idx-S1-S6 D1): crate v2.1 (the pinned copy, std only, no dependencies) so that
+# option_clock::settle calls common_fill::limits::settle_intrinsic instead of re-implementing it (one common runtime).
+common_fill = { path = "../../pinned/common-fill-v21" }
+
+# ---------------------------------------------------------------------------
+# GATE 8 — the O(1) ratio harness. `harness = false` so it is a plain binary
+# with no benchmarking framework and therefore no dependency; `test = false`
+# because `cargo test` must not run a timing loop, and the coverage gate must
+# not measure one. See D-0034 and crates/core/Cargo.toml.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false
+
+[lints]
+workspace = true
+
+# The section above sits between the two [[bench]] blocks on purpose: gate 14's
+# manifest reader (.github/gates_bounds.rs, bench_decls) drops a [[bench]] that
+# is followed directly by another [[bench]], and would then report that this
+# crate declares no `ratio` bench (found at the CLOUD-CHG1 merge, 16 Oct 2026).
+
+# ---------------------------------------------------------------------------
+# Package CHG-1 — the charge stack's p50 / p99 / max per executed order and per
+# client-security-day, and the ratios that would show a cost growing with the
+# trade. Same shape as `ratio`, for the same reasons: no framework, no
+# dependency, not run by `cargo test`. D-5118.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "stack"
+harness = false
+test    = false
+
+# idxopt-v3 (S3): the named mutant of the option_clock port: the settle path is cut (a settled remainder read as unsettled).
+# The exercise-STT red vectors must fail under it.
+[features]
+m_oc_settle = []

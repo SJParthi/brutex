@@ -1,0 +1,55 @@
+# sniper-host-v1: the SNIPER HOST and SWEEP KERNEL (SNIPER-ADANIENT-PLAN v2, MAIN-signed with S1-S11; SNIPER-REQUIREMENTS 0-14).
+# Three crates:
+#   crates/sniper_kernel : the LINE engine over RSI x CCI x %R (plan 8.3), FIRST mode, counted tie runs, the ladders as data rows,
+#                          the outer bitsets, the step counters (plan 8.4). Pure: std only, no I/O, no float.
+#   crates/wf_sweep      : the two common_wf ADDITIONS of decision D-S14 (SweepAcc, Lists::offer_learn), STAGED here because the
+#                          common_wf v1 tree belongs to its own builder; written to be lifted into common_wf verbatim on MAIN's line.
+#                          Pure: std only, no I/O, no float.
+#   crates/sniper_host   : the thin wiring: data rows, common_feat readings (Zerodha minute candles, S1), crate v2 pricing (never
+#                          FillPath::cut_at, S2), the outcome store, DB rows with a hash-chained audit, monitoring, the luck twin,
+#                          the NEW-DAY path (S9), sniper-q.
+[workspace]
+resolver = "3"
+members = ["crates/sniper_kernel", "crates/wf_sweep", "crates/sniper_host"]
+# pinned/common-wf-v1: a cp -p -n of common_wf v1 AS SHA256SUMS'd (9331e56d8a811eba, 17:10:25 IST; verified 0 mismatches), taken from
+# its repairer's pre-repair copy at 17:5x IST while the live tree is under repair; linked read-only, never a member.
+# pinned/common-feat-v1: the same for common_feat v1 (SHA256SUMS ead47bd674df6fd2, 16:47:31 IST; from repair-feat-v1/orig, verified
+# 0 mismatches); pinned/opening5s-5b3r70 is a symlink to the round 3 tree its feat_io links (the store reader).
+# HOST REPAIR (2026-11-13, from `date` 19:04 IST): both stage A crates RE-PINNED at their repaired SHA256SUMS: pinned/common-wf-v1-r2
+# (repair 2, 5e01f0cf8fc749c7) and pinned/common-feat-v1-r1 (repair 1, 96dcae85389cacbc), each a cp -p -n verified 0 mismatches; the v1
+# pins above are kept, no longer linked.
+exclude = ["pinned"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code             = "deny"
+missing_docs            = "warn"
+unreachable_pub         = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all                      = { level = "deny", priority = -1 }
+unwrap_used              = "deny"
+expect_used              = "deny"
+panic                    = "deny"
+indexing_slicing         = "deny"
+float_arithmetic         = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss           = "deny"
+todo                     = "deny"
+unimplemented            = "deny"
+dbg_macro                = "deny"
+
+[profile.release]
+opt-level = 3
+debug = 1
+overflow-checks = true
+# Speed build (sniper-host-v1-fast, 2026-11-14): whole-program optimisation so the drawdown monoid (common_wf::dd::Dd::combine),
+# the step histogram and the list compares inline across crates. Semantics unchanged (no float in the sweep; checked sums stay).
+lto = "fat"
+codegen-units = 1

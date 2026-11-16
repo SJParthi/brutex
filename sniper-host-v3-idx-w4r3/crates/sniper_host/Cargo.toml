@@ -1,0 +1,175 @@
+[package]
+name = "sniper_host"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+description = "The SNIPER HOST (SNIPER-ADANIENT-PLAN v2): thin wiring of common_feat (RAW readings on Zerodha minute candles, S1), the frozen common fill crate v2 (2-second worst-case blocks; never FillPath::cut_at, S2), the sweep kernel and the D-S14 additions; the outcome store, DB rows with a hash-chained audit, heartbeat monitoring, the luck twin, the NEW-DAY path (S9) and sniper-q."
+build = false
+autobenches = false
+autoexamples = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sniper-host"
+path = "src/bin/sniper-host.rs"
+
+[[bin]]
+name = "sniper-q"
+path = "src/bin/sniper-q.rs"
+
+[[test]]
+name = "matrix"
+path = "tests/matrix.rs"
+
+[[test]]
+name = "no_cut_at"
+path = "tests/no_cut_at.rs"
+
+[[test]]
+name = "h1"
+path = "tests/h1.rs"
+
+[[test]]
+name = "sec"
+path = "tests/sec.rs"
+
+# DIALS BUILD: the seven context / calendar / range dials on the real data (wiring, radix, OFF = binary k, K11, plan vectors).
+[[test]]
+name = "dials"
+path = "tests/dials.rs"
+
+# PORTER (secfd): the seven context dials on the seconds driver's compact rows (SEC-EQ ON on 60 min and 30 s; OFF = secf).
+[[test]]
+name = "secdials"
+path = "tests/secdials.rs"
+
+# HOST v3 (2026-11-14): check-build-v2 F1, the two merge-point tests (the kept-set match of run_with / run_all_kept against an
+# oracle that never reads kept_of; the minutes driver's swept-N order: a two-N search equals the one-N searches row by row).
+[[test]]
+name = "f1"
+path = "tests/f1.rs"
+
+[features]
+red = ["sniper_kernel/red", "wf_sweep/red"]
+# m-S16: the host references FillPath::cut_at (the build test `no_cut_at` must catch it).
+m_s16 = []
+# m-S17: a beside law that skips a block on price (req70-2s-cap) is accepted at load (matrix SN-X45 must catch it).
+m_s17 = []
+# m_rw: the pick re-walk keeps a session's LATER qualifying candle (search::tests REWALK-EQ must catch it).
+m_rw = []
+# m_s4 (plan m-S4): a higher timeframe's FORMING candle is read (cands::tests SN-X15 must catch it).
+m_s4 = []
+# HOST REPAIR (2026-11-13; check-build-feat-v1-r2 H1, check-build-host-v1 B2 / B3), each caught by its named test:
+# m_h1_reset: the higher-timeframe slot never gets the decision stream's K13 reset (the v1 host: a bare MtfSlot); caught by
+#   cands::tests h1a and tests/h1.rs h1a (H-* 15 min on 2025-11-17 09:15).
+m_h1_reset = []
+# m_h1_entry: the decision reads the bare session flag `Session::entry` (the v1 host), not `entry_at(candle END)`; caught by
+#   tests/h1.rs h1b (3 min 2020-03-13 09:21 and 2020-03-23 09:57 are no candidates).
+m_h1_entry = []
+# m_b2: the per-pick protection count reads the stop-clip flag (CLIPPED), not the protection hold; caught by matrix SN-B2.
+m_b2 = []
+# m_b3: sniper-q guesses the record width from the part's name (the v1 sniper-q); caught by matrix SN-B3.
+m_b3 = []
+# SNIPER s16 (sizing builder, 2026-11-14), each caught by its named test:
+# m_s16q: half way takes the UPPER count; caught by size::tests closest_equals_the_plain_definition and half_way_takes_the_lower_count.
+m_s16q = []
+# m_s16a: the account base is never applied (the rule's count always taken); caught by size::tests the_account_base_cuts and matrix sn16.
+m_s16a = []
+# SECONDS BUILDER (2026-11-14; ported onto the closest-count host by the seconds porter secf), each caught by its named test:
+# m_sec_eq: a GE boundary byte one level short (the compact kept set loses its last passing level); caught by tests/sec.rs sec_eq_minutes.
+m_sec_eq = []
+# m_sec_htf: the streaming H-* cursor puts the next queued candle before it has ended (a forming candle read); caught by
+#   cands::tests htf_cursor_equals_htf_slots.
+m_sec_htf = []
+# REPAIR ROUND (2026-11-14): m_n1 = feat_io m_halt0_folded (a halt-window volume-0 second folded as a candle again); caught by tests/sec.rs
+#   n1_halt_window_indicative_seconds_absent.
+m_n1 = ["feat_io/m_halt0_folded"]
+# SNIPER s20 (combined exit builder, 2026-11-14), each caught by its named test:
+# m_xc_flip: the combined exit ignores the Supertrend flip (the clock or the square-off only); caught by matrix sn20_the_flip_wins_when_it_comes_first.
+m_xc_flip = []
+# m_xc_clock: the combined exit's clock is the go-positive timer, not the plain clock; caught by matrix sn20_the_clock_wins_even_in_profit.
+m_xc_clock = []
+# m_xc_cut (check-build-xc B1, FIXER 2026-11-14): the combined exit's clock ignores the broker's 15:08:00 own-order cut (REQ 70 S14);
+#   caught by matrix sn20_the_clock_at_or_after_the_cut_waits_for_the_square_off.
+m_xc_cut = []
+# DIALS BUILD: m_k11: every context dial reads one step past S (the forming index minute, an expiry listed on the day, a closure
+#   announced on the day, the decision session's own official row in the 52-week window and the daily ATR, a later candle in the
+#   day's range); caught by ctxdials::tests k11_* and tests/dials.rs k11_* (and sn_x09_b5).
+m_k11 = []
+# INDEX S7 builder (plan v3.1 s3.4 law table, crates/sniper_host/src/instr.rs): each mutant must turn its s7_* test red.
+m_ix1a = []
+m_ix1b = []
+m_ix_hold = []
+m_ix_roll = []
+m_ix_rollopen = []
+m_ix_itm_stk = []
+m_ix_zgap = []
+m_ix_cash_rows = []
+m_s7_sym = []
+# S7 BUILDER wave 4 (2026-11-15), each must turn its named test red (a build with any of them refuses a search):
+# m_ix_sq: the law table accepts sq_charge broker (L9, D2); caught by instr::tests::s7w4_law_l9_square_off_is_the_strategys_own_order.
+m_ix_sq = []
+# m_s7w4_refuse_idx: IDXOPT refused again (the wave-3 binary); caught by instr::tests::s7w4_index_modes_are_priced.
+m_s7w4_refuse_idx = []
+# m_d2_broker_sq: the shared pricer charges the 15:10 square-off as the BROKER's order (D2); caught by opt_pos intraday::tests::d2_*
+#   and idx::tests::d2_host_square_off_net_is_own_order.
+m_d2_broker_sq = ["opt_pos/m_d2_broker_sq"]
+# Lane B's P3 set on the INDEX positional groups (crate::posgroups, copied from lane B's tree) and the CRITIC-POSITIONAL B2 mutant:
+# m_pos_look: the exit finder reads the NEXT candle's Supertrend side; m_pos_group: an against-side (F17) entry grouped with the with-side
+# episode; m_pos_sess: groups by SESSION (two positions of one side open at once); m_pos_mk: a positional trade booked at its ENTRY month;
+# m_pos_future_refusal: a LATER-class refusal (known only after the entry: roll_no_itm, roll_refused_cash, roll_close_incomplete, a hole)
+# removes the row, so FIRST moves to a later candle (look-ahead). Each caught by its idx::tests / posgroups::tests case.
+m_pos_look = []
+m_pos_group = []
+m_pos_sess = []
+m_pos_mk = []
+m_pos_future_refusal = []
+# S7 BUILDER wave 4 (resumed 2026-11-15 17:0x): m_pos_rd_alone: the positional run-down reads each trip ALONE against its own premium
+# (the roll legs NOT joined, the earlier trips' realised result dropped: the 16:12 reading); caught by
+# idxpos::tests::s7w4_rundown_joins_the_roll_legs_lane_b_s5.
+m_pos_rd_alone = []
+# m_pos_f8: the positional one-order gate F8 accepts an entry / roll-open whose A2 quantity is above that day's one-order maximum;
+# caught by idxpos::tests::s7w4_positional_f8_gate_on_entries_and_roll_opens.
+m_pos_f8 = []
+# S7 BUILDER wave 4 resumed again (the NIFTY 60m LONG positional canary on final3 stopped in common_wf on 'acc add: TradeOnUnwalkedSession':
+# a carry filled on the Saturday budget session 2020-02-01, a SPECIAL session the common_wf calendar does not walk without a ruling, R11):
+# m_pos_book_unwalked: the booking session is the latest session at or before the day the money is last known (the final3 reading) instead
+# of the first WALKED session at or after it; caught by idxpos::tests::s7w4_booking_session_is_the_next_walked_session.
+m_pos_book_unwalked = []
+# W4 REPAIR r3 (check-wave4-S9-r2.md D-R2-1): m_idx_data_end_nohole: a data-end valuation on a DATA-law hole is not a hole trade (the w4r
+# reading): opt_pos skips the valuation's span test (opt_pos/m_idx_data_end_nohole, red on pos::tests::data_end_valuation_on_a_hole_session_
+# carries_the_hole) and level_of reads the legs only; caught by idxpos::tests::w4r3_level_of_sets_hole_for_a_data_end_valuation_on_a_hole.
+m_idx_data_end_nohole = ["opt_pos/m_idx_data_end_nohole"]
+
+[dependencies]
+sniper_kernel = { path = "../sniper_kernel" }
+wf_sweep = { path = "../wf_sweep" }
+# Stage A: common_wf v1 LINKED, RE-PINNED 2026-11-13 19:04 IST at its repair 2 (pinned/common-wf-v1-r2 = cp -p -n of scratch/common-wf-v1, SHA256SUMS sha16 5e01f0cf8fc749c7, 72 lines, 0 mismatches): picks, verdicts, words, the repaired method_line.
+# common_feat v1 RE-PINNED at its repair 1 (pinned/common-feat-v1-r1, SHA256SUMS sha16 96dcae85389cacbc, 183 lines, 0 mismatches; check-build-feat-v1-r2 PASS W/F-U): MtfSlot::reset_at, Session::entry_at, the HALT rows, the kept straddling candles.
+common_wf = { path = "../../pinned/common-wf-v1-r2" }
+common_fill = { path = "../../../common-fill-v2" }
+# REPAIR ROUND (2026-11-14, check-build-sec.md B1 = check-build-feat-v1-r2 N1): RE-PINNED at common_feat REPAIR 2 (pinned/common-feat-v1-r2 =
+# cp -p -R -n of pinned/common-feat-v1-r1 + ONE new feat_io read, host::session_seconds: read_member + fold_seconds + the segment filter, every
+# halt-window volume-0 second dropped and counted; feat-run seconds and sec::day_seconds both call it). r1 is kept, no longer linked.
+# S7 BUILDER wave 4 (2026-11-15, main 5b507203): RE-PINNED at common_feat REPAIR 3 = S4 of SNIPER-IDXOPT-PLAN-v3.1 (pinned/w4m/common-feat-v1-r3 =
+# cp -p -R -n of scratch/idxopt-v3-w4m/pinned/common-feat-v1-r3, SHA256SUMS-r3 sha16 b05fafb38dab24d0; S4 PASS: every ADANIENT reading
+# byte-identical to r2, host v3's 84 tests pass linked to it): the index instrument READ rows (feat_io::instr), the index Zerodha read
+# with the Muhurat candles excluded, X-PEER / X-VIX / D-EXP / D-DTE / D-MEND / G-52H / G-52L / G-DRNG for the index rows (feat_io::idxdials).
+# costs + core now come from pinned/w4m/opening5s-5b3r70 (= scratch/idxopt-v3-w4m/crates: core / store / telemetry byte-identical to
+# scratch/opening5s-5b3r70's; costs = the same + the option_clock port, S3), so ONE copy of each serves the host, feat_io and opt_pos.
+common_feat = { path = "../../pinned/w4m/common-feat-v1-r3/crates/common_feat" }
+feat_io = { path = "../../pinned/w4m/common-feat-v1-r3/crates/feat_io" }
+costs = { path = "../../pinned/w4m/opening5s-5b3r70/crates/costs", version = "0.1.0" }
+brutex_core = { path = "../../pinned/w4m/opening5s-5b3r70/crates/core", package = "core", version = "0.1.0" }
+# S7 BUILDER wave 4: the shared option pricer of the index tracks = opt_pos of scratch/idxopt-v3-w4m (S8b positional legs + wave 4: D1 / D3 /
+# D4, the production source DP-NEWPX-IDXOPT under the DATA law, the account re-walk), its calendar crate idx_cal and its fill crate v2.1
+# (common_fill 2.1.0, a distinct package from the cash path's crate v2: the cash path keeps v2, so its results stay byte-identical, P2).
+opt_pos = { path = "../../pinned/w4m/opening5s-5b3r70/crates/opt_pos" }
+idx_cal = { path = "../../pinned/w4m/opening5s-5b3r70/crates/idx_cal" }
+cf21 = { path = "../../pinned/w4m/opening5s-5b3r70/pinned/common-fill-v21", package = "common_fill" }
+
+[lints]
+workspace = true
