@@ -1,0 +1,90 @@
+crates/sniper_host/src/price.rs:500:23: replace += with *= in price
+crates/sniper_host/src/price.rs:500:23: replace += with -= in price
+crates/sniper_host/src/price.rs:507:23: replace += with *= in price
+crates/sniper_host/src/price.rs:511:25: replace > with == in price
+crates/sniper_host/src/price.rs:511:25: replace > with < in price
+crates/sniper_host/src/price.rs:512:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:515:69: replace * with + in price
+crates/sniper_host/src/price.rs:517:27: replace > with == in price
+crates/sniper_host/src/price.rs:517:27: replace > with >= in price
+crates/sniper_host/src/price.rs:517:45: replace > with == in price
+crates/sniper_host/src/price.rs:517:45: replace > with >= in price
+crates/sniper_host/src/price.rs:520:30: replace > with == in price
+crates/sniper_host/src/price.rs:520:30: replace > with >= in price
+crates/sniper_host/src/price.rs:520:51: replace > with == in price
+crates/sniper_host/src/price.rs:520:51: replace > with >= in price
+crates/sniper_host/src/price.rs:536:48: replace / with % in price
+crates/sniper_host/src/price.rs:536:48: replace / with * in price
+crates/sniper_host/src/price.rs:536:39: replace * with + in price
+crates/sniper_host/src/price.rs:552:5: replace derive_composite -> Priced with Default::default()
+crates/sniper_host/src/price.rs:571:5: replace record_width -> usize with 0
+crates/sniper_host/src/price.rs:556:30: replace <= with > in derive_composite
+crates/sniper_host/src/price.rs:571:5: replace record_width -> usize with 1
+crates/sniper_host/src/price.rs:571:38: replace * with + in record_width
+crates/sniper_host/src/price.rs:571:38: replace * with / in record_width
+crates/sniper_host/src/price.rs:571:20: replace + with - in record_width
+crates/sniper_host/src/price.rs:571:20: replace + with * in record_width
+crates/sniper_host/src/price.rs:571:16: replace * with + in record_width
+crates/sniper_host/src/price.rs:571:16: replace * with / in record_width
+crates/sniper_host/src/price.rs:571:9: replace * with + in record_width
+crates/sniper_host/src/price.rs:571:9: replace * with / in record_width
+crates/sniper_host/src/price.rs:581:5: replace encode -> Result<Vec<u8>, Refusal> with Ok(vec![])
+crates/sniper_host/src/price.rs:581:5: replace encode -> Result<Vec<u8>, Refusal> with Ok(vec![0])
+crates/sniper_host/src/price.rs:581:5: replace encode -> Result<Vec<u8>, Refusal> with Ok(vec![1])
+crates/sniper_host/src/price.rs:595:104: replace / with * in encode
+crates/sniper_host/src/price.rs:602:99: replace / with * in encode
+crates/sniper_host/src/price.rs:602:82: replace - with + in encode
+crates/sniper_host/src/price.rs:605:23: replace != with == in encode
+crates/sniper_host/src/query.rs:11:5: replace build_index -> Vec<u8> with vec![]
+crates/sniper_host/src/query.rs:11:5: replace build_index -> Vec<u8> with vec![0]
+crates/sniper_host/src/query.rs:11:5: replace build_index -> Vec<u8> with vec![1]
+crates/sniper_host/src/query.rs:11:31: replace + with - in build_index
+crates/sniper_host/src/query.rs:11:31: replace + with * in build_index
+crates/sniper_host/src/query.rs:14:52: replace + with - in build_index
+crates/sniper_host/src/query.rs:14:52: replace + with * in build_index
+crates/sniper_host/src/query.rs:14:48: replace * with + in build_index
+crates/sniper_host/src/query.rs:14:48: replace * with / in build_index
+crates/sniper_host/src/query.rs:30:5: replace lookup -> Option<u32> with None
+crates/sniper_host/src/query.rs:30:5: replace lookup -> Option<u32> with Some(0)
+crates/sniper_host/src/query.rs:30:5: replace lookup -> Option<u32> with Some(1)
+crates/sniper_host/src/query.rs:30:40: replace + with - in lookup
+crates/sniper_host/src/query.rs:30:40: replace + with * in lookup
+crates/sniper_host/src/query.rs:32:13: replace >= with < in lookup
+crates/sniper_host/src/query.rs:32:34: replace > with < in lookup
+crates/sniper_host/src/query.rs:35:27: replace + with - in lookup
+crates/sniper_host/src/query.rs:35:27: replace + with * in lookup
+crates/sniper_host/src/query.rs:36:10: replace + with - in lookup
+crates/sniper_host/src/query.rs:36:10: replace + with * in lookup
+crates/sniper_host/src/query.rs:36:49: replace * with + in lookup
+crates/sniper_host/src/query.rs:36:49: replace * with / in lookup
+crates/sniper_host/src/query.rs:36:31: replace + with - in lookup
+crates/sniper_host/src/query.rs:36:31: replace + with * in lookup
+crates/sniper_host/src/query.rs:36:27: replace * with + in lookup
+crates/sniper_host/src/query.rs:36:27: replace * with / in lookup
+crates/sniper_host/src/query.rs:36:68: replace != with == in lookup
+crates/sniper_host/src/query.rs:42:5: replace record -> Option<&[u8]> with None
+crates/sniper_host/src/query.rs:42:5: replace record -> Option<&[u8]> with Some(Vec::leak(Vec::new()))
+crates/sniper_host/src/query.rs:42:5: replace record -> Option<&[u8]> with Some(Vec::leak(vec![0]))
+crates/sniper_host/src/query.rs:42:5: replace record -> Option<&[u8]> with Some(Vec::leak(vec![1]))
+crates/sniper_host/src/query.rs:42:26: replace * with + in record
+crates/sniper_host/src/query.rs:42:26: replace * with / in record
+crates/sniper_host/src/query.rs:43:19: replace + with - in record
+crates/sniper_host/src/query.rs:43:19: replace + with * in record
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![], vec![])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![], vec![vec![String::new()]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![], vec![vec![]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![], vec![vec!["xyzzy".into()]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![String::new()], vec![])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![String::new()], vec![vec![]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![String::new()], vec![vec![String::new()]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec![String::new()], vec![vec!["xyzzy".into()]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec!["xyzzy".into()], vec![])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec!["xyzzy".into()], vec![vec![]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec!["xyzzy".into()], vec![vec![String::new()]])
+crates/sniper_host/src/rows.rs:27:5: replace tsv -> (Vec<String>, Vec<Vec<String>>) with (vec!["xyzzy".into()], vec![vec!["xyzzy".into()]])
+crates/sniper_host/src/rows.rs:44:5: replace col -> Result<usize, String> with Ok(0)
+crates/sniper_host/src/rows.rs:44:5: replace col -> Result<usize, String> with Ok(1)
+crates/sniper_host/src/rows.rs:44:34: replace == with != in col
+crates/sniper_host/src/rows.rs:59:9: replace RunRows::parse -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/rows.rs:79:9: replace RunRows::get -> Result<&str, String> with Ok("")
+crates/sniper_host/src/rows.rs:79:9: replace RunRows::get -> Result<&str, String> with Ok("xyzzy")

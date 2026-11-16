@@ -1,0 +1,31 @@
+crates/wf_sweep/src/acc.rs:504:9: replace SweepAcc<'a>::sync_months -> Result<(), SweepErr> with Ok(())
+crates/wf_sweep/src/acc.rs:555:47: replace && with || in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:560:57: replace * with + in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:560:57: replace * with / in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:561:60: replace * with / in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:561:60: replace * with + in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:573:17: replace > with == in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:573:17: replace > with >= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:576:17: replace < with == in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:576:17: replace < with <= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:588:32: replace > with >= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:591:30: replace += with -= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:591:30: replace += with *= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:593:23: replace += with *= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:593:28: replace + with * in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:595:24: replace * with / in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:597:27: replace > with >= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:599:27: replace > with >= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:600:45: replace > with >= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:601:19: replace += with -= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:601:19: replace += with *= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:605:29: replace > with >= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:616:27: replace += with -= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:616:27: replace += with *= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:621:21: replace > with >= in SweepAcc<'a>::apply
+crates/wf_sweep/src/acc.rs:636:22: replace += with *= in SweepAcc<'a>::insert
+crates/wf_sweep/src/acc.rs:645:22: replace += with *= in SweepAcc<'a>::remove
+crates/wf_sweep/src/acc.rs:654:49: replace && with || in SweepAcc<'a>::reset
+crates/wf_sweep/src/acc.rs:654:22: replace && with || in SweepAcc<'a>::reset
+crates/wf_sweep/src/acc.rs:654:25: delete ! in SweepAcc<'a>::reset
+crates/wf_sweep/src/acc.rs:654:52: delete ! in SweepAcc<'a>::reset

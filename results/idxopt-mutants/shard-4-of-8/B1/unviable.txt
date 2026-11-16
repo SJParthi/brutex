@@ -1,0 +1,3 @@
+crates/sniper_host/src/rows.rs:87:9: replace RunRows::num -> Result<T, String> with Ok(Default::default())
+crates/sniper_host/src/rows.rs:95:9: replace RunRows::list -> Result<Vec<T>, String> with Ok(vec![Default::default()])
+crates/sniper_host/src/rows.rs:125:9: replace Windows::parse -> Result<Self, String> with Ok(Default::default())

@@ -1,0 +1,58 @@
+crates/costs/src/option_clock.rs:220:23: replace && with || in charges
+crates/costs/src/option_clock.rs:220:41: replace > with < in charges
+crates/costs/src/option_clock.rs:220:41: replace > with >= in charges
+crates/costs/src/option_clock.rs:221:44: replace + with - in charges
+crates/costs/src/option_clock.rs:220:41: replace > with == in charges
+crates/costs/src/option_clock.rs:221:44: replace + with * in charges
+crates/costs/src/option_clock.rs:222:40: replace + with - in charges
+crates/costs/src/option_clock.rs:222:40: replace + with * in charges
+crates/costs/src/option_clock.rs:223:63: replace + with - in charges
+crates/costs/src/option_clock.rs:223:63: replace + with * in charges
+crates/costs/src/option_clock.rs:223:42: replace + with - in charges
+crates/costs/src/option_clock.rs:223:42: replace + with * in charges
+crates/costs/src/option_clock.rs:225:42: replace + with - in charges
+crates/costs/src/option_clock.rs:225:42: replace + with * in charges
+crates/costs/src/option_clock.rs:226:91: replace + with - in charges
+crates/costs/src/option_clock.rs:226:91: replace + with * in charges
+crates/costs/src/option_clock.rs:226:57: replace + with - in charges
+crates/costs/src/option_clock.rs:226:57: replace + with * in charges
+crates/costs/src/option_clock.rs:227:35: replace + with - in charges
+crates/costs/src/option_clock.rs:227:35: replace + with * in charges
+crates/costs/src/option_clock.rs:227:30: replace + with - in charges
+crates/costs/src/option_clock.rs:227:30: replace + with * in charges
+crates/costs/src/option_clock.rs:227:25: replace + with - in charges
+crates/costs/src/option_clock.rs:227:25: replace + with * in charges
+crates/costs/src/option_clock.rs:227:20: replace + with - in charges
+crates/costs/src/option_clock.rs:227:20: replace + with * in charges
+crates/costs/src/option_clock.rs:228:29: replace * with + in charges
+crates/costs/src/option_clock.rs:228:29: replace * with / in charges
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 0, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 0, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 0, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 1, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 1, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 1, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, -1, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, -1, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, -1, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 0, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 0, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 0, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 1, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 1, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 1, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, -1, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, -1, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, -1, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 0, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 0, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 0, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 1, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 1, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 1, [-1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, -1, [0; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, -1, [1; 8])
+crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, -1, [-1; 8])
+crates/costs/src/option_clock.rs:240:45: replace && with || in charges_est
+crates/costs/src/option_clock.rs:240:30: replace == with != in charges_est
+crates/costs/src/option_clock.rs:240:48: delete ! in charges_est

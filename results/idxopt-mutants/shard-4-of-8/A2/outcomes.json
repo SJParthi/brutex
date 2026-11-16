@@ -1,0 +1,4050 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 4.972681366,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 1.3584840950000001,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:220:23: replace && with || in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 220,
+              "column": 23
+            },
+            "end": {
+              "line": 220,
+              "column": 25
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_220_col_23.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_220_col_23.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.312506213,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.30497122,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:220:41: replace > with < in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 220,
+              "column": 41
+            },
+            "end": {
+              "line": 220,
+              "column": 42
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_220_col_41_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_220_col_41_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.210758135,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.507683377,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:220:41: replace > with >= in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 220,
+              "column": 41
+            },
+            "end": {
+              "line": 220,
+              "column": 42
+            }
+          },
+          "replacement": ">=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_220_col_41_002.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_220_col_41_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.860100696,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.258642245,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:221:44: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 221,
+              "column": 44
+            },
+            "end": {
+              "line": 221,
+              "column": 45
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_221_col_44.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_221_col_44.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.960662545,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.312257264,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:220:41: replace > with == in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 220,
+              "column": 41
+            },
+            "end": {
+              "line": 220,
+              "column": 42
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_220_col_41.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_220_col_41.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 5.801154557,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.351813559,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:221:44: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 221,
+              "column": 44
+            },
+            "end": {
+              "line": 221,
+              "column": 45
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_221_col_44_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_221_col_44_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.078412706,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.35176736,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:222:40: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 222,
+              "column": 40
+            },
+            "end": {
+              "line": 222,
+              "column": 41
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_222_col_40.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_222_col_40.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.061915082,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.354815746,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:222:40: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 222,
+              "column": 40
+            },
+            "end": {
+              "line": 222,
+              "column": 41
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_222_col_40_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_222_col_40_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.1662268980000001,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.301815517,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:223:63: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 223,
+              "column": 63
+            },
+            "end": {
+              "line": 223,
+              "column": 64
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_223_col_63.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_223_col_63.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.110654732,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.353947492,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:223:63: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 223,
+              "column": 63
+            },
+            "end": {
+              "line": 223,
+              "column": 64
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_223_col_63_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_223_col_63_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.011173867,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408967308,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:223:42: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 223,
+              "column": 42
+            },
+            "end": {
+              "line": 223,
+              "column": 43
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_223_col_42.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_223_col_42.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.408016897,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408131798,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:223:42: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 223,
+              "column": 42
+            },
+            "end": {
+              "line": 223,
+              "column": 43
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_223_col_42_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_223_col_42_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.116756934,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.405265886,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:225:42: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 225,
+              "column": 42
+            },
+            "end": {
+              "line": 225,
+              "column": 43
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_225_col_42.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_225_col_42.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.118630898,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.45658773,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:225:42: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 225,
+              "column": 42
+            },
+            "end": {
+              "line": 225,
+              "column": 43
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_225_col_42_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_225_col_42_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.159639364,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.457284224,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:226:91: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 226,
+              "column": 91
+            },
+            "end": {
+              "line": 226,
+              "column": 92
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_226_col_91.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_226_col_91.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.014234434,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.36177777,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:226:91: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 226,
+              "column": 91
+            },
+            "end": {
+              "line": 226,
+              "column": 92
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_226_col_91_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_226_col_91_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.1131811759999999,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.403112395,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:226:57: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 226,
+              "column": 57
+            },
+            "end": {
+              "line": 226,
+              "column": 58
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_226_col_57.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_226_col_57.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.118317049,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.35415148,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:226:57: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 226,
+              "column": 57
+            },
+            "end": {
+              "line": 226,
+              "column": 58
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_226_col_57_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_226_col_57_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.057154825,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.406463687,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:35: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 35
+            },
+            "end": {
+              "line": 227,
+              "column": 36
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_35.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_35.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.019084879,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.354824178,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:35: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 35
+            },
+            "end": {
+              "line": 227,
+              "column": 36
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_35_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_35_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.959247671,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.354485133,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:30: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 30
+            },
+            "end": {
+              "line": 227,
+              "column": 31
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_30.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_30.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.367350543,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.302879261,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:30: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 30
+            },
+            "end": {
+              "line": 227,
+              "column": 31
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_30_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_30_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.020017692,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408433676,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:25: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 25
+            },
+            "end": {
+              "line": 227,
+              "column": 26
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_25.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_25.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.963205138,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.46028779,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:25: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 25
+            },
+            "end": {
+              "line": 227,
+              "column": 26
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_25_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_25_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.159492602,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.406167816,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:20: replace + with - in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 20
+            },
+            "end": {
+              "line": 227,
+              "column": 21
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_20.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_20.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.013577964,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.406004078,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:227:20: replace + with * in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 227,
+              "column": 20
+            },
+            "end": {
+              "line": 227,
+              "column": 21
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_227_col_20_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_227_col_20_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.018298381,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.355419847,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:228:29: replace * with + in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 228,
+              "column": 29
+            },
+            "end": {
+              "line": 228,
+              "column": 30
+            }
+          },
+          "replacement": "+",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_228_col_29.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_228_col_29.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.162167694,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.357267025,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:228:29: replace * with / in charges",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges",
+            "return_type": "-> [i64; 8]",
+            "span": {
+              "start": {
+                "line": 210,
+                "column": 1
+              },
+              "end": {
+                "line": 230,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 228,
+              "column": 29
+            },
+            "end": {
+              "line": 228,
+              "column": 30
+            }
+          },
+          "replacement": "/",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_228_col_29_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_228_col_29_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.166992296,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408527353,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 0, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 0, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.061853715,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.506957142,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 0, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 0, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_001.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.113695472,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.355534727,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 0, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 0, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_002.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.117118933,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.409068344,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 1, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 1, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_003.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_003.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.1104938500000001,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.456080721,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 1, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 1, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_004.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_004.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.010939154,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.410114481,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, 1, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 1, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_005.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_005.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.113437412,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.467014108,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, -1, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, -1, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_006.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_006.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.959415897,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.411075332,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, -1, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, -1, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_007.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_007.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.062885087,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.406367128,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (0, -1, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(0, -1, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_008.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_008.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.107642587,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.458033247,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 0, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 0, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_009.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_009.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.116215642,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.507584835,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 0, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 0, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_010.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_010.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.21614184,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408922243,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 0, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 0, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_011.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_011.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.110845713,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408336772,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 1, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 1, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_012.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_012.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.164382106,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.361588358,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 1, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 1, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_013.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_013.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.01350252,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.454528052,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, 1, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 1, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_014.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_014.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.113400235,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.45673557,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, -1, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, -1, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_015.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_015.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.106237478,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.502628617,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, -1, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, -1, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_016.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_016.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.208975794,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.456161451,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (1, -1, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(1, -1, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_017.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_017.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.008117434,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.40702045,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 0, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, 0, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_018.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_018.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.16622812,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.40672004,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 0, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, 0, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_019.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_019.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.159519383,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.407859232,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 0, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, 0, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_020.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_020.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.010681717,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.45843186,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 1, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, 1, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_021.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_021.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.110238251,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.354827559,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 1, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, 1, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_022.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_022.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.064812904,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.5085803,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, 1, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, 1, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_023.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_023.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.311320196,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.45491987,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, -1, [0; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, -1, [0; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_024.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_024.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.107746522,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.411879098,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, -1, [1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, -1, [1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_025.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_025.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.061342472,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.461448184,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:5: replace charges_est -> (i64, i64, [i64; 8]) with (-1, -1, [-1; 8])",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 5
+            },
+            "end": {
+              "line": 271,
+              "column": 35
+            }
+          },
+          "replacement": "(-1, -1, [-1; 8])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_5_026.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_5_026.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.111360774,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.408399941,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:45: replace && with || in charges_est",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 45
+            },
+            "end": {
+              "line": 240,
+              "column": 47
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_45.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_45.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.013795823,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.356372084,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:30: replace == with != in charges_est",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 30
+            },
+            "end": {
+              "line": 240,
+              "column": 32
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_30.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_30.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.1249962,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.410355433,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/costs/src/option_clock.rs:240:48: delete ! in charges_est",
+          "package": "costs",
+          "file": "crates/costs/src/option_clock.rs",
+          "function": {
+            "function_name": "charges_est",
+            "return_type": "-> (i64, i64, [i64; 8])",
+            "span": {
+              "start": {
+                "line": 232,
+                "column": 1
+              },
+              "end": {
+                "line": 272,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 240,
+              "column": 48
+            },
+            "end": {
+              "line": 240,
+              "column": 49
+            }
+          },
+          "replacement": "",
+          "genre": "UnaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__costs__src__option_clock.rs_line_240_col_48.log",
+      "diff_path": "diff/crates__costs__src__option_clock.rs_line_240_col_48.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.214850456,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.254606053,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=costs@0.1.0",
+            "--locked",
+            "--",
+            "--exact"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 58,
+  "missed": 0,
+  "caught": 58,
+  "timeout": 0,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-11-16T16:07:00.555975866Z",
+  "end_time": "2026-11-16T16:07:53.519863346Z",
+  "cargo_mutants_version": "27.1.0"
+}

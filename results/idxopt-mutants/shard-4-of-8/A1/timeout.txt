@@ -1,0 +1,2 @@
+crates/opt_pos/src/pack.rs:112:25: replace += with *= in Live::advance
+crates/opt_pos/src/pack.rs:300:14: replace == with != in put_var

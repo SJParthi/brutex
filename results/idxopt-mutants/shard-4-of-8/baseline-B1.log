@@ -1,0 +1,117 @@
+   Compiling core v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/core)
+   Compiling crc32fast v1.5.0
+   Compiling cfg-if v1.0.4
+   Compiling simd-adler32 v0.3.10
+   Compiling telemetry v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/telemetry)
+   Compiling twox-hash v2.1.5
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.8.9
+   Compiling ruzstd v0.9.1
+   Compiling flate2 v1.1.9
+   Compiling store v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/store)
+   Compiling common_fill v2.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/pinned/common-fill-v21)
+   Compiling common_feat v1.0.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/common-feat-v1-r3/crates/common_feat)
+   Compiling common_fill v2.0.0 (/root/idxopt/common-fill-v2)
+   Compiling costs v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/costs)
+   Compiling idx_cal v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/idx_cal)
+   Compiling feat_io v1.0.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/common-feat-v1-r3/crates/feat_io)
+   Compiling opt_pos v0.1.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/w4m/opening5s-5b3r70/crates/opt_pos)
+   Compiling sniper_host v1.0.0 (/root/idxopt/sniper-host-v3-idx-w4r3/crates/sniper_host)
+    Finished `test` profile [unoptimized] target(s) in 11.90s
+     Running unittests src/lib.rs (/root/tgt-B/debug/deps/sniper_host-1a7710d79bde209e)
+
+running 51 tests
+test ctxdials::tests::k11_d_exp_is_on_only_for_an_expiry_known_before_the_session ... ok
+test cands::tests::sn_x15_a_higher_timeframe_reads_its_last_completed_candle_only ... ok
+test cands::tests::h1a_a_higher_timeframe_never_reads_across_the_k13_reset ... ok
+test ctxdials::tests::k11_g_drng_reads_the_session_so_far_and_the_atr_of_earlier_sessions ... ok
+test ctxdials::tests::k11_sn_x34_d_mend_reads_the_calendar_as_known_on_the_prior_evening ... ok
+test ctxdials::tests::k11_x_nifty_and_x_vix_read_the_last_completed_minute_of_the_session_only ... ok
+test idx::tests::s7w4_as_priced_maps_every_cell ... ok
+test ctxdials::tests::mirrors_follow_the_dial_rows ... ok
+test idx::tests::s7w4_outcome_row_width_of_the_15_value_grid ... ok
+test idxpos::tests::s7w4_booking_is_the_running_max_of_last_known_sessions ... ok
+test idx::tests::s7w4_positional_entry_without_a_cal_row_or_series_is_a_decide_refusal ... ok
+test idxpos::tests::s7w4_booking_session_is_the_next_walked_session ... ok
+test idxpos::tests::s7w4_later_facts_never_remove_a_positional_row ... ok
+test idxpos::tests::s7w4_open_at_data_end_is_flagged_never_unclosable ... ok
+test idxpos::tests::s7w4_out_pos_row_is_792_bytes ... ok
+test idxpos::tests::s7w4_positional_f8_gate_on_entries_and_roll_opens ... ok
+test idxpos::tests::s7w4_rundown_joins_the_roll_legs_lane_b_s5 ... ok
+test idxpos::tests::w4r3_level_of_sets_hole_for_a_data_end_valuation_on_a_hole ... ok
+test idxpos::tests::w4r_data_end_year_word_reads_like_common_wf_items ... ok
+test idxpos::tests::w4r_positional_seam_sentinel_and_slot_rule ... ok
+test instr::tests::s7_law_accepts_the_plan_rows ... ok
+test idxpos::tests::s7w4_day_min_equals_a_scan ... ok
+test instr::tests::s7_law_l1_l2_block ... ok
+test instr::tests::s7_law_l3_hold_exit ... ok
+test instr::tests::s7_index_mode_refused_by_name ... ok
+test instr::tests::s7_law_l5_roll_open_intraday ... ok
+test instr::tests::s7_law_l4_roll_rule ... ok
+test instr::tests::s7_law_l6_itm_on_stkopt ... ok
+test instr::tests::s7_law_l7_zgap_needs_o1_record ... ok
+test instr::tests::s7_law_l8_cash_rows ... ok
+test instr::tests::s7_underlying_is_the_data_row ... ok
+test instr::tests::s7w4_law_l9_square_off_is_the_strategys_own_order ... ok
+test instr::tests::s7w4_index_modes_are_priced ... ok
+test posgroups::tests::f17_one_candle_groups_and_flip_waits ... ok
+test posgroups::tests::flip_a_group_runs_from_one_flip_exit_candle_inclusive_to_the_next_exclusive ... ok
+test cands::tests::htf_cursor_equals_htf_slots ... ok
+test posgroups::tests::groups_are_keyed_by_the_exit_never_the_session_two_positions_of_one_side_are_never_open ... ok
+test posgroups::tests::the_ca_close_caps_a_stretch_and_data_end_is_one_group ... ok
+test posgroups::tests::xs_an_against_side_entry_exits_at_the_next_eligible_candle_across_a_night_and_a_weekend ... ok
+test posgroups::tests::p3a_the_stream_side_is_each_candles_own_close_never_the_next_candles ... ok
+test search::tests::merged_codes_decode_to_their_combo_and_n ... ok
+test posgroups::tests::xs_flip_and_the_one_pass_exits_agree_with_the_direct_finder ... ok
+test search::tests::slice_rows_keep_their_labels_and_mirrors ... ok
+test sha::tests::known_vectors ... ok
+test posgroups::tests::b5_a_700_candle_group_replicated_100x_keeps_its_first_copy ... ok
+test size::tests::closest_equals_the_plain_definition_and_never_below_floor ... ok
+test size::tests::half_way_takes_the_lower_count_and_zero_only_at_twice_the_target ... ok
+test size::tests::the_account_base_cuts_to_the_largest_count_that_fits ... ok
+test search::tests::rewalk_equals_the_line_engine_first_mode ... ok
+test sha::tests::streaming_equals_one_shot ... ok
+test posgroups::tests::p3h_p_mono_holds_on_every_candidate_of_random_streams_both_rules_both_sides ... ok
+
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/fast.rs (/root/tgt-B/debug/deps/fast-2e3a4a129e79927c)
+
+running 1 test
+test run_all_equals_one_run_per_n ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.82s
+
+     Running tests/matrix.rs (/root/tgt-B/debug/deps/matrix-023fbcdd628f6ebd)
+
+running 19 tests
+test query_lookup_is_o1_and_round_trips ... ok
+test sn16_the_closest_count_the_floor_count_and_the_account_cap ... ok
+test db_writer_once_labels_and_the_hash_chain ... ok
+test sn20_the_clock_wins_even_in_profit ... ok
+test sn_b2_the_protection_hold_is_flagged_and_counted_per_pick_s3 ... ok
+test sn20_the_square_off_the_tie_and_thin_tapes ... ok
+test sn_x12_an_order_larger_than_its_blocks_moves_the_rest ... ok
+test sn_x13_a_decision_at_15_08_is_rejected ... ok
+test sn_x23_the_sweep_holds_one_first_trade_per_session ... ok
+test sn20_the_clock_at_or_after_the_cut_waits_for_the_square_off ... ok
+test sn_x14_square_off_and_unclosable_units ... ok
+test sn_x44_a_zero_unit_entry_sends_no_exit_order ... ok
+test sn_x45_the_money_cap_law_is_refused_at_load_s3 ... ok
+test sn_x39_g_inc_a_day_appended_equals_the_full_run ... ok
+test the_launch_gate_parses_swap ... ok
+test the_red_door_refuses_a_red_build ... ok
+test sn_x44_a_winning_stop_rewalks_the_entry_s2 ... ok
+test sn20_the_flip_wins_when_it_comes_first ... ok
+test sn_x49_g_comp_the_derived_composite_equals_the_priced_one ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.07s
+
+     Running tests/no_cut_at.rs (/root/tgt-B/debug/deps/no_cut_at-2d971de02ffa2176)
+
+running 2 tests
+test host_sources_never_name_it ... ok
+test host_binary_never_links_it ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+

@@ -1,0 +1,168 @@
+crates/opt_pos/src/newpx.rs:254:14: replace != with == in day_rows
+crates/opt_pos/src/newpx.rs:264:24: replace += with -= in day_rows
+crates/opt_pos/src/newpx.rs:264:24: replace += with *= in day_rows
+crates/opt_pos/src/newpx.rs:265:34: replace + with - in day_rows
+crates/opt_pos/src/newpx.rs:265:34: replace + with * in day_rows
+crates/opt_pos/src/newpx.rs:267:21: delete match arm (FailKind::Both, Some(st)) in day_rows
+crates/opt_pos/src/newpx.rs:272:35: replace && with || in day_rows
+crates/opt_pos/src/newpx.rs:272:24: replace && with || in day_rows
+crates/opt_pos/src/newpx.rs:272:20: replace > with == in day_rows
+crates/opt_pos/src/newpx.rs:258:16: delete ! in day_rows
+crates/opt_pos/src/newpx.rs:272:20: replace > with < in day_rows
+crates/opt_pos/src/newpx.rs:272:20: replace > with >= in day_rows
+crates/opt_pos/src/newpx.rs:272:31: replace > with == in day_rows
+crates/opt_pos/src/newpx.rs:272:31: replace > with < in day_rows
+crates/opt_pos/src/newpx.rs:272:42: replace >= with < in day_rows
+crates/opt_pos/src/newpx.rs:278:51: delete ! in day_rows
+crates/opt_pos/src/newpx.rs:281:20: replace += with *= in day_rows
+crates/opt_pos/src/newpx.rs:281:20: replace += with -= in day_rows
+crates/opt_pos/src/newpx.rs:282:30: replace + with - in day_rows
+crates/opt_pos/src/newpx.rs:282:30: replace + with * in day_rows
+crates/opt_pos/src/newpx.rs:292:31: replace match guard h.0 <= last.1 with false in day_rows
+crates/opt_pos/src/newpx.rs:292:35: replace <= with > in day_rows
+crates/opt_pos/src/newpx.rs:300:17: replace match guard n_fail > 0 with true in day_rows
+crates/opt_pos/src/newpx.rs:300:17: replace match guard n_fail > 0 with false in day_rows
+crates/opt_pos/src/newpx.rs:300:24: replace > with == in day_rows
+crates/opt_pos/src/newpx.rs:300:24: replace > with < in day_rows
+crates/opt_pos/src/newpx.rs:300:24: replace > with >= in day_rows
+crates/opt_pos/src/pack.rs:40:5: replace gcd -> i64 with 0
+crates/opt_pos/src/pack.rs:40:5: replace gcd -> i64 with 1
+crates/opt_pos/src/pack.rs:40:5: replace gcd -> i64 with -1
+crates/opt_pos/src/pack.rs:41:13: replace != with == in gcd
+crates/opt_pos/src/pack.rs:42:24: replace % with / in gcd
+crates/opt_pos/src/pack.rs:42:24: replace % with + in gcd
+crates/opt_pos/src/pack.rs:56:9: replace LotState::push with ()
+crates/opt_pos/src/pack.rs:56:21: replace += with -= in LotState::push
+crates/opt_pos/src/pack.rs:59:23: replace || with && in LotState::push
+crates/opt_pos/src/pack.rs:56:21: replace += with *= in LotState::push
+crates/opt_pos/src/pack.rs:59:18: replace <= with > in LotState::push
+crates/opt_pos/src/pack.rs:59:32: replace != with == in LotState::push
+crates/opt_pos/src/pack.rs:59:28: replace % with / in LotState::push
+crates/opt_pos/src/pack.rs:59:28: replace % with + in LotState::push
+crates/opt_pos/src/pack.rs:68:9: replace LotState::lot -> i64 with 0
+crates/opt_pos/src/pack.rs:68:9: replace LotState::lot -> i64 with 1
+crates/opt_pos/src/pack.rs:68:9: replace LotState::lot -> i64 with -1
+crates/opt_pos/src/pack.rs:71:34: replace && with || in LotState::lot
+crates/opt_pos/src/pack.rs:71:29: replace == with != in LotState::lot
+crates/opt_pos/src/pack.rs:71:49: replace == with != in LotState::lot
+crates/opt_pos/src/pack.rs:74:86: replace && with || in LotState::lot
+crates/opt_pos/src/pack.rs:74:93: replace > with == in LotState::lot
+crates/opt_pos/src/pack.rs:74:93: replace > with < in LotState::lot
+crates/opt_pos/src/pack.rs:78:32: replace * with + in LotState::lot
+crates/opt_pos/src/pack.rs:78:32: replace * with / in LotState::lot
+crates/opt_pos/src/pack.rs:78:19: replace / with % in LotState::lot
+crates/opt_pos/src/pack.rs:78:19: replace / with * in LotState::lot
+crates/opt_pos/src/pack.rs:80:14: replace == with != in LotState::lot
+crates/opt_pos/src/pack.rs:104:9: replace Live::advance with ()
+crates/opt_pos/src/pack.rs:105:21: replace >= with < in Live::advance
+crates/opt_pos/src/pack.rs:108:24: replace += with -= in Live::advance
+crates/opt_pos/src/pack.rs:112:25: replace += with -= in Live::advance
+crates/opt_pos/src/pack.rs:147:5: replace pick_at -> Result<(Pick, u64), String> with Ok((Default::default(), 0))
+crates/opt_pos/src/pack.rs:147:5: replace pick_at -> Result<(Pick, u64), String> with Ok((Default::default(), 1))
+crates/opt_pos/src/pack.rs:148:15: replace <= with > in pick_at
+crates/opt_pos/src/pack.rs:152:8: delete ! in pick_at
+crates/opt_pos/src/pack.rs:205:9: replace Runs<T>::push with ()
+crates/opt_pos/src/pack.rs:206:23: replace == with != in Runs<T>::push
+crates/opt_pos/src/pack.rs:207:23: replace == with != in Runs<T>::push
+crates/opt_pos/src/pack.rs:209:26: replace + with - in Runs<T>::push
+crates/opt_pos/src/pack.rs:209:26: replace + with * in Runs<T>::push
+crates/opt_pos/src/pack.rs:212:31: replace + with - in Runs<T>::push
+crates/opt_pos/src/pack.rs:212:31: replace + with * in Runs<T>::push
+crates/opt_pos/src/pack.rs:219:5: replace zst -> Vec<u8> with vec![]
+crates/opt_pos/src/pack.rs:219:5: replace zst -> Vec<u8> with vec![0]
+crates/opt_pos/src/pack.rs:219:5: replace zst -> Vec<u8> with vec![1]
+crates/opt_pos/src/pack.rs:227:5: replace unzst -> Result<Vec<u8>, String> with Ok(vec![])
+crates/opt_pos/src/pack.rs:227:5: replace unzst -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/opt_pos/src/pack.rs:227:5: replace unzst -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/opt_pos/src/pack.rs:297:5: replace put_var with ()
+crates/opt_pos/src/pack.rs:298:32: replace & with | in put_var
+crates/opt_pos/src/pack.rs:298:32: replace & with ^ in put_var
+crates/opt_pos/src/pack.rs:299:11: replace >>= with <<= in put_var
+crates/opt_pos/src/pack.rs:304:20: replace | with & in put_var
+crates/opt_pos/src/pack.rs:309:5: replace get_var -> Result<u64, String> with Ok(0)
+crates/opt_pos/src/pack.rs:309:5: replace get_var -> Result<u64, String> with Ok(1)
+crates/opt_pos/src/pack.rs:313:13: replace += with -= in get_var
+crates/opt_pos/src/pack.rs:313:13: replace += with *= in get_var
+crates/opt_pos/src/pack.rs:314:11: replace |= with &= in get_var
+crates/opt_pos/src/pack.rs:314:26: replace & with | in get_var
+crates/opt_pos/src/pack.rs:314:26: replace & with ^ in get_var
+crates/opt_pos/src/pack.rs:315:21: replace == with != in get_var
+crates/opt_pos/src/pack.rs:315:14: replace & with | in get_var
+crates/opt_pos/src/pack.rs:315:14: replace & with ^ in get_var
+crates/opt_pos/src/pack.rs:318:15: replace += with -= in get_var
+crates/opt_pos/src/pack.rs:318:15: replace += with *= in get_var
+crates/opt_pos/src/pack.rs:319:18: replace > with < in get_var
+crates/opt_pos/src/pack.rs:326:5: replace zz -> u64 with 1
+crates/opt_pos/src/pack.rs:326:5: replace zz -> u64 with 0
+crates/opt_pos/src/pack.rs:326:15: replace ^ with | in zz
+crates/opt_pos/src/pack.rs:326:15: replace ^ with & in zz
+crates/opt_pos/src/pack.rs:326:9: replace << with >> in zz
+crates/opt_pos/src/pack.rs:326:20: replace >> with << in zz
+crates/opt_pos/src/pack.rs:330:5: replace unzz -> i64 with 0
+crates/opt_pos/src/pack.rs:330:5: replace unzz -> i64 with 1
+crates/opt_pos/src/pack.rs:330:5: replace unzz -> i64 with -1
+crates/opt_pos/src/pack.rs:330:28: replace ^ with | in unzz
+crates/opt_pos/src/pack.rs:330:8: replace >> with << in unzz
+crates/opt_pos/src/pack.rs:330:28: replace ^ with & in unzz
+crates/opt_pos/src/pack.rs:330:30: delete - in unzz
+crates/opt_pos/src/pack.rs:330:35: replace & with | in unzz
+crates/opt_pos/src/pack.rs:330:35: replace & with ^ in unzz
+crates/opt_pos/src/pack.rs:338:5: replace enc_block -> Vec<u8> with vec![]
+crates/opt_pos/src/pack.rs:338:5: replace enc_block -> Vec<u8> with vec![1]
+crates/opt_pos/src/pack.rs:338:5: replace enc_block -> Vec<u8> with vec![0]
+crates/opt_pos/src/pack.rs:345:32: replace - with + in enc_block
+crates/opt_pos/src/pack.rs:345:32: replace - with / in enc_block
+crates/opt_pos/src/pack.rs:346:32: replace - with + in enc_block
+crates/opt_pos/src/pack.rs:346:32: replace - with / in enc_block
+crates/opt_pos/src/pack.rs:347:32: replace - with + in enc_block
+crates/opt_pos/src/pack.rs:347:32: replace - with / in enc_block
+crates/opt_pos/src/pack.rs:348:32: replace - with + in enc_block
+crates/opt_pos/src/pack.rs:348:32: replace - with / in enc_block
+crates/opt_pos/src/pack.rs:349:32: replace - with + in enc_block
+crates/opt_pos/src/pack.rs:349:32: replace - with / in enc_block
+crates/opt_pos/src/pack.rs:361:5: replace dec_block -> Result<(String, Vec<NewSec>), String> with Ok((String::new(), vec![]))
+crates/opt_pos/src/pack.rs:361:5: replace dec_block -> Result<(String, Vec<NewSec>), String> with Ok((String::new(), vec![Default::default()]))
+crates/opt_pos/src/pack.rs:361:5: replace dec_block -> Result<(String, Vec<NewSec>), String> with Ok(("xyzzy".into(), vec![]))
+crates/opt_pos/src/pack.rs:361:5: replace dec_block -> Result<(String, Vec<NewSec>), String> with Ok(("xyzzy".into(), vec![Default::default()]))
+crates/opt_pos/src/pack.rs:362:31: replace + with * in dec_block
+crates/opt_pos/src/pack.rs:362:31: replace + with - in dec_block
+crates/opt_pos/src/pack.rs:364:9: replace += with -= in dec_block
+crates/opt_pos/src/pack.rs:364:9: replace += with *= in dec_block
+crates/opt_pos/src/pack.rs:369:20: replace + with - in dec_block
+crates/opt_pos/src/pack.rs:369:20: replace + with * in dec_block
+crates/opt_pos/src/pack.rs:370:20: replace + with - in dec_block
+crates/opt_pos/src/pack.rs:370:20: replace + with * in dec_block
+crates/opt_pos/src/pack.rs:371:19: replace + with - in dec_block
+crates/opt_pos/src/pack.rs:371:19: replace + with * in dec_block
+crates/opt_pos/src/pack.rs:372:19: replace - with + in dec_block
+crates/opt_pos/src/pack.rs:372:19: replace - with / in dec_block
+crates/opt_pos/src/pack.rs:373:19: replace + with - in dec_block
+crates/opt_pos/src/pack.rs:373:19: replace + with * in dec_block
+crates/opt_pos/src/pos.rs:132:9: replace SeriesRow::final_date -> Day with Default::default()
+crates/opt_pos/src/pos.rs:270:12: delete ! in NewpxSrc::day_rows
+crates/opt_pos/src/pos.rs:285:57: replace += with -= in NewpxSrc::day_rows
+crates/opt_pos/src/pos.rs:285:57: replace += with *= in NewpxSrc::day_rows
+crates/opt_pos/src/pos.rs:308:9: replace Book::newpx -> Option<&NewpxSrc> with None
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(0, 0)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(0, 1)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(0, -1)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(1, 0)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(1, 1)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(1, -1)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(-1, 0)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(-1, 1)]
+crates/opt_pos/src/pos.rs:314:9: replace Book::holes_of -> Vec<(i64, i64)> with vec![(-1, -1)]
+crates/opt_pos/src/pos.rs:319:9: replace Book::put_opt with ()
+crates/opt_pos/src/pos.rs:324:9: replace Book::put_spot with ()
+crates/opt_pos/src/pos.rs:332:9: replace Book::opt_rows -> Result<Option<Vec<Sec>>, String> with Ok(None)
+crates/opt_pos/src/pos.rs:332:9: replace Book::opt_rows -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![]))
+crates/opt_pos/src/pos.rs:332:9: replace Book::opt_rows -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![Default::default()]))
+crates/opt_pos/src/pos.rs:338:64: replace + with * in Book::opt_rows
+crates/opt_pos/src/pos.rs:339:22: replace == with != in Book::opt_rows
+crates/opt_pos/src/pos.rs:376:9: replace Book::decide_rows -> Result<Option<Vec<Sec>>, String> with Ok(None)
+crates/opt_pos/src/pos.rs:376:9: replace Book::decide_rows -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![]))
+crates/opt_pos/src/pos.rs:376:9: replace Book::decide_rows -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![Default::default()]))
+crates/opt_pos/src/pos.rs:376:33: replace || with && in Book::decide_rows
+crates/opt_pos/src/pos.rs:393:9: replace Book::spot_rows -> Result<Vec<Sec>, String> with Ok(vec![])
+crates/opt_pos/src/pos.rs:393:9: replace Book::spot_rows -> Result<Vec<Sec>, String> with Ok(vec![Default::default()])

@@ -1,0 +1,6 @@
+crates/opt_pos/src/pack.rs:180:5: replace lead_buf -> Vec<Cand> with vec![Default::default()]
+crates/opt_pos/src/pack.rs:207:13: replace && with || in Runs<T>::push
+crates/opt_pos/src/pack.rs:206:13: replace && with || in Runs<T>::push
+crates/opt_pos/src/pos.rs:270:9: replace NewpxSrc::day_rows -> Result<newpx::DayRows, String> with Ok(Default::default())
+crates/opt_pos/src/pos.rs:301:9: replace Book::with_newpx -> Self with Default::default()
+crates/opt_pos/src/pos.rs:308:9: replace Book::newpx -> Option<&NewpxSrc> with Some(Box::leak(Box::new(Default::default())))

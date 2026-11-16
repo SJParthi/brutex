@@ -1,0 +1,107 @@
+crates/opt_pos/src/newpx.rs:272:31: replace > with >= in day_rows
+crates/opt_pos/src/newpx.rs:292:31: replace match guard h.0 <= last.1 with true in day_rows
+crates/opt_pos/src/pack.rs:74:93: replace > with >= in LotState::lot
+crates/opt_pos/src/pack.rs:108:24: replace += with *= in Live::advance
+crates/opt_pos/src/pack.rs:109:22: replace > with == in Live::advance
+crates/opt_pos/src/pack.rs:109:22: replace > with < in Live::advance
+crates/opt_pos/src/pack.rs:109:22: replace > with >= in Live::advance
+crates/opt_pos/src/pack.rs:147:50: delete field what from struct Pick expression in pick_at
+crates/opt_pos/src/pack.rs:149:27: delete field what from struct Pick expression in pick_at
+crates/opt_pos/src/pack.rs:157:19: replace match guard e == "no_itm_fit" with true in pick_at
+crates/opt_pos/src/pack.rs:157:19: replace match guard e == "no_itm_fit" with false in pick_at
+crates/opt_pos/src/pack.rs:157:21: replace == with != in pick_at
+crates/opt_pos/src/pack.rs:157:51: delete field what from struct Pick expression in pick_at
+crates/opt_pos/src/pack.rs:166:5: replace f8_ok -> bool with true
+crates/opt_pos/src/pack.rs:166:5: replace f8_ok -> bool with false
+crates/opt_pos/src/pack.rs:166:17: replace == with != in f8_ok
+crates/opt_pos/src/pack.rs:169:49: replace == with != in f8_ok
+crates/opt_pos/src/pack.rs:172:61: replace && with || in f8_ok
+crates/opt_pos/src/pack.rs:172:43: replace && with || in f8_ok
+crates/opt_pos/src/pack.rs:172:30: replace && with || in f8_ok
+crates/opt_pos/src/pack.rs:172:25: replace >= with < in f8_ok
+crates/opt_pos/src/pack.rs:172:39: replace > with == in f8_ok
+crates/opt_pos/src/pack.rs:172:39: replace > with < in f8_ok
+crates/opt_pos/src/pack.rs:172:39: replace > with >= in f8_ok
+crates/opt_pos/src/pack.rs:172:56: replace == with != in f8_ok
+crates/opt_pos/src/pack.rs:172:48: replace % with / in f8_ok
+crates/opt_pos/src/pack.rs:172:48: replace % with + in f8_ok
+crates/opt_pos/src/pack.rs:172:101: replace <= with > in f8_ok
+crates/opt_pos/src/pack.rs:180:5: replace lead_buf -> Vec<Cand> with vec![]
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (None, None)
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (None, Some(String::new()))
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (None, Some("xyzzy".into()))
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (Some(String::new()), None)
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (Some(String::new()), Some(String::new()))
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (Some(String::new()), Some("xyzzy".into()))
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (Some("xyzzy".into()), None)
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (Some("xyzzy".into()), Some(String::new()))
+crates/opt_pos/src/pack.rs:186:5: replace lead_at -> (Option<String>, Option<String>) with (Some("xyzzy".into()), Some("xyzzy".into()))
+crates/opt_pos/src/pack.rs:304:20: replace | with ^ in put_var
+crates/opt_pos/src/pack.rs:319:18: replace > with == in get_var
+crates/opt_pos/src/pack.rs:319:18: replace > with >= in get_var
+crates/opt_pos/src/pos.rs:141:5: replace parse_cal -> Result<BTreeMap<Day, CalRow>, String> with Ok(BTreeMap::new())
+crates/opt_pos/src/pos.rs:141:5: replace parse_cal -> Result<BTreeMap<Day, CalRow>, String> with Ok(BTreeMap::from_iter([(Default::default(), Default::default())]))
+crates/opt_pos/src/pos.rs:143:59: replace || with && in parse_cal
+crates/opt_pos/src/pos.rs:150:117: replace == with != in parse_cal
+crates/opt_pos/src/pos.rs:143:31: replace || with && in parse_cal
+crates/opt_pos/src/pos.rs:160:5: replace parse_series -> Result<Vec<SeriesRow>, String> with Ok(vec![])
+crates/opt_pos/src/pos.rs:160:5: replace parse_series -> Result<Vec<SeriesRow>, String> with Ok(vec![Default::default()])
+crates/opt_pos/src/pos.rs:162:58: replace || with && in parse_series
+crates/opt_pos/src/pos.rs:162:31: replace || with && in parse_series
+crates/opt_pos/src/pos.rs:185:5: replace parse_close -> Result<BTreeMap<Day, i64>, String> with Ok(BTreeMap::new())
+crates/opt_pos/src/pos.rs:185:5: replace parse_close -> Result<BTreeMap<Day, i64>, String> with Ok(BTreeMap::from_iter([(Default::default(), 0)]))
+crates/opt_pos/src/pos.rs:185:5: replace parse_close -> Result<BTreeMap<Day, i64>, String> with Ok(BTreeMap::from_iter([(Default::default(), 1)]))
+crates/opt_pos/src/pos.rs:185:5: replace parse_close -> Result<BTreeMap<Day, i64>, String> with Ok(BTreeMap::from_iter([(Default::default(), -1)]))
+crates/opt_pos/src/pos.rs:188:31: replace || with && in parse_close
+crates/opt_pos/src/pos.rs:193:44: replace == with != in parse_close
+crates/opt_pos/src/pos.rs:338:64: replace + with - in Book::opt_rows
+crates/opt_pos/src/pos.rs:338:57: replace * with + in Book::opt_rows
+crates/opt_pos/src/pos.rs:338:57: replace * with / in Book::opt_rows
+crates/opt_pos/src/pos.rs:338:69: replace * with + in Book::opt_rows
+crates/opt_pos/src/pos.rs:338:69: replace * with / in Book::opt_rows
+crates/opt_pos/src/pos.rs:353:9: replace Book::store_read -> Result<Option<Vec<Sec>>, String> with Ok(None)
+crates/opt_pos/src/pos.rs:353:9: replace Book::store_read -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![]))
+crates/opt_pos/src/pos.rs:353:9: replace Book::store_read -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![Default::default()]))
+crates/opt_pos/src/pos.rs:356:47: replace / with % in Book::store_read
+crates/opt_pos/src/pos.rs:356:47: replace / with * in Book::store_read
+crates/opt_pos/src/pos.rs:356:31: replace - with + in Book::store_read
+crates/opt_pos/src/pos.rs:356:31: replace - with / in Book::store_read
+crates/opt_pos/src/pos.rs:358:122: replace + with - in Book::store_read
+crates/opt_pos/src/pos.rs:358:122: replace + with * in Book::store_read
+crates/opt_pos/src/pos.rs:358:115: replace * with + in Book::store_read
+crates/opt_pos/src/pos.rs:358:115: replace * with / in Book::store_read
+crates/opt_pos/src/pos.rs:358:127: replace * with + in Book::store_read
+crates/opt_pos/src/pos.rs:358:127: replace * with / in Book::store_read
+crates/opt_pos/src/pos.rs:360:77: replace && with || in Book::store_read
+crates/opt_pos/src/pos.rs:360:64: replace && with || in Book::store_read
+crates/opt_pos/src/pos.rs:360:50: replace && with || in Book::store_read
+crates/opt_pos/src/pos.rs:360:46: replace > with == in Book::store_read
+crates/opt_pos/src/pos.rs:360:46: replace > with < in Book::store_read
+crates/opt_pos/src/pos.rs:360:46: replace > with >= in Book::store_read
+crates/opt_pos/src/pos.rs:360:60: replace > with == in Book::store_read
+crates/opt_pos/src/pos.rs:360:60: replace > with < in Book::store_read
+crates/opt_pos/src/pos.rs:360:60: replace > with >= in Book::store_read
+crates/opt_pos/src/pos.rs:360:73: replace > with == in Book::store_read
+crates/opt_pos/src/pos.rs:360:73: replace > with < in Book::store_read
+crates/opt_pos/src/pos.rs:360:73: replace > with >= in Book::store_read
+crates/opt_pos/src/pos.rs:360:87: replace >= with < in Book::store_read
+crates/opt_pos/src/pos.rs:361:37: delete ! in Book::store_read
+crates/opt_pos/src/pos.rs:361:78: replace && with || in Book::store_read
+crates/opt_pos/src/pos.rs:361:73: replace >= with < in Book::store_read
+crates/opt_pos/src/pos.rs:361:93: replace < with == in Book::store_read
+crates/opt_pos/src/pos.rs:361:93: replace < with > in Book::store_read
+crates/opt_pos/src/pos.rs:361:93: replace < with <= in Book::store_read
+crates/opt_pos/src/pos.rs:400:47: replace / with % in Book::spot_rows
+crates/opt_pos/src/pos.rs:400:47: replace / with * in Book::spot_rows
+crates/opt_pos/src/pos.rs:400:31: replace - with + in Book::spot_rows
+crates/opt_pos/src/pos.rs:400:31: replace - with / in Book::spot_rows
+crates/opt_pos/src/pos.rs:402:116: replace + with - in Book::spot_rows
+crates/opt_pos/src/pos.rs:402:116: replace + with * in Book::spot_rows
+crates/opt_pos/src/pos.rs:402:109: replace * with + in Book::spot_rows
+crates/opt_pos/src/pos.rs:402:109: replace * with / in Book::spot_rows
+crates/opt_pos/src/pos.rs:402:121: replace * with + in Book::spot_rows
+crates/opt_pos/src/pos.rs:402:121: replace * with / in Book::spot_rows
+crates/opt_pos/src/pos.rs:405:33: delete ! in Book::spot_rows
+crates/opt_pos/src/pos.rs:405:74: replace && with || in Book::spot_rows
+crates/opt_pos/src/pos.rs:405:69: replace >= with < in Book::spot_rows
+crates/opt_pos/src/pos.rs:405:89: replace < with == in Book::spot_rows

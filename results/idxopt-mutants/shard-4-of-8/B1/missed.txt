@@ -1,0 +1,65 @@
+crates/sniper_host/src/price.rs:493:38: replace < with <= in price
+crates/sniper_host/src/price.rs:507:23: replace += with -= in price
+crates/sniper_host/src/price.rs:509:33: replace == with != in price
+crates/sniper_host/src/price.rs:511:25: replace > with >= in price
+crates/sniper_host/src/price.rs:515:69: replace * with / in price
+crates/sniper_host/src/price.rs:517:31: replace || with && in price
+crates/sniper_host/src/price.rs:517:27: replace > with < in price
+crates/sniper_host/src/price.rs:517:45: replace > with < in price
+crates/sniper_host/src/price.rs:518:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:520:34: replace || with && in price
+crates/sniper_host/src/price.rs:520:30: replace > with < in price
+crates/sniper_host/src/price.rs:520:51: replace > with < in price
+crates/sniper_host/src/price.rs:521:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:523:29: replace || with && in price
+crates/sniper_host/src/price.rs:524:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:528:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:533:91: replace - with + in price
+crates/sniper_host/src/price.rs:533:91: replace - with / in price
+crates/sniper_host/src/price.rs:534:44: replace > with == in price
+crates/sniper_host/src/price.rs:534:44: replace > with < in price
+crates/sniper_host/src/price.rs:534:44: replace > with >= in price
+crates/sniper_host/src/price.rs:536:39: replace * with / in price
+crates/sniper_host/src/price.rs:595:55: replace == with != in encode
+crates/sniper_host/src/price.rs:595:104: replace / with % in encode
+crates/sniper_host/src/price.rs:595:94: replace - with + in encode
+crates/sniper_host/src/price.rs:595:94: replace - with / in encode
+crates/sniper_host/src/price.rs:597:84: replace | with & in encode
+crates/sniper_host/src/price.rs:597:84: replace | with ^ in encode
+crates/sniper_host/src/price.rs:602:29: replace || with && in encode
+crates/sniper_host/src/price.rs:602:24: replace == with != in encode
+crates/sniper_host/src/price.rs:602:46: replace == with != in encode
+crates/sniper_host/src/price.rs:602:99: replace / with % in encode
+crates/sniper_host/src/price.rs:602:82: replace - with / in encode
+crates/sniper_host/src/query.rs:32:18: replace || with && in lookup
+crates/sniper_host/src/query.rs:32:34: replace > with == in lookup
+crates/sniper_host/src/query.rs:32:34: replace > with >= in lookup
+crates/sniper_host/src/rows.rs:14:5: replace parse_mk -> Option<Mk> with None
+crates/sniper_host/src/rows.rs:14:5: replace parse_mk -> Option<Mk> with Some(Default::default())
+crates/sniper_host/src/rows.rs:16:48: replace - with + in parse_mk
+crates/sniper_host/src/rows.rs:16:48: replace - with / in parse_mk
+crates/sniper_host/src/rows.rs:16:44: replace + with - in parse_mk
+crates/sniper_host/src/rows.rs:16:44: replace + with * in parse_mk
+crates/sniper_host/src/rows.rs:16:39: replace * with + in parse_mk
+crates/sniper_host/src/rows.rs:16:39: replace * with / in parse_mk
+crates/sniper_host/src/rows.rs:22:5: replace mk_text -> String with String::new()
+crates/sniper_host/src/rows.rs:22:5: replace mk_text -> String with "xyzzy".into()
+crates/sniper_host/src/rows.rs:30:31: replace || with && in tsv
+crates/sniper_host/src/rows.rs:95:9: replace RunRows::list -> Result<Vec<T>, String> with Ok(vec![])
+crates/sniper_host/src/rows.rs:103:9: replace RunRows::hms -> Result<i64, String> with Ok(0)
+crates/sniper_host/src/rows.rs:103:9: replace RunRows::hms -> Result<i64, String> with Ok(1)
+crates/sniper_host/src/rows.rs:103:9: replace RunRows::hms -> Result<i64, String> with Ok(-1)
+crates/sniper_host/src/rows.rs:104:68: delete - in RunRows::hms
+crates/sniper_host/src/rows.rs:106:26: replace match guard (0..24).contains(h) && (0..60).contains(m) && (0..60).contains(s) with true in RunRows::hms
+crates/sniper_host/src/rows.rs:106:26: replace match guard (0..24).contains(h) && (0..60).contains(m) && (0..60).contains(s) with false in RunRows::hms
+crates/sniper_host/src/rows.rs:106:69: replace && with || in RunRows::hms
+crates/sniper_host/src/rows.rs:106:46: replace && with || in RunRows::hms
+crates/sniper_host/src/rows.rs:106:116: replace + with - in RunRows::hms
+crates/sniper_host/src/rows.rs:106:116: replace + with * in RunRows::hms
+crates/sniper_host/src/rows.rs:106:107: replace + with - in RunRows::hms
+crates/sniper_host/src/rows.rs:106:107: replace + with * in RunRows::hms
+crates/sniper_host/src/rows.rs:106:100: replace * with + in RunRows::hms
+crates/sniper_host/src/rows.rs:106:100: replace * with / in RunRows::hms
+crates/sniper_host/src/rows.rs:106:111: replace * with + in RunRows::hms
+crates/sniper_host/src/rows.rs:106:111: replace * with / in RunRows::hms
+crates/sniper_host/src/rows.rs:129:70: replace == with != in Windows::parse
