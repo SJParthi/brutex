@@ -1,0 +1,2 @@
+crates/spikefade/src/report3.rs:1837:124: delete field run from struct WinRes expression in stage_b_whole
+crates/spikefade/src/report3.rs:3298:16: delete field x from struct Sum expression in twin10
