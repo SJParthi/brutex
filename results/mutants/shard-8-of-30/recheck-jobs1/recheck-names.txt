@@ -1,0 +1,30 @@
+crates/spikefade/src/trade.rs:954:28: replace += with *= in book_dearest
+crates/spikefade/src/trade.rs:1094:17: replace > with < in trip_rd
+crates/spikefade/src/trade.rs:1136:31: replace < with > in out_of
+crates/spikefade/src/trade.rs:1143:27: replace > with == in out_of
+crates/spikefade/src/trade.rs:1143:63: replace - with / in out_of
+crates/spikefade/src/trade.rs:1155:54: replace > with == in out_of31
+crates/spikefade/src/trade.rs:1213:165: replace * with / in size_event_mx
+crates/spikefade/src/trade.rs:1286:91: replace + with - in size_event_mx
+crates/spikefade/src/trade.rs:1304:35: replace / with * in size_event_mx
+crates/spikefade/src/trade.rs:1490:22: replace - with / in evidence
+crates/spikefade/src/v2.rs:39:5: replace parse_settings -> Option<(usize, usize, usize, usize)> with Some((0, 0, 1, 0))
+crates/spikefade/src/v2.rs:39:5: replace parse_settings -> Option<(usize, usize, usize, usize)> with Some((1, 0, 0, 0))
+crates/spikefade/src/v2.rs:39:5: replace parse_settings -> Option<(usize, usize, usize, usize)> with Some((1, 1, 1, 0))
+crates/spikefade/src/v2.rs:195:39: replace + with - in r1_overlaps
+crates/spikefade/src/v2.rs:196:83: replace < with == in r1_overlaps
+crates/spikefade/src/v2.rs:242:5: replace expiry_class -> (String, i64) with ("xyzzy".into(), 1)
+crates/spikefade/src/v2.rs:252:24: replace == with != in expiry_class
+crates/spikefade/src/v2.rs:270:5: replace raw_1m -> Result<HashMap<u32, BTreeMap<usize, [i64; 5]>>, String> with Ok(HashMap::from_iter([(0, BTreeMap::from_iter([(1, [0; 5])]))]))
+crates/spikefade/src/v2.rs:270:5: replace raw_1m -> Result<HashMap<u32, BTreeMap<usize, [i64; 5]>>, String> with Ok(HashMap::from_iter([(1, BTreeMap::from_iter([(1, [0; 5])]))]))
+crates/spikefade/src/v2.rs:375:234: replace * with / in blocks_md
+crates/spikefade/src/v2.rs:424:55: replace / with % in evidence_md
+crates/spikefade/src/v2.rs:437:65: replace * with + in evidence_md
+crates/spikefade/src/v2.rs:461:57: replace / with * in evidence_md
+crates/spikefade/src/v2.rs:515:63: replace + with - in remark_peak
+crates/spikefade/src/v2.rs:547:5: replace write_new -> Result<(), String> with Ok(())
+crates/spikefade/src/kern.rs:377:16: replace > with >= in flush
+crates/spikefade/src/kern.rs:410:68: replace - with / in unrealised
+crates/spikefade/src/kern.rs:416:51: replace - with + in unrealised
+crates/spikefade/src/kern.rs:475:87: replace - with / in cap_loss
+crates/spikefade/src/kern.rs:520:18: replace > with >= in cap_eval
