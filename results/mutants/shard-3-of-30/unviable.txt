@@ -1,0 +1,1 @@
+crates/spikefade/src/acct.rs:471:5: replace detail_list -> (Vec<Dec>, Sum) with (vec![Default::default()], Default::default())

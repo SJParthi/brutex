@@ -1,0 +1,112 @@
+crates/spikefade/src/acct.rs:255:26: replace * with + in Tops::offer
+crates/spikefade/src/acct.rs:255:26: replace * with / in Tops::offer
+crates/spikefade/src/acct.rs:255:21: replace >= with < in Tops::offer
+crates/spikefade/src/acct.rs:258:21: replace >= with < in Tops::offer
+crates/spikefade/src/acct.rs:258:27: replace * with + in Tops::offer
+crates/spikefade/src/acct.rs:258:27: replace * with / in Tops::offer
+crates/spikefade/src/acct.rs:261:18: replace > with >= in Tops::offer
+crates/spikefade/src/acct.rs:262:32: delete - in Tops::offer
+crates/spikefade/src/acct.rs:262:80: delete - in Tops::offer
+crates/spikefade/src/acct.rs:271:9: replace Tops::merge with ()
+crates/spikefade/src/acct.rs:300:31: replace * with / in step
+crates/spikefade/src/acct.rs:302:19: replace != with == in step
+crates/spikefade/src/acct.rs:342:24: replace + with - in step
+crates/spikefade/src/acct.rs:353:15: replace & with | in step
+crates/spikefade/src/acct.rs:356:30: replace * with / in step
+crates/spikefade/src/acct.rs:365:19: replace += with *= in step
+crates/spikefade/src/acct.rs:372:5: replace sweep_list -> Vec<Sum> with vec![]
+crates/spikefade/src/acct.rs:372:5: replace sweep_list -> Vec<Sum> with vec![Default::default()]
+crates/spikefade/src/acct.rs:379:13: replace += with -= in sweep_list
+crates/spikefade/src/acct.rs:379:13: replace += with *= in sweep_list
+crates/spikefade/src/acct.rs:379:26: replace % with / in sweep_list
+crates/spikefade/src/acct.rs:379:26: replace % with + in sweep_list
+crates/spikefade/src/acct.rs:384:40: replace != with == in sweep_list
+crates/spikefade/src/acct.rs:386:24: replace % with / in sweep_list
+crates/spikefade/src/acct.rs:386:24: replace % with + in sweep_list
+crates/spikefade/src/acct.rs:388:35: replace && with || in sweep_list
+crates/spikefade/src/acct.rs:388:27: replace == with != in sweep_list
+crates/spikefade/src/acct.rs:388:95: replace == with != in sweep_list
+crates/spikefade/src/acct.rs:392:40: replace + with - in sweep_list
+crates/spikefade/src/acct.rs:393:34: replace / with % in sweep_list
+crates/spikefade/src/acct.rs:393:34: replace / with * in sweep_list
+crates/spikefade/src/acct.rs:400:36: replace + with - in sweep_list
+crates/spikefade/src/acct.rs:400:36: replace + with * in sweep_list
+crates/spikefade/src/acct.rs:400:48: replace % with / in sweep_list
+crates/spikefade/src/acct.rs:400:48: replace % with + in sweep_list
+crates/spikefade/src/acct.rs:403:24: delete field seg from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:29: delete field list from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:40: delete field x from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:78: delete field n from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:115: delete field net from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:133: delete field trades from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:152: delete field wins from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:167: delete field mdd from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:180: delete field worst from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:197: delete field worst_day from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:222: delete field days_pos from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:245: delete field days_neg from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:268: delete field days_traded from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:297: delete field ndays from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:304: delete field spike from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:318: delete field pk_margin from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:59: replace / with % in sweep_list
+crates/spikefade/src/acct.rs:403:59: replace / with * in sweep_list
+crates/spikefade/src/acct.rs:403:96: replace % with / in sweep_list
+crates/spikefade/src/acct.rs:403:96: replace % with + in sweep_list
+crates/spikefade/src/acct.rs:414:23: replace < with <= in flush
+crates/spikefade/src/acct.rs:424:21: replace += with -= in flush
+crates/spikefade/src/acct.rs:424:21: replace += with *= in flush
+crates/spikefade/src/acct.rs:425:20: replace += with -= in flush
+crates/spikefade/src/acct.rs:425:20: replace += with *= in flush
+crates/spikefade/src/acct.rs:426:18: replace > with == in flush
+crates/spikefade/src/acct.rs:426:18: replace > with < in flush
+crates/spikefade/src/acct.rs:426:18: replace > with >= in flush
+crates/spikefade/src/acct.rs:427:21: replace += with *= in flush
+crates/spikefade/src/acct.rs:431:37: replace - with + in flush
+crates/spikefade/src/acct.rs:431:37: replace - with / in flush
+crates/spikefade/src/acct.rs:432:24: replace -= with += in flush
+crates/spikefade/src/acct.rs:432:24: replace -= with /= in flush
+crates/spikefade/src/acct.rs:440:5: replace close_day with ()
+crates/spikefade/src/acct.rs:440:19: replace == with != in close_day
+crates/spikefade/src/acct.rs:443:22: replace > with == in close_day
+crates/spikefade/src/acct.rs:443:22: replace > with >= in close_day
+crates/spikefade/src/acct.rs:444:24: replace += with *= in close_day
+crates/spikefade/src/acct.rs:448:42: replace += with *= in close_day
+crates/spikefade/src/acct.rs:449:39: replace += with -= in close_day
+crates/spikefade/src/acct.rs:449:39: replace += with *= in close_day
+crates/spikefade/src/acct.rs:472:24: delete field next_exit from struct Acc expression in detail_list
+crates/spikefade/src/acct.rs:472:45: delete field cur_day from struct Acc expression in detail_list
+crates/spikefade/src/acct.rs:483:19: delete field seg from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:27: delete field list from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:36: delete field x from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:70: delete field n from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:104: delete field net from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:141: delete field wins from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:156: delete field mdd from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:169: delete field worst from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:186: delete field worst_day from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:211: delete field days_pos from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:234: delete field days_neg from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:257: delete field days_traded from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:286: delete field ndays from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:293: delete field spike from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, 0), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, 1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 0, -1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, 1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, 0), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, 1), Default::default())]])
+crates/spikefade/src/acct.rs:574:9: replace Tops::export -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((1, -1, -1), Default::default())]])
