@@ -1,0 +1,22 @@
+crates/spikefade/src/screen.rs:777:17: replace && with || in rank_at
+crates/spikefade/src/screen.rs:789:67: replace >= with < in rank_at
+crates/spikefade/src/trade.rs:59:27: replace * with +
+crates/spikefade/src/trade.rs:59:27: replace * with /
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 0, 0, 1, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 0, 1, 1, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 0, 1, 1, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 0, 0, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 0, 1, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 1, 1, false)
+crates/spikefade/src/trade.rs:240:16: replace += with -= in gap_facts
+crates/spikefade/src/trade.rs:375:34: replace | with ^ in side_key
+crates/spikefade/src/trade.rs:899:5: replace charges_of -> Result<(i64, i64, i64, bool), String> with Ok((0, 1, -1, false))
+crates/spikefade/src/trade.rs:899:5: replace charges_of -> Result<(i64, i64, i64, bool), String> with Ok((-1, -1, -1, false))
+crates/spikefade/src/trade.rs:908:5: replace charges_orders -> Result<(i64, i64, i64, bool), String> with Ok((0, 0, 0, false))
+crates/spikefade/src/trade.rs:908:5: replace charges_orders -> Result<(i64, i64, i64, bool), String> with Ok((0, -1, 0, false))
+crates/spikefade/src/trade.rs:908:5: replace charges_orders -> Result<(i64, i64, i64, bool), String> with Ok((1, 0, 0, false))
+crates/spikefade/src/trade.rs:941:80: replace > with < in book_dearest
+crates/spikefade/src/trade.rs:949:16: replace > with < in book_dearest

@@ -1,0 +1,20 @@
+crates/spikefade/src/screen.rs:503:30: delete field lists from struct DayEvents expression in generate
+crates/spikefade/src/trade.rs:59:27: replace * with +
+crates/spikefade/src/trade.rs:59:27: replace * with /
+crates/spikefade/src/trade.rs:606:79: delete field buy_value from struct crate::charges::Trip expression in charges_orders_n
+crates/spikefade/src/trade.rs:606:90: delete field sell_value from struct crate::charges::Trip expression in charges_orders_n
+crates/spikefade/src/trade.rs:606:102: delete field entry_orders from struct crate::charges::Trip expression in charges_orders_n
+crates/spikefade/src/trade.rs:606:129: delete field exit_orders from struct crate::charges::Trip expression in charges_orders_n
+crates/spikefade/src/trade.rs:631:79: delete field buy_value from struct crate::charges::Trip expression in charges_dearer_of
+crates/spikefade/src/trade.rs:631:90: delete field sell_value from struct crate::charges::Trip expression in charges_dearer_of
+crates/spikefade/src/trade.rs:631:102: delete field entry_orders from struct crate::charges::Trip expression in charges_dearer_of
+crates/spikefade/src/trade.rs:631:126: delete field exit_orders from struct crate::charges::Trip expression in charges_dearer_of
+crates/spikefade/src/trade.rs:828:26: delete field limit from struct Order expression in record_base_f7
+crates/spikefade/src/trade.rs:948:26: delete field rd from struct F7Trip expression in book_dearest
+crates/spikefade/src/trade.rs:1033:9: delete field units from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1034:9: delete field sold_value from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1035:9: delete field e0 from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1037:9: delete field p0 from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1038:9: delete field limit_in from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1039:9: delete field sale_known from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1040:9: delete field sale_blocks from struct Trip expression in trip_rd

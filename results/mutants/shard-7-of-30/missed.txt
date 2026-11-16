@@ -436,3 +436,6 @@ crates/spikefade/src/trade.rs:941:80: replace > with == in book_dearest
 crates/spikefade/src/trade.rs:941:80: replace > with >= in book_dearest
 crates/spikefade/src/trade.rs:948:66: delete field r0_net from struct F7Trip expression in book_dearest
 crates/spikefade/src/trade.rs:949:16: replace > with == in book_dearest
+crates/spikefade/src/trade.rs:949:16: replace > with >= in book_dearest
+crates/spikefade/src/trade.rs:951:28: replace += with -= in book_dearest
+crates/spikefade/src/trade.rs:951:28: replace += with *= in book_dearest
