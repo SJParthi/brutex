@@ -1,0 +1,1 @@
+crates/costs/src/expiry.rs:454:47: replace && with || in next_weekly_on

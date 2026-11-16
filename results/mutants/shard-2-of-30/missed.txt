@@ -1,0 +1,13 @@
+crates/costs/src/equity_dated.rs:1180:61: replace < with <= in narrow_fitting
+crates/costs/src/equity_readings.rs:679:64: replace + with - in Facts::of
+crates/costs/src/fill.rs:470:32: replace < with <= in fills_at
+crates/costs/src/lot.rs:515:18: delete - in lot_size_of
+crates/costs/src/lot.rs:679:9: replace LotStanding::word -> &'static str with ""
+crates/costs/src/lot.rs:679:9: replace LotStanding::word -> &'static str with "xyzzy"
+crates/costs/src/lot.rs:688:9: replace LotStanding::parse -> Option<Self> with None
+crates/costs/src/lot.rs:689:13: delete match arm "sourced" in LotStanding::parse
+crates/costs/src/lot.rs:690:13: delete match arm "unverified" in LotStanding::parse
+crates/costs/src/lot.rs:907:23: replace > with >= in LotTable::from_rows
+crates/costs/src/lot.rs:979:9: replace LotTable::rows -> &[LotRow] with Vec::leak(Vec::new())
+crates/costs/src/lot.rs:994:9: replace LotTable::underlyings -> usize with 0
+crates/costs/src/lot.rs:1075:42: replace == with != in compiled_rows

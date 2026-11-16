@@ -1,0 +1,121 @@
+crates/costs/src/equity_dated.rs:1212:5: replace worst_state_stamp -> StateCharge with Default::default()
+crates/costs/src/equity_dated.rs:1221:5: replace worst_state_units -> (&'static StateStamp, i128) with (Box::leak(Box::new(Default::default())), 0)
+crates/costs/src/equity_dated.rs:1221:5: replace worst_state_units -> (&'static StateStamp, i128) with (Box::leak(Box::new(Default::default())), 1)
+crates/costs/src/equity_dated.rs:1221:5: replace worst_state_units -> (&'static StateStamp, i128) with (Box::leak(Box::new(Default::default())), -1)
+crates/costs/src/equity_readings.rs:61:32: replace << with >>
+crates/costs/src/equity_readings.rs:129:5: replace overflow -> ChargeError with Default::default()
+crates/costs/src/equity_readings.rs:124:5: replace not_positive -> ChargeError with Default::default()
+crates/costs/src/equity_readings.rs:154:9: replace NoteInput::from_fills -> Result<Self, ChargeError> with Ok(Default::default())
+crates/costs/src/equity_readings.rs:195:21: replace && with || in NoteInput::from_fills
+crates/costs/src/equity_readings.rs:241:9: replace NoteInput::day -> TradeDay with Default::default()
+crates/costs/src/equity_readings.rs:247:9: replace NoteInput::orders -> &[OrderTotals] with Vec::leak(vec![Default::default()])
+crates/costs/src/equity_readings.rs:259:9: replace NoteInput::buy_value -> Paisa with Default::default()
+crates/costs/src/equity_readings.rs:265:9: replace NoteInput::sell_value -> Paisa with Default::default()
+crates/costs/src/equity_readings.rs:282:9: replace NoteInput::gross -> Paisa with Default::default()
+crates/costs/src/equity_readings.rs:576:9: replace NoteLines::lines -> [Paisa; 11] with [Default::default(); 11]
+crates/costs/src/equity_readings.rs:627:5: replace largest -> (R, i128) with (Default::default(), 0)
+crates/costs/src/equity_readings.rs:627:5: replace largest -> (R, i128) with (Default::default(), 1)
+crates/costs/src/equity_readings.rs:627:5: replace largest -> (R, i128) with (Default::default(), -1)
+crates/costs/src/equity_readings.rs:635:9: replace Facts::of -> Self with Default::default()
+crates/costs/src/equity_readings.rs:713:9: replace Facts::pick -> Lines with Default::default()
+crates/costs/src/equity_readings.rs:762:9: replace Facts::worst -> (Lines, ReadingSet) with (Default::default(), Default::default())
+crates/costs/src/equity_readings.rs:865:9: replace Lines::of -> Self with Default::default()
+crates/costs/src/equity_readings.rs:938:5: replace priced -> Priced with Default::default()
+crates/costs/src/equity_readings.rs:898:9: replace Lines::narrow -> NoteLines with Default::default()
+crates/costs/src/equity_readings.rs:969:5: replace official -> Result<NoteLines, ChargeError> with Ok(Default::default())
+crates/costs/src/equity_readings.rs:959:5: replace note -> Result<NoteLines, ChargeError> with Ok(Default::default())
+crates/costs/src/equity_readings.rs:979:5: replace worst -> Result<(NoteLines, ReadingSet), ChargeError> with Ok((Default::default(), Default::default()))
+crates/costs/src/error.rs:88:9: replace Refusal::with_remediation -> Self with Default::default()
+crates/costs/src/error.rs:109:9: replace Refusal::exchange -> Option<Exchange> with Some(Default::default())
+crates/costs/src/error.rs:115:9: replace Refusal::on -> TradeDay with Default::default()
+crates/costs/src/error.rs:121:9: replace Refusal::window_start -> TradeDay with Default::default()
+crates/costs/src/error.rs:129:9: replace Refusal::verified_from -> Option<TradeDay> with Some(Default::default())
+crates/costs/src/error.rs:403:9: replace <impl From<Refusal> for CostError>::from -> Self with Default::default()
+crates/costs/src/exact.rs:85:9: replace Ratio::from_bps_x100 -> Self with Default::default()
+crates/costs/src/exact.rs:97:9: replace Ratio::denominator -> i64 with 0
+crates/costs/src/exact.rs:97:9: replace Ratio::denominator -> i64 with 1
+crates/costs/src/exact.rs:97:9: replace Ratio::denominator -> i64 with -1
+crates/costs/src/exact.rs:106:9: replace Ratio::is_well_shaped -> bool with false
+crates/costs/src/exact.rs:106:18: replace > with == in Ratio::is_well_shaped
+crates/costs/src/exact.rs:106:18: replace > with < in Ratio::is_well_shaped
+crates/costs/src/exact.rs:106:34: replace >= with < in Ratio::is_well_shaped
+crates/costs/src/exact.rs:210:9: replace Exact::of_paisa -> Self with Default::default()
+crates/costs/src/exact.rs:250:9: replace Exact::sum -> Result<Self, ChargeError> with Ok(Default::default())
+crates/costs/src/exact.rs:265:9: replace Exact::times -> Result<Self, ChargeError> with Ok(Default::default())
+crates/costs/src/exact.rs:285:5: replace units_of -> Result<Exact, ChargeError> with Ok(Default::default())
+crates/costs/src/expiry.rs:297:5: replace weekly_regime -> Result<WeeklyRegime, Refusal> with Ok(Default::default())
+crates/costs/src/expiry.rs:310:5: replace monthly_regime -> Result<Weekday, Refusal> with Ok(Default::default())
+crates/costs/src/expiry.rs:353:5: replace next_weekly_expiry -> Result<Option<TradeDay>, CostError> with Ok(Some(Default::default()))
+crates/costs/src/expiry.rs:409:5: replace next_monthly_expiry -> Result<TradeDay, CostError> with Ok(Default::default())
+crates/costs/src/expiry.rs:441:5: replace next_weekly_on -> Result<Option<TradeDay>, CostError> with Ok(Some(Default::default()))
+crates/costs/src/expiry.rs:523:5: replace next_monthly_on -> Result<TradeDay, CostError> with Ok(Default::default())
+crates/costs/src/expiry.rs:552:5: replace last_weekday_of_month -> TradeDay with Default::default()
+crates/costs/src/fill.rs:221:9: replace Bar::flat -> Result<Self, CostError> with Ok(Default::default())
+crates/costs/src/fill.rs:227:9: replace Bar::open -> Paisa with Default::default()
+crates/costs/src/fill.rs:233:9: replace Bar::high -> Paisa with Default::default()
+crates/costs/src/fill.rs:239:9: replace Bar::low -> Paisa with Default::default()
+crates/costs/src/fill.rs:259:9: replace Fills::at_open -> Self with Default::default()
+crates/costs/src/fill.rs:269:9: replace Fills::buy -> Paisa with Default::default()
+crates/costs/src/fill.rs:288:9: replace Fills::realized_slip_per_unit -> Paisa with Default::default()
+crates/costs/src/fill.rs:275:9: replace Fills::sell -> Paisa with Default::default()
+crates/costs/src/fill.rs:427:5: replace fills_at -> Result<Fills, CostError> with Ok(Default::default())
+crates/costs/src/fill.rs:516:5: replace worst_case_fills -> Result<Fills, CostError> with Ok(Default::default())
+crates/costs/src/ledger.rs:127:9: replace ExecutedOrder::with_part -> Result<Self, ChargeError> with Ok(Default::default())
+crates/costs/src/ledger.rs:146:9: replace ExecutedOrder::checked -> Result<Self, ChargeError> with Ok(Default::default())
+crates/costs/src/ledger.rs:163:5: replace overflow -> ChargeError with Default::default()
+crates/costs/src/ledger.rs:229:9: replace DayLedger::kind -> TradeKind with Default::default()
+crates/costs/src/ledger.rs:241:9: replace DayLedger::day -> TradeDay with Default::default()
+crates/costs/src/ledger.rs:235:9: replace DayLedger::exchange -> Exchange with Default::default()
+crates/costs/src/ledger.rs:308:9: replace DayLedger::close -> Result<DayCharges, ChargeError> with Ok(Default::default())
+crates/costs/src/ledger.rs:413:5: replace order_lines_unrounded -> Result<[(&'static str, Exact); 11], ChargeError> with Ok([("", Default::default()); 11])
+crates/costs/src/ledger.rs:413:5: replace order_lines_unrounded -> Result<[(&'static str, Exact); 11], ChargeError> with Ok([("xyzzy", Default::default()); 11])
+crates/costs/src/ledger.rs:522:9: replace DayLedger::order_lines_unrounded -> Result<[(&'static str, Exact); 11], ChargeError> with Ok([("", Default::default()); 11])
+crates/costs/src/ledger.rs:522:9: replace DayLedger::order_lines_unrounded -> Result<[(&'static str, Exact); 11], ChargeError> with Ok([("xyzzy", Default::default()); 11])
+crates/costs/src/ledger.rs:576:5: replace applicable -> Result<ExecutedOrder, ChargeError> with Ok(Default::default())
+crates/costs/src/ledger.rs:589:5: replace share -> Result<Exact, ChargeError> with Ok(Default::default())
+crates/costs/src/ledger.rs:607:5: replace lines_of -> Result<[Exact; 11], ChargeError> with Ok([Default::default(); 11])
+crates/costs/src/ledger.rs:651:5: replace named -> [(&'static str, Exact); 11] with [("", Default::default()); 11]
+crates/costs/src/ledger.rs:651:5: replace named -> [(&'static str, Exact); 11] with [("xyzzy", Default::default()); 11]
+crates/costs/src/ledger.rs:680:5: replace precise_order_lines -> Result<[Exact; 9], ChargeError> with Ok([Default::default(); 9])
+crates/costs/src/lot.rs:79:9: replace LotSize::new_const -> Self with Default::default()
+crates/costs/src/lot.rs:236:5: replace lot_size_on -> Result<LotSize, Refusal> with Ok(Default::default())
+crates/costs/src/lot.rs:290:9: replace ContractRule::lot_of -> LotSize with Default::default()
+crates/costs/src/lot.rs:427:5: replace unread_revision -> Option<TradeDay> with Some(Default::default())
+crates/costs/src/lot.rs:497:5: replace lot_size_of -> Result<ContractLot, CostError> with Ok(Default::default())
+crates/costs/src/lot.rs:688:9: replace LotStanding::parse -> Option<Self> with Some(Default::default())
+crates/costs/src/lot.rs:907:9: replace LotTable::from_rows -> Result<Self, LotTableError> with Ok(Default::default())
+crates/costs/src/lot.rs:979:9: replace LotTable::rows -> &[LotRow] with Vec::leak(vec![Default::default()])
+crates/costs/src/lot.rs:985:9: replace LotTable::rows_of -> &[LotRow] with Vec::leak(vec![Default::default()])
+crates/costs/src/lot.rs:1011:9: replace LotTable::lot_on -> Result<LotAnswer<'_>, LotAbsence> with Ok(Default::default())
+crates/costs/src/lot.rs:1059:5: replace compiled_rows -> Vec<LotRow> with vec![Default::default()]
+crates/costs/src/moneyness.rs:185:9: replace MoneynessSteps::bucket -> Moneyness with Default::default()
+crates/costs/src/moneyness.rs:351:5: replace moneyness_steps -> Result<MoneynessSteps, CostError> with Ok(Default::default())
+crates/costs/src/moneyness.rs:409:5: replace classify -> Result<Moneyness, CostError> with Ok(Default::default())
+crates/costs/src/rate.rs:87:9: replace BpsX100::get -> i64 with 0
+crates/costs/src/rate.rs:87:9: replace BpsX100::get -> i64 with 1
+crates/costs/src/rate.rs:87:9: replace BpsX100::get -> i64 with -1
+crates/costs/src/rate.rs:138:5: replace brokerage_per_order -> Paisa with Default::default()
+crates/costs/src/rate.rs:226:5: replace stamp_duty -> BpsX100 with Default::default()
+crates/costs/src/regime.rs:93:51: replace + with *
+crates/costs/src/regime.rs:93:51: replace + with -
+crates/costs/src/regime.rs:127:9: replace RegimeRow::verified -> Self with Default::default()
+crates/costs/src/regime.rs:136:9: replace RegimeRow::unverified -> Self with Default::default()
+crates/costs/src/regime.rs:149:9: replace RegimeRow::is_well_shaped -> bool with false
+crates/costs/src/regime.rs:150:46: replace >= with < in RegimeRow::is_well_shaped
+crates/costs/src/regime.rs:189:9: replace RegimeTable::rate_on -> Result<BpsX100, Refusal> with Ok(Default::default())
+crates/costs/src/regime.rs:223:9: replace RegimeTable::rows -> impl Iterator<Item =&RegimeRow> with ::std::iter::once(Box::leak(Box::new(Default::default())))
+crates/costs/src/regime.rs:233:9: replace RegimeTable::refusal_windows -> [Option<RefusalWindow>; MAX_REGIME_ROWS] with [Some(Default::default()); MAX_REGIME_ROWS]
+crates/costs/src/regime.rs:260:9: replace RegimeTable::anchor_covers_all_days -> bool with false
+crates/costs/src/regime.rs:270:9: replace RegimeTable::rows_ascend -> bool with false
+crates/costs/src/regime.rs:284:9: replace RegimeTable::rows_are_well_shaped -> bool with false
+crates/costs/src/regime.rs:303:9: replace RegimeTable::is_shipping_shape -> bool with false
+crates/costs/src/regime.rs:321:9: replace RefusalWindow::start -> TradeDay with Default::default()
+crates/costs/src/regime.rs:328:9: replace RefusalWindow::verified_from -> Option<TradeDay> with Some(Default::default())
+crates/costs/src/regime.rs:628:5: replace stt_options_rate -> Result<BpsX100, Refusal> with Ok(Default::default())
+crates/costs/src/regime.rs:639:5: replace stt_exercise_rate -> Result<BpsX100, Refusal> with Ok(Default::default())
+crates/costs/src/regime.rs:673:5: replace exchange_charge_rate -> Result<BpsX100, Refusal> with Ok(Default::default())
+crates/costs/src/regime.rs:685:5: replace exchange_charge_refusal_windows -> [Option<RefusalWindow>; MAX_REGIME_ROWS] with [Some(Default::default()); MAX_REGIME_ROWS]
+crates/costs/src/regime.rs:726:5: replace ipft_rate -> Result<BpsX100, Refusal> with Ok(Default::default())
+crates/costs/src/regime.rs:734:5: replace table_for -> &'static RegimeTable with Box::leak(Box::new(Default::default()))
+crates/costs/src/schedule.rs:113:9: replace TradeKind::refusal -> Option<ChargeError> with Some(Default::default())
+crates/costs/src/schedule.rs:125:9: replace TradeKind::segment -> Segment with Default::default()
