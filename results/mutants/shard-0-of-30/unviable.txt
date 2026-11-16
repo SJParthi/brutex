@@ -75,3 +75,89 @@ crates/core/src/universe.rs:4369:36: replace - with + in MemberIndex<N>::build
 crates/core/src/universe.rs:4373:15: replace += with -= in MemberIndex<N>::build
 crates/core/src/universe.rs:4369:36: replace - with / in MemberIndex<N>::build
 crates/core/src/universe.rs:4373:15: replace += with *= in MemberIndex<N>::build
+crates/core/src/universe.rs:4522:15: replace & with | in mask
+crates/core/src/universe.rs:4522:15: replace & with ^ in mask
+crates/core/src/universe.rs:4522:27: replace - with + in mask
+crates/core/src/universe.rs:4522:27: replace - with / in mask
+crates/core/src/universe.rs:4545:13: replace < with == in fnv1a
+crates/core/src/universe.rs:4545:13: replace < with <= in fnv1a
+crates/core/src/universe.rs:4548:11: replace += with -= in fnv1a
+crates/core/src/universe.rs:4548:11: replace += with *= in fnv1a
+crates/core/src/vendor.rs:214:9: replace VendorSet::with -> Self with Default::default()
+crates/core/src/vendor.rs:541:9: replace Vendor::master_columns -> MasterColumns with Default::default()
+crates/core/src/vendor.rs:944:9: replace Decoded::skip -> Option<Skip> with Some(Default::default())
+crates/core/src/vendor.rs:974:5: replace collapse_spaces -> Result<Collapsed, InstrumentError> with Ok(Default::default())
+crates/core/src/vendor.rs:1181:5: replace board_of -> EquityVerdict with Default::default()
+crates/core/src/vendor.rs:1212:9: replace Vendor::segment_of -> Result<SegmentVerdict, InstrumentError> with Ok(Default::default())
+crates/core/src/vendor.rs:1580:5: replace decode_master_row -> Result<Decoded, InstrumentError> with Ok(Default::default())
+crates/core/src/vendor.rs:1903:5: replace unsuffixed_key -> Result<Option<InstrumentKey>, InstrumentError> with Ok(Some(Default::default()))
+crates/core/src/vendor.rs:1926:5: replace parse_expiry -> Result<Expiry, InstrumentError> with Ok(Default::default())
+crates/costs/src/dated.rs:88:9: replace DatedRow<V>::verified -> Self with Default::default()
+crates/costs/src/dated.rs:97:9: replace DatedRow<V>::unverified -> Self with Default::default()
+crates/costs/src/dated.rs:139:9: replace DatedTable<V>::value_on -> Result<V, Refusal> with Ok(Default::default())
+crates/costs/src/dated.rs:225:9: replace DatedTable<V>::is_shipping_shape -> bool with false
+crates/costs/src/dated.rs:225:12: delete ! in DatedTable<V>::is_shipping_shape
+crates/costs/src/dated.rs:228:12: delete ! in DatedTable<V>::is_shipping_shape
+crates/costs/src/dated.rs:231:12: delete ! in DatedTable<V>::is_shipping_shape
+crates/costs/src/dated.rs:247:24: delete ! in DatedTable<V>::is_shipping_shape
+crates/costs/src/dated.rs:234:12: delete ! in DatedTable<V>::is_shipping_shape
+crates/costs/src/dated.rs:250:24: delete ! in DatedTable<V>::is_shipping_shape
+crates/costs/src/dated.rs:284:5: replace has_content -> bool with false
+crates/costs/src/dated.rs:305:5: replace str_eq -> bool with false
+crates/costs/src/dated.rs:307:19: replace != with == in str_eq
+crates/costs/src/charge_error.rs:231:9: replace <impl From<CostError> for ChargeError>::from -> Self with Default::default()
+crates/costs/src/charge_error.rs:237:9: replace <impl From<crate::error::Refusal> for ChargeError>::from -> Self with Default::default()
+crates/costs/src/day.rs:251:9: replace TradeDay::new_const -> Option<Self> with None
+crates/costs/src/day.rs:265:9: replace TradeDay::ordinal -> i32 with 0
+crates/costs/src/day.rs:251:9: replace TradeDay::new_const -> Option<Self> with Some(Default::default())
+crates/costs/src/day.rs:265:9: replace TradeDay::ordinal -> i32 with 1
+crates/costs/src/day.rs:265:9: replace TradeDay::ordinal -> i32 with -1
+crates/costs/src/day.rs:292:9: replace TradeDay::before -> bool with true
+crates/costs/src/day.rs:292:9: replace TradeDay::before -> bool with false
+crates/costs/src/day.rs:292:22: replace < with > in TradeDay::before
+crates/costs/src/day.rs:292:22: replace < with == in TradeDay::before
+crates/costs/src/day.rs:300:9: replace TradeDay::same_day -> bool with false
+crates/costs/src/day.rs:300:22: replace == with != in TradeDay::same_day
+crates/costs/src/day.rs:314:9: replace TradeDay::weekday -> Weekday with Default::default()
+crates/costs/src/day.rs:334:9: replace TradeDay::plus_days -> Result<Self, CostError> with Ok(Default::default())
+crates/costs/src/day.rs:363:9: replace TradeDay::from_ordinal -> Result<Self, CostError> with Ok(Default::default())
+crates/costs/src/day.rs:393:9: replace TradeDay::last_of_its_month -> Self with Default::default()
+crates/costs/src/day.rs:430:9: replace TradeDay::with_day_in_same_month -> Self with Default::default()
+crates/costs/src/day.rs:445:9: replace TradeDay::earlier_in_same_month -> Self with Default::default()
+crates/costs/src/day.rs:496:5: replace days_from_civil -> i32 with 0
+crates/costs/src/day.rs:496:5: replace days_from_civil -> i32 with 1
+crates/costs/src/day.rs:496:5: replace days_from_civil -> i32 with -1
+crates/costs/src/day.rs:500:25: replace - with + in days_from_civil
+crates/costs/src/day.rs:500:25: replace - with / in days_from_civil
+crates/costs/src/day.rs:500:30: replace <= with > in days_from_civil
+crates/costs/src/day.rs:501:17: replace / with % in days_from_civil
+crates/costs/src/day.rs:501:17: replace / with * in days_from_civil
+crates/costs/src/day.rs:502:17: replace - with / in days_from_civil
+crates/costs/src/day.rs:503:64: replace + with - in days_from_civil
+crates/costs/src/day.rs:503:64: replace + with * in days_from_civil
+crates/costs/src/day.rs:503:60: replace / with % in days_from_civil
+crates/costs/src/day.rs:503:60: replace / with * in days_from_civil
+crates/costs/src/day.rs:503:55: replace + with - in days_from_civil
+crates/costs/src/day.rs:503:55: replace + with * in days_from_civil
+crates/costs/src/day.rs:503:20: replace * with / in days_from_civil
+crates/costs/src/day.rs:503:20: replace * with + in days_from_civil
+crates/costs/src/day.rs:503:25: replace + with * in days_from_civil
+crates/costs/src/day.rs:503:25: replace + with - in days_from_civil
+crates/costs/src/day.rs:503:32: replace > with == in days_from_civil
+crates/costs/src/day.rs:503:32: replace > with < in days_from_civil
+crates/costs/src/day.rs:503:38: delete - in days_from_civil
+crates/costs/src/day.rs:503:32: replace > with >= in days_from_civil
+crates/costs/src/day.rs:504:47: replace + with - in days_from_civil
+crates/costs/src/day.rs:504:47: replace + with * in days_from_civil
+crates/costs/src/day.rs:504:25: replace + with * in days_from_civil
+crates/costs/src/day.rs:504:19: replace * with + in days_from_civil
+crates/costs/src/day.rs:504:19: replace * with / in days_from_civil
+crates/costs/src/day.rs:504:31: replace / with % in days_from_civil
+crates/costs/src/day.rs:504:31: replace / with * in days_from_civil
+crates/costs/src/day.rs:504:41: replace / with % in days_from_civil
+crates/costs/src/day.rs:504:41: replace / with * in days_from_civil
+crates/costs/src/day.rs:505:25: replace - with / in days_from_civil
+crates/costs/src/day.rs:505:19: replace + with - in days_from_civil
+crates/costs/src/day.rs:505:19: replace + with * in days_from_civil
+crates/costs/src/day.rs:505:9: replace * with + in days_from_civil
+crates/costs/src/day.rs:505:9: replace * with / in days_from_civil

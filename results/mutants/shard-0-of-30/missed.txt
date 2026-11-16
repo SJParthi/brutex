@@ -378,3 +378,159 @@ crates/core/src/universe.rs:4483:9: replace MemberIndex<N>::len -> usize with 0
 crates/core/src/universe.rs:4483:9: replace MemberIndex<N>::len -> usize with 1
 crates/core/src/universe.rs:4489:9: replace MemberIndex<N>::is_empty -> bool with true
 crates/core/src/universe.rs:4489:9: replace MemberIndex<N>::is_empty -> bool with false
+crates/core/src/universe.rs:4489:20: replace == with != in MemberIndex<N>::is_empty
+crates/core/src/universe.rs:4515:5: replace mask -> usize with 0
+crates/core/src/universe.rs:4515:5: replace mask -> usize with 1
+crates/core/src/universe.rs:4542:5: replace fnv1a -> u64 with 0
+crates/core/src/universe.rs:4542:5: replace fnv1a -> u64 with 1
+crates/core/src/universe.rs:4546:14: replace ^= with |= in fnv1a
+crates/core/src/universe.rs:4545:13: replace < with > in fnv1a
+crates/core/src/universe.rs:4546:14: replace ^= with &= in fnv1a
+crates/core/src/universe.rs:4641:5: replace of_instrument -> Universe with Default::default()
+crates/core/src/vendor.rs:119:9: replace Vendor::publishes_master -> bool with true
+crates/core/src/vendor.rs:119:9: replace Vendor::publishes_master -> bool with false
+crates/core/src/vendor.rs:150:9: replace Vendor::master_file -> &'static str with ""
+crates/core/src/vendor.rs:150:9: replace Vendor::master_file -> &'static str with "xyzzy"
+crates/core/src/vendor.rs:170:9: replace Vendor::as_str -> &'static str with ""
+crates/core/src/vendor.rs:170:9: replace Vendor::as_str -> &'static str with "xyzzy"
+crates/core/src/vendor.rs:181:9: replace Vendor::bit -> u8 with 0
+crates/core/src/vendor.rs:181:9: replace Vendor::bit -> u8 with 1
+crates/core/src/vendor.rs:183:29: replace << with >> in Vendor::bit
+crates/core/src/vendor.rs:185:33: replace << with >> in Vendor::bit
+crates/core/src/vendor.rs:186:29: replace << with >> in Vendor::bit
+crates/core/src/vendor.rs:187:32: replace << with >> in Vendor::bit
+crates/core/src/vendor.rs:214:21: replace | with & in VendorSet::with
+crates/core/src/vendor.rs:214:21: replace | with ^ in VendorSet::with
+crates/core/src/vendor.rs:220:9: replace VendorSet::contains -> bool with true
+crates/core/src/vendor.rs:220:9: replace VendorSet::contains -> bool with false
+crates/core/src/vendor.rs:220:31: replace != with == in VendorSet::contains
+crates/core/src/vendor.rs:220:16: replace & with | in VendorSet::contains
+crates/core/src/vendor.rs:220:16: replace & with ^ in VendorSet::contains
+crates/core/src/vendor.rs:226:9: replace VendorSet::is_empty -> bool with true
+crates/core/src/vendor.rs:226:9: replace VendorSet::is_empty -> bool with false
+crates/core/src/vendor.rs:226:16: replace == with != in VendorSet::is_empty
+crates/core/src/vendor.rs:326:9: replace VendorId::as_str -> &str with ""
+crates/core/src/vendor.rs:326:9: replace VendorId::as_str -> &str with "xyzzy"
+crates/core/src/vendor.rs:337:9: replace <impl core::fmt::Debug for VendorId>::fmt -> core::fmt::Result with Ok(Default::default())
+crates/core/src/vendor.rs:343:9: replace <impl core::fmt::Display for VendorId>::fmt -> core::fmt::Result with Ok(Default::default())
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with None
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("", 0))
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("", 1))
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("xyzzy", 0))
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("xyzzy", 1))
+crates/core/src/vendor.rs:449:17: replace < with == in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:449:17: replace < with > in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:449:17: replace < with <= in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:455:20: replace > with == in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:455:20: replace > with < in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:455:20: replace > with >= in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:458:15: replace += with -= in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:458:15: replace += with *= in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:797:9: replace Skip::reason -> &'static str with ""
+crates/core/src/vendor.rs:797:9: replace Skip::reason -> &'static str with "xyzzy"
+crates/core/src/vendor.rs:819:9: replace Skip::is_routine -> bool with true
+crates/core/src/vendor.rs:819:9: replace Skip::is_routine -> bool with false
+crates/core/src/vendor.rs:819:9: delete ! in Skip::is_routine
+crates/core/src/vendor.rs:835:9: replace Skip::unread_code -> Option<&'a str> with None
+crates/core/src/vendor.rs:835:9: replace Skip::unread_code -> Option<&'a str> with Some("")
+crates/core/src/vendor.rs:835:9: replace Skip::unread_code -> Option<&'a str> with Some("xyzzy")
+crates/core/src/vendor.rs:860:9: replace Skip::judges_the_paper -> bool with true
+crates/core/src/vendor.rs:860:9: replace Skip::judges_the_paper -> bool with false
+crates/core/src/vendor.rs:944:9: replace Decoded::skip -> Option<Skip> with None
+crates/core/src/vendor.rs:977:14: replace == with != in collapse_spaces
+crates/core/src/vendor.rs:987:13: replace += with -= in collapse_spaces
+crates/core/src/vendor.rs:987:13: replace += with *= in collapse_spaces
+crates/core/src/vendor.rs:1005:9: replace Collapsed::as_str -> &str with ""
+crates/core/src/vendor.rs:1005:9: replace Collapsed::as_str -> &str with "xyzzy"
+crates/core/src/vendor.rs:1274:9: replace Vendor::type_of -> Result<Option<&'static str>, InstrumentError> with Ok(None)
+crates/core/src/vendor.rs:1274:9: replace Vendor::type_of -> Result<Option<&'static str>, InstrumentError> with Ok(Some(""))
+crates/core/src/vendor.rs:1274:9: replace Vendor::type_of -> Result<Option<&'static str>, InstrumentError> with Ok(Some("xyzzy"))
+crates/core/src/vendor.rs:1276:17: delete match arm "IDX" | "EQ" | "FUT" | "CE" | "PE" in Vendor::type_of
+crates/core/src/vendor.rs:1277:21: delete match arm "IDX" in Vendor::type_of
+crates/core/src/vendor.rs:1278:21: delete match arm "EQ" in Vendor::type_of
+crates/core/src/vendor.rs:1279:21: delete match arm "FUT" in Vendor::type_of
+crates/core/src/vendor.rs:1280:21: delete match arm "CE" in Vendor::type_of
+crates/core/src/vendor.rs:1286:17: delete match arm "INDEX" in Vendor::type_of
+crates/core/src/vendor.rs:1287:17: delete match arm "EQUITY" in Vendor::type_of
+crates/core/src/vendor.rs:1288:17: delete match arm "FUTSTK" | "FUTIDX" in Vendor::type_of
+crates/core/src/vendor.rs:1289:17: delete match arm "OPTSTK" | "OPTIDX" in Vendor::type_of
+crates/core/src/vendor.rs:1295:17: delete match arm "FUTCUR" | "OPTCUR" in Vendor::type_of
+crates/core/src/vendor.rs:1290:21: delete match arm "CE" in Vendor::type_of
+crates/core/src/vendor.rs:1291:21: delete match arm "PE" in Vendor::type_of
+crates/core/src/vendor.rs:1306:17: delete match arm "EQ" in Vendor::type_of
+crates/core/src/vendor.rs:1307:17: delete match arm "FUT" in Vendor::type_of
+crates/core/src/vendor.rs:1309:17: delete match arm "CE" in Vendor::type_of
+crates/core/src/vendor.rs:1310:17: delete match arm "PE" in Vendor::type_of
+crates/core/src/vendor.rs:1364:9: replace Vendor::index_segment_word -> Option<&'static str> with None
+crates/core/src/vendor.rs:1364:9: replace Vendor::index_segment_word -> Option<&'static str> with Some("")
+crates/core/src/vendor.rs:1364:9: replace Vendor::index_segment_word -> Option<&'static str> with Some("xyzzy")
+crates/core/src/vendor.rs:1411:9: replace Vendor::is_known_foreign_exchange -> bool with true
+crates/core/src/vendor.rs:1411:9: replace Vendor::is_known_foreign_exchange -> bool with false
+crates/core/src/vendor.rs:1415:46: replace == with != in Vendor::is_known_foreign_exchange
+crates/core/src/vendor.rs:1481:9: replace Vendor::index_alias -> Option<&'static str> with None
+crates/core/src/vendor.rs:1481:9: replace Vendor::index_alias -> Option<&'static str> with Some("")
+crates/core/src/vendor.rs:1481:9: replace Vendor::index_alias -> Option<&'static str> with Some("xyzzy")
+crates/core/src/vendor.rs:1483:17: delete match arm "NIFTY50" in Vendor::index_alias
+crates/core/src/vendor.rs:1484:17: delete match arm "NIFTYBANK" in Vendor::index_alias
+crates/core/src/vendor.rs:1507:9: replace Vendor::index_alias_source -> Option<&'static str> with None
+crates/core/src/vendor.rs:1507:9: replace Vendor::index_alias_source -> Option<&'static str> with Some("")
+crates/core/src/vendor.rs:1507:9: replace Vendor::index_alias_source -> Option<&'static str> with Some("xyzzy")
+crates/core/src/vendor.rs:1509:17: delete match arm "NIFTY" in Vendor::index_alias_source
+crates/core/src/vendor.rs:1510:17: delete match arm "BANKNIFTY" in Vendor::index_alias_source
+crates/core/src/vendor.rs:1541:5: replace unread_master_code -> Option<(&'static str, &'a str)> with None
+crates/core/src/vendor.rs:1541:5: replace unread_master_code -> Option<(&'static str, &'a str)> with Some(("", ""))
+crates/core/src/vendor.rs:1541:5: replace unread_master_code -> Option<(&'static str, &'a str)> with Some(("", "xyzzy"))
+crates/core/src/vendor.rs:1541:5: replace unread_master_code -> Option<(&'static str, &'a str)> with Some(("xyzzy", ""))
+crates/core/src/vendor.rs:1541:5: replace unread_master_code -> Option<(&'static str, &'a str)> with Some(("xyzzy", "xyzzy"))
+crates/core/src/vendor.rs:1541:34: replace || with && in unread_master_code
+crates/core/src/vendor.rs:1541:67: replace != with == in unread_master_code
+crates/core/src/vendor.rs:1610:19: replace match guard vendor.is_known_foreign_exchange(row.exchange) with true in decode_master_row
+crates/core/src/vendor.rs:1610:19: replace match guard vendor.is_known_foreign_exchange(row.exchange) with false in decode_master_row
+crates/core/src/vendor.rs:1619:45: replace || with && in decode_master_row
+crates/core/src/vendor.rs:1667:45: replace == with != in decode_master_row
+crates/core/src/vendor.rs:1668:15: replace != with == in decode_master_row
+crates/core/src/vendor.rs:1759:28: replace == with != in decode_master_row
+crates/core/src/vendor.rs:1775:9: delete match arm "IDX" in decode_master_row
+crates/core/src/vendor.rs:1807:9: delete match arm "EQ" in decode_master_row
+crates/core/src/vendor.rs:1813:9: delete match arm "FUT" in decode_master_row
+crates/core/src/vendor.rs:1806:17: replace match guard vendor.master_columns().listing_class.is_empty() with true in decode_master_row
+crates/core/src/vendor.rs:1806:17: replace match guard vendor.master_columns().listing_class.is_empty() with false in decode_master_row
+crates/core/src/vendor.rs:1865:25: replace match guard !vendor.master_columns().isin.is_empty() with true in decode_master_row
+crates/core/src/vendor.rs:1865:25: replace match guard !vendor.master_columns().isin.is_empty() with false in decode_master_row
+crates/core/src/vendor.rs:1865:25: delete ! in decode_master_row
+crates/core/src/vendor.rs:1903:5: replace unsuffixed_key -> Result<Option<InstrumentKey>, InstrumentError> with Ok(None)
+crates/core/src/vendor.rs:1904:33: replace || with && in unsuffixed_key
+crates/core/src/vendor.rs:1904:17: replace != with == in unsuffixed_key
+crates/core/src/vendor.rs:1914:9: delete field underlying from struct InstrumentKey expression in unsuffixed_key
+crates/core/src/vendor.rs:1934:37: replace || with && in parse_expiry
+crates/core/src/vendor.rs:1934:21: replace || with && in parse_expiry
+crates/core/src/vendor.rs:1934:16: replace != with == in parse_expiry
+crates/core/src/vendor.rs:1934:32: replace != with == in parse_expiry
+crates/core/src/vendor.rs:1934:48: replace != with == in parse_expiry
+crates/core/src/vendor.rs:1942:8: delete ! in parse_expiry
+crates/core/src/vendor.rs:1942:49: replace || with && in parse_expiry
+crates/core/src/vendor.rs:1942:54: replace == with != in parse_expiry
+crates/core/src/vendor.rs:1954:39: replace + with - in parse_expiry
+crates/core/src/vendor.rs:1954:39: replace + with * in parse_expiry
+crates/core/src/vendor.rs:1954:34: replace * with + in parse_expiry
+crates/core/src/vendor.rs:1954:34: replace * with / in parse_expiry
+crates/core/src/vendor.rs:1954:53: replace - with + in parse_expiry
+crates/core/src/vendor.rs:1954:53: replace - with / in parse_expiry
+crates/core/src/vendor.rs:1955:55: replace + with - in parse_expiry
+crates/core/src/vendor.rs:1955:55: replace + with * in parse_expiry
+crates/core/src/vendor.rs:1955:50: replace * with + in parse_expiry
+crates/core/src/vendor.rs:1955:50: replace * with / in parse_expiry
+crates/core/src/vendor.rs:1955:60: replace - with + in parse_expiry
+crates/core/src/vendor.rs:1955:60: replace - with / in parse_expiry
+crates/core/src/vendor.rs:1956:53: replace + with - in parse_expiry
+crates/core/src/vendor.rs:1956:53: replace + with * in parse_expiry
+crates/core/src/vendor.rs:1956:48: replace * with + in parse_expiry
+crates/core/src/vendor.rs:1956:48: replace * with / in parse_expiry
+crates/core/src/vendor.rs:1956:58: replace - with + in parse_expiry
+crates/core/src/vendor.rs:1956:58: replace - with / in parse_expiry
+crates/core/src/vendor.rs:1978:5: replace parse_strike -> Result<Paisa, InstrumentError> with Ok(Default::default())
+crates/core/src/vendor.rs:1979:23: replace match guard strike > Paisa::ZERO with true in parse_strike
+crates/core/src/vendor.rs:1979:23: replace match guard strike > Paisa::ZERO with false in parse_strike
+crates/core/src/vendor.rs:1979:30: replace > with == in parse_strike
+crates/core/src/vendor.rs:1979:30: replace > with < in parse_strike
+crates/core/src/vendor.rs:1979:30: replace > with >= in parse_strike

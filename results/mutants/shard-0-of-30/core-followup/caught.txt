@@ -1,0 +1,17 @@
+crates/core/src/instrument.rs:65:13: delete match arm "NSE" in Exchange::parse
+crates/core/src/symbol.rs:89:9: replace Symbol::as_str -> &str with ""
+crates/core/src/symbol.rs:89:9: replace Symbol::as_str -> &str with "xyzzy"
+crates/core/src/universe.rs:4086:21: replace | with & in Universe::union
+crates/core/src/universe.rs:4124:5: replace of_equity -> Universe with Default::default()
+crates/core/src/universe.rs:4363:17: replace < with == in MemberIndex<N>::build
+crates/core/src/universe.rs:4363:17: replace < with > in MemberIndex<N>::build
+crates/core/src/universe.rs:4395:9: replace MemberIndex<N>::contains -> bool with true
+crates/core/src/universe.rs:4395:9: replace MemberIndex<N>::contains -> bool with false
+crates/core/src/universe.rs:4461:9: replace MemberIndex<N>::position -> Option<usize> with None
+crates/core/src/universe.rs:4461:9: replace MemberIndex<N>::position -> Option<usize> with Some(0)
+crates/core/src/universe.rs:4461:9: replace MemberIndex<N>::position -> Option<usize> with Some(1)
+crates/core/src/universe.rs:4461:25: replace > with == in MemberIndex<N>::position
+crates/core/src/universe.rs:4461:25: replace > with < in MemberIndex<N>::position
+crates/core/src/universe.rs:4466:21: replace == with != in MemberIndex<N>::position
+crates/core/src/vendor.rs:326:9: replace VendorId::as_str -> &str with ""
+crates/core/src/vendor.rs:326:9: replace VendorId::as_str -> &str with "xyzzy"
