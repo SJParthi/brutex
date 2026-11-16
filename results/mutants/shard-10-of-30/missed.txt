@@ -404,3 +404,5 @@ crates/spikefade/src/report3.rs:1524:230: delete field ngroup from struct Seg3 e
 crates/spikefade/src/report3.rs:1524:246: delete field vol60 from struct Seg3 expression in prepare_segment_c2
 crates/spikefade/src/report3.rs:1524:253: delete field universe from struct Seg3 expression in prepare_segment_c2
 crates/spikefade/src/report3.rs:1524:263: delete field lvd from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1638:19: replace ^= with &= in build_lists
+crates/spikefade/src/report3.rs:1638:19: replace ^= with |= in build_lists
