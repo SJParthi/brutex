@@ -1,0 +1,3 @@
+crates/spikefade/src/ckmerge.rs:178:21: replace && with || in read_all
+crates/spikefade/src/ckmerge.rs:349:92: replace + with - in canon
+crates/spikefade/src/ckmerge.rs:349:187: replace + with - in canon

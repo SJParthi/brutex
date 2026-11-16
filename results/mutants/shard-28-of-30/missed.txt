@@ -56,3 +56,84 @@ crates/spikefade/src/ckmerge.rs:79:86: replace || with && in merge
 crates/spikefade/src/ckmerge.rs:87:56: replace == with != in merge
 crates/spikefade/src/ckmerge.rs:88:19: replace += with -= in merge
 crates/spikefade/src/ckmerge.rs:93:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:118:17: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:118:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:134:16: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:156:100: replace && with || in bck_files
+crates/spikefade/src/ckmerge.rs:192:28: replace match guard x.0 == b.p0 && x.1 == b.p1 with true in read_all
+crates/spikefade/src/ckmerge.rs:192:40: replace && with || in read_all
+crates/spikefade/src/ckmerge.rs:208:16: replace == with != in read_all
+crates/spikefade/src/ckmerge.rs:220:5: replace cmd_ckpt_merge -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:220:5: replace cmd_ckpt_merge -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:220:49: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:220:76: replace + with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:222:12: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:238:50: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:240:27: replace + with - in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:240:27: replace + with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:243:75: delete ! in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:256:15: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:258:43: replace - with + in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:258:43: replace - with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:64: replace || with && in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:55: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:60: replace * with + in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:60: replace * with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:71: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:83: replace * with + in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:83: replace * with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:78: replace + with - in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:78: replace + with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:264:22: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:278:20: replace match guard old == new with true in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:278:20: replace match guard old == new with false in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:278:24: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:299:28: replace match guard *x != t with true in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:299:28: replace match guard *x != t with false in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:299:31: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:307:22: replace match guard o == *t with true in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:307:22: replace match guard o == *t with false in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:307:24: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:100: replace / with % in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:100: replace / with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:64: replace / with % in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:64: replace / with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:60: replace * with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:335:5: replace canon -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:335:5: replace canon -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:340:8: delete ! in canon
+crates/spikefade/src/ckmerge.rs:349:88: replace > with == in canon
+crates/spikefade/src/ckmerge.rs:349:88: replace > with < in canon
+crates/spikefade/src/ckmerge.rs:349:88: replace > with >= in canon
+crates/spikefade/src/ckmerge.rs:349:92: replace + with * in canon
+crates/spikefade/src/ckmerge.rs:349:183: replace > with == in canon
+crates/spikefade/src/ckmerge.rs:349:183: replace > with < in canon
+crates/spikefade/src/ckmerge.rs:349:187: replace + with * in canon
+crates/spikefade/src/ckmerge.rs:401:5: replace cmd_ckpt_canon -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:401:5: replace cmd_ckpt_canon -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:402:46: replace == with != in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:403:75: replace == with != in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:403:50: replace + with - in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:403:50: replace + with * in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:415:5: replace cmd_bck_check -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:415:5: replace cmd_bck_check -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:422:11: replace += with -= in cmd_bck_check
+crates/spikefade/src/ckmerge.rs:422:11: replace += with *= in cmd_bck_check
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (0, 0, 0)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (0, 1, 0)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (0, 1, 1)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (1, 0, 0)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (1, 0, 1)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (1, 1, 1)
+crates/spikefade/src/kit.rs:90:5: replace any -> bool with false
+crates/spikefade/src/kit.rs:96:5: replace words -> String with String::new()
+crates/spikefade/src/kit.rs:96:5: replace words -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:138:65: replace && with || in args_digest
+crates/spikefade/src/kit.rs:138:36: replace == with != in args_digest
+crates/spikefade/src/kit.rs:190:65: replace || with && in from_args
+crates/spikefade/src/kit.rs:190:56: replace || with && in from_args
+crates/spikefade/src/kit.rs:191:61: replace || with && in from_args
+crates/spikefade/src/kit.rs:191:52: replace || with && in from_args
+crates/spikefade/src/kit.rs:209:55: replace > with == in from_args
+crates/spikefade/src/kit.rs:209:55: replace > with >= in from_args
+crates/spikefade/src/kit.rs:218:33: replace == with != in from_args

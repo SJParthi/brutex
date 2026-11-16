@@ -1,0 +1,3 @@
+crates/spikefade/src/kit.rs:142:11: replace += with -= in args_digest
+crates/spikefade/src/kit.rs:142:11: replace += with *= in args_digest
+crates/spikefade/src/kit.rs:148:15: replace += with -= in args_digest
