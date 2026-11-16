@@ -1,1 +1,2 @@
 crates/spikefade/src/split18.rs:860:5: replace cmp_bad -> Ordering with Default::default()
+crates/spikefade/src/split18.rs:976:5: replace splits -> Vec<Split> with vec![Default::default()]

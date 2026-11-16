@@ -23,3 +23,20 @@ crates/spikefade/src/split18.rs:852:24: replace < with == in Fig18::worst_day
 crates/spikefade/src/split18.rs:852:24: replace < with > in Fig18::worst_day
 crates/spikefade/src/split18.rs:852:24: replace < with <= in Fig18::worst_day
 crates/spikefade/src/split18.rs:852:76: replace == with != in Fig18::worst_day
+crates/spikefade/src/split18.rs:860:77: replace * with / in cmp_bad
+crates/spikefade/src/split18.rs:860:119: replace * with / in cmp_bad
+crates/spikefade/src/split18.rs:861:6: delete ! in cmp_bad
+crates/spikefade/src/split18.rs:862:15: delete ! in cmp_bad
+crates/spikefade/src/split18.rs:863:27: replace - with + in cmp_bad
+crates/spikefade/src/split18.rs:863:53: replace - with + in cmp_bad
+crates/spikefade/src/split18.rs:886:30: replace < with <= in Dst::build
+crates/spikefade/src/split18.rs:896:21: replace < with <= in Dst::build
+crates/spikefade/src/split18.rs:898:24: replace < with <= in Dst::build
+crates/spikefade/src/split18.rs:902:38: replace - with / in Dst::build
+crates/spikefade/src/split18.rs:926:18: replace || with && in Dst::query
+crates/spikefade/src/split18.rs:969:9: replace Split::wf -> bool with true
+crates/spikefade/src/split18.rs:969:9: replace Split::wf -> bool with false
+crates/spikefade/src/split18.rs:969:19: replace != with == in Split::wf
+crates/spikefade/src/split18.rs:1024:150: replace == with != in Fig18c::of
+crates/spikefade/src/split18.rs:1028:9: replace Fig18c::words -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1051:11: replace > with >= in passed
