@@ -2,3 +2,5 @@ crates/spikefade/src/fix33.rs:356:89: replace * with / in cap_minutes
 crates/spikefade/src/fix33.rs:363:61: replace * with / in cap_minutes
 crates/spikefade/src/fixg.rs:278:9: replace IdxElm::parse -> Result<Vec<IdxRow>, String> with Ok(vec![Default::default()])
 crates/spikefade/src/fixg.rs:318:9: replace IdxElm::at -> Option<&IdxRow> with Some(Box::leak(Box::new(Default::default())))
+crates/spikefade/src/fix34.rs:516:9: replace HaltTable::parse -> Result<Vec<HaltRow>, String> with Ok(vec![Default::default()])
+crates/spikefade/src/fix34.rs:551:9: replace HaltTable::of -> Vec<&HaltRow> with vec![Box::leak(Box::new(Default::default()))]

@@ -128,3 +128,25 @@ crates/spikefade/src/fix34.rs:424:65: replace - with + in cap_months
 crates/spikefade/src/fix34.rs:424:65: replace - with / in cap_months
 crates/spikefade/src/fix34.rs:425:71: replace - with + in cap_months
 crates/spikefade/src/fix34.rs:425:71: replace - with / in cap_months
+crates/spikefade/src/fix34.rs:439:5: replace cap_count_split with ()
+crates/spikefade/src/fix34.rs:448:5: replace cap_words -> String with String::new()
+crates/spikefade/src/fix34.rs:448:5: replace cap_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:455:5: replace cap_cost_words -> String with String::new()
+crates/spikefade/src/fix34.rs:455:5: replace cap_cost_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:462:5: replace suffix_max -> Vec<i32> with vec![]
+crates/spikefade/src/fix34.rs:462:5: replace suffix_max -> Vec<i32> with vec![0]
+crates/spikefade/src/fix34.rs:462:5: replace suffix_max -> Vec<i32> with vec![1]
+crates/spikefade/src/fix34.rs:462:5: replace suffix_max -> Vec<i32> with vec![-1]
+crates/spikefade/src/fix34.rs:516:70: replace && with || in HaltTable::parse
+crates/spikefade/src/fix34.rs:542:9: replace HaltTable::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/fix34.rs:568:79: replace == with != in halts_of
+crates/spikefade/src/fix34.rs:611:18: replace && with || in segments_of
+crates/spikefade/src/fix34.rs:611:14: replace > with >= in segments_of
+crates/spikefade/src/fix34.rs:611:23: replace < with <= in segments_of
+crates/spikefade/src/fix34.rs:627:5: replace halt_words -> String with String::new()
+crates/spikefade/src/fix34.rs:627:5: replace halt_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:628:72: replace == with != in halt_words
+crates/spikefade/src/fix34.rs:637:19: replace < with > in clamp_prev_to_segments
+crates/spikefade/src/fix34.rs:679:22: replace > with >= in lot0_resolve
+crates/spikefade/src/fix34.rs:693:106: replace > with >= in lot0_resolve
+crates/spikefade/src/fix34.rs:695:21: replace > with >= in lot0_resolve
