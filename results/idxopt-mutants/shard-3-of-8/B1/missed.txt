@@ -73,3 +73,85 @@ crates/sniper_host/src/posgroups.rs:76:32: replace + with - in st_stream
 crates/sniper_host/src/posgroups.rs:99:9: replace Rule::id -> &'static str with ""
 crates/sniper_host/src/posgroups.rs:99:9: replace Rule::id -> &'static str with "xyzzy"
 crates/sniper_host/src/posgroups.rs:135:27: replace + with * in exit_of
+crates/sniper_host/src/posgroups.rs:162:67: replace + with * in exits_all
+crates/sniper_host/src/posgroups.rs:215:19: replace * with + in cap_exit
+crates/sniper_host/src/posgroups.rs:215:19: replace * with / in cap_exit
+crates/sniper_host/src/posgroups.rs:217:47: replace > with >= in cap_exit
+crates/sniper_host/src/posgroups.rs:219:49: replace match guard t < close_at && s.get(j).is_some_and(|x| x.end >= ex_open) with true in cap_exit
+crates/sniper_host/src/posgroups.rs:220:40: replace match guard t < close_at with true in cap_exit
+crates/sniper_host/src/posgroups.rs:219:62: replace && with || in cap_exit
+crates/sniper_host/src/posgroups.rs:219:51: replace < with == in cap_exit
+crates/sniper_host/src/posgroups.rs:219:51: replace < with > in cap_exit
+crates/sniper_host/src/posgroups.rs:219:51: replace < with <= in cap_exit
+crates/sniper_host/src/posgroups.rs:219:96: replace >= with < in cap_exit
+crates/sniper_host/src/posgroups.rs:220:42: replace < with <= in cap_exit
+crates/sniper_host/src/posgroups.rs:225:57: replace * with / in cap_exit
+crates/sniper_host/src/posgroups.rs:253:148: replace == with != in groups
+crates/sniper_host/src/posgroups.rs:263:24: delete ! in groups
+crates/sniper_host/src/posgroups.rs:263:82: replace || with && in groups
+crates/sniper_host/src/posgroups.rs:263:96: replace != with == in groups
+crates/sniper_host/src/posgroups.rs:267:20: delete ! in groups
+crates/sniper_host/src/price.rs:36:32: replace - with + in at_sod
+crates/sniper_host/src/price.rs:36:17: replace * with + in at_sod
+crates/sniper_host/src/price.rs:36:17: replace * with / in at_sod
+crates/sniper_host/src/price.rs:111:9: replace Day::price_only_in -> bool with true
+crates/sniper_host/src/price.rs:111:9: replace Day::price_only_in -> bool with false
+crates/sniper_host/src/price.rs:111:56: replace < with == in Day::price_only_in
+crates/sniper_host/src/price.rs:111:56: replace < with > in Day::price_only_in
+crates/sniper_host/src/price.rs:111:56: replace < with <= in Day::price_only_in
+crates/sniper_host/src/price.rs:112:51: replace < with == in Day::price_only_in
+crates/sniper_host/src/price.rs:112:51: replace < with > in Day::price_only_in
+crates/sniper_host/src/price.rs:112:51: replace < with <= in Day::price_only_in
+crates/sniper_host/src/price.rs:302:48: replace - with + in ymd
+crates/sniper_host/src/price.rs:302:48: replace - with / in ymd
+crates/sniper_host/src/price.rs:302:33: replace + with - in ymd
+crates/sniper_host/src/price.rs:302:33: replace + with * in ymd
+crates/sniper_host/src/price.rs:302:20: replace - with + in ymd
+crates/sniper_host/src/price.rs:302:26: replace / with % in ymd
+crates/sniper_host/src/price.rs:304:19: replace - with / in ymd
+crates/sniper_host/src/price.rs:304:42: replace - with + in ymd
+crates/sniper_host/src/price.rs:304:42: replace - with / in ymd
+crates/sniper_host/src/price.rs:304:32: replace + with - in ymd
+crates/sniper_host/src/price.rs:304:38: replace / with % in ymd
+crates/sniper_host/src/price.rs:304:48: replace / with % in ymd
+crates/sniper_host/src/price.rs:305:23: replace + with - in ymd
+crates/sniper_host/src/price.rs:305:23: replace + with * in ymd
+crates/sniper_host/src/price.rs:305:17: replace * with + in ymd
+crates/sniper_host/src/price.rs:306:17: replace - with / in ymd
+crates/sniper_host/src/price.rs:306:17: replace - with + in ymd
+crates/sniper_host/src/price.rs:306:29: replace + with - in ymd
+crates/sniper_host/src/price.rs:306:29: replace + with * in ymd
+crates/sniper_host/src/price.rs:307:19: replace < with <= in ymd
+crates/sniper_host/src/price.rs:307:45: replace - with + in ymd
+crates/sniper_host/src/price.rs:307:45: replace - with / in ymd
+crates/sniper_host/src/price.rs:308:11: replace <= with > in ymd
+crates/sniper_host/src/price.rs:308:20: replace + with - in ymd
+crates/sniper_host/src/price.rs:308:20: replace + with * in ymd
+crates/sniper_host/src/price.rs:328:17: replace > with >= in net_of
+crates/sniper_host/src/price.rs:329:29: delete field block from struct BlockFill expression in net_of
+crates/sniper_host/src/price.rs:329:57: delete field at from struct common_fill::Block expression in net_of
+crates/sniper_host/src/price.rs:380:43: replace match guard cfg!(feature = "m_xc_flip") with false in price
+crates/sniper_host/src/price.rs:388:19: replace += with *= in price
+crates/sniper_host/src/price.rs:389:15: replace == with != in price
+crates/sniper_host/src/price.rs:390:69: replace > with >= in price
+crates/sniper_host/src/price.rs:399:26: replace > with < in price
+crates/sniper_host/src/price.rs:400:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:403:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:411:33: replace > with == in price
+crates/sniper_host/src/price.rs:411:33: replace > with < in price
+crates/sniper_host/src/price.rs:411:33: replace > with >= in price
+crates/sniper_host/src/price.rs:412:30: replace |= with &= in price
+crates/sniper_host/src/price.rs:415:30: replace |= with &= in price
+crates/sniper_host/src/price.rs:463:31: replace += with -= in price
+crates/sniper_host/src/price.rs:463:31: replace += with *= in price
+crates/sniper_host/src/price.rs:477:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:489:17: delete match arm Some(Rule::GoPositive{..}) in price
+crates/sniper_host/src/price.rs:488:44: replace match guard anchor < signal || matches!(plan, Plan::Stop { .. }) with true in price
+crates/sniper_host/src/price.rs:488:44: replace match guard anchor < signal || matches!(plan, Plan::Stop { .. }) with false in price
+crates/sniper_host/src/price.rs:490:48: replace match guard won with true in price
+crates/sniper_host/src/price.rs:490:48: replace match guard won with false in price
+crates/sniper_host/src/price.rs:488:60: replace || with && in price
+crates/sniper_host/src/price.rs:488:51: replace < with == in price
+crates/sniper_host/src/price.rs:488:51: replace < with > in price
+crates/sniper_host/src/price.rs:488:51: replace < with <= in price
+crates/sniper_host/src/price.rs:493:38: replace < with > in price

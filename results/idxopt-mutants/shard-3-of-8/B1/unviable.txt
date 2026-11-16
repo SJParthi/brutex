@@ -8,3 +8,13 @@ crates/sniper_host/src/monitor.rs:95:9: replace && with || in launch_gate
 crates/sniper_host/src/posgroups.rs:37:5: replace ctx_of -> CandleCtx with Default::default()
 crates/sniper_host/src/posgroups.rs:51:5: replace cfg_a -> SeriesCfg with Default::default()
 crates/sniper_host/src/posgroups.rs:62:5: replace st_stream -> Result<Vec<StC>, String> with Ok(vec![Default::default()])
+crates/sniper_host/src/posgroups.rs:214:5: replace cap_exit -> Result<(Exit, i64), String> with Ok((Default::default(), 0))
+crates/sniper_host/src/posgroups.rs:214:5: replace cap_exit -> Result<(Exit, i64), String> with Ok((Default::default(), 1))
+crates/sniper_host/src/posgroups.rs:214:5: replace cap_exit -> Result<(Exit, i64), String> with Ok((Default::default(), -1))
+crates/sniper_host/src/price.rs:36:5: replace at_sod -> Us with Default::default()
+crates/sniper_host/src/price.rs:60:9: replace <impl From<FillErr> for Refusal>::from -> Self with Default::default()
+crates/sniper_host/src/price.rs:105:9: replace Day::tape -> Result<Tape<'_>, FillErr> with Ok(Default::default())
+crates/sniper_host/src/price.rs:272:17: replace && with || in leg
+crates/sniper_host/src/price.rs:283:5: replace corder -> Result<Option<COrder>, Refusal> with Ok(Some(Default::default()))
+crates/sniper_host/src/price.rs:449:21: replace && with || in price
+crates/sniper_host/src/price.rs:448:21: replace && with || in price

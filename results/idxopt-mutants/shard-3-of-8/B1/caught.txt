@@ -104,3 +104,199 @@ crates/sniper_host/src/posgroups.rs:126:57: delete ! in exit_of
 crates/sniper_host/src/posgroups.rs:129:19: replace += with -= in exit_of
 crates/sniper_host/src/posgroups.rs:134:38: replace == with != in exit_of
 crates/sniper_host/src/posgroups.rs:135:27: replace + with - in exit_of
+crates/sniper_host/src/posgroups.rs:137:25: replace == with != in exit_of
+crates/sniper_host/src/posgroups.rs:139:47: replace && with || in exit_of
+crates/sniper_host/src/posgroups.rs:139:37: replace && with || in exit_of
+crates/sniper_host/src/posgroups.rs:139:55: replace == with != in exit_of
+crates/sniper_host/src/posgroups.rs:139:63: delete ! in exit_of
+crates/sniper_host/src/posgroups.rs:142:19: replace += with -= in exit_of
+crates/sniper_host/src/posgroups.rs:153:5: replace exits_all -> Vec<Option<usize>> with vec![]
+crates/sniper_host/src/posgroups.rs:153:5: replace exits_all -> Vec<Option<usize>> with vec![None]
+crates/sniper_host/src/posgroups.rs:153:5: replace exits_all -> Vec<Option<usize>> with vec![Some(0)]
+crates/sniper_host/src/posgroups.rs:153:5: replace exits_all -> Vec<Option<usize>> with vec![Some(1)]
+crates/sniper_host/src/posgroups.rs:158:48: replace + with - in exits_all
+crates/sniper_host/src/posgroups.rs:158:48: replace + with * in exits_all
+crates/sniper_host/src/posgroups.rs:158:89: replace + with - in exits_all
+crates/sniper_host/src/posgroups.rs:158:89: replace + with * in exits_all
+crates/sniper_host/src/posgroups.rs:158:130: replace + with - in exits_all
+crates/sniper_host/src/posgroups.rs:158:130: replace + with * in exits_all
+crates/sniper_host/src/posgroups.rs:159:25: replace + with - in exits_all
+crates/sniper_host/src/posgroups.rs:159:25: replace + with * in exits_all
+crates/sniper_host/src/posgroups.rs:160:45: replace && with || in exits_all
+crates/sniper_host/src/posgroups.rs:160:53: replace == with != in exits_all
+crates/sniper_host/src/posgroups.rs:160:61: delete ! in exits_all
+crates/sniper_host/src/posgroups.rs:160:78: replace + with - in exits_all
+crates/sniper_host/src/posgroups.rs:160:78: replace + with * in exits_all
+crates/sniper_host/src/posgroups.rs:161:55: replace + with - in exits_all
+crates/sniper_host/src/posgroups.rs:161:55: replace + with * in exits_all
+crates/sniper_host/src/posgroups.rs:162:43: replace == with != in exits_all
+crates/sniper_host/src/posgroups.rs:162:67: replace + with - in exits_all
+crates/sniper_host/src/posgroups.rs:175:44: replace && with || in exits_all
+crates/sniper_host/src/posgroups.rs:175:29: replace == with != in exits_all
+crates/sniper_host/src/posgroups.rs:175:37: delete ! in exits_all
+crates/sniper_host/src/posgroups.rs:175:47: delete ! in exits_all
+crates/sniper_host/src/posgroups.rs:182:37: replace == with != in exits_all
+crates/sniper_host/src/posgroups.rs:217:47: replace > with == in cap_exit
+crates/sniper_host/src/posgroups.rs:217:47: replace > with < in cap_exit
+crates/sniper_host/src/posgroups.rs:219:49: replace match guard t < close_at && s.get(j).is_some_and(|x| x.end >= ex_open) with false in cap_exit
+crates/sniper_host/src/posgroups.rs:220:40: replace match guard t < close_at with false in cap_exit
+crates/sniper_host/src/posgroups.rs:220:42: replace < with == in cap_exit
+crates/sniper_host/src/posgroups.rs:220:42: replace < with > in cap_exit
+crates/sniper_host/src/posgroups.rs:225:57: replace * with + in cap_exit
+crates/sniper_host/src/posgroups.rs:229:21: replace && with || in cap_exit
+crates/sniper_host/src/posgroups.rs:229:16: replace != with == in cap_exit
+crates/sniper_host/src/posgroups.rs:229:32: replace <= with > in cap_exit
+crates/sniper_host/src/posgroups.rs:243:5: replace groups -> Result<Grouped, String> with Ok(Default::default())
+crates/sniper_host/src/posgroups.rs:249:23: replace * with + in groups
+crates/sniper_host/src/posgroups.rs:249:23: replace * with / in groups
+crates/sniper_host/src/posgroups.rs:253:202: replace == with != in groups
+crates/sniper_host/src/posgroups.rs:256:24: replace match guard same with true in groups
+crates/sniper_host/src/posgroups.rs:256:24: replace match guard same with false in groups
+crates/sniper_host/src/posgroups.rs:257:21: replace += with -= in groups
+crates/sniper_host/src/posgroups.rs:257:21: replace += with *= in groups
+crates/sniper_host/src/posgroups.rs:258:43: replace - with + in groups
+crates/sniper_host/src/posgroups.rs:258:43: replace - with / in groups
+crates/sniper_host/src/posgroups.rs:263:54: replace && with || in groups
+crates/sniper_host/src/posgroups.rs:263:65: replace == with != in groups
+crates/sniper_host/src/posgroups.rs:263:101: replace && with || in groups
+crates/sniper_host/src/posgroups.rs:263:106: replace < with == in groups
+crates/sniper_host/src/posgroups.rs:263:106: replace < with > in groups
+crates/sniper_host/src/posgroups.rs:263:106: replace < with <= in groups
+crates/sniper_host/src/posgroups.rs:267:50: replace && with || in groups
+crates/sniper_host/src/posgroups.rs:271:49: replace - with + in groups
+crates/sniper_host/src/posgroups.rs:271:49: replace - with / in groups
+crates/sniper_host/src/price.rs:36:41: replace * with + in at_sod
+crates/sniper_host/src/price.rs:36:41: replace * with / in at_sod
+crates/sniper_host/src/price.rs:36:32: replace - with / in at_sod
+crates/sniper_host/src/price.rs:36:26: replace + with - in at_sod
+crates/sniper_host/src/price.rs:36:26: replace + with * in at_sod
+crates/sniper_host/src/price.rs:216:5: replace held_counts -> (u32, u32) with (0, 0)
+crates/sniper_host/src/price.rs:216:5: replace held_counts -> (u32, u32) with (0, 1)
+crates/sniper_host/src/price.rs:216:5: replace held_counts -> (u32, u32) with (1, 0)
+crates/sniper_host/src/price.rs:216:5: replace held_counts -> (u32, u32) with (1, 1)
+crates/sniper_host/src/price.rs:217:39: replace + with - in held_counts
+crates/sniper_host/src/price.rs:217:39: replace + with * in held_counts
+crates/sniper_host/src/price.rs:217:60: replace != with == in held_counts
+crates/sniper_host/src/price.rs:217:53: replace & with | in held_counts
+crates/sniper_host/src/price.rs:217:53: replace & with ^ in held_counts
+crates/sniper_host/src/price.rs:217:69: replace + with - in held_counts
+crates/sniper_host/src/price.rs:217:69: replace + with * in held_counts
+crates/sniper_host/src/price.rs:217:99: replace != with == in held_counts
+crates/sniper_host/src/price.rs:217:83: replace & with | in held_counts
+crates/sniper_host/src/price.rs:217:83: replace & with ^ in held_counts
+crates/sniper_host/src/price.rs:262:5: replace leg -> Result<([LevelFill; MAXL], Vec<Vec<BlockFill>>), FillErr> with Ok(([Default::default(); MAXL], vec![]))
+crates/sniper_host/src/price.rs:262:5: replace leg -> Result<([LevelFill; MAXL], Vec<Vec<BlockFill>>), FillErr> with Ok(([Default::default(); MAXL], vec![vec![]]))
+crates/sniper_host/src/price.rs:262:5: replace leg -> Result<([LevelFill; MAXL], Vec<Vec<BlockFill>>), FillErr> with Ok(([Default::default(); MAXL], vec![vec![Default::default()]]))
+crates/sniper_host/src/price.rs:265:13: replace <= with > in leg
+crates/sniper_host/src/price.rs:271:22: replace == with != in leg
+crates/sniper_host/src/price.rs:283:5: replace corder -> Result<Option<COrder>, Refusal> with Ok(None)
+crates/sniper_host/src/price.rs:289:43: replace / with % in corder
+crates/sniper_host/src/price.rs:285:20: replace == with != in corder
+crates/sniper_host/src/price.rs:289:43: replace / with * in corder
+crates/sniper_host/src/price.rs:294:36: replace == with != in corder
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, 0, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, 0, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, 0, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, 1, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, 1, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, 1, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, -1, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, -1, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (0, -1, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, 0, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, 0, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, 0, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, 1, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, 1, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, 1, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, -1, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, -1, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (1, -1, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, 0, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, 0, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, 0, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, 1, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, 1, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, 1, -1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, -1, 0)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, -1, 1)
+crates/sniper_host/src/price.rs:299:5: replace ymd -> (i64, i64, i64) with (-1, -1, -1)
+crates/sniper_host/src/price.rs:299:28: replace + with - in ymd
+crates/sniper_host/src/price.rs:299:28: replace + with * in ymd
+crates/sniper_host/src/price.rs:301:17: replace - with + in ymd
+crates/sniper_host/src/price.rs:301:17: replace - with / in ymd
+crates/sniper_host/src/price.rs:301:23: replace * with + in ymd
+crates/sniper_host/src/price.rs:301:23: replace * with / in ymd
+crates/sniper_host/src/price.rs:302:65: replace / with % in ymd
+crates/sniper_host/src/price.rs:302:65: replace / with * in ymd
+crates/sniper_host/src/price.rs:302:20: replace - with / in ymd
+crates/sniper_host/src/price.rs:302:26: replace / with * in ymd
+crates/sniper_host/src/price.rs:302:39: replace / with % in ymd
+crates/sniper_host/src/price.rs:302:39: replace / with * in ymd
+crates/sniper_host/src/price.rs:302:54: replace / with % in ymd
+crates/sniper_host/src/price.rs:302:54: replace / with * in ymd
+crates/sniper_host/src/price.rs:303:17: replace + with - in ymd
+crates/sniper_host/src/price.rs:303:17: replace + with * in ymd
+crates/sniper_host/src/price.rs:303:23: replace * with + in ymd
+crates/sniper_host/src/price.rs:303:23: replace * with / in ymd
+crates/sniper_host/src/price.rs:304:19: replace - with + in ymd
+crates/sniper_host/src/price.rs:304:32: replace + with * in ymd
+crates/sniper_host/src/price.rs:304:26: replace * with + in ymd
+crates/sniper_host/src/price.rs:304:26: replace * with / in ymd
+crates/sniper_host/src/price.rs:304:38: replace / with * in ymd
+crates/sniper_host/src/price.rs:304:48: replace / with * in ymd
+crates/sniper_host/src/price.rs:305:28: replace / with % in ymd
+crates/sniper_host/src/price.rs:305:28: replace / with * in ymd
+crates/sniper_host/src/price.rs:305:17: replace * with / in ymd
+crates/sniper_host/src/price.rs:306:38: replace + with - in ymd
+crates/sniper_host/src/price.rs:306:38: replace + with * in ymd
+crates/sniper_host/src/price.rs:306:34: replace / with % in ymd
+crates/sniper_host/src/price.rs:306:34: replace / with * in ymd
+crates/sniper_host/src/price.rs:306:24: replace * with + in ymd
+crates/sniper_host/src/price.rs:306:24: replace * with / in ymd
+crates/sniper_host/src/price.rs:307:19: replace < with == in ymd
+crates/sniper_host/src/price.rs:307:19: replace < with > in ymd
+crates/sniper_host/src/price.rs:307:29: replace + with - in ymd
+crates/sniper_host/src/price.rs:307:29: replace + with * in ymd
+crates/sniper_host/src/price.rs:315:5: replace net_of -> Result<i64, Refusal> with Ok(0)
+crates/sniper_host/src/price.rs:315:5: replace net_of -> Result<i64, Refusal> with Ok(1)
+crates/sniper_host/src/price.rs:315:5: replace net_of -> Result<i64, Refusal> with Ok(-1)
+crates/sniper_host/src/price.rs:328:17: replace > with == in net_of
+crates/sniper_host/src/price.rs:328:17: replace > with < in net_of
+crates/sniper_host/src/price.rs:329:101: delete field units from struct BlockFill expression in net_of
+crates/sniper_host/src/price.rs:329:118: delete field px from struct BlockFill expression in net_of
+crates/sniper_host/src/price.rs:347:5: replace price -> Result<Priced, Refusal> with Ok(Default::default())
+crates/sniper_host/src/price.rs:350:10: replace >= with < in price
+crates/sniper_host/src/price.rs:364:24: replace == with != in price
+crates/sniper_host/src/price.rs:367:19: replace == with != in price
+crates/sniper_host/src/price.rs:380:43: replace match guard cfg!(feature = "m_xc_flip") with true in price
+crates/sniper_host/src/price.rs:388:19: replace += with -= in price
+crates/sniper_host/src/price.rs:390:69: replace > with == in price
+crates/sniper_host/src/price.rs:390:69: replace > with < in price
+crates/sniper_host/src/price.rs:397:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:399:26: replace > with == in price
+crates/sniper_host/src/price.rs:399:26: replace > with >= in price
+crates/sniper_host/src/price.rs:406:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:408:24: replace == with != in price
+crates/sniper_host/src/price.rs:410:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:428:53: replace match guard cfg!(feature = "m_xc_clock") with true in price
+crates/sniper_host/src/price.rs:428:53: replace match guard cfg!(feature = "m_xc_clock") with false in price
+crates/sniper_host/src/price.rs:442:27: replace += with -= in price
+crates/sniper_host/src/price.rs:442:27: replace += with *= in price
+crates/sniper_host/src/price.rs:448:34: replace <= with > in price
+crates/sniper_host/src/price.rs:449:52: replace || with && in price
+crates/sniper_host/src/price.rs:449:55: delete ! in price
+crates/sniper_host/src/price.rs:449:100: replace && with || in price
+crates/sniper_host/src/price.rs:449:113: replace >= with < in price
+crates/sniper_host/src/price.rs:459:33: replace += with -= in price
+crates/sniper_host/src/price.rs:459:33: replace += with *= in price
+crates/sniper_host/src/price.rs:460:30: replace |= with &= in price
+crates/sniper_host/src/price.rs:469:29: replace && with || in price
+crates/sniper_host/src/price.rs:469:32: delete ! in price
+crates/sniper_host/src/price.rs:470:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:473:38: replace > with == in price
+crates/sniper_host/src/price.rs:473:38: replace > with < in price
+crates/sniper_host/src/price.rs:473:38: replace > with >= in price
+crates/sniper_host/src/price.rs:474:26: replace |= with &= in price
+crates/sniper_host/src/price.rs:476:33: replace == with != in price
+crates/sniper_host/src/price.rs:493:38: replace < with == in price
