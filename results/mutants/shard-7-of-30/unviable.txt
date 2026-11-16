@@ -1,0 +1,7 @@
+crates/spikefade/src/cube.rs:898:9: replace && with || in load_m
+crates/spikefade/src/cube.rs:913:9: replace && with || in load_sec_m
+crates/spikefade/src/cube.rs:1046:9: replace && with || in decode_cube
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![Box::leak(Box::new(Default::default()))], None)
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![Box::leak(Box::new(Default::default()))], Some(0))
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![Box::leak(Box::new(Default::default()))], Some(1))
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![Box::leak(Box::new(Default::default()))], Some(-1))

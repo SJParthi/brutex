@@ -1,0 +1,5 @@
+crates/spikefade/src/cube.rs:681:19: replace % with / in pad
+crates/spikefade/src/cube.rs:681:19: replace % with + in pad
+crates/spikefade/src/cube.rs:877:22: replace % with / in Rd<'_>::align
+crates/spikefade/src/cube.rs:877:22: replace % with + in Rd<'_>::align
+crates/spikefade/src/cube.rs:878:20: replace += with *= in Rd<'_>::align
