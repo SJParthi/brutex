@@ -1,0 +1,52 @@
+crates/spikefade/src/acct.rs:252:21: replace >= with < in Tops::offer
+crates/spikefade/src/acct.rs:388:51: replace || with && in sweep_list
+crates/spikefade/src/acct.rs:392:40: replace + with * in sweep_list
+crates/spikefade/src/acct.rs:403:24: delete field seg from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:29: delete field list from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:40: delete field x from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:78: delete field n from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:115: delete field net from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:133: delete field trades from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:152: delete field wins from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:167: delete field mdd from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:180: delete field worst from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:197: delete field worst_day from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:222: delete field days_pos from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:245: delete field days_neg from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:268: delete field days_traded from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:297: delete field ndays from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:304: delete field spike from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:403:318: delete field pk_margin from struct Sum expression in sweep_list
+crates/spikefade/src/acct.rs:443:22: replace > with < in close_day
+crates/spikefade/src/acct.rs:472:24: delete field next_exit from struct Acc expression in detail_list
+crates/spikefade/src/acct.rs:472:45: delete field cur_day from struct Acc expression in detail_list
+crates/spikefade/src/acct.rs:483:19: delete field seg from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:27: delete field list from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:36: delete field x from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:70: delete field n from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:104: delete field net from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:122: delete field trades from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:141: delete field wins from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:156: delete field mdd from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:169: delete field worst from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:186: delete field worst_day from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:211: delete field days_pos from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:234: delete field days_neg from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:257: delete field days_traded from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:286: delete field ndays from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:293: delete field spike from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:307: delete field pk_margin from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:581:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((0, -1, -1), Default::default())]])
+crates/spikefade/src/acct.rs:581:9: replace Tops::canonical -> (usize, Vec<Vec<((i64, i64, i64), Sum)>>) with (0, vec![vec![((-1, 1, 0), Default::default())]])
+crates/spikefade/src/cal.rs:108:5: replace fmt_us -> String with String::new()
+crates/spikefade/src/charges.rs:68:38: replace * with / in rates_on
+crates/spikefade/src/charges.rs:70:18: replace < with > in rates_on
+crates/spikefade/src/charges.rs:72:25: replace < with <= in rates_on
+crates/spikefade/src/charges.rs:111:33: replace * with / in charges_est
+crates/spikefade/src/charges.rs:112:26: replace * with + in charges_est
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 0, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 1, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 0, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, -1, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, -1, 1, true)
+crates/spikefade/src/charges.rs:149:69: replace * with + in charges_est_sell
