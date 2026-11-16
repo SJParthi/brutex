@@ -421,3 +421,132 @@ crates/spikefade/src/report3.rs:2973:32: replace += with -= in stage_b_day_major
 crates/spikefade/src/report3.rs:2986:19: replace += with -= in stage_b_day_major_v33
 crates/spikefade/src/report3.rs:2975:28: delete ! in stage_b_day_major_v33
 crates/spikefade/src/report3.rs:2986:19: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2998:24: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2998:24: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2998:29: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3000:25: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3000:25: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3012:50: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3012:50: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3012:37: replace * with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3015:31: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3017:33: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3018:33: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3018:33: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3018:56: replace > with == in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3018:56: replace > with < in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3018:56: replace > with >= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3022:54: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3022:54: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3022:49: replace * with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3022:49: replace * with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3036:46: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3036:36: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3036:59: replace > with < in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3036:59: replace > with >= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3038:43: replace || with && in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3038:36: delete ! in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3042:47: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3042:47: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3045:46: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3045:46: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3054:47: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3054:47: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3056:46: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3056:46: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3063:62: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3063:62: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3066:63: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3066:63: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3070:37: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3071:66: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3071:66: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3074:67: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3074:67: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3082:36: replace += with -= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3082:36: replace += with *= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3094:76: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3094:76: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3094:99: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3094:99: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3095:65: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3095:65: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3096:75: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3096:75: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3110:30: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3110:30: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3111:30: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3111:30: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3114:86: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3114:86: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3133:25: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3133:21: replace > with == in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3133:21: replace > with < in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3133:21: replace > with >= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3133:36: replace >= with < in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3137:54: delete ! in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:44: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:25: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:21: replace > with == in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:21: replace > with < in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:21: replace > with >= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:36: replace >= with < in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:50: replace < with == in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3143:50: replace < with <= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3151:48: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3151:54: replace < with == in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3151:54: replace < with > in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3151:54: replace < with <= in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3158:28: replace - with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3158:28: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3177:47: replace - with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3181:104: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3181:104: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3181:47: replace * with + in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3181:47: replace * with / in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3181:220: replace + with - in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3181:220: replace + with * in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3183:24: replace == with != in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3194:5: replace cand_flags with ()
+crates/spikefade/src/report3.rs:3194:8: delete ! in cand_flags
+crates/spikefade/src/report3.rs:3202:19: replace || with && in cand_flags
+crates/spikefade/src/report3.rs:3202:12: delete ! in cand_flags
+crates/spikefade/src/report3.rs:3215:5: replace cand_whole with ()
+crates/spikefade/src/report3.rs:3215:8: delete ! in cand_whole
+crates/spikefade/src/report3.rs:3226:61: replace == with != in cand_whole
+crates/spikefade/src/report3.rs:3228:26: replace || with && in cand_whole
+crates/spikefade/src/report3.rs:3228:29: delete ! in cand_whole
+crates/spikefade/src/report3.rs:3232:172: replace >= with < in cand_whole
+crates/spikefade/src/report3.rs:3237:28: replace += with -= in cand_whole
+crates/spikefade/src/report3.rs:3237:28: replace += with *= in cand_whole
+crates/spikefade/src/report3.rs:3245:5: replace offer_row with ()
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with None
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((0, 0, 0), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((0, 0, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((0, 1, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((0, 1, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((0, -1, 0), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((0, -1, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((0, -1, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, 0, 0), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, 0, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, 0, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, 1, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, 1, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, -1, 0), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, -1, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((1, -1, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, 0, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, 0, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, 1, 0), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, 1, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, 1, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, -1, 0), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, -1, 1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i64, i64), crate::wf::Fig, crate::wf::Fig)> with Some(((-1, -1, -1), Default::default(), Default::default()))
+crates/spikefade/src/report3.rs:3255:18: replace == with != in row_candidate
+crates/spikefade/src/report3.rs:3270:5: replace row_better -> bool with true
+crates/spikefade/src/report3.rs:3270:5: replace row_better -> bool with false
+crates/spikefade/src/report3.rs:3270:15: replace || with && in row_better
+crates/spikefade/src/report3.rs:3270:9: replace > with < in row_better
+crates/spikefade/src/report3.rs:3270:9: replace > with >= in row_better
