@@ -144,3 +144,208 @@ crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> wi
 crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((-1, 1))
 crates/sniper_host/src/cands.rs:363:5: replace pct100 -> Option<(i128, i128)> with Some((-1, -1))
 crates/sniper_host/src/cands.rs:363:22: replace * with + in pct100
+crates/sniper_host/src/cands.rs:363:22: replace * with / in pct100
+crates/sniper_host/src/cands.rs:367:5: replace piv_label -> bool with true
+crates/sniper_host/src/cands.rs:367:5: replace piv_label -> bool with false
+crates/sniper_host/src/cands.rs:384:9: delete match arm "ABOVE_P" in piv_label
+crates/sniper_host/src/cands.rs:385:9: delete match arm "ABOVE_R1" in piv_label
+crates/sniper_host/src/cands.rs:386:9: delete match arm "ABOVE_R2" in piv_label
+crates/sniper_host/src/cands.rs:387:9: delete match arm "P_R1" in piv_label
+crates/sniper_host/src/cands.rs:388:9: delete match arm "R1_R2" in piv_label
+crates/sniper_host/src/cands.rs:389:9: delete match arm "S1_P" in piv_label
+crates/sniper_host/src/cands.rs:390:9: delete match arm "BELOW_P" in piv_label
+crates/sniper_host/src/cands.rs:391:9: delete match arm "BELOW_S1" in piv_label
+crates/sniper_host/src/cands.rs:392:9: delete match arm "BELOW_S2" in piv_label
+crates/sniper_host/src/cands.rs:393:9: delete match arm "S2_S1" in piv_label
+crates/sniper_host/src/cands.rs:386:25: replace == with != in piv_label
+crates/sniper_host/src/cands.rs:387:21: replace == with != in piv_label
+crates/sniper_host/src/cands.rs:388:22: replace == with != in piv_label
+crates/sniper_host/src/cands.rs:389:21: replace == with != in piv_label
+crates/sniper_host/src/cands.rs:392:25: replace == with != in piv_label
+crates/sniper_host/src/cands.rs:393:22: replace == with != in piv_label
+crates/sniper_host/src/cands.rs:399:5: replace cpr_label -> bool with true
+crates/sniper_host/src/cands.rs:399:5: replace cpr_label -> bool with false
+crates/sniper_host/src/cands.rs:400:9: delete match arm ("ABOVE_TC", true) in cpr_label
+crates/sniper_host/src/cands.rs:401:9: delete match arm ("ABOVE_TC", false) in cpr_label
+crates/sniper_host/src/cands.rs:402:9: delete match arm ("INSIDE", _) in cpr_label
+crates/sniper_host/src/cands.rs:400:33: replace == with != in cpr_label
+crates/sniper_host/src/cands.rs:401:34: replace == with != in cpr_label
+crates/sniper_host/src/cands.rs:402:28: replace == with != in cpr_label
+crates/sniper_host/src/cands.rs:412:5: replace outer_values -> (Vec<OuterValue>, Wiring) with (vec![], Default::default())
+crates/sniper_host/src/cands.rs:417:58: replace >= with < in outer_values
+crates/sniper_host/src/cands.rs:421:12: delete ! in outer_values
+crates/sniper_host/src/cands.rs:428:16: replace += with -= in outer_values
+crates/sniper_host/src/cands.rs:428:16: replace += with *= in outer_values
+crates/sniper_host/src/cands.rs:430:16: delete ! in outer_values
+crates/sniper_host/src/cands.rs:441:13: delete match arm "C-IDX" in outer_values
+crates/sniper_host/src/cands.rs:446:13: delete match arm "C-COL" in outer_values
+crates/sniper_host/src/cands.rs:452:13: delete match arm "K-DOW" in outer_values
+crates/sniper_host/src/cands.rs:458:13: delete match arm "T-ST" in outer_values
+crates/sniper_host/src/cands.rs:484:13: delete match arm "T-EMA" in outer_values
+crates/sniper_host/src/cands.rs:504:13: delete match arm "V-BB" in outer_values
+crates/sniper_host/src/cands.rs:516:13: delete match arm "C-BODY" | "C-UW" | "C-LW" | "C-RNG" | "V-RVOL" | "C-GAP" | "P-CHG" | "G-PDH" | "G-PDL" | "L-CPRW" in outer_values
+crates/sniper_host/src/cands.rs:554:13: delete match arm "L-PIV" | "L-CPR" in outer_values
+crates/sniper_host/src/cands.rs:564:13: delete match arm "L-PIVW" | "L-PIVM" | "L-CPRWK" | "L-CPRMO" in outer_values
+crates/sniper_host/src/cands.rs:579:13: delete match arm "L-CPRWKW" | "L-CPRMOW" in outer_values
+crates/sniper_host/src/cands.rs:594:13: delete match arm "V-BBW" in outer_values
+crates/sniper_host/src/cands.rs:607:13: delete match arm "C-PAT" in outer_values
+crates/sniper_host/src/cands.rs:626:71: replace match guard fam.n_htf > 0 with true in outer_values
+crates/sniper_host/src/cands.rs:626:71: replace match guard fam.n_htf > 0 with false in outer_values
+crates/sniper_host/src/cands.rs:692:67: replace match guard !fam.ctxr.is_empty() with true in outer_values
+crates/sniper_host/src/cands.rs:692:67: replace match guard !fam.ctxr.is_empty() with false in outer_values
+crates/sniper_host/src/cands.rs:704:35: replace match guard !fam.ctxr.is_empty() with true in outer_values
+crates/sniper_host/src/cands.rs:704:35: replace match guard !fam.ctxr.is_empty() with false in outer_values
+crates/sniper_host/src/cands.rs:443:64: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:448:37: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:449:83: replace > with == in outer_values
+crates/sniper_host/src/cands.rs:449:83: replace > with < in outer_values
+crates/sniper_host/src/cands.rs:449:83: replace > with >= in outer_values
+crates/sniper_host/src/cands.rs:449:114: replace < with == in outer_values
+crates/sniper_host/src/cands.rs:449:114: replace < with > in outer_values
+crates/sniper_host/src/cands.rs:449:114: replace < with <= in outer_values
+crates/sniper_host/src/cands.rs:455:97: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:455:131: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:455:127: replace & with | in outer_values
+crates/sniper_host/src/cands.rs:455:127: replace & with ^ in outer_values
+crates/sniper_host/src/cands.rs:455:105: replace >> with << in outer_values
+crates/sniper_host/src/cands.rs:455:121: replace - with + in outer_values
+crates/sniper_host/src/cands.rs:455:121: replace - with / in outer_values
+crates/sniper_host/src/cands.rs:466:55: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:467:63: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:467:84: delete ! in outer_values
+crates/sniper_host/src/cands.rs:469:45: delete match arm 1 in outer_values
+crates/sniper_host/src/cands.rs:470:45: delete match arm 2 in outer_values
+crates/sniper_host/src/cands.rs:470:50: delete ! in outer_values
+crates/sniper_host/src/cands.rs:473:77: replace * with + in outer_values
+crates/sniper_host/src/cands.rs:473:77: replace * with / in outer_values
+crates/sniper_host/src/cands.rs:474:67: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:474:61: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:474:85: replace - with + in outer_values
+crates/sniper_host/src/cands.rs:474:85: replace - with / in outer_values
+crates/sniper_host/src/cands.rs:474:106: replace - with + in outer_values
+crates/sniper_host/src/cands.rs:474:106: replace - with / in outer_values
+crates/sniper_host/src/cands.rs:475:60: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:475:49: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:475:86: replace * with + in outer_values
+crates/sniper_host/src/cands.rs:475:86: replace * with / in outer_values
+crates/sniper_host/src/cands.rs:488:51: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:488:40: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:488:59: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:493:73: replace * with + in outer_values
+crates/sniper_host/src/cands.rs:493:73: replace * with / in outer_values
+crates/sniper_host/src/cands.rs:494:66: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:494:60: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:495:72: replace - with + in outer_values
+crates/sniper_host/src/cands.rs:495:72: replace - with / in outer_values
+crates/sniper_host/src/cands.rs:495:87: replace - with + in outer_values
+crates/sniper_host/src/cands.rs:495:87: replace - with / in outer_values
+crates/sniper_host/src/cands.rs:496:47: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:496:73: replace * with + in outer_values
+crates/sniper_host/src/cands.rs:496:42: replace >= with < in outer_values
+crates/sniper_host/src/cands.rs:496:73: replace * with / in outer_values
+crates/sniper_host/src/cands.rs:524:33: delete match arm "C-BODY" in outer_values
+crates/sniper_host/src/cands.rs:525:33: delete match arm "C-UW" in outer_values
+crates/sniper_host/src/cands.rs:526:33: delete match arm "C-LW" in outer_values
+crates/sniper_host/src/cands.rs:527:33: delete match arm "C-RNG" in outer_values
+crates/sniper_host/src/cands.rs:528:33: delete match arm "V-RVOL" in outer_values
+crates/sniper_host/src/cands.rs:529:33: delete match arm "C-GAP" in outer_values
+crates/sniper_host/src/cands.rs:530:33: delete match arm "P-CHG" in outer_values
+crates/sniper_host/src/cands.rs:531:33: delete match arm "G-PDH" in outer_values
+crates/sniper_host/src/cands.rs:538:33: delete match arm "G-PDL" in outer_values
+crates/sniper_host/src/cands.rs:545:33: delete match arm "L-CPRW" in outer_values
+crates/sniper_host/src/cands.rs:535:105: delete - in outer_values
+crates/sniper_host/src/cands.rs:542:105: delete - in outer_values
+crates/sniper_host/src/cands.rs:555:32: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:573:64: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:580:36: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:587:45: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:600:42: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:601:126: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:611:25: delete match arm "MARUBOZU" in outer_values
+crates/sniper_host/src/cands.rs:612:25: delete match arm "ENGULF" | "ENGULFING" in outer_values
+crates/sniper_host/src/cands.rs:613:25: delete match arm "HAMMER" in outer_values
+crates/sniper_host/src/cands.rs:614:25: delete match arm "INSIDE" in outer_values
+crates/sniper_host/src/cands.rs:615:25: delete match arm "OUTSIDE" in outer_values
+crates/sniper_host/src/cands.rs:616:25: delete match arm "DOJI" in outer_values
+crates/sniper_host/src/cands.rs:617:25: delete match arm "NR4" in outer_values
+crates/sniper_host/src/cands.rs:618:25: delete match arm "NR7" in outer_values
+crates/sniper_host/src/cands.rs:622:84: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:622:52: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:622:47: replace != with == in outer_values
+crates/sniper_host/src/cands.rs:622:79: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:622:73: replace & with | in outer_values
+crates/sniper_host/src/cands.rs:622:73: replace & with ^ in outer_values
+crates/sniper_host/src/cands.rs:622:153: replace != with == in outer_values
+crates/sniper_host/src/cands.rs:622:147: replace & with | in outer_values
+crates/sniper_host/src/cands.rs:622:147: replace & with ^ in outer_values
+crates/sniper_host/src/cands.rs:623:100: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:626:81: replace > with == in outer_values
+crates/sniper_host/src/cands.rs:626:81: replace > with < in outer_values
+crates/sniper_host/src/cands.rs:626:81: replace > with >= in outer_values
+crates/sniper_host/src/cands.rs:629:40: delete ! in outer_values
+crates/sniper_host/src/cands.rs:630:87: replace + with - in outer_values
+crates/sniper_host/src/cands.rs:630:87: replace + with * in outer_values
+crates/sniper_host/src/cands.rs:630:75: replace * with + in outer_values
+crates/sniper_host/src/cands.rs:630:75: replace * with / in outer_values
+crates/sniper_host/src/cands.rs:634:25: delete match arm "H-RSI" | "H-CCI" | "H-WR" in outer_values
+crates/sniper_host/src/cands.rs:652:25: delete match arm "H-BB" in outer_values
+crates/sniper_host/src/cands.rs:662:25: delete match arm "H-ST" in outer_values
+crates/sniper_host/src/cands.rs:642:45: delete match arm "H-RSI" in outer_values
+crates/sniper_host/src/cands.rs:643:45: delete match arm "H-CCI" in outer_values
+crates/sniper_host/src/cands.rs:646:75: replace >= with < in outer_values
+crates/sniper_host/src/cands.rs:657:150: replace >= with < in outer_values
+crates/sniper_host/src/cands.rs:665:52: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:668:41: delete match arm 1 in outer_values
+crates/sniper_host/src/cands.rs:669:41: delete match arm 2 in outer_values
+crates/sniper_host/src/cands.rs:668:51: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:669:51: replace != with == in outer_values
+crates/sniper_host/src/cands.rs:679:52: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:681:41: delete match arm 1 in outer_values
+crates/sniper_host/src/cands.rs:682:41: delete match arm 2 in outer_values
+crates/sniper_host/src/cands.rs:681:51: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:682:51: replace != with == in outer_values
+crates/sniper_host/src/cands.rs:692:67: delete ! in outer_values
+crates/sniper_host/src/cands.rs:704:35: delete ! in outer_values
+crates/sniper_host/src/cands.rs:706:32: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:709:25: delete match arm "ON" in outer_values
+crates/sniper_host/src/cands.rs:710:25: delete match arm "NOT" in outer_values
+crates/sniper_host/src/cands.rs:713:63: replace && with || in outer_values
+crates/sniper_host/src/cands.rs:713:142: replace == with != in outer_values
+crates/sniper_host/src/cands.rs:722:53: replace - with + in outer_values
+crates/sniper_host/src/cands.rs:722:53: replace - with / in outer_values
+crates/sniper_host/src/cands.rs:766:53: replace == with != in htf_ladders
+crates/sniper_host/src/cands.rs:784:5: replace htf_reads -> Result<Vec<(i64, HtfRead)>, String> with Ok(vec![])
+crates/sniper_host/src/cands.rs:784:5: replace htf_reads -> Result<Vec<(i64, HtfRead)>, String> with Ok(vec![(0, Default::default())])
+crates/sniper_host/src/cands.rs:784:5: replace htf_reads -> Result<Vec<(i64, HtfRead)>, String> with Ok(vec![(1, Default::default())])
+crates/sniper_host/src/cands.rs:784:5: replace htf_reads -> Result<Vec<(i64, HtfRead)>, String> with Ok(vec![(-1, Default::default())])
+crates/sniper_host/src/cands.rs:808:9: replace HtfBuilder::push -> (i64, HtfRead) with (0, Default::default())
+crates/sniper_host/src/cands.rs:808:9: replace HtfBuilder::push -> (i64, HtfRead) with (1, Default::default())
+crates/sniper_host/src/cands.rs:808:9: replace HtfBuilder::push -> (i64, HtfRead) with (-1, Default::default())
+crates/sniper_host/src/cands.rs:825:57: replace == with != in HtfBuilder::push
+crates/sniper_host/src/cands.rs:833:27: replace < with == in HtfBuilder::push
+crates/sniper_host/src/cands.rs:833:27: replace < with > in HtfBuilder::push
+crates/sniper_host/src/cands.rs:833:27: replace < with <= in HtfBuilder::push
+crates/sniper_host/src/cands.rs:836:43: replace * with + in HtfBuilder::push
+crates/sniper_host/src/cands.rs:836:43: replace * with / in HtfBuilder::push
+crates/sniper_host/src/cands.rs:861:49: replace + with - in attach_htf
+crates/sniper_host/src/cands.rs:853:5: replace attach_htf with ()
+crates/sniper_host/src/cands.rs:861:49: replace + with * in attach_htf
+crates/sniper_host/src/cands.rs:861:45: replace * with + in attach_htf
+crates/sniper_host/src/cands.rs:861:45: replace * with / in attach_htf
+crates/sniper_host/src/ctxdials.rs:80:78: replace + with - in last_close_at
+crates/sniper_host/src/ctxdials.rs:80:78: replace + with * in last_close_at
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(0, 0)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(0, 1)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(0, -1)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(1, 0)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(1, 1)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(1, -1)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(-1, 0)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(-1, 1)])
+crates/sniper_host/src/ctxdials.rs:102:5: replace parse_expiries -> Result<Vec<(i32, i32)>, String> with Ok(vec![(-1, -1)])
+crates/sniper_host/src/ctxdials.rs:104:60: replace || with && in parse_expiries
+crates/sniper_host/src/ctxdials.rs:104:38: replace || with && in parse_expiries
+crates/sniper_host/src/ctxdials.rs:111:13: delete match arm (Some(e), Some(k)) in parse_expiries
+crates/sniper_host/src/ctxdials.rs:125:10: replace > with >= in expiry_flag
+crates/sniper_host/src/ctxdials.rs:129:75: replace <= with > in expiry_flag

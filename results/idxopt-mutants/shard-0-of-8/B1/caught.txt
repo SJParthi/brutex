@@ -1,0 +1,65 @@
+crates/sniper_host/src/cands.rs:882:5: replace htf_slots -> (Vec<Option<T>>, u64) with (vec![], 0)
+crates/sniper_host/src/cands.rs:882:5: replace htf_slots -> (Vec<Option<T>>, u64) with (vec![], 1)
+crates/sniper_host/src/cands.rs:882:5: replace htf_slots -> (Vec<Option<T>>, u64) with (vec![None], 0)
+crates/sniper_host/src/cands.rs:882:5: replace htf_slots -> (Vec<Option<T>>, u64) with (vec![None], 1)
+crates/sniper_host/src/cands.rs:888:18: replace >= with < in htf_slots
+crates/sniper_host/src/cands.rs:891:16: delete ! in htf_slots
+crates/sniper_host/src/cands.rs:894:15: replace += with -= in htf_slots
+crates/sniper_host/src/cands.rs:897:25: replace && with || in htf_slots
+crates/sniper_host/src/cands.rs:897:21: replace > with == in htf_slots
+crates/sniper_host/src/cands.rs:897:21: replace > with < in htf_slots
+crates/sniper_host/src/cands.rs:897:21: replace > with >= in htf_slots
+crates/sniper_host/src/cands.rs:897:28: delete ! in htf_slots
+crates/sniper_host/src/cands.rs:901:15: replace += with -= in htf_slots
+crates/sniper_host/src/cands.rs:940:9: replace HtfCursor<T>::reset with ()
+crates/sniper_host/src/cands.rs:945:9: replace HtfCursor<T>::put with ()
+crates/sniper_host/src/cands.rs:950:9: replace HtfCursor<T>::at -> Option<T> with None
+crates/sniper_host/src/cands.rs:951:18: replace >= with < in HtfCursor<T>::at
+crates/sniper_host/src/cands.rs:958:24: replace && with || in HtfCursor<T>::at
+crates/sniper_host/src/cands.rs:958:20: replace > with == in HtfCursor<T>::at
+crates/sniper_host/src/cands.rs:958:20: replace > with < in HtfCursor<T>::at
+crates/sniper_host/src/cands.rs:958:20: replace > with >= in HtfCursor<T>::at
+crates/sniper_host/src/cands.rs:958:27: delete ! in HtfCursor<T>::at
+crates/sniper_host/src/cands.rs:973:9: replace HtfCursor<T>::reset_refused -> u64 with 0
+crates/sniper_host/src/cands.rs:973:9: replace HtfCursor<T>::reset_refused -> u64 with 1
+crates/sniper_host/src/ctxdials.rs:80:5: replace last_close_at -> Option<i64> with None
+crates/sniper_host/src/ctxdials.rs:80:5: replace last_close_at -> Option<i64> with Some(0)
+crates/sniper_host/src/ctxdials.rs:80:5: replace last_close_at -> Option<i64> with Some(1)
+crates/sniper_host/src/ctxdials.rs:80:5: replace last_close_at -> Option<i64> with Some(-1)
+crates/sniper_host/src/ctxdials.rs:80:44: replace <= with > in last_close_at
+crates/sniper_host/src/ctxdials.rs:82:23: replace == with != in last_close_at
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::new()
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(0, 0)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(0, -1)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(0, 1)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(1, 0)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(1, 1)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(1, -1)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(-1, 0)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(-1, 1)])
+crates/sniper_host/src/ctxdials.rs:88:5: replace daily_closes -> BTreeMap<i32, i64> with BTreeMap::from_iter([(-1, -1)])
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with None
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((0, 0))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((0, 1))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((0, -1))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((1, 0))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((1, 1))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((1, -1))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((-1, 0))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((-1, 1))
+crates/sniper_host/src/ctxdials.rs:94:5: replace change_bp -> Option<(i128, i128)> with Some((-1, -1))
+crates/sniper_host/src/ctxdials.rs:123:5: replace expiry_flag -> Option<bool> with None
+crates/sniper_host/src/ctxdials.rs:123:5: replace expiry_flag -> Option<bool> with Some(true)
+crates/sniper_host/src/ctxdials.rs:123:5: replace expiry_flag -> Option<bool> with Some(false)
+crates/sniper_host/src/ctxdials.rs:125:17: replace || with && in expiry_flag
+crates/sniper_host/src/ctxdials.rs:125:10: replace > with == in expiry_flag
+crates/sniper_host/src/ctxdials.rs:125:10: replace > with < in expiry_flag
+crates/sniper_host/src/ctxdials.rs:125:22: replace <= with > in expiry_flag
+crates/sniper_host/src/ctxdials.rs:129:41: replace && with || in expiry_flag
+crates/sniper_host/src/ctxdials.rs:129:36: replace == with != in expiry_flag
+crates/sniper_host/src/ctxdials.rs:129:91: replace < with == in expiry_flag
+crates/sniper_host/src/ctxdials.rs:129:91: replace < with > in expiry_flag
+crates/sniper_host/src/ctxdials.rs:129:91: replace < with <= in expiry_flag
+crates/sniper_host/src/ctxdials.rs:133:5: replace month_key -> i32 with 1
+crates/sniper_host/src/ctxdials.rs:133:5: replace month_key -> i32 with 0
+crates/sniper_host/src/ctxdials.rs:133:5: replace month_key -> i32 with -1

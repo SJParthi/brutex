@@ -1,0 +1,2 @@
+crates/sniper_host/src/cands.rs:894:15: replace += with *= in htf_slots
+crates/sniper_host/src/cands.rs:901:15: replace += with *= in htf_slots
