@@ -1,0 +1,84 @@
+crates/costs/src/trip.rs:1123:40: replace > with >= in charge_stack_legs
+crates/greeks/src/solver.rs:328:24: replace > with >= in Contract::implied_volatility
+crates/spikefade/src/main.rs:93:5: replace main with ()
+crates/spikefade/src/main.rs:96:9: delete match arm Some("run") in main
+crates/spikefade/src/main.rs:97:9: delete match arm Some("aggcheck") in main
+crates/spikefade/src/main.rs:95:9: delete match arm Some("cube") in main
+crates/spikefade/src/main.rs:98:9: delete match arm Some("run3") in main
+crates/spikefade/src/main.rs:99:9: delete match arm Some("p3") in main
+crates/spikefade/src/main.rs:100:9: delete match arm Some("margincheck") in main
+crates/spikefade/src/main.rs:101:9: delete match arm Some("margin-one") in main
+crates/spikefade/src/main.rs:102:9: delete match arm Some("margincheck2") in main
+crates/spikefade/src/main.rs:104:9: delete match arm Some("greeks-tsv") in main
+crates/spikefade/src/main.rs:106:9: delete match arm Some("expiry-cal") in main
+crates/spikefade/src/main.rs:108:9: delete match arm Some("special-spans") in main
+crates/spikefade/src/main.rs:110:9: delete match arm Some("side17-combine") in main
+crates/spikefade/src/main.rs:112:9: delete match arm Some("ckpt-merge") in main
+crates/spikefade/src/main.rs:113:9: delete match arm Some("ckpt-canon") in main
+crates/spikefade/src/main.rs:114:9: delete match arm Some("bck-check") in main
+crates/spikefade/src/main.rs:115:9: delete match arm Some("cube-slice") in main
+crates/spikefade/src/main.rs:116:9: delete match arm Some("synth") in main
+crates/spikefade/src/main.rs:129:5: replace cmd_cube -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/main.rs:129:5: replace cmd_cube -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/main.rs:131:36: replace == with != in cmd_cube
+crates/spikefade/src/main.rs:133:12: replace && with || in cmd_cube
+crates/spikefade/src/main.rs:133:15: delete ! in cmd_cube
+crates/spikefade/src/main.rs:143:5: replace cmd_special_spans -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/main.rs:143:5: replace cmd_special_spans -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/main.rs:150:22: replace == with != in cmd_special_spans
+crates/spikefade/src/main.rs:150:18: replace & with | in cmd_special_spans
+crates/spikefade/src/main.rs:150:18: replace & with ^ in cmd_special_spans
+crates/spikefade/src/main.rs:151:31: replace % with / in cmd_special_spans
+crates/spikefade/src/main.rs:151:31: replace % with + in cmd_special_spans
+crates/spikefade/src/main.rs:152:31: replace % with / in cmd_special_spans
+crates/spikefade/src/main.rs:152:31: replace % with + in cmd_special_spans
+crates/spikefade/src/main.rs:153:49: replace % with / in cmd_special_spans
+crates/spikefade/src/main.rs:153:49: replace % with + in cmd_special_spans
+crates/spikefade/src/main.rs:159:15: replace <= with > in cmd_special_spans
+crates/spikefade/src/main.rs:160:42: replace - with + in cmd_special_spans
+crates/spikefade/src/main.rs:160:42: replace - with / in cmd_special_spans
+crates/spikefade/src/main.rs:160:38: replace + with - in cmd_special_spans
+crates/spikefade/src/main.rs:160:38: replace + with * in cmd_special_spans
+crates/spikefade/src/acct.rs:22:28: replace * with +
+crates/spikefade/src/acct.rs:22:28: replace * with /
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 0, 0, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 0, 0, 1)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 0, 1, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 0, 1, 1)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 1, 0, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 1, 0, 1)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 1, 1, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (0, 1, 1, 1)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 0, 0, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 0, 0, 1)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 0, 1, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 0, 1, 1)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 1, 0, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 1, 0, 1)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 1, 1, 0)
+crates/spikefade/src/acct.rs:27:5: replace x_parts -> (usize, usize, usize, usize) with (1, 1, 1, 1)
+crates/spikefade/src/acct.rs:27:8: replace / with * in x_parts
+crates/spikefade/src/acct.rs:27:24: replace % with / in x_parts
+crates/spikefade/src/acct.rs:27:24: replace % with + in x_parts
+crates/spikefade/src/acct.rs:27:18: replace / with % in x_parts
+crates/spikefade/src/acct.rs:27:18: replace / with * in x_parts
+crates/spikefade/src/acct.rs:27:37: replace % with / in x_parts
+crates/spikefade/src/acct.rs:27:37: replace % with + in x_parts
+crates/spikefade/src/acct.rs:27:32: replace / with * in x_parts
+crates/spikefade/src/acct.rs:93:9: replace Sum::every_day -> bool with true
+crates/spikefade/src/acct.rs:93:9: replace Sum::every_day -> bool with false
+crates/spikefade/src/acct.rs:93:23: replace == with != in Sum::every_day
+crates/spikefade/src/acct.rs:154:5: replace view_name -> &'static str with ""
+crates/spikefade/src/acct.rs:154:5: replace view_name -> &'static str with "xyzzy"
+crates/spikefade/src/acct.rs:154:47: replace == with != in view_name
+crates/spikefade/src/acct.rs:160:5: replace view_letter -> &'static str with ""
+crates/spikefade/src/acct.rs:160:5: replace view_letter -> &'static str with "xyzzy"
+crates/spikefade/src/acct.rs:160:49: replace == with != in view_letter
+crates/spikefade/src/acct.rs:171:85: replace + with * in verdict_key
+crates/spikefade/src/acct.rs:171:53: replace + with - in verdict_key
+crates/spikefade/src/acct.rs:171:36: replace * with + in verdict_key
+crates/spikefade/src/acct.rs:171:36: replace * with / in verdict_key
+crates/spikefade/src/acct.rs:171:75: replace * with + in verdict_key
+crates/spikefade/src/acct.rs:171:75: replace * with / in verdict_key
+crates/spikefade/src/acct.rs:171:90: delete - in verdict_key
+crates/spikefade/src/acct.rs:173:35: replace + with - in verdict_key

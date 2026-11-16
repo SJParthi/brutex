@@ -1,0 +1,564 @@
+crates/costs/src/stack.rs:178:9: replace Order::is_broker_square_off -> bool with false
+crates/costs/src/stack.rs:270:9: replace Totals::orders -> i64 with 0
+crates/costs/src/stack.rs:187:9: replace Order::value -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/stack.rs:270:9: replace Totals::orders -> i64 with 1
+crates/costs/src/stack.rs:270:9: replace Totals::orders -> i64 with -1
+crates/costs/src/stack.rs:299:22: replace && with || in Totals::add
+crates/costs/src/stack.rs:299:9: replace Totals::add -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/stack.rs:299:25: delete ! in Totals::add
+crates/costs/src/stack.rs:364:9: replace Totals::exercise -> Result<(), ChargeError> with Ok(())
+crates/costs/src/stack.rs:364:17: replace != with == in Totals::exercise
+crates/costs/src/stack.rs:369:23: replace == with != in Totals::exercise
+crates/costs/src/stack.rs:372:34: replace <= with > in Totals::exercise
+crates/costs/src/stack.rs:476:28: replace && with || in ClientSecurityDay::add
+crates/costs/src/stack.rs:476:31: delete ! in ClientSecurityDay::add
+crates/costs/src/stack.rs:525:9: replace ClientSecurityDay::exercise -> Result<(), ChargeError> with Ok(())
+crates/costs/src/stack.rs:571:22: replace && with || in settle_precise
+crates/costs/src/stack.rs:571:17: replace == with != in settle_precise
+crates/costs/src/stack.rs:571:43: replace == with != in settle_precise
+crates/costs/src/stack.rs:591:67: replace - with + in settle_precise
+crates/costs/src/stack.rs:591:67: replace - with / in settle_precise
+crates/costs/src/stack.rs:698:26: replace > with == in settle_dhan
+crates/costs/src/stack.rs:698:26: replace > with < in settle_dhan
+crates/costs/src/stack.rs:698:26: replace > with >= in settle_dhan
+crates/costs/src/stack.rs:703:17: replace == with != in settle_dhan
+crates/costs/src/stack.rs:713:25: replace > with == in settle_dhan
+crates/costs/src/stack.rs:713:25: replace > with < in settle_dhan
+crates/costs/src/stack.rs:713:25: replace > with >= in settle_dhan
+crates/costs/src/stack.rs:798:45: replace - with + in adjustment
+crates/costs/src/stack.rs:798:45: replace - with / in adjustment
+crates/costs/src/stack.rs:831:37: replace > with == in taxes
+crates/costs/src/stack.rs:831:37: replace > with < in taxes
+crates/costs/src/stack.rs:831:37: replace > with >= in taxes
+crates/costs/src/stack.rs:880:15: replace == with != in equity_netting
+crates/costs/src/stack.rs:883:16: replace == with != in equity_netting
+crates/costs/src/stack.rs:886:19: replace && with || in equity_netting
+crates/costs/src/stack.rs:886:15: replace > with == in equity_netting
+crates/costs/src/stack.rs:886:15: replace > with < in equity_netting
+crates/costs/src/stack.rs:886:15: replace > with >= in equity_netting
+crates/costs/src/stack.rs:886:27: replace > with == in equity_netting
+crates/costs/src/stack.rs:886:27: replace > with < in equity_netting
+crates/costs/src/stack.rs:886:27: replace > with >= in equity_netting
+crates/costs/src/stack.rs:897:5: replace non_delivery_value -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/stack.rs:897:36: replace * with + in non_delivery_value
+crates/costs/src/stack.rs:897:36: replace * with / in non_delivery_value
+crates/costs/src/stack.rs:899:20: replace * with + in non_delivery_value
+crates/costs/src/stack.rs:899:20: replace * with / in non_delivery_value
+crates/costs/src/stack.rs:904:5: replace to_rupee -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/stack.rs:905:50: replace * with + in to_rupee
+crates/costs/src/stack.rs:905:50: replace * with / in to_rupee
+crates/costs/src/stack.rs:953:5: replace add -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/stack.rs:961:5: replace add_units -> Result<i64, ChargeError> with Ok(0)
+crates/costs/src/stack.rs:961:5: replace add_units -> Result<i64, ChargeError> with Ok(1)
+crates/costs/src/stack.rs:961:5: replace add_units -> Result<i64, ChargeError> with Ok(-1)
+crates/costs/src/stack.rs:968:5: replace sum -> Result<Paisa, ChargeError> with Ok(Default::default())
+crates/costs/src/stack.rs:1044:9: replace DayCharges::orders -> i64 with 0
+crates/costs/src/stack.rs:1044:9: replace DayCharges::orders -> i64 with 1
+crates/costs/src/stack.rs:1044:9: replace DayCharges::orders -> i64 with -1
+crates/costs/src/stack.rs:1051:9: replace DayCharges::exercises -> i64 with 0
+crates/costs/src/stack.rs:1051:9: replace DayCharges::exercises -> i64 with -1
+crates/costs/src/stack.rs:1051:9: replace DayCharges::exercises -> i64 with 1
+crates/costs/src/stack.rs:1056:9: replace DayCharges::buy_quantity -> i64 with 0
+crates/costs/src/stack.rs:1056:9: replace DayCharges::buy_quantity -> i64 with 1
+crates/costs/src/stack.rs:1056:9: replace DayCharges::buy_quantity -> i64 with -1
+crates/costs/src/stack.rs:1066:9: replace DayCharges::sell_quantity -> i64 with 0
+crates/costs/src/stack.rs:1066:9: replace DayCharges::sell_quantity -> i64 with 1
+crates/costs/src/stack.rs:1066:9: replace DayCharges::sell_quantity -> i64 with -1
+crates/costs/src/stack.rs:1173:9: replace DayCharges::rates_used -> [Option<Cited>; MAX_RATES_USED] with [None; MAX_RATES_USED]
+crates/costs/src/stack.rs:1178:9: replace DayCharges::unverified_sources -> impl Iterator<Item =&'static str>+'_ with ::std::iter::empty()
+crates/costs/src/stack.rs:1178:9: replace DayCharges::unverified_sources -> impl Iterator<Item =&'static str>+'_ with ::std::iter::once("")
+crates/costs/src/stack.rs:1178:9: replace DayCharges::unverified_sources -> impl Iterator<Item =&'static str>+'_ with ::std::iter::once("xyzzy")
+crates/costs/src/stack.rs:1181:42: replace == with != in DayCharges::unverified_sources
+crates/costs/src/stack.rs:1239:9: replace <impl fmt::Display for DayCharges>::fmt -> fmt::Result with Ok(Default::default())
+crates/costs/src/stack.rs:1337:9: replace ClientDay::add -> Result<(), ChargeError> with Ok(())
+crates/costs/src/stack.rs:1343:27: replace != with == in ClientDay::add
+crates/costs/src/stack.rs:1342:24: replace != with == in ClientDay::add
+crates/costs/src/stack.rs:1344:26: replace != with == in ClientDay::add
+crates/costs/src/stack.rs:1441:9: replace ClientDayCharges::securities -> i64 with 0
+crates/costs/src/stack.rs:1441:9: replace ClientDayCharges::securities -> i64 with 1
+crates/costs/src/stack.rs:1441:9: replace ClientDayCharges::securities -> i64 with -1
+crates/costs/src/stack.rs:1481:5: replace not_an_estimate -> Result<(), ChargeError> with Ok(())
+crates/costs/src/stack.rs:1555:75: replace || with && in NetTrade::of_day
+crates/costs/src/stack.rs:1555:50: replace || with && in NetTrade::of_day
+crates/costs/src/stack.rs:1555:29: replace != with == in NetTrade::of_day
+crates/costs/src/stack.rs:1555:70: replace == with != in NetTrade::of_day
+crates/costs/src/stack.rs:1555:98: replace > with == in NetTrade::of_day
+crates/costs/src/stack.rs:1555:98: replace > with < in NetTrade::of_day
+crates/costs/src/stack.rs:1555:98: replace > with >= in NetTrade::of_day
+crates/costs/src/stack.rs:1586:47: replace && with || in NetTrade::of_days
+crates/costs/src/stack.rs:1586:42: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1587:47: replace && with || in NetTrade::of_days
+crates/costs/src/stack.rs:1586:71: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1587:42: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1587:72: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1597:13: replace && with || in NetTrade::of_days
+crates/costs/src/stack.rs:1598:13: replace && with || in NetTrade::of_days
+crates/costs/src/stack.rs:1596:13: replace && with || in NetTrade::of_days
+crates/costs/src/stack.rs:1595:13: replace && with || in NetTrade::of_days
+crates/costs/src/stack.rs:1594:13: replace && with || in NetTrade::of_days
+crates/costs/src/stack.rs:1593:29: replace || with && in NetTrade::of_days
+crates/costs/src/stack.rs:1594:23: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1595:29: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1597:40: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1596:33: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1598:40: replace == with != in NetTrade::of_days
+crates/costs/src/stack.rs:1599:12: delete ! in NetTrade::of_days
+crates/costs/src/stack.rs:1602:37: replace != with == in NetTrade::of_days
+crates/costs/src/stack.rs:1607:12: delete ! in NetTrade::of_days
+crates/costs/src/stack.rs:1681:9: replace NetTrade::versions -> (&'static str, &'static str) with ("", "")
+crates/costs/src/stack.rs:1681:9: replace NetTrade::versions -> (&'static str, &'static str) with ("", "xyzzy")
+crates/costs/src/stack.rs:1681:9: replace NetTrade::versions -> (&'static str, &'static str) with ("xyzzy", "")
+crates/costs/src/stack.rs:1681:9: replace NetTrade::versions -> (&'static str, &'static str) with ("xyzzy", "xyzzy")
+crates/costs/src/stack.rs:1704:9: replace NetTrade::is_win -> bool with true
+crates/costs/src/stack.rs:1704:9: replace NetTrade::is_win -> bool with false
+crates/costs/src/stack.rs:1704:24: replace > with == in NetTrade::is_win
+crates/costs/src/stack.rs:1704:24: replace > with < in NetTrade::is_win
+crates/costs/src/stack.rs:1704:24: replace > with >= in NetTrade::is_win
+crates/costs/src/stack.rs:1710:9: replace <impl fmt::Display for NetTrade>::fmt -> fmt::Result with Ok(Default::default())
+crates/costs/src/strike.rs:97:9: replace <impl core::fmt::Display for StrikeStep>::fmt -> core::fmt::Result with Ok(Default::default())
+crates/costs/src/strike.rs:266:5: replace at_the_money -> Result<Paisa, CostError> with Ok(Default::default())
+crates/costs/src/strike.rs:267:13: replace <= with > in at_the_money
+crates/costs/src/strike.rs:277:26: replace + with - in at_the_money
+crates/costs/src/strike.rs:277:26: replace + with * in at_the_money
+crates/costs/src/strike.rs:277:19: replace * with + in at_the_money
+crates/costs/src/strike.rs:277:19: replace * with / in at_the_money
+crates/costs/src/strike.rs:277:47: replace * with + in at_the_money
+crates/costs/src/strike.rs:277:47: replace * with / in at_the_money
+crates/costs/src/strike.rs:278:23: replace * with + in at_the_money
+crates/costs/src/strike.rs:278:23: replace * with / in at_the_money
+crates/costs/src/strike.rs:334:5: replace strike_at -> Result<Paisa, CostError> with Ok(Default::default())
+crates/costs/src/strike.rs:334:18: replace <= with > in strike_at
+crates/costs/src/strike.rs:347:28: delete - in strike_at
+crates/costs/src/strike.rs:349:40: replace + with - in strike_at
+crates/costs/src/strike.rs:349:40: replace + with * in strike_at
+crates/costs/src/strike.rs:349:48: replace * with + in strike_at
+crates/costs/src/strike.rs:349:48: replace * with / in strike_at
+crates/costs/src/strike.rs:355:5: replace into_strike -> Result<Paisa, CostError> with Ok(Default::default())
+crates/costs/src/strike.rs:356:15: replace <= with > in into_strike
+crates/costs/src/trip.rs:142:9: replace Outcome::as_str -> &'static str with ""
+crates/costs/src/trip.rs:142:9: replace Outcome::as_str -> &'static str with "xyzzy"
+crates/costs/src/trip.rs:153:9: replace Outcome::is_priced -> bool with true
+crates/costs/src/trip.rs:153:9: replace Outcome::is_priced -> bool with false
+crates/costs/src/trip.rs:159:9: replace <impl core::fmt::Display for Outcome>::fmt -> core::fmt::Result with Ok(Default::default())
+crates/costs/src/trip.rs:206:9: replace Contract::expiry -> Option<TradeDay> with None
+crates/costs/src/trip.rs:613:12: delete ! in RoundTrip::in_lots
+crates/costs/src/trip.rs:668:9: replace RoundTrip::quantity -> i64 with 0
+crates/costs/src/trip.rs:668:9: replace RoundTrip::quantity -> i64 with 1
+crates/costs/src/trip.rs:668:9: replace RoundTrip::quantity -> i64 with -1
+crates/costs/src/trip.rs:719:9: replace Charges::quantity -> i64 with 0
+crates/costs/src/trip.rs:719:9: replace Charges::quantity -> i64 with 1
+crates/costs/src/trip.rs:719:9: replace Charges::quantity -> i64 with -1
+crates/costs/src/trip.rs:868:13: replace + with - in Charges::validated
+crates/costs/src/trip.rs:868:13: replace + with * in Charges::validated
+crates/costs/src/trip.rs:867:13: replace + with - in Charges::validated
+crates/costs/src/trip.rs:867:13: replace + with * in Charges::validated
+crates/costs/src/trip.rs:866:13: replace + with - in Charges::validated
+crates/costs/src/trip.rs:866:13: replace + with * in Charges::validated
+crates/costs/src/trip.rs:865:13: replace + with - in Charges::validated
+crates/costs/src/trip.rs:865:13: replace + with * in Charges::validated
+crates/costs/src/trip.rs:864:13: replace + with - in Charges::validated
+crates/costs/src/trip.rs:864:13: replace + with * in Charges::validated
+crates/costs/src/trip.rs:863:13: replace + with - in Charges::validated
+crates/costs/src/trip.rs:863:13: replace + with * in Charges::validated
+crates/costs/src/trip.rs:869:41: replace != with == in Charges::validated
+crates/costs/src/trip.rs:875:13: replace != with == in Charges::validated
+crates/costs/src/trip.rs:875:49: replace - with + in Charges::validated
+crates/costs/src/trip.rs:875:49: replace - with / in Charges::validated
+crates/costs/src/trip.rs:892:9: replace <impl core::fmt::Display for Charges>::fmt -> core::fmt::Result with Ok(Default::default())
+crates/costs/src/trip.rs:950:17: replace <= with > in position
+crates/costs/src/trip.rs:982:37: replace - with + in position
+crates/costs/src/trip.rs:982:37: replace - with / in position
+crates/costs/src/trip.rs:1003:5: replace leg_notional -> Result<Paisa, CostError> with Ok(Default::default())
+crates/costs/src/trip.rs:1024:5: replace per_leg -> Result<Paisa, CostError> with Ok(Default::default())
+crates/costs/src/trip.rs:1027:35: replace + with - in per_leg
+crates/costs/src/trip.rs:1027:35: replace + with * in per_leg
+crates/costs/src/trip.rs:1123:40: replace > with == in charge_stack_legs
+crates/costs/src/trip.rs:1123:40: replace > with < in charge_stack_legs
+crates/costs/src/trip.rs:1136:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1136:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1135:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1135:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1134:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1134:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1148:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1148:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1147:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1147:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1146:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1146:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1145:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1145:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1144:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1144:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1143:13: replace + with - in charge_stack_legs
+crates/costs/src/trip.rs:1143:13: replace + with * in charge_stack_legs
+crates/costs/src/trip.rs:1263:8: delete ! in price
+crates/costs/src/venue.rs:106:9: replace SweptSlot::index -> usize with 0
+crates/costs/src/venue.rs:106:9: replace SweptSlot::index -> usize with 1
+crates/costs/src/venue.rs:118:9: replace SweptSlot::symbol -> &'static str with ""
+crates/costs/src/venue.rs:118:9: replace SweptSlot::symbol -> &'static str with "xyzzy"
+crates/greeks/src/bsm.rs:165:9: replace Greeks::is_finite -> bool with true
+crates/costs/src/venue.rs:152:32: replace == with != in swept_slot
+crates/greeks/src/bsm.rs:165:9: replace Greeks::is_finite -> bool with false
+crates/greeks/src/bsm.rs:175:5: replace finite -> Result<f64, GreeksError> with Ok(1.0)
+crates/greeks/src/bsm.rs:175:5: replace finite -> Result<f64, GreeksError> with Ok(0.0)
+crates/greeks/src/bsm.rs:175:5: replace finite -> Result<f64, GreeksError> with Ok(-1.0)
+crates/greeks/src/bsm.rs:188:5: replace positive_bounded -> Result<f64, GreeksError> with Ok(0.0)
+crates/greeks/src/bsm.rs:188:5: replace positive_bounded -> Result<f64, GreeksError> with Ok(-1.0)
+crates/greeks/src/bsm.rs:188:5: replace positive_bounded -> Result<f64, GreeksError> with Ok(1.0)
+crates/greeks/src/bsm.rs:189:14: replace <= with > in positive_bounded
+crates/greeks/src/bsm.rs:192:14: replace > with == in positive_bounded
+crates/greeks/src/bsm.rs:192:14: replace > with < in positive_bounded
+crates/greeks/src/bsm.rs:192:14: replace > with >= in positive_bounded
+crates/greeks/src/bsm.rs:205:5: replace signed_bounded -> Result<f64, GreeksError> with Ok(0.0)
+crates/greeks/src/bsm.rs:205:5: replace signed_bounded -> Result<f64, GreeksError> with Ok(1.0)
+crates/greeks/src/bsm.rs:205:5: replace signed_bounded -> Result<f64, GreeksError> with Ok(-1.0)
+crates/greeks/src/bsm.rs:206:20: replace > with == in signed_bounded
+crates/greeks/src/bsm.rs:206:20: replace > with < in signed_bounded
+crates/greeks/src/bsm.rs:206:20: replace > with >= in signed_bounded
+crates/greeks/src/bsm.rs:242:18: replace <= with > in Contract::check
+crates/greeks/src/bsm.rs:247:18: replace > with == in Contract::check
+crates/greeks/src/bsm.rs:247:18: replace > with < in Contract::check
+crates/greeks/src/bsm.rs:247:18: replace > with >= in Contract::check
+crates/greeks/src/bsm.rs:256:38: replace * with + in Contract::check
+crates/greeks/src/bsm.rs:256:38: replace * with / in Contract::check
+crates/greeks/src/bsm.rs:256:31: delete - in Contract::check
+crates/greeks/src/bsm.rs:257:28: replace * with + in Contract::check
+crates/greeks/src/bsm.rs:257:28: replace * with / in Contract::check
+crates/greeks/src/bsm.rs:258:40: replace * with + in Contract::check
+crates/greeks/src/bsm.rs:258:49: replace * with + in Contract::check
+crates/greeks/src/bsm.rs:258:40: replace * with / in Contract::check
+crates/greeks/src/bsm.rs:258:43: delete - in Contract::check
+crates/greeks/src/bsm.rs:258:49: replace * with / in Contract::check
+crates/greeks/src/bsm.rs:269:12: delete ! in Contract::check
+crates/greeks/src/bsm.rs:328:9: replace Contract::price -> Result<f64, GreeksError> with Ok(0.0)
+crates/greeks/src/bsm.rs:328:9: replace Contract::price -> Result<f64, GreeksError> with Ok(1.0)
+crates/greeks/src/bsm.rs:328:9: replace Contract::price -> Result<f64, GreeksError> with Ok(-1.0)
+crates/greeks/src/bsm.rs:357:41: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:357:41: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:360:13: replace / with * in Checked::greeks
+crates/greeks/src/bsm.rs:360:13: replace / with % in Checked::greeks
+crates/greeks/src/bsm.rs:359:13: replace + with - in Checked::greeks
+crates/greeks/src/bsm.rs:359:13: replace + with * in Checked::greeks
+crates/greeks/src/bsm.rs:358:30: replace / with % in Checked::greeks
+crates/greeks/src/bsm.rs:358:30: replace / with * in Checked::greeks
+crates/greeks/src/bsm.rs:359:72: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:359:72: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:359:39: replace + with - in Checked::greeks
+crates/greeks/src/bsm.rs:359:39: replace + with * in Checked::greeks
+crates/greeks/src/bsm.rs:359:26: replace - with + in Checked::greeks
+crates/greeks/src/bsm.rs:359:26: replace - with / in Checked::greeks
+crates/greeks/src/bsm.rs:359:58: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:359:58: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:359:45: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:359:45: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:361:21: replace - with + in Checked::greeks
+crates/greeks/src/bsm.rs:361:21: replace - with / in Checked::greeks
+crates/greeks/src/bsm.rs:366:51: replace / with % in Checked::greeks
+crates/greeks/src/bsm.rs:366:51: replace / with * in Checked::greeks
+crates/greeks/src/bsm.rs:366:41: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:366:41: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:366:64: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:366:64: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:367:43: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:367:43: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:367:33: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:367:33: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:368:58: replace / with % in Checked::greeks
+crates/greeks/src/bsm.rs:368:58: replace / with * in Checked::greeks
+crates/greeks/src/bsm.rs:368:45: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:368:45: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:368:35: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:368:21: delete - in Checked::greeks
+crates/greeks/src/bsm.rs:368:35: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:368:65: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:368:65: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:375:46: replace - with + in Checked::greeks
+crates/greeks/src/bsm.rs:375:46: replace - with / in Checked::greeks
+crates/greeks/src/bsm.rs:375:34: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:375:34: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:375:71: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:375:71: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:376:41: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:376:41: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:378:25: replace + with - in Checked::greeks
+crates/greeks/src/bsm.rs:378:25: replace + with * in Checked::greeks
+crates/greeks/src/bsm.rs:377:27: replace - with + in Checked::greeks
+crates/greeks/src/bsm.rs:377:27: replace - with / in Checked::greeks
+crates/greeks/src/bsm.rs:377:64: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:377:64: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:377:39: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:377:39: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:378:53: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:378:53: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:378:38: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:378:38: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:379:57: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:379:57: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:379:32: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:379:32: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:383:53: delete - in Checked::greeks
+crates/greeks/src/bsm.rs:384:53: delete - in Checked::greeks
+crates/greeks/src/bsm.rs:386:56: replace - with + in Checked::greeks
+crates/greeks/src/bsm.rs:386:56: replace - with / in Checked::greeks
+crates/greeks/src/bsm.rs:386:44: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:386:44: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:386:71: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:386:71: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:387:42: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:387:42: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:387:21: delete - in Checked::greeks
+crates/greeks/src/bsm.rs:389:25: replace - with + in Checked::greeks
+crates/greeks/src/bsm.rs:389:25: replace - with / in Checked::greeks
+crates/greeks/src/bsm.rs:388:27: replace + with - in Checked::greeks
+crates/greeks/src/bsm.rs:388:27: replace + with * in Checked::greeks
+crates/greeks/src/bsm.rs:388:64: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:388:64: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:388:39: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:388:39: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:389:53: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:389:53: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:389:38: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:389:38: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:390:58: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:390:58: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:390:33: replace * with + in Checked::greeks
+crates/greeks/src/bsm.rs:390:33: replace * with / in Checked::greeks
+crates/greeks/src/bsm.rs:390:21: delete - in Checked::greeks
+crates/greeks/src/bsm.rs:426:9: replace Checked::price_scale -> f64 with 0.0
+crates/greeks/src/bsm.rs:426:9: replace Checked::price_scale -> f64 with 1.0
+crates/greeks/src/bsm.rs:426:9: replace Checked::price_scale -> f64 with -1.0
+crates/greeks/src/bsm.rs:426:22: replace + with - in Checked::price_scale
+crates/greeks/src/bsm.rs:426:22: replace + with * in Checked::price_scale
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (0.0, 0.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (0.0, 1.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (0.0, -1.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (1.0, 0.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (1.0, 1.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (1.0, -1.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (-1.0, 0.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (-1.0, 1.0)
+crates/greeks/src/bsm.rs:436:9: replace Checked::no_arbitrage_bounds -> (f64, f64) with (-1.0, -1.0)
+crates/greeks/src/bsm.rs:438:31: replace - with + in Checked::no_arbitrage_bounds
+crates/greeks/src/bsm.rs:438:31: replace - with / in Checked::no_arbitrage_bounds
+crates/greeks/src/bsm.rs:442:41: replace - with + in Checked::no_arbitrage_bounds
+crates/greeks/src/bsm.rs:442:41: replace - with / in Checked::no_arbitrage_bounds
+crates/greeks/src/error.rs:163:9: replace <impl fmt::Display for GreeksError>::fmt -> fmt::Result with Ok(Default::default())
+crates/greeks/src/moneyness.rs:104:45: replace / with % in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:104:45: replace / with * in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:104:29: replace - with + in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:104:29: replace - with / in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:106:36: replace > with == in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:106:36: replace > with < in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:106:36: replace > with >= in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:106:19: replace - with + in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:106:19: replace - with / in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:112:26: replace > with == in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:112:26: replace > with < in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:112:26: replace > with >= in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:129:13: delete match arm (_, 0) in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:130:13: delete match arm (OptionKind::Call, 1) |(OptionKind::Put, -1) in Moneyness::from_ladder
+crates/greeks/src/moneyness.rs:143:9: replace <impl fmt::Display for Moneyness>::fmt -> fmt::Result with Ok(Default::default())
+crates/greeks/src/normal.rs:115:5: replace standard_normal_pdf -> f64 with 0.0
+crates/greeks/src/normal.rs:115:5: replace standard_normal_pdf -> f64 with 1.0
+crates/greeks/src/normal.rs:115:5: replace standard_normal_pdf -> f64 with -1.0
+crates/greeks/src/normal.rs:115:26: replace * with + in standard_normal_pdf
+crates/greeks/src/normal.rs:115:26: replace * with / in standard_normal_pdf
+crates/greeks/src/normal.rs:115:15: replace * with + in standard_normal_pdf
+crates/greeks/src/normal.rs:115:15: replace * with / in standard_normal_pdf
+crates/greeks/src/normal.rs:115:11: replace * with + in standard_normal_pdf
+crates/greeks/src/normal.rs:115:11: replace * with / in standard_normal_pdf
+crates/greeks/src/normal.rs:115:6: delete - in standard_normal_pdf
+crates/greeks/src/normal.rs:137:5: replace standard_normal_cdf -> f64 with 0.0
+crates/greeks/src/normal.rs:137:5: replace standard_normal_cdf -> f64 with 1.0
+crates/greeks/src/normal.rs:137:5: replace standard_normal_cdf -> f64 with -1.0
+crates/greeks/src/normal.rs:138:10: replace > with == in standard_normal_cdf
+crates/greeks/src/normal.rs:138:10: replace > with < in standard_normal_cdf
+crates/greeks/src/normal.rs:138:10: replace > with >= in standard_normal_cdf
+crates/greeks/src/normal.rs:148:27: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:148:27: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:148:23: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:148:23: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:148:18: delete - in standard_normal_cdf
+crates/greeks/src/normal.rs:151:22: replace < with == in standard_normal_cdf
+crates/greeks/src/normal.rs:151:22: replace < with > in standard_normal_cdf
+crates/greeks/src/normal.rs:151:22: replace < with <= in standard_normal_cdf
+crates/greeks/src/normal.rs:152:89: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:152:89: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:152:84: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:152:84: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:152:78: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:152:78: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:152:74: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:152:74: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:152:68: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:152:68: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:152:64: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:152:64: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:152:58: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:152:58: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:152:54: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:152:54: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:152:48: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:152:48: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:152:44: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:152:44: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:152:38: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:152:38: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:152:34: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:152:34: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:154:88: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:154:88: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:154:83: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:154:83: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:154:77: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:154:77: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:154:73: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:154:73: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:154:67: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:154:67: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:154:63: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:154:63: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:154:57: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:154:57: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:154:53: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:154:53: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:154:47: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:154:47: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:154:43: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:154:43: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:154:37: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:154:37: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:154:33: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:154:33: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:154:27: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:154:27: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:154:23: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:154:23: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:155:27: replace / with * in standard_normal_cdf
+crates/greeks/src/normal.rs:155:27: replace / with % in standard_normal_cdf
+crates/greeks/src/normal.rs:155:15: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:155:15: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:157:26: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:157:26: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:32: replace / with % in standard_normal_cdf
+crates/greeks/src/normal.rs:157:32: replace / with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:37: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:157:37: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:43: replace / with % in standard_normal_cdf
+crates/greeks/src/normal.rs:157:43: replace / with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:48: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:157:48: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:54: replace / with % in standard_normal_cdf
+crates/greeks/src/normal.rs:157:54: replace / with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:59: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:59: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:157:65: replace / with % in standard_normal_cdf
+crates/greeks/src/normal.rs:157:65: replace / with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:70: replace + with * in standard_normal_cdf
+crates/greeks/src/normal.rs:157:70: replace + with - in standard_normal_cdf
+crates/greeks/src/normal.rs:158:15: replace / with % in standard_normal_cdf
+crates/greeks/src/normal.rs:158:15: replace / with * in standard_normal_cdf
+crates/greeks/src/normal.rs:158:27: replace * with + in standard_normal_cdf
+crates/greeks/src/normal.rs:158:27: replace * with / in standard_normal_cdf
+crates/greeks/src/normal.rs:166:13: replace - with + in standard_normal_cdf
+crates/greeks/src/normal.rs:166:13: replace - with / in standard_normal_cdf
+crates/greeks/src/solver.rs:176:58: replace + with -
+crates/greeks/src/solver.rs:176:58: replace + with *
+crates/greeks/src/solver.rs:176:40: replace + with *
+crates/greeks/src/solver.rs:176:25: replace + with *
+crates/greeks/src/solver.rs:272:18: replace >= with < in Contract::implied_volatility
+crates/greeks/src/solver.rs:269:18: replace <= with > in Contract::implied_volatility
+crates/greeks/src/solver.rs:278:12: delete ! in Contract::implied_volatility
+crates/greeks/src/solver.rs:281:18: replace <= with > in Contract::implied_volatility
+crates/greeks/src/solver.rs:288:18: replace >= with < in Contract::implied_volatility
+crates/greeks/src/solver.rs:298:57: replace + with - in Contract::implied_volatility
+crates/greeks/src/solver.rs:298:57: replace + with * in Contract::implied_volatility
+crates/greeks/src/solver.rs:298:46: replace + with - in Contract::implied_volatility
+crates/greeks/src/solver.rs:298:46: replace + with * in Contract::implied_volatility
+crates/greeks/src/solver.rs:327:80: replace / with % in Contract::implied_volatility
+crates/greeks/src/solver.rs:327:80: replace / with * in Contract::implied_volatility
+crates/greeks/src/solver.rs:327:65: replace * with + in Contract::implied_volatility
+crates/greeks/src/solver.rs:327:65: replace * with / in Contract::implied_volatility
+crates/greeks/src/solver.rs:327:50: replace / with % in Contract::implied_volatility
+crates/greeks/src/solver.rs:327:50: replace / with * in Contract::implied_volatility
+crates/greeks/src/solver.rs:328:24: replace > with == in Contract::implied_volatility
+crates/greeks/src/solver.rs:328:24: replace > with < in Contract::implied_volatility
+crates/greeks/src/solver.rs:356:5: replace brenner_subrahmanyam -> f64 with 0.0
+crates/greeks/src/solver.rs:356:5: replace brenner_subrahmanyam -> f64 with 1.0
+crates/greeks/src/solver.rs:356:5: replace brenner_subrahmanyam -> f64 with -1.0
+crates/greeks/src/solver.rs:356:34: replace / with % in brenner_subrahmanyam
+crates/greeks/src/solver.rs:356:34: replace / with * in brenner_subrahmanyam
+crates/greeks/src/solver.rs:356:26: replace * with + in brenner_subrahmanyam
+crates/greeks/src/solver.rs:356:26: replace * with / in brenner_subrahmanyam
+crates/greeks/src/solver.rs:356:10: replace / with % in brenner_subrahmanyam
+crates/greeks/src/solver.rs:356:10: replace / with * in brenner_subrahmanyam
+crates/greeks/src/solver.rs:371:19: replace += with -= in Checked::search
+crates/greeks/src/solver.rs:371:19: replace += with *= in Checked::search
+crates/greeks/src/solver.rs:377:24: replace <= with > in Checked::search
+crates/greeks/src/solver.rs:380:43: replace / with % in Checked::search
+crates/greeks/src/solver.rs:380:43: replace / with * in Checked::search
+crates/greeks/src/solver.rs:380:34: replace - with + in Checked::search
+crates/greeks/src/solver.rs:380:34: replace - with / in Checked::search
+crates/greeks/src/solver.rs:381:35: replace - with + in Checked::search
+crates/greeks/src/solver.rs:381:35: replace - with / in Checked::search
+crates/greeks/src/solver.rs:384:16: delete ! in Checked::search
+crates/greeks/src/solver.rs:388:27: replace <= with > in Checked::search
+crates/greeks/src/solver.rs:398:45: replace + with - in Checked::search
+crates/greeks/src/solver.rs:398:45: replace + with * in Checked::search
+crates/greeks/src/solver.rs:415:9: replace Checked::bisect -> f64 with 0.0
+crates/greeks/src/solver.rs:415:9: replace Checked::bisect -> f64 with 1.0
+crates/greeks/src/solver.rs:415:9: replace Checked::bisect -> f64 with -1.0
+crates/greeks/src/solver.rs:416:13: replace * with + in Checked::bisect
+crates/greeks/src/solver.rs:416:13: replace * with / in Checked::bisect
+crates/greeks/src/solver.rs:416:20: replace + with - in Checked::bisect
+crates/greeks/src/solver.rs:416:20: replace + with * in Checked::bisect
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (0.0, 0.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (0.0, 1.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (0.0, -1.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (1.0, 0.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (1.0, 1.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (1.0, -1.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (-1.0, 0.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (-1.0, 1.0)
+crates/greeks/src/solver.rs:424:9: replace Checked::bracket -> (f64, f64) with (-1.0, -1.0)
+crates/greeks/src/solver.rs:427:30: replace * with + in Checked::bracket
+crates/greeks/src/solver.rs:427:30: replace * with / in Checked::bracket
+crates/greeks/src/solver.rs:427:37: replace + with - in Checked::bracket
+crates/greeks/src/solver.rs:427:37: replace + with * in Checked::bracket
+crates/greeks/src/solver.rs:428:48: replace < with == in Checked::bracket
+crates/greeks/src/solver.rs:428:48: replace < with > in Checked::bracket
+crates/greeks/src/solver.rs:428:48: replace < with <= in Checked::bracket
+crates/spikefade/src/acct.rs:27:8: replace / with % in x_parts
+crates/spikefade/src/acct.rs:27:32: replace / with % in x_parts
+crates/spikefade/src/acct.rs:27:44: replace % with / in x_parts
+crates/spikefade/src/acct.rs:27:44: replace % with + in x_parts
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, 0, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, 0, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, 0, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, 1, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, 1, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, 1, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, -1, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, -1, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (0, -1, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, 0, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, 0, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, 0, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, 1, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, 1, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, 1, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, -1, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, -1, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (1, -1, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, 0, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, 0, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, 0, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, 1, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, 1, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, 1, -1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, -1, 0)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, -1, 1)
+crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, -1, -1)
+crates/spikefade/src/acct.rs:171:85: replace + with - in verdict_key
+crates/spikefade/src/acct.rs:171:53: replace + with * in verdict_key
