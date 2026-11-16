@@ -1,0 +1,87 @@
+crates/spikefade/src/sw33.rs:100:8: delete ! in words
+crates/spikefade/src/sw33.rs:124:34: replace == with != in from_args
+crates/spikefade/src/sw33.rs:124:5: replace from_args -> Result<(), String> with Ok(())
+crates/spikefade/src/sw33.rs:129:24: replace match guard v == yes with true in from_args
+crates/spikefade/src/sw33.rs:130:24: replace match guard v == no with true in from_args
+crates/spikefade/src/sw33.rs:130:24: replace match guard v == no with false in from_args
+crates/spikefade/src/sw33.rs:127:39: replace == with != in from_args
+crates/spikefade/src/sw33.rs:127:66: replace + with - in from_args
+crates/spikefade/src/sw33.rs:127:66: replace + with * in from_args
+crates/spikefade/src/sw33.rs:129:26: replace == with != in from_args
+crates/spikefade/src/sw33.rs:130:26: replace == with != in from_args
+crates/spikefade/src/fix33.rs:57:5: replace on -> bool with true
+crates/spikefade/src/fix33.rs:57:5: replace on -> bool with false
+crates/spikefade/src/fix33.rs:69:5: replace set with ()
+crates/spikefade/src/fix33.rs:88:5: replace any -> bool with false
+crates/spikefade/src/fix33.rs:124:24: replace match guard v == no with false in from_args
+crates/spikefade/src/fix33.rs:123:26: replace == with != in from_args
+crates/spikefade/src/fix33.rs:131:46: replace == with != in from_args
+crates/spikefade/src/fix33.rs:138:46: replace == with != in from_args
+crates/spikefade/src/fix33.rs:138:81: replace + with * in from_args
+crates/spikefade/src/fix33.rs:157:5: replace sort_samples -> DaySmp with Default::default()
+crates/spikefade/src/fix33.rs:167:5: replace kth_union -> u64 with 0
+crates/spikefade/src/fix33.rs:167:5: replace kth_union -> u64 with 1
+crates/spikefade/src/fix33.rs:170:14: replace < with == in kth_union
+crates/spikefade/src/fix33.rs:170:14: replace < with > in kth_union
+crates/spikefade/src/fix33.rs:171:22: replace + with - in kth_union
+crates/spikefade/src/fix33.rs:171:34: replace / with * in kth_union
+crates/spikefade/src/fix33.rs:172:82: replace <= with > in kth_union
+crates/spikefade/src/fix33.rs:173:14: replace > with == in kth_union
+crates/spikefade/src/fix33.rs:173:14: replace > with < in kth_union
+crates/spikefade/src/fix33.rs:173:14: replace > with >= in kth_union
+crates/spikefade/src/fix33.rs:185:5: replace pct_union -> u64 with 0
+crates/spikefade/src/fix33.rs:185:5: replace pct_union -> u64 with 1
+crates/spikefade/src/fix33.rs:186:10: replace == with != in pct_union
+crates/spikefade/src/fix33.rs:189:34: replace / with % in pct_union
+crates/spikefade/src/fix33.rs:189:34: replace / with * in pct_union
+crates/spikefade/src/fix33.rs:189:30: replace * with + in pct_union
+crates/spikefade/src/fix33.rs:189:30: replace * with / in pct_union
+crates/spikefade/src/fix33.rs:189:25: replace - with + in pct_union
+crates/spikefade/src/fix33.rs:189:25: replace - with / in pct_union
+crates/spikefade/src/fix33.rs:196:5: replace levels_of -> Levels with Default::default()
+crates/spikefade/src/fix33.rs:216:5: replace warm_levels -> Levels with Default::default()
+crates/spikefade/src/fix33.rs:225:5: replace causal_levels -> Vec<Option<(Levels, usize)>> with vec![]
+crates/spikefade/src/fix33.rs:225:5: replace causal_levels -> Vec<Option<(Levels, usize)>> with vec![None]
+crates/spikefade/src/fix33.rs:225:5: replace causal_levels -> Vec<Option<(Levels, usize)>> with vec![Some((Default::default(), 0))]
+crates/spikefade/src/fix33.rs:225:5: replace causal_levels -> Vec<Option<(Levels, usize)>> with vec![Some((Default::default(), 1))]
+crates/spikefade/src/fix33.rs:228:14: replace == with != in causal_levels
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (0, 0, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (0, 0, 1))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (0, 1, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (0, 1, 1))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (1, 0, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (1, 0, 1))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (1, 1, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![], (1, 1, 1))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (0, 0, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (0, 0, 1))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (0, 1, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (0, 1, 1))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (1, 0, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (1, 0, 1))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (1, 1, 0))
+crates/spikefade/src/fix33.rs:266:5: replace day_levels -> (Vec<Levels>, (usize, usize, usize)) with (vec![Default::default()], (1, 1, 1))
+crates/spikefade/src/fix33.rs:273:16: replace += with -= in day_levels
+crates/spikefade/src/fix33.rs:273:16: replace += with *= in day_levels
+crates/spikefade/src/fix33.rs:276:27: replace += with -= in day_levels
+crates/spikefade/src/fix33.rs:276:27: replace += with *= in day_levels
+crates/spikefade/src/fix33.rs:276:45: replace < with == in day_levels
+crates/spikefade/src/fix33.rs:276:45: replace < with > in day_levels
+crates/spikefade/src/fix33.rs:276:45: replace < with <= in day_levels
+crates/spikefade/src/fix33.rs:280:24: replace += with -= in day_levels
+crates/spikefade/src/fix33.rs:280:24: replace += with *= in day_levels
+crates/spikefade/src/fix33.rs:319:9: replace CapRes::ok -> bool with true
+crates/spikefade/src/fix33.rs:319:9: replace CapRes::ok -> bool with false
+crates/spikefade/src/fix33.rs:319:25: replace == with != in CapRes::ok
+crates/spikefade/src/fix33.rs:329:5: replace cap_minutes -> CapRes with Default::default()
+crates/spikefade/src/fix33.rs:338:20: replace >= with < in cap_minutes
+crates/spikefade/src/fix33.rs:342:15: replace += with *= in cap_minutes
+crates/spikefade/src/fix33.rs:351:20: replace != with == in cap_minutes
+crates/spikefade/src/fix33.rs:354:15: replace += with -= in cap_minutes
+crates/spikefade/src/fix33.rs:356:83: replace / with % in cap_minutes
+crates/spikefade/src/fix33.rs:356:83: replace / with * in cap_minutes
+crates/spikefade/src/fix33.rs:356:78: replace - with + in cap_minutes
+crates/spikefade/src/fix33.rs:356:78: replace - with / in cap_minutes
+crates/spikefade/src/fix33.rs:356:54: replace + with - in cap_minutes
+crates/spikefade/src/fix33.rs:356:54: replace + with * in cap_minutes
+crates/spikefade/src/fix33.rs:356:50: replace - with + in cap_minutes

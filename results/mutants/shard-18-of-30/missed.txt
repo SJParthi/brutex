@@ -1,0 +1,30 @@
+crates/spikefade/src/sw33.rs:125:38: replace == with != in from_args
+crates/spikefade/src/sw33.rs:129:24: replace match guard v == yes with false in from_args
+crates/spikefade/src/fix33.rs:88:5: replace any -> bool with true
+crates/spikefade/src/fix33.rs:94:5: replace words -> String with String::new()
+crates/spikefade/src/fix33.rs:94:5: replace words -> String with "xyzzy".into()
+crates/spikefade/src/fix33.rs:94:8: delete ! in words
+crates/spikefade/src/fix33.rs:111:5: replace fp_part -> String with String::new()
+crates/spikefade/src/fix33.rs:111:5: replace fp_part -> String with "xyzzy".into()
+crates/spikefade/src/fix33.rs:119:5: replace from_args -> Result<(), String> with Ok(())
+crates/spikefade/src/fix33.rs:119:34: replace == with != in from_args
+crates/spikefade/src/fix33.rs:123:24: replace match guard v == yes with true in from_args
+crates/spikefade/src/fix33.rs:123:24: replace match guard v == yes with false in from_args
+crates/spikefade/src/fix33.rs:124:24: replace match guard v == no with true in from_args
+crates/spikefade/src/fix33.rs:121:39: replace == with != in from_args
+crates/spikefade/src/fix33.rs:121:66: replace + with - in from_args
+crates/spikefade/src/fix33.rs:121:66: replace + with * in from_args
+crates/spikefade/src/fix33.rs:124:26: replace == with != in from_args
+crates/spikefade/src/fix33.rs:131:89: replace + with - in from_args
+crates/spikefade/src/fix33.rs:131:89: replace + with * in from_args
+crates/spikefade/src/fix33.rs:133:12: delete ! in from_args
+crates/spikefade/src/fix33.rs:138:81: replace + with - in from_args
+crates/spikefade/src/fix33.rs:140:12: delete ! in from_args
+crates/spikefade/src/fix33.rs:292:5: replace level_words -> (String, String) with (String::new(), String::new())
+crates/spikefade/src/fix33.rs:292:5: replace level_words -> (String, String) with (String::new(), "xyzzy".into())
+crates/spikefade/src/fix33.rs:292:5: replace level_words -> (String, String) with ("xyzzy".into(), String::new())
+crates/spikefade/src/fix33.rs:292:5: replace level_words -> (String, String) with ("xyzzy".into(), "xyzzy".into())
+crates/spikefade/src/fix33.rs:297:17: replace == with != in level_words
+crates/spikefade/src/fix33.rs:341:22: replace += with -= in cap_minutes
+crates/spikefade/src/fix33.rs:341:22: replace += with *= in cap_minutes
+crates/spikefade/src/fix33.rs:342:15: replace += with -= in cap_minutes
