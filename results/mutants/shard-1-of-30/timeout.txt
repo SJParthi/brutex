@@ -1,0 +1,5 @@
+crates/costs/src/day.rs:537:19: replace - with / in civil_from_days
+crates/costs/src/day.rs:539:40: replace + with * in civil_from_days
+crates/costs/src/day.rs:539:19: replace - with / in civil_from_days
+crates/costs/src/day.rs:540:49: replace - with / in civil_from_days
+crates/costs/src/expiry.rs:454:47: replace && with || in next_weekly_on
