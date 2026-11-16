@@ -550,3 +550,71 @@ crates/spikefade/src/report3.rs:3270:5: replace row_better -> bool with false
 crates/spikefade/src/report3.rs:3270:15: replace || with && in row_better
 crates/spikefade/src/report3.rs:3270:9: replace > with < in row_better
 crates/spikefade/src/report3.rs:3270:9: replace > with >= in row_better
+crates/spikefade/src/report3.rs:3270:42: replace < with == in row_better
+crates/spikefade/src/report3.rs:3270:42: replace < with > in row_better
+crates/spikefade/src/report3.rs:3270:42: replace < with <= in row_better
+crates/spikefade/src/report3.rs:3275:5: replace row_take with ()
+crates/spikefade/src/report3.rs:3286:30: replace || with && in d3_rewalk
+crates/spikefade/src/report3.rs:3323:53: replace * with + in d3_rewalk
+crates/spikefade/src/report3.rs:3321:117: replace >= with < in d3_rewalk
+crates/spikefade/src/report3.rs:3323:53: replace * with / in d3_rewalk
+crates/spikefade/src/report3.rs:3324:25: replace + with * in d3_rewalk
+crates/spikefade/src/report3.rs:3328:57: replace < with == in d3_rewalk
+crates/spikefade/src/report3.rs:3328:57: replace < with > in d3_rewalk
+crates/spikefade/src/report3.rs:3328:90: replace < with == in d3_rewalk
+crates/spikefade/src/report3.rs:3328:90: replace < with <= in d3_rewalk
+crates/spikefade/src/report3.rs:3350:65: replace < with == in d3_rewalk
+crates/spikefade/src/report3.rs:3350:65: replace < with > in d3_rewalk
+crates/spikefade/src/report3.rs:3350:65: replace < with <= in d3_rewalk
+crates/spikefade/src/report3.rs:3350:98: replace < with == in d3_rewalk
+crates/spikefade/src/report3.rs:3350:98: replace < with <= in d3_rewalk
+crates/spikefade/src/report3.rs:3354:78: replace == with != in d3_rewalk
+crates/spikefade/src/report3.rs:3375:26: replace += with *= in d3_rewalk
+crates/spikefade/src/report3.rs:3389:15: replace > with == in wanted_picks
+crates/spikefade/src/report3.rs:3389:15: replace > with < in wanted_picks
+crates/spikefade/src/report3.rs:3389:15: replace > with >= in wanted_picks
+crates/spikefade/src/report3.rs:3396:19: replace > with >= in wanted_picks
+crates/spikefade/src/report3.rs:3402:19: replace > with >= in wanted_picks
+crates/spikefade/src/report3.rs:3420:41: replace + with - in twin10
+crates/spikefade/src/report3.rs:3445:33: replace && with || in d1_rebuild
+crates/spikefade/src/report3.rs:3471:114: replace == with != in d1_rebuild
+crates/spikefade/src/report3.rs:3513:15: replace += with -= in compare_day_major
+crates/spikefade/src/report3.rs:3514:24: replace != with == in compare_day_major
+crates/spikefade/src/report3.rs:3515:22: replace += with -= in compare_day_major
+crates/spikefade/src/report3.rs:3515:22: replace += with *= in compare_day_major
+crates/spikefade/src/report3.rs:3519:106: replace != with == in compare_day_major
+crates/spikefade/src/report3.rs:3520:26: replace += with -= in compare_day_major
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), true, 0, 0)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), true, 0, 1)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), true, 1, 0)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), true, 1, 1)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), false, 0, 0)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), false, 0, 1)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), false, 1, 0)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with (String::new(), false, 1, 1)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), true, 0, 0)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), true, 0, 1)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), true, 1, 0)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), true, 1, 1)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), false, 0, 0)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), false, 0, 1)
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), false, 1, 1)
+crates/spikefade/src/report3.rs:3540:29: replace / with % in set_words
+crates/spikefade/src/report3.rs:3540:29: replace / with * in set_words
+crates/spikefade/src/report3.rs:3541:28: replace % with / in set_words
+crates/spikefade/src/report3.rs:3541:28: replace % with + in set_words
+crates/spikefade/src/report3.rs:3547:5: replace setting_words -> String with String::new()
+crates/spikefade/src/report3.rs:3547:5: replace setting_words -> String with "xyzzy".into()
+crates/spikefade/src/report3.rs:3547:29: replace / with % in setting_words
+crates/spikefade/src/report3.rs:3547:29: replace / with * in setting_words
+crates/spikefade/src/report3.rs:3549:135: replace && with || in setting_words
+crates/spikefade/src/report3.rs:3549:130: replace == with != in setting_words
+crates/spikefade/src/report3.rs:3549:171: replace == with != in setting_words
+crates/spikefade/src/report3.rs:3550:8: delete ! in setting_words
+crates/spikefade/src/report3.rs:3550:87: replace == with != in setting_words
+crates/spikefade/src/report3.rs:3624:5: replace trade_row -> Result<Option<PickRow>, String> with Ok(None)
+crates/spikefade/src/report3.rs:3625:32: replace / with % in trade_row
+crates/spikefade/src/report3.rs:3626:31: replace % with / in trade_row
+crates/spikefade/src/report3.rs:3626:31: replace % with + in trade_row
+crates/spikefade/src/report3.rs:3630:48: replace == with != in trade_row
+crates/spikefade/src/report3.rs:3639:33: replace * with + in trade_row

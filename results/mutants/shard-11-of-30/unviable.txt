@@ -30,3 +30,4 @@ crates/spikefade/src/report3.rs:2826:41: replace && with || in stage_b_day_major
 crates/spikefade/src/report3.rs:2843:53: replace && with || in stage_b_day_major_v33
 crates/spikefade/src/report3.rs:2890:33: replace && with || in stage_b_day_major_v33
 crates/spikefade/src/report3.rs:2976:29: replace && with || in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3624:5: replace trade_row -> Result<Option<PickRow>, String> with Ok(Some(Default::default()))

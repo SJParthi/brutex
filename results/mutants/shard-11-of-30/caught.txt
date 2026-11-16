@@ -119,3 +119,44 @@ crates/spikefade/src/report3.rs:3254:5: replace row_candidate -> Option<((i64, i
 crates/spikefade/src/report3.rs:3270:9: replace > with == in row_better
 crates/spikefade/src/report3.rs:3270:30: replace && with || in row_better
 crates/spikefade/src/report3.rs:3270:23: replace == with != in row_better
+crates/spikefade/src/report3.rs:3285:5: replace d3_rewalk -> Result<(), String> with Ok(())
+crates/spikefade/src/report3.rs:3324:25: replace + with - in d3_rewalk
+crates/spikefade/src/report3.rs:3328:57: replace < with <= in d3_rewalk
+crates/spikefade/src/report3.rs:3328:90: replace < with > in d3_rewalk
+crates/spikefade/src/report3.rs:3350:98: replace < with > in d3_rewalk
+crates/spikefade/src/report3.rs:3351:30: replace >= with < in d3_rewalk
+crates/spikefade/src/report3.rs:3373:28: replace += with -= in d3_rewalk
+crates/spikefade/src/report3.rs:3373:28: replace += with *= in d3_rewalk
+crates/spikefade/src/report3.rs:3375:26: replace += with -= in d3_rewalk
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("", 0, 0)]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("", 0, 1)]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("", 1, 0)]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("", 1, 1)]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("xyzzy", 0, 0)]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("xyzzy", 0, 1)]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("xyzzy", 1, 0)]
+crates/spikefade/src/report3.rs:3388:5: replace wanted_picks -> Vec<(&'static str, usize, usize)> with vec![("xyzzy", 1, 1)]
+crates/spikefade/src/report3.rs:3396:19: replace > with == in wanted_picks
+crates/spikefade/src/report3.rs:3396:19: replace > with < in wanted_picks
+crates/spikefade/src/report3.rs:3402:19: replace > with == in wanted_picks
+crates/spikefade/src/report3.rs:3402:19: replace > with < in wanted_picks
+crates/spikefade/src/report3.rs:3414:5: replace twin10 -> Option<Sum> with None
+crates/spikefade/src/report3.rs:3414:5: replace twin10 -> Option<Sum> with Some(Default::default())
+crates/spikefade/src/report3.rs:3414:38: replace / with % in twin10
+crates/spikefade/src/report3.rs:3414:38: replace / with * in twin10
+crates/spikefade/src/report3.rs:3414:62: replace % with / in twin10
+crates/spikefade/src/report3.rs:3414:62: replace % with + in twin10
+crates/spikefade/src/report3.rs:3415:10: replace == with != in twin10
+crates/spikefade/src/report3.rs:3420:16: delete field x from struct Sum expression in twin10
+crates/spikefade/src/report3.rs:3420:41: replace + with * in twin10
+crates/spikefade/src/report3.rs:3420:36: replace * with + in twin10
+crates/spikefade/src/report3.rs:3420:36: replace * with / in twin10
+crates/spikefade/src/report3.rs:3428:5: replace d1_rebuild -> Result<(), String> with Ok(())
+crates/spikefade/src/report3.rs:3469:8: delete ! in d1_rebuild
+crates/spikefade/src/report3.rs:3486:16: delete ! in d1_rebuild
+crates/spikefade/src/report3.rs:3503:5: replace compare_day_major -> Result<(), String> with Ok(())
+crates/spikefade/src/report3.rs:3513:15: replace += with *= in compare_day_major
+crates/spikefade/src/report3.rs:3520:26: replace += with *= in compare_day_major
+crates/spikefade/src/report3.rs:3540:5: replace set_words -> (String, bool, u8, usize) with ("xyzzy".into(), false, 1, 0)
+crates/spikefade/src/report3.rs:3625:32: replace / with * in trade_row
