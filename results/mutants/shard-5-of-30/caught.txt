@@ -97,3 +97,15 @@ crates/spikefade/src/report.rs:582:13: replace ^= with &= in bench_windows
 crates/spikefade/src/report.rs:584:13: replace ^= with &= in bench_windows
 crates/spikefade/src/report.rs:598:24: replace + with - in bench_windows
 crates/spikefade/src/report.rs:603:13: replace == with != in bench_windows
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("", 0)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("xyzzy", 1)]), Default::default(), 0))
+crates/spikefade/src/report.rs:710:39: replace += with -= in pick_detail
+crates/spikefade/src/report.rs:710:39: replace += with *= in pick_detail
+crates/spikefade/src/report.rs:721:36: replace * with + in pick_detail
+crates/spikefade/src/report.rs:724:18: replace += with -= in pick_detail
+crates/spikefade/src/report.rs:736:76: replace + with * in pick_detail
+crates/spikefade/src/report.rs:737:58: replace / with * in pick_detail
+crates/spikefade/src/report.rs:737:54: replace * with / in pick_detail
+crates/spikefade/src/report.rs:853:5: replace peak_margin -> i64 with 1
+crates/spikefade/src/report.rs:925:43: replace == with != in write_results
+crates/spikefade/src/report.rs:929:51: replace - with + in write_results

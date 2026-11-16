@@ -411,3 +411,173 @@ crates/spikefade/src/report.rs:668:19: replace > with >= in prev_closes
 crates/spikefade/src/report.rs:678:5: replace rep_of -> usize with 0
 crates/spikefade/src/report.rs:678:5: replace rep_of -> usize with 1
 crates/spikefade/src/report.rs:679:8: delete ! in rep_of
+crates/spikefade/src/report.rs:682:107: replace < with == in rep_of
+crates/spikefade/src/report.rs:682:107: replace < with > in rep_of
+crates/spikefade/src/report.rs:682:107: replace < with <= in rep_of
+crates/spikefade/src/report.rs:686:5: replace settings_words -> String with String::new()
+crates/spikefade/src/report.rs:686:5: replace settings_words -> String with "xyzzy".into()
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::new(), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::new(), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("", 0)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("", 0)]), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("", 1)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("", 1)]), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("xyzzy", 0)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("xyzzy", 0)]), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("xyzzy", 1)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![], BTreeMap::from_iter([("xyzzy", 1)]), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::new(), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::new(), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("", 0)]), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("", 1)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("", 1)]), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("xyzzy", 0)]), Default::default(), 0))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("xyzzy", 0)]), Default::default(), 1))
+crates/spikefade/src/report.rs:693:5: replace pick_detail -> Result<(Vec<TradeRow>, BTreeMap<&'static str, u64>, Sum, u64), String> with Ok((vec![Default::default()], BTreeMap::from_iter([("xyzzy", 1)]), Default::default(), 1))
+crates/spikefade/src/report.rs:711:18: replace != with == in pick_detail
+crates/spikefade/src/report.rs:721:36: replace * with / in pick_detail
+crates/spikefade/src/report.rs:724:18: replace += with *= in pick_detail
+crates/spikefade/src/report.rs:730:38: replace || with && in pick_detail
+crates/spikefade/src/report.rs:730:29: replace != with == in pick_detail
+crates/spikefade/src/report.rs:730:47: replace != with == in pick_detail
+crates/spikefade/src/report.rs:731:18: replace += with -= in pick_detail
+crates/spikefade/src/report.rs:731:18: replace += with *= in pick_detail
+crates/spikefade/src/report.rs:734:82: replace > with == in pick_detail
+crates/spikefade/src/report.rs:734:82: replace > with < in pick_detail
+crates/spikefade/src/report.rs:734:82: replace > with >= in pick_detail
+crates/spikefade/src/report.rs:736:82: replace / with % in pick_detail
+crates/spikefade/src/report.rs:736:82: replace / with * in pick_detail
+crates/spikefade/src/report.rs:736:76: replace + with - in pick_detail
+crates/spikefade/src/report.rs:736:28: replace * with + in pick_detail
+crates/spikefade/src/report.rs:736:28: replace * with / in pick_detail
+crates/spikefade/src/report.rs:736:35: replace + with - in pick_detail
+crates/spikefade/src/report.rs:736:35: replace + with * in pick_detail
+crates/spikefade/src/report.rs:737:49: replace - with + in pick_detail
+crates/spikefade/src/report.rs:737:49: replace - with / in pick_detail
+crates/spikefade/src/report.rs:737:58: replace / with % in pick_detail
+crates/spikefade/src/report.rs:737:54: replace * with + in pick_detail
+crates/spikefade/src/report.rs:739:72: replace < with == in pick_detail
+crates/spikefade/src/report.rs:739:72: replace < with > in pick_detail
+crates/spikefade/src/report.rs:739:72: replace < with <= in pick_detail
+crates/spikefade/src/report.rs:739:88: replace + with - in pick_detail
+crates/spikefade/src/report.rs:739:88: replace + with * in pick_detail
+crates/spikefade/src/report.rs:739:156: replace < with == in pick_detail
+crates/spikefade/src/report.rs:739:156: replace < with > in pick_detail
+crates/spikefade/src/report.rs:739:156: replace < with <= in pick_detail
+crates/spikefade/src/report.rs:739:172: replace + with - in pick_detail
+crates/spikefade/src/report.rs:739:172: replace + with * in pick_detail
+crates/spikefade/src/report.rs:742:13: delete match arm 0..= 4 in pick_detail
+crates/spikefade/src/report.rs:743:13: delete match arm 5..= 8 in pick_detail
+crates/spikefade/src/report.rs:744:13: delete match arm 9..= 12 in pick_detail
+crates/spikefade/src/report.rs:746:39: replace && with || in pick_detail
+crates/spikefade/src/report.rs:746:23: replace != with == in pick_detail
+crates/spikefade/src/report.rs:746:45: replace >= with < in pick_detail
+crates/spikefade/src/report.rs:749:32: replace && with || in pick_detail
+crates/spikefade/src/report.rs:749:28: replace < with == in pick_detail
+crates/spikefade/src/report.rs:749:28: replace < with > in pick_detail
+crates/spikefade/src/report.rs:749:28: replace < with <= in pick_detail
+crates/spikefade/src/report.rs:749:49: replace > with == in pick_detail
+crates/spikefade/src/report.rs:749:49: replace > with < in pick_detail
+crates/spikefade/src/report.rs:749:49: replace > with >= in pick_detail
+crates/spikefade/src/report.rs:750:63: replace == with != in pick_detail
+crates/spikefade/src/report.rs:751:71: replace / with % in pick_detail
+crates/spikefade/src/report.rs:751:71: replace / with * in pick_detail
+crates/spikefade/src/report.rs:751:49: replace - with + in pick_detail
+crates/spikefade/src/report.rs:751:49: replace - with / in pick_detail
+crates/spikefade/src/report.rs:754:35: replace > with == in pick_detail
+crates/spikefade/src/report.rs:754:35: replace > with < in pick_detail
+crates/spikefade/src/report.rs:754:35: replace > with >= in pick_detail
+crates/spikefade/src/report.rs:754:54: replace / with % in pick_detail
+crates/spikefade/src/report.rs:754:54: replace / with * in pick_detail
+crates/spikefade/src/report.rs:755:47: replace * with + in pick_detail
+crates/spikefade/src/report.rs:755:47: replace * with / in pick_detail
+crates/spikefade/src/report.rs:761:28: replace > with == in pick_detail
+crates/spikefade/src/report.rs:761:28: replace > with < in pick_detail
+crates/spikefade/src/report.rs:761:28: replace > with >= in pick_detail
+crates/spikefade/src/report.rs:768:18: replace + with - in pick_detail
+crates/spikefade/src/report.rs:768:18: replace + with * in pick_detail
+crates/spikefade/src/report.rs:775:25: replace == with != in pick_detail
+crates/spikefade/src/report.rs:788:35: replace / with % in pick_detail
+crates/spikefade/src/report.rs:788:35: replace / with * in pick_detail
+crates/spikefade/src/report.rs:789:52: replace / with % in pick_detail
+crates/spikefade/src/report.rs:789:52: replace / with * in pick_detail
+crates/spikefade/src/report.rs:829:30: replace < with == in pick_detail
+crates/spikefade/src/report.rs:829:30: replace < with > in pick_detail
+crates/spikefade/src/report.rs:829:30: replace < with <= in pick_detail
+crates/spikefade/src/report.rs:832:31: replace - with + in pick_detail
+crates/spikefade/src/report.rs:832:31: replace - with / in pick_detail
+crates/spikefade/src/report.rs:844:44: replace + with - in pick_detail
+crates/spikefade/src/report.rs:844:44: replace + with * in pick_detail
+crates/spikefade/src/report.rs:844:334: replace < with == in pick_detail
+crates/spikefade/src/report.rs:844:334: replace < with > in pick_detail
+crates/spikefade/src/report.rs:844:334: replace < with <= in pick_detail
+crates/spikefade/src/report.rs:853:5: replace peak_margin -> i64 with 0
+crates/spikefade/src/report.rs:853:5: replace peak_margin -> i64 with -1
+crates/spikefade/src/report.rs:855:33: replace * with + in peak_margin
+crates/spikefade/src/report.rs:855:33: replace * with / in peak_margin
+crates/spikefade/src/report.rs:856:30: replace > with == in peak_margin
+crates/spikefade/src/report.rs:856:30: replace > with < in peak_margin
+crates/spikefade/src/report.rs:856:30: replace > with >= in peak_margin
+crates/spikefade/src/report.rs:856:61: replace + with - in peak_margin
+crates/spikefade/src/report.rs:856:61: replace + with * in peak_margin
+crates/spikefade/src/report.rs:856:52: replace * with + in peak_margin
+crates/spikefade/src/report.rs:856:52: replace * with / in peak_margin
+crates/spikefade/src/report.rs:856:90: replace + with - in peak_margin
+crates/spikefade/src/report.rs:856:90: replace + with * in peak_margin
+crates/spikefade/src/report.rs:857:20: replace + with - in peak_margin
+crates/spikefade/src/report.rs:857:20: replace + with * in peak_margin
+crates/spikefade/src/report.rs:858:23: delete - in peak_margin
+crates/spikefade/src/report.rs:863:13: replace += with -= in peak_margin
+crates/spikefade/src/report.rs:863:13: replace += with *= in peak_margin
+crates/spikefade/src/report.rs:883:5: replace wd -> String with String::new()
+crates/spikefade/src/report.rs:883:5: replace wd -> String with "xyzzy".into()
+crates/spikefade/src/report.rs:883:19: replace == with != in wd
+crates/spikefade/src/report.rs:888:5: replace distinct -> Vec<(Sum, usize)> with vec![]
+crates/spikefade/src/report.rs:888:5: replace distinct -> Vec<(Sum, usize)> with vec![(Default::default(), 0)]
+crates/spikefade/src/report.rs:888:5: replace distinct -> Vec<(Sum, usize)> with vec![(Default::default(), 1)]
+crates/spikefade/src/report.rs:890:148: replace && with || in distinct
+crates/spikefade/src/report.rs:890:128: replace && with || in distinct
+crates/spikefade/src/report.rs:890:104: replace && with || in distinct
+crates/spikefade/src/report.rs:890:86: replace && with || in distinct
+crates/spikefade/src/report.rs:890:72: replace && with || in distinct
+crates/spikefade/src/report.rs:890:62: replace == with != in distinct
+crates/spikefade/src/report.rs:890:79: replace == with != in distinct
+crates/spikefade/src/report.rs:890:95: replace == with != in distinct
+crates/spikefade/src/report.rs:890:116: replace == with != in distinct
+crates/spikefade/src/report.rs:890:138: replace == with != in distinct
+crates/spikefade/src/report.rs:890:157: replace == with != in distinct
+crates/spikefade/src/report.rs:891:17: replace += with -= in distinct
+crates/spikefade/src/report.rs:891:17: replace += with *= in distinct
+crates/spikefade/src/report.rs:901:5: replace write_results -> Result<(), String> with Ok(())
+crates/spikefade/src/report.rs:929:37: replace || with && in write_results
+crates/spikefade/src/report.rs:929:32: replace <= with > in write_results
+crates/spikefade/src/report.rs:929:42: replace == with != in write_results
+crates/spikefade/src/report.rs:929:51: replace - with / in write_results
+crates/spikefade/src/report.rs:930:28: replace && with || in write_results
+crates/spikefade/src/report.rs:930:22: replace < with == in write_results
+crates/spikefade/src/report.rs:930:22: replace < with > in write_results
+crates/spikefade/src/report.rs:930:22: replace < with <= in write_results
+crates/spikefade/src/report.rs:930:31: delete ! in write_results
+crates/spikefade/src/report.rs:930:102: replace && with || in write_results
+crates/spikefade/src/report.rs:930:86: replace && with || in write_results
+crates/spikefade/src/report.rs:930:64: replace && with || in write_results
+crates/spikefade/src/report.rs:930:57: replace == with != in write_results
+crates/spikefade/src/report.rs:930:76: replace == with != in write_results
+crates/spikefade/src/report.rs:930:95: replace == with != in write_results
+crates/spikefade/src/report.rs:930:111: replace == with != in write_results
+crates/spikefade/src/report.rs:944:60: replace + with - in write_results
+crates/spikefade/src/report.rs:944:60: replace + with * in write_results
+crates/spikefade/src/report.rs:944:56: replace * with + in write_results
+crates/spikefade/src/report.rs:944:56: replace * with / in write_results
+crates/spikefade/src/report.rs:944:50: replace + with - in write_results
+crates/spikefade/src/report.rs:944:50: replace + with * in write_results
+crates/spikefade/src/report.rs:944:46: replace * with + in write_results
+crates/spikefade/src/report.rs:944:46: replace * with / in write_results
+crates/spikefade/src/report.rs:944:41: replace + with - in write_results
+crates/spikefade/src/report.rs:944:41: replace + with * in write_results
+crates/spikefade/src/report.rs:944:37: replace * with + in write_results
+crates/spikefade/src/report.rs:944:37: replace * with / in write_results
+crates/spikefade/src/report.rs:1013:39: replace / with % in write_results
+crates/spikefade/src/report.rs:1013:39: replace / with * in write_results
+crates/spikefade/src/report.rs:1014:77: replace / with % in write_results
+crates/spikefade/src/report.rs:1014:77: replace / with * in write_results
