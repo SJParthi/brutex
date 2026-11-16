@@ -82,8 +82,9 @@ Labels: EXACT = a count. MEASURED = a wall time taken on this box. Nothing here 
 ## 6. Odd: five out-of-memory kills, all of the spikefade test binary
 
 The kernel's memory-cgroup OOM killer killed the `spikefade` test binary 5 times:
-- 4 in the main run, at 16:28:56Z, 16:29:06Z, 16:29:16Z and 16:29:29Z, at 11.3 to 13.9 GB resident;
-- 1 in the re-check, at 17:27:25Z, at 13.9 GB resident.
+- 4 in the main run, at 16:28:56Z, 16:29:06Z, 16:29:16Z and 16:29:29Z. The kernel log gives anon-rss 11,302,472 to
+  13,875,692 kB (10.8 to 13.2 GiB).
+- 1 in the re-check, at 17:27:25Z, with anon-rss 13,859,900 kB (13.2 GiB).
 
 The kernel log names the threads that hit the limit: `tests34s::batch` 4 times and `tests34s::sha25` once.
 
