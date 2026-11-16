@@ -1,0 +1,159 @@
+# mutant	class	failing tests (main run; class gate-only = only split18::tests::v32rb_split_o1_gates failed)
+crates/spikefade/src/report3.rs:254:43: replace % with + in wtie	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:263:5: replace headline_gate -> bool with true	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:263:5: replace headline_gate -> bool with false	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:269:5: replace headline_gate_liq -> bool with true	others	tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:269:5: replace headline_gate_liq -> bool with false	others	tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:274:5: replace dd_grouped_pub -> i64 with 0	others	tests31::v31_stress_table_drawdown_grouped
+crates/spikefade/src/report3.rs:274:5: replace dd_grouped_pub -> i64 with 1	others	tests31::v31_stress_table_drawdown_grouped
+crates/spikefade/src/report3.rs:274:5: replace dd_grouped_pub -> i64 with -1	others	tests31::v31_stress_table_drawdown_grouped
+crates/spikefade/src/report3.rs:283:5: replace headline_ok -> bool with true	gate+others	split18::tests::v32rb_split_o1_gates tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:283:5: replace headline_ok -> bool with false	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:283:30: replace && with || in headline_ok	others	tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:283:37: replace == with != in headline_ok	others	tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:283:42: replace && with || in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:283:45: delete ! in headline_ok	others	tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:287:63: replace || with && in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:287:68: replace <= with > in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:289:62: replace || with && in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:292:18: delete ! in headline_ok	others	tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:292:37: replace || with && in headline_ok	others	tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:292:85: replace || with && in headline_ok	others	tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:292:101: replace == with != in headline_ok	others	tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:293:13: replace && with || in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:293:25: replace && with || in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:293:38: replace > with == in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:293:38: replace > with < in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits tests32r::v32r_headline_excludes_liquidity_off
+crates/spikefade/src/report3.rs:293:38: replace > with >= in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive
+crates/spikefade/src/report3.rs:293:42: replace && with || in headline_ok	others	tests31::v31_headline_gate_small_stop_share_25_stress_positive tests32::v32_headline_needs_zero_unfilled_exits
+crates/spikefade/src/report3.rs:310:24: replace && with || in slice_ok	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:351:9: replace Store::ensure -> Result<(), String> with Ok(())	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:351:83: replace == with != in Store::ensure	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:374:24: replace += with -= in Store::ensure	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:374:24: replace += with *= in Store::ensure	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:381:9: replace Store::release with ()	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:381:12: delete ! in Store::release	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:385:12: delete ! in Store::release	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:389:35: replace == with != in Store::release	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:389:53: delete ! in Store::release	gate+others	split18::tests::v32rb_split_o1_gates tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:402:9: replace Store::sample_rss with ()	others	tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed
+crates/spikefade/src/report3.rs:438:9: replace Store::src_of -> Option<(PathBuf, String)> with None	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:438:9: replace Store::src_of -> Option<(PathBuf, String)> with Some((Default::default(), String::new()))	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:438:9: replace Store::src_of -> Option<(PathBuf, String)> with Some((Default::default(), "xyzzy".into()))	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:480:5: replace offer_windows with ()	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:482:12: delete ! in offer_windows	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:482:19: replace || with && in offer_windows	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:486:23: replace += with -= in offer_windows	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:486:23: replace += with *= in offer_windows	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:492:23: replace += with -= in offer_windows	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:492:23: replace += with *= in offer_windows	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:496:22: replace == with != in offer_windows	others	tests33g::v33g_win_sliding_candidates_bounded_exact
+crates/spikefade/src/report3.rs:501:47: replace > with == in offer_windows	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:562:38: replace || with && in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:576:84: replace * with / in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:592:19: replace > with < in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:592:19: replace > with >= in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:611:40: replace || with && in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:616:9: delete match arm Some("stk") in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:629:20: replace match guard sw::on(sw::MARGIN_EXACT) with false in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:779:98: replace == with != in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:893:100: replace - with / in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:954:32: replace * with + in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:954:54: replace * with / in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1035:52: replace && with || in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1039:73: replace && with || in cmd_run3	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1173:45: replace != with == in prepare_day	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1197:38: delete field refuse from struct MarginAt expression in prepare_day	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1296:112: delete field tops from struct Seg3 expression in prepare_segment	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1302:5: replace append_cfg_lists with ()	others	tests33::v33_c2_append_cfg_lists_offsets
+crates/spikefade/src/report3.rs:1306:59: replace + with - in append_cfg_lists	others	tests33::v33_c2_append_cfg_lists_offsets
+crates/spikefade/src/report3.rs:1306:59: replace + with * in append_cfg_lists	others	tests33::v33_c2_append_cfg_lists_offsets
+crates/spikefade/src/report3.rs:1330:60: replace >> with << in Layout33::with_mask	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1330:66: replace & with | in Layout33::with_mask	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1330:66: replace & with ^ in Layout33::with_mask	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1330:70: replace == with != in Layout33::with_mask	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1334:61: replace == with != in Layout33::with_mask	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1344:9: replace Layout33::per_list -> usize with 0	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1344:9: replace Layout33::per_list -> usize with 1	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1344:19: replace * with + in Layout33::per_list	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1344:19: replace * with / in Layout33::per_list	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1344:30: replace * with + in Layout33::per_list	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1344:30: replace * with / in Layout33::per_list	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:9: replace Layout33::idx -> usize with 0	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:9: replace Layout33::idx -> usize with 1	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:13: replace * with + in Layout33::idx	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:13: replace * with / in Layout33::idx	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:27: replace + with - in Layout33::idx	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:27: replace + with * in Layout33::idx	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:71: replace * with + in Layout33::idx	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:71: replace * with / in Layout33::idx	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:75: replace + with - in Layout33::idx	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1351:75: replace + with * in Layout33::idx	others	tests33::v33_c1_compact_layout_bijective
+crates/spikefade/src/report3.rs:1359:5: replace day_items33 -> Vec<usize> with vec![]	others	tests33::v33_largest_first_is_a_permutation
+crates/spikefade/src/report3.rs:1359:5: replace day_items33 -> Vec<usize> with vec![0]	others	tests33::v33_largest_first_is_a_permutation
+crates/spikefade/src/report3.rs:1359:5: replace day_items33 -> Vec<usize> with vec![1]	others	tests33::v33_largest_first_is_a_permutation
+crates/spikefade/src/report3.rs:1359:95: replace > with == in day_items33	others	tests33::v33_largest_first_is_a_permutation
+crates/spikefade/src/report3.rs:1359:95: replace > with < in day_items33	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_largest_first_is_a_permutation
+crates/spikefade/src/report3.rs:1359:95: replace > with >= in day_items33	others	tests33::v33_largest_first_is_a_permutation
+crates/spikefade/src/report3.rs:1375:5: replace fp_v33 -> String with String::new()	others	tests33::v33_batch_order_permutation_and_fingerprint
+crates/spikefade/src/report3.rs:1375:5: replace fp_v33 -> String with "xyzzy".into()	others	tests33::v33_batch_order_permutation_and_fingerprint
+crates/spikefade/src/report3.rs:1387:5: replace day_classes33 -> Vec<Vec<usize>> with vec![]	others	tests33::v33_d2_class_key_has_tf
+crates/spikefade/src/report3.rs:1387:5: replace day_classes33 -> Vec<Vec<usize>> with vec![vec![]]	others	tests33::v33_d2_class_key_has_tf
+crates/spikefade/src/report3.rs:1387:5: replace day_classes33 -> Vec<Vec<usize>> with vec![vec![0]]	others	tests33::v33_d2_class_key_has_tf
+crates/spikefade/src/report3.rs:1387:5: replace day_classes33 -> Vec<Vec<usize>> with vec![vec![1]]	others	tests33::v33_d2_class_key_has_tf
+crates/spikefade/src/report3.rs:1397:143: replace == with != in day_classes33	others	tests33::v33_d2_class_key_has_tf
+crates/spikefade/src/report3.rs:1417:5: replace pf_src33 -> Option<(usize, (PathBuf, String))> with None	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:1417:5: replace pf_src33 -> Option<(usize, (PathBuf, String))> with Some((0, (Default::default(), String::new())))	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:1417:5: replace pf_src33 -> Option<(usize, (PathBuf, String))> with Some((0, (Default::default(), "xyzzy".into())))	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:1417:5: replace pf_src33 -> Option<(usize, (PathBuf, String))> with Some((1, (Default::default(), "xyzzy".into())))	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:1417:5: replace pf_src33 -> Option<(usize, (PathBuf, String))> with Some((1, (Default::default(), String::new())))	others	tests33::v33_prefetch_slot_is_its_day
+crates/spikefade/src/report3.rs:1417:69: replace + with - in pf_src33	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1444:17: delete match arm (Some(c), Some(tp)) in prepare_segment_c2	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1480:206: replace - with / in prepare_segment_c2	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1481:66: delete field tfw from struct Seg3 expression in prepare_segment_c2	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1489:5: replace build_lists_derived with ()	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1509:75: replace && with || in build_lists_derived	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1509:78: delete ! in build_lists_derived	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1510:75: replace && with || in build_lists_derived	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1522:23: replace += with -= in build_lists_derived	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1522:23: replace += with *= in build_lists_derived	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1526:21: replace += with -= in build_lists_derived	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1526:21: replace += with *= in build_lists_derived	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1526:46: replace - with + in build_lists_derived	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1526:46: replace - with / in build_lists_derived	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1528:18: replace == with != in build_lists_derived	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1562:5: replace build_lists with ()	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1578:76: replace && with || in build_lists	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1578:79: delete ! in build_lists	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1579:76: replace && with || in build_lists	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1587:21: replace += with -= in build_lists	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1587:21: replace += with *= in build_lists	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1587:46: replace - with + in build_lists	others	tests33::v33_c3_derived_lists_equal
+crates/spikefade/src/report3.rs:1587:46: replace - with / in build_lists	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1599:102: replace == with != in build_lists	others	tests33::v33_c3_derived_lists_equal tests33::v33_c3_flagged_lists_derived
+crates/spikefade/src/report3.rs:1635:5: replace stage_a_chunks33 -> Vec<(usize, Vec<usize>)> with vec![]	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1635:5: replace stage_a_chunks33 -> Vec<(usize, Vec<usize>)> with vec![(0, vec![])]	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1635:5: replace stage_a_chunks33 -> Vec<(usize, Vec<usize>)> with vec![(0, vec![0])]	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1635:5: replace stage_a_chunks33 -> Vec<(usize, Vec<usize>)> with vec![(0, vec![1])]	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1635:5: replace stage_a_chunks33 -> Vec<(usize, Vec<usize>)> with vec![(1, vec![])]	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1635:5: replace stage_a_chunks33 -> Vec<(usize, Vec<usize>)> with vec![(1, vec![0])]	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1635:5: replace stage_a_chunks33 -> Vec<(usize, Vec<usize>)> with vec![(1, vec![1])]	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1648:19: replace != with == in stage_a_chunks33	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1649:22: replace += with *= in stage_a_chunks33	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1649:22: replace += with -= in stage_a_chunks33	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1651:25: replace > with == in stage_a_chunks33	gate+others	split18::tests::v32rb_split_o1_gates tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1651:25: replace > with < in stage_a_chunks33	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1651:25: replace > with >= in stage_a_chunks33	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1655:70: replace && with || in stage_a_chunks33	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1661:12: delete ! in stage_a_chunks33	others	tests33::v33_achunk_same_sequence_whole_contracts
+crates/spikefade/src/report3.rs:1759:22: replace += with -= in stage_a_events_c	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1762:24: replace > with == in stage_a_events_c	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1883:33: replace && with || in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1883:42: replace > with < in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1884:84: replace / with * in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1887:41: replace / with % in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1917:93: replace > with >= in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1920:40: replace % with / in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1935:25: replace += with *= in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1953:35: replace += with *= in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates
+crates/spikefade/src/report3.rs:1957:68: replace > with == in stage_b_whole	gate-only	split18::tests::v32rb_split_o1_gates

@@ -1,0 +1,15 @@
+crates/spikefade/src/report3.rs:410:13: replace && with || in Store::sample_rss
+crates/spikefade/src/report3.rs:451:13: replace && with || in Store::put
+crates/spikefade/src/report3.rs:792:25: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:805:29: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:839:25: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:840:25: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:1185:18: replace && with || in prepare_day
+crates/spikefade/src/report3.rs:1330:9: replace Layout33::with_mask -> Self with Default::default()
+crates/spikefade/src/report3.rs:1773:27: replace && with || in stage_a_events_c
+crates/spikefade/src/report3.rs:1911:37: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1912:29: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1917:36: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1917:80: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1918:29: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1957:29: replace && with || in stage_b_whole
