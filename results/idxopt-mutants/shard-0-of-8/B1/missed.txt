@@ -349,3 +349,32 @@ crates/sniper_host/src/ctxdials.rs:104:38: replace || with && in parse_expiries
 crates/sniper_host/src/ctxdials.rs:111:13: delete match arm (Some(e), Some(k)) in parse_expiries
 crates/sniper_host/src/ctxdials.rs:125:10: replace > with >= in expiry_flag
 crates/sniper_host/src/ctxdials.rs:129:75: replace <= with > in expiry_flag
+crates/sniper_host/src/ctxdials.rs:134:12: replace + with - in month_key
+crates/sniper_host/src/ctxdials.rs:134:12: replace + with * in month_key
+crates/sniper_host/src/ctxdials.rs:134:7: replace * with + in month_key
+crates/sniper_host/src/ctxdials.rs:139:36: replace + with - in month_last_day
+crates/sniper_host/src/ctxdials.rs:139:36: replace + with * in month_last_day
+crates/sniper_host/src/ctxdials.rs:140:32: replace - with / in month_last_day
+crates/sniper_host/src/ctxdials.rs:161:84: replace > with >= in month_end_flags
+crates/sniper_host/src/ctxdials.rs:161:122: replace > with == in month_end_flags
+crates/sniper_host/src/ctxdials.rs:161:122: replace > with < in month_end_flags
+crates/sniper_host/src/ctxdials.rs:161:122: replace > with >= in month_end_flags
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with None
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((0, 0))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((0, 1))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((0, -1))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((1, 0))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((1, 1))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((1, -1))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((-1, 0))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((-1, 1))
+crates/sniper_host/src/ctxdials.rs:174:5: replace hl52 -> Option<(i64, i64)> with Some((-1, -1))
+crates/sniper_host/src/ctxdials.rs:178:46: replace + with - in hl52
+crates/sniper_host/src/ctxdials.rs:178:46: replace + with * in hl52
+crates/sniper_host/src/ctxdials.rs:180:14: replace == with != in hl52
+crates/sniper_host/src/ctxdials.rs:188:11: replace += with -= in hl52
+crates/sniper_host/src/ctxdials.rs:188:11: replace += with *= in hl52
+crates/sniper_host/src/ctxdials.rs:190:8: replace == with != in hl52
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![], vec![])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![], vec![0])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![], vec![1])
