@@ -1,0 +1,18 @@
+   Compiling core v0.1.0 (/root/mut/crates/core)
+   Compiling greeks v0.1.0 (/root/mut/crates/greeks)
+   Compiling common_fill v2.4.0 (/root/mut/pinned/common-fill-v24)
+   Compiling costs v0.1.0 (/root/mut/crates/costs)
+error: couldn't read `crates/core/tests/../../../.github/workflows/ci.yml`: No such file or directory (os error 2)
+  --> crates/core/tests/claim_reader.rs:24:24
+   |
+24 | const WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/tests/../../../.github/gates_bounds.rs`: No such file or directory (os error 2)
+  --> crates/core/tests/claim_reader.rs:25:20
+   |
+25 | const TOOL: &str = include_str!("../../../.github/gates_bounds.rs");
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `core` (test "claim_reader") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
