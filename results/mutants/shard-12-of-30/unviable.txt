@@ -1,1 +1,6 @@
 crates/spikefade/src/report3.rs:3722:13: replace && with || in trade_row
+crates/spikefade/src/report3.rs:4298:17: replace && with || in write3
+crates/spikefade/src/report3.rs:4311:13: replace && with || in write3
+crates/spikefade/src/report3.rs:4310:16: replace && with || in write3
+crates/spikefade/src/report3.rs:4371:17: replace && with || in write3
+crates/spikefade/src/report3.rs:4385:17: replace && with || in write3

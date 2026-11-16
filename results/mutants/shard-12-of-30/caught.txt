@@ -8,3 +8,14 @@ crates/spikefade/src/report3.rs:3837:49: replace + with * in row32_of
 crates/spikefade/src/report3.rs:3838:43: replace / with % in row32_of
 crates/spikefade/src/report3.rs:3843:65: replace / with % in row32_of
 crates/spikefade/src/report3.rs:3893:28: replace > with >= in row32_of
+crates/spikefade/src/report3.rs:3946:75: replace && with || in row32_of
+crates/spikefade/src/report3.rs:3987:5: replace dd_grouped -> i64 with 0
+crates/spikefade/src/report3.rs:3987:5: replace dd_grouped -> i64 with 1
+crates/spikefade/src/report3.rs:3987:5: replace dd_grouped -> i64 with -1
+crates/spikefade/src/report3.rs:3995:16: replace += with -= in dd_grouped
+crates/spikefade/src/report3.rs:3995:16: replace += with *= in dd_grouped
+crates/spikefade/src/report3.rs:3996:15: replace += with -= in dd_grouped
+crates/spikefade/src/report3.rs:3999:26: replace - with + in dd_grouped
+crates/spikefade/src/report3.rs:3999:26: replace - with / in dd_grouped
+crates/spikefade/src/report3.rs:4123:72: replace * with + in write3
+crates/spikefade/src/report3.rs:4353:36: replace / with * in write3

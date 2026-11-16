@@ -1,0 +1,2 @@
+crates/spikefade/src/report3.rs:3992:19: replace != with == in dd_grouped
+crates/spikefade/src/report3.rs:3996:15: replace += with *= in dd_grouped
