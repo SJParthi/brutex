@@ -1,0 +1,25 @@
+crates/spikefade/src/fix33.rs:88:5: replace any -> bool with false
+crates/spikefade/src/fix33.rs:124:24: replace match guard v == no with false in from_args
+crates/spikefade/src/fix33.rs:123:26: replace == with != in from_args
+crates/spikefade/src/fix33.rs:131:46: replace == with != in from_args
+crates/spikefade/src/fix33.rs:138:46: replace == with != in from_args
+crates/spikefade/src/fix33.rs:138:81: replace + with * in from_args
+crates/spikefade/src/fix33.rs:276:45: replace < with <= in day_levels
+crates/spikefade/src/fix33.rs:342:15: replace += with *= in cap_minutes
+crates/spikefade/src/fix33.rs:481:77: replace == with != in StepSampler::want
+crates/spikefade/src/fix33.rs:487:18: replace > with >= in StepSampler::push
+crates/spikefade/src/fixg.rs:114:5: replace fp_part -> String with String::new()
+crates/spikefade/src/fixg.rs:290:21: replace > with == in IdxElm::parse
+crates/spikefade/src/fixg.rs:309:9: replace IdxElm::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/fix34.rs:170:9: delete match arm WICK in word
+crates/spikefade/src/fix34.rs:207:26: replace == with != in from_args
+crates/spikefade/src/fix34.rs:415:22: replace > with >= in cap_test_failed
+crates/spikefade/src/fix34.rs:712:54: replace > with >= in lot0_words
+crates/spikefade/src/fix34.rs:853:9: replace StampTable::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/fix34.rs:886:5: replace stamp_class -> Option<String> with Some(String::new())
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 0), (0, 0))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 0), (-1, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 1), (0, 1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 0, 1), (1, 0))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 1, 0), (-1, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((0, String::new(), 0, 1, 1), (0, 1))]))
