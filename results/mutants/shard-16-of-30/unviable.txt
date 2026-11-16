@@ -5,3 +5,5 @@ crates/spikefade/src/ckpt.rs:21:7: replace + with * in sum_line
 crates/spikefade/src/ckpt.rs:27:5: replace num -> Result<T, String> with Ok(Default::default())
 crates/spikefade/src/ckpt.rs:77:149: replace + with - in fig_line
 crates/spikefade/src/ckpt.rs:77:149: replace + with * in fig_line
+crates/spikefade/src/side17.rs:149:294: replace + with - in idx_words
+crates/spikefade/src/side17.rs:149:294: replace + with * in idx_words
