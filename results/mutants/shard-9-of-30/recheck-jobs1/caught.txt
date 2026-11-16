@@ -1,0 +1,7 @@
+crates/spikefade/src/kern.rs:979:5: replace seg_of -> u8 with 1
+crates/spikefade/src/kern.rs:1377:44: replace % with + in walk_accs
+crates/spikefade/src/kern.rs:1377:57: delete ! in walk_accs
+crates/spikefade/src/kern.rs:1405:22: replace > with == in walk_accs
+crates/spikefade/src/kern.rs:1405:22: replace > with < in walk_accs
+crates/spikefade/src/kern.rs:1407:88: replace - with / in walk_accs
+crates/spikefade/src/kern.rs:1436:110: replace / with % in step_weighted
