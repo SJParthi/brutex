@@ -4,3 +4,4 @@ crates/spikefade/src/ckmerge.rs:349:187: replace + with - in canon
 crates/spikefade/src/kit.rs:230:13: replace && with || in from_args
 crates/spikefade/src/kit.rs:463:13: replace && with || in tool
 crates/spikefade/src/kit.rs:541:9: replace && with || in rss_kb
+crates/spikefade/src/kit.rs:900:25: replace && with || in list_digest

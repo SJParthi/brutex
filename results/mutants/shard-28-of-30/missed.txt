@@ -169,3 +169,51 @@ crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(1
 crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(-1.0)
 crates/spikefade/src/kit.rs:553:8: delete ! in proc_cpu_s
 crates/spikefade/src/kit.rs:557:42: replace / with * in proc_cpu_s
+crates/spikefade/src/kit.rs:580:20: replace < with <= in strict_fail
+crates/spikefade/src/kit.rs:582:27: replace == with != in strict_fail
+crates/spikefade/src/kit.rs:594:5: replace strict_check -> Result<(), String> with Ok(())
+crates/spikefade/src/kit.rs:595:8: delete ! in strict_check
+crates/spikefade/src/kit.rs:599:10: replace > with == in strict_check
+crates/spikefade/src/kit.rs:599:10: replace > with < in strict_check
+crates/spikefade/src/kit.rs:599:10: replace > with >= in strict_check
+crates/spikefade/src/kit.rs:624:5: replace probe_tools -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/kit.rs:624:5: replace probe_tools -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/kit.rs:625:29: replace != with == in probe_tools
+crates/spikefade/src/kit.rs:630:12: delete ! in probe_tools
+crates/spikefade/src/kit.rs:635:12: delete ! in probe_tools
+crates/spikefade/src/kit.rs:635:35: delete ! in probe_tools
+crates/spikefade/src/kit.rs:635:50: replace && with || in probe_tools
+crates/spikefade/src/kit.rs:635:39: replace == with != in probe_tools
+crates/spikefade/src/kit.rs:635:53: delete ! in probe_tools
+crates/spikefade/src/kit.rs:693:9: replace Plan::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/kit.rs:744:48: replace || with && in Plan::parse
+crates/spikefade/src/kit.rs:744:36: replace || with && in Plan::parse
+crates/spikefade/src/kit.rs:778:117: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:778:70: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:810:5: replace fp_part -> String with String::new()
+crates/spikefade/src/kit.rs:810:5: replace fp_part -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:811:9: delete match arm (Some(p), Some(d)) in fp_part
+crates/spikefade/src/kit.rs:812:9: delete match arm (Some(p), None) in fp_part
+crates/spikefade/src/kit.rs:835:32: replace * with / in par_digest
+crates/spikefade/src/kit.rs:835:50: replace * with + in par_digest
+crates/spikefade/src/kit.rs:900:12: delete ! in list_digest
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec![])
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/spikefade/src/kit.rs:921:42: replace || with && in table_lines
+crates/spikefade/src/kit.rs:921:50: replace == with != in table_lines
+crates/spikefade/src/kit.rs:924:31: replace + with - in table_lines
+crates/spikefade/src/kit.rs:924:31: replace + with * in table_lines
+crates/spikefade/src/kit.rs:927:40: replace || with && in table_lines
+crates/spikefade/src/kit.rs:927:17: replace == with != in table_lines
+crates/spikefade/src/kit.rs:927:48: replace == with != in table_lines
+crates/spikefade/src/kit.rs:975:5: replace inputs_manifest -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/kit.rs:975:5: replace inputs_manifest -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/kit.rs:1020:5: replace check_inputs -> Result<(), String> with Ok(())
+crates/spikefade/src/kit.rs:1021:13: replace == with != in check_inputs
+crates/spikefade/src/kit.rs:1027:21: replace != with == in check_inputs
+crates/spikefade/src/kit.rs:1029:28: replace >= with < in check_inputs
+crates/spikefade/src/kit.rs:1169:36: replace match guard i == 0 with true in Bck::parse
+crates/spikefade/src/kit.rs:1323:22: replace match guard cfg!(feature = "m_kit_merge_ignores_unknown") with false in Bck::parse
+crates/spikefade/src/kit.rs:1182:52: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1182:36: replace || with && in Bck::parse

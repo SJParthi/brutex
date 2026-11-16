@@ -10,3 +10,4 @@ crates/spikefade/src/kit.rs:360:23: replace += with *= in Sha256::update
 crates/spikefade/src/kit.rs:362:26: replace == with != in Sha256::update
 crates/spikefade/src/kit.rs:373:12: delete ! in Sha256::update
 crates/spikefade/src/kit.rs:398:9: replace Sha256::update_pad with ()
+crates/spikefade/src/kit.rs:831:26: replace >= with < in par_digest
