@@ -1,0 +1,224 @@
+//! Indian F&O statutory rates: the dated regime table, and the refusal that
+//! stands where a rate was never verified.
+//!
+//! Stage 1 of the cost calculator is **the rates and the refusal contract**:
+//! "what rate was in force" and "is that rate citation-grounded". Stages two
+//! and three, below, compute the charges, the GST total and the net P&L on top
+//! of it (`trip::price`, `trip::charge_stack`); nothing guesses at a rate.
+//!
+//! # The one idea this crate exists to preserve
+//!
+//! Before 2024-10-01 the exchange transaction charge was a member
+//! **monthly-turnover slab ladder**, and the circulars that fixed those slabs
+//! could not be retrieved. There is no honest flat per-trade equivalent. So
+//! that window carries **no rate at all** — not a zero, not the current rate,
+//! not a configurable default. A date landing in it produces a
+//! [`error::Refusal`], never a number.
+//!
+//! That is enforced by the type system rather than by a runtime check. The
+//! [`regime::Rate`] enum has two variants, and the unverified one **has no
+//! numeric field**. There is nowhere for a fabricated rate to live, so there
+//! is no flag, no keyword and no fall-back that could reach one. The only way
+//! a caller ever holds a [`rate::BpsX100`] is to have been handed one out of a
+//! `Rate::Verified` row, because [`rate::BpsX100`]'s constructor is
+//! crate-private and every table in this crate is a `const` item this crate
+//! owns. `CLAUDE.md` §4: degrade loudly and name the reason, or refuse.
+//!
+//! # Constant per-operation cost
+//!
+//! Every lookup here is O(1) **by construction**, and the construction is the
+//! proof rather than a measurement standing in for one:
+//!
+//! * A regime table is `anchor + [Option<RegimeRow>; MAX_LATER_ROWS]`. The
+//!   trip count of the one loop is bounded by [`regime::MAX_LATER_ROWS`], a
+//!   compile-time constant. No argument can change it, because the tables are
+//!   `const` items fixed before any input exists.
+//! * The anchor row starts at [`day::TradeDay::MIN`], asserted at **compile
+//!   time**, so every representable date selects a row. "Before the table" is
+//!   not a representable state and costs no branch.
+//! * Comparing two dates is one `i32` compare. [`day::TradeDay`] carries a day
+//!   ordinal, so ordering never walks fields.
+//!
+//! The predecessor did this with `bisect_right` and documented itself
+//! as O(log N), "effectively O(1)" because N ≤ 3 — an honest hedge for a
+//! variable-length list. There is no list here to bisect and no N to grow, so
+//! the hedge is not needed and is not made. `crates/costs/benches/ratio.rs`
+//! measures the claim.
+//!
+//! # Money and rates are integers
+//!
+//! * Money is `i64` paisa ([`brutex_core::price::Paisa`]). `CLAUDE.md` §7.
+//! * A rate is an integer in the source's `bps_x100` encoding — see
+//!   [`rate::BpsX100`], which states the exact scale and where the name comes
+//!   from.
+//! * There is no `f64` anywhere in this crate, on any path, in any test.
+//!
+//! # Where this came from
+//!
+//! Ported from the predecessor repository's `brutex/costs/constants.py` and
+//! `brutex/costs/types.py`, with the decision structure of
+//! `rust/fno-math/src/optcost/regime.rs` read for reference. That crate links
+//! `PyO3` and could not be depended on: `CLAUDE.md` §2 bans a binding to another
+//! language without exception, and `deny.toml` lists `pyo3` by name. The
+//! arithmetic was lifted; the binding was left behind.
+//!
+//! See `docs/05-decisions.md` D-0041.
+//!
+//! # Stage two: the option arithmetic
+//!
+//! Stage two adds the four things a charge has to be computed **on** — which
+//! strike, how many units, how far from the money, and which expiry — and every
+//! one of them is integer arithmetic with no search anywhere:
+//!
+//! * A strike grid is an arithmetic progression, so the at-the-money rung is a
+//!   **rounding**, not a lookup in a chain ([`strike`]).
+//! * Moneyness is a **signed step count** from that rung, negative into the
+//!   money and positive out of it ([`moneyness`]).
+//! * A position is `lots × lot size`, one multiplication ([`lot`]).
+//! * An expiry is a **remainder mod 7** and, for a monthly, one month roll —
+//!   never a walk over a calendar ([`expiry`]).
+//!
+//! Three of those four are **dated**, because the lot size moved seven times
+//! and the expiry weekday five times between 2021 and 2026, and a backtest that
+//! used one value across the window would mis-size every position in it. They
+//! carry the same refusal contract as a statutory rate, through the one
+//! mechanism in `dated`.
+//!
+//! Stage two still computes **no charge**. There is no GST total, no round
+//! trip, no slippage and no net P&L — those are stage three's.
+//!
+//! # Stage three: the round trip
+//!
+//! [`trip::price`] takes one round trip — two bars, two days, a quantity, an
+//! instrument, a direction and a broker — and returns every charge itemised
+//! plus the total, in paisa `i64`. That is what the first two stages were for.
+//!
+//! Five things in an Indian F&O cost stack are commonly got wrong, and each of
+//! them is a defect the predecessor repository records finding and fixing:
+//!
+//! 1. **The transaction tax is sell-side, and on the PREMIUM** — not both
+//!    sides, and not on `strike × lots`.
+//! 2. **Stamp duty is buy-side only.** Charging both legs doubles it.
+//! 3. **GST is 18% on the services base, rounded ONCE.** Rounding CGST and SGST
+//!    separately at 9% each is a systematic **+₹1 overcharge on every trade**.
+//! 4. **Brokerage is per executed ORDER, flat.** One lot and a thousand lots
+//!    pay the same.
+//! 5. **An unverified regime refuses the WHOLE round trip** — not a component
+//!    quietly priced at zero, and not today's rate applied backwards.
+//!
+//! Every one of them is enforced by the shape of the code rather than by a
+//! comment, and every one is pinned by a test against the predecessor's own
+//! worked examples. See [`trip`] for where each is handled.
+//!
+//! Stage three also carries across the two subtleties underneath the stack:
+//! the **fill law** ([`fill`]), where each leg anchors on its own bar's adverse
+//! extreme and then pays one further tick, and the **two rounding laws**
+//! ([`money`]), where a statutory levy floors to the paisa and then ceils to
+//! the rupee while a non-statutory one ceils to the paisa per leg.
+//!
+//! # What is here
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`day`] | the trade date and the weekday, as arithmetic on an ordinal |
+//! | [`error`] | every refusal this crate can return, and what it says |
+//! | `dated` (private) | one dated table, generic over what it dates |
+//! | [`rate`] | the flat rates, each beside its citation |
+//! | [`regime`] | the dated rate tables, the lookup, and the refusal rows |
+//! | [`venue`] | which exchange's circular governs an underlying, and its slot |
+//! | [`strike`] | the grid step and the strike a moneyness names |
+//! | [`moneyness`] | how far from the money a strike is, in signed steps |
+//! | [`lot`] | the dated lot size, the quantity and the notional |
+//! | [`expiry`] | the next weekly and the next monthly expiry |
+//! | [`money`] | the two rounding laws, and the trap between them |
+//! | [`fill`] | the worst-case fill law and the bar it anchors on |
+//! | [`scope`] | which segments bear the charge stack at all |
+//! | [`trip`] | the round trip, itemised, and the total |
+
+//!
+//! # Package CHG-1: the contract-note charge stack
+//!
+//! Four modules price what the round trip above does not: equity cash in
+//! three products, futures, and options under the contract-note method, plus
+//! the broker's own fees — one executed order and one client-security-day at
+//! a time, every money value in paisa `i64`, every rate an exact integer
+//! [`exact::Ratio`]. The default mode is **precise** ([`stack`]); a replica of
+//! Dhan's public calculator ([`dhan_calc`]) exists **for comparison only**,
+//! and every one of its outputs says so. Rates are chosen by an explicit
+//! [`schedule::RateSelector`] with no `Default`: today's rates on every date (the
+//! set a backtest names, labelled on every output) or the dated regime above,
+//! read exactly as [`trip::Rates::resolve`] reads it — the regime row in force
+//! plus the IPFT, on every day (D-5131). A backtest drives
+//! [`ledger::DayLedger`]: one per client, security and day, an O(1) add per
+//! executed order, an O(1) exercise that also pays Dhan's ₹20 brokerage
+//! (sources row B-05, D-5132), one close in either mode, and each order's own
+//! lines priced against the day's netting — measured as C-CHG-07, C-CHG-08,
+//! C-CHG-09 and C-CHG-10 in `crates/costs/benches/stack.rs`. D-5110 to D-5132.
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`exact`] | the exact rate, half-up rounding, and the rupee renderer |
+//! | [`charge_error`] | every refusal the charge stack can return |
+//! | [`schedule`] | the trade kinds, today's rates with their sources, the selector |
+//! | [`stack`] | the precise stack: one order, one client-security-day |
+//! | [`dhan_calc`] | Dhan's calculator, line by line, labelled an estimate |
+//! | [`ledger`] | the per client-security-day accumulator a backtest drives |
+//!
+//! # Package FNO-COSTS: NSE cash-equity intraday on two cost clocks
+//!
+//! The F&O top-mover strategy trades F&O stocks' cash shares intraday from
+//! 3 Sep 2018, and every trade is priced on two clocks (operator rule 7):
+//! the official rates in force on its own day, and Dhan's rates of today,
+//! each under the official method and under every open reading at its
+//! worst; the headline is the worse of the two worst. D-8110 to D-8116.
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`equity_dated`] | the 25 dated rows of `costs-table.json`, the State stamp table, the lookup |
+//! | [`equity_readings`] | one contract note under each reading set, and the worst |
+//! | [`equity_clock`] | both clocks on one trade, the headline, and the bench measurements |
+
+#![forbid(unsafe_code)]
+
+mod dated;
+
+pub mod charge_error;
+pub mod day;
+pub mod dhan_calc;
+pub mod equity_clock;
+pub mod equity_dated;
+pub mod equity_readings;
+pub mod error;
+pub mod exact;
+pub mod expiry;
+pub mod fill;
+pub mod ledger;
+pub mod lot;
+pub mod money;
+pub mod moneyness;
+pub mod rate;
+pub mod regime;
+pub mod schedule;
+pub mod scope;
+pub mod stack;
+pub mod strike;
+pub mod trip;
+pub mod venue;
+
+#[cfg(test)]
+mod tests {
+    use crate::{equity_clock, equity_dated, equity_readings};
+
+    /// The strategy path reaches the three equity modules from the crate
+    /// root, and the version a run's identity names is the table they price.
+    #[test]
+    fn the_equity_modules_answer_from_the_crate_root() {
+        assert_eq!(
+            equity_dated::EQUITY_DATED_VERSION,
+            "costs-table/2026-10-30/r1"
+        );
+        assert_eq!(equity_dated::EQUITY_DATED_ROWS.len(), 25);
+        assert_eq!(equity_readings::NOTE_LINE_NAMES.len(), 11);
+        assert_eq!(equity_clock::DHAN_DATA_API_MONTHLY.raw(), 49_900);
+    }
+}
