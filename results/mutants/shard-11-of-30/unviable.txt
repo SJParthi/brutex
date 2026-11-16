@@ -12,3 +12,6 @@ crates/spikefade/src/report3.rs:2150:405: replace + with * in stage_b_day_major
 crates/spikefade/src/report3.rs:2152:9: replace && with || in stage_b_day_major
 crates/spikefade/src/report3.rs:2187:17: replace && with || in stage_b_day_major
 crates/spikefade/src/report3.rs:2223:17: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2292:29: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2359:29: replace && with || in stage_b_day_major
+crates/spikefade/src/report3.rs:2358:37: replace && with || in stage_b_day_major
