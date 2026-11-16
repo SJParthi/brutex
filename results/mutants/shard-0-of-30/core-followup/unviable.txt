@@ -72,3 +72,12 @@ crates/core/src/universe.rs:4545:13: replace < with == in fnv1a
 crates/core/src/universe.rs:4545:13: replace < with <= in fnv1a
 crates/core/src/universe.rs:4548:11: replace += with -= in fnv1a
 crates/core/src/vendor.rs:214:9: replace VendorSet::with -> Self with Default::default()
+crates/core/src/universe.rs:4548:11: replace += with *= in fnv1a
+crates/core/src/vendor.rs:541:9: replace Vendor::master_columns -> MasterColumns with Default::default()
+crates/core/src/vendor.rs:944:9: replace Decoded::skip -> Option<Skip> with Some(Default::default())
+crates/core/src/vendor.rs:974:5: replace collapse_spaces -> Result<Collapsed, InstrumentError> with Ok(Default::default())
+crates/core/src/vendor.rs:1181:5: replace board_of -> EquityVerdict with Default::default()
+crates/core/src/vendor.rs:1212:9: replace Vendor::segment_of -> Result<SegmentVerdict, InstrumentError> with Ok(Default::default())
+crates/core/src/vendor.rs:1580:5: replace decode_master_row -> Result<Decoded, InstrumentError> with Ok(Default::default())
+crates/core/src/vendor.rs:1903:5: replace unsuffixed_key -> Result<Option<InstrumentKey>, InstrumentError> with Ok(Some(Default::default()))
+crates/core/src/vendor.rs:1926:5: replace parse_expiry -> Result<Expiry, InstrumentError> with Ok(Default::default())

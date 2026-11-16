@@ -1,1 +1,2 @@
 crates/core/src/universe.rs:4469:22: replace + with * in MemberIndex<N>::position
+crates/core/src/vendor.rs:458:15: replace += with *= in MasterRow<'_>::over_wide

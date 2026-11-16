@@ -15,3 +15,37 @@ crates/core/src/universe.rs:4461:25: replace > with < in MemberIndex<N>::positio
 crates/core/src/universe.rs:4466:21: replace == with != in MemberIndex<N>::position
 crates/core/src/vendor.rs:326:9: replace VendorId::as_str -> &str with ""
 crates/core/src/vendor.rs:326:9: replace VendorId::as_str -> &str with "xyzzy"
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("", 0))
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("", 1))
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("xyzzy", 0))
+crates/core/src/vendor.rs:422:9: replace MasterRow<'_>::over_wide -> Option<(&'static str, usize)> with Some(("xyzzy", 1))
+crates/core/src/vendor.rs:449:17: replace < with <= in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:455:20: replace > with < in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:458:15: replace += with -= in MasterRow<'_>::over_wide
+crates/core/src/vendor.rs:944:9: replace Decoded::skip -> Option<Skip> with None
+crates/core/src/vendor.rs:977:14: replace == with != in collapse_spaces
+crates/core/src/vendor.rs:987:13: replace += with -= in collapse_spaces
+crates/core/src/vendor.rs:987:13: replace += with *= in collapse_spaces
+crates/core/src/vendor.rs:1005:9: replace Collapsed::as_str -> &str with ""
+crates/core/src/vendor.rs:1005:9: replace Collapsed::as_str -> &str with "xyzzy"
+crates/core/src/vendor.rs:1274:9: replace Vendor::type_of -> Result<Option<&'static str>, InstrumentError> with Ok(None)
+crates/core/src/vendor.rs:1274:9: replace Vendor::type_of -> Result<Option<&'static str>, InstrumentError> with Ok(Some(""))
+crates/core/src/vendor.rs:1274:9: replace Vendor::type_of -> Result<Option<&'static str>, InstrumentError> with Ok(Some("xyzzy"))
+crates/core/src/vendor.rs:1306:17: delete match arm "EQ" in Vendor::type_of
+crates/core/src/vendor.rs:1364:9: replace Vendor::index_segment_word -> Option<&'static str> with None
+crates/core/src/vendor.rs:1364:9: replace Vendor::index_segment_word -> Option<&'static str> with Some("")
+crates/core/src/vendor.rs:1364:9: replace Vendor::index_segment_word -> Option<&'static str> with Some("xyzzy")
+crates/core/src/vendor.rs:1481:9: replace Vendor::index_alias -> Option<&'static str> with None
+crates/core/src/vendor.rs:1481:9: replace Vendor::index_alias -> Option<&'static str> with Some("")
+crates/core/src/vendor.rs:1481:9: replace Vendor::index_alias -> Option<&'static str> with Some("xyzzy")
+crates/core/src/vendor.rs:1483:17: delete match arm "NIFTY50" in Vendor::index_alias
+crates/core/src/vendor.rs:1484:17: delete match arm "NIFTYBANK" in Vendor::index_alias
+crates/core/src/vendor.rs:1507:9: replace Vendor::index_alias_source -> Option<&'static str> with None
+crates/core/src/vendor.rs:1507:9: replace Vendor::index_alias_source -> Option<&'static str> with Some("")
+crates/core/src/vendor.rs:1507:9: replace Vendor::index_alias_source -> Option<&'static str> with Some("xyzzy")
+crates/core/src/vendor.rs:1509:17: delete match arm "NIFTY" in Vendor::index_alias_source
+crates/core/src/vendor.rs:1510:17: delete match arm "BANKNIFTY" in Vendor::index_alias_source
+crates/core/src/vendor.rs:1667:45: replace == with != in decode_master_row
+crates/core/src/vendor.rs:1668:15: replace != with == in decode_master_row
+crates/core/src/vendor.rs:1759:28: replace == with != in decode_master_row
+crates/core/src/vendor.rs:1775:9: delete match arm "IDX" in decode_master_row
