@@ -235,3 +235,66 @@ crates/spikefade/src/split18.rs:1290:32: replace && with || in better
 crates/spikefade/src/split18.rs:1290:23: replace == with != in better
 crates/spikefade/src/split18.rs:1296:5: replace fresh_ok -> bool with true
 crates/spikefade/src/split18.rs:1296:5: replace fresh_ok -> bool with false
+crates/spikefade/src/split18.rs:1296:15: replace || with && in fresh_ok
+crates/spikefade/src/split18.rs:1296:10: replace == with != in fresh_ok
+crates/spikefade/src/split18.rs:1299:27: replace - with + in fresh_ok
+crates/spikefade/src/split18.rs:1299:27: replace - with / in fresh_ok
+crates/spikefade/src/split18.rs:1301:5: delete ! in fresh_ok
+crates/spikefade/src/split18.rs:1301:35: replace || with && in fresh_ok
+crates/spikefade/src/split18.rs:1301:15: replace && with || in fresh_ok
+crates/spikefade/src/split18.rs:1301:11: replace > with == in fresh_ok
+crates/spikefade/src/split18.rs:1301:11: replace > with < in fresh_ok
+crates/spikefade/src/split18.rs:1301:11: replace > with >= in fresh_ok
+crates/spikefade/src/split18.rs:1301:29: replace < with == in fresh_ok
+crates/spikefade/src/split18.rs:1301:29: replace < with > in fresh_ok
+crates/spikefade/src/split18.rs:1301:29: replace < with <= in fresh_ok
+crates/spikefade/src/split18.rs:1301:46: replace && with || in fresh_ok
+crates/spikefade/src/split18.rs:1301:42: replace < with == in fresh_ok
+crates/spikefade/src/split18.rs:1301:42: replace < with > in fresh_ok
+crates/spikefade/src/split18.rs:1301:42: replace < with <= in fresh_ok
+crates/spikefade/src/split18.rs:1301:59: replace >= with < in fresh_ok
+crates/spikefade/src/split18.rs:1317:11: replace == with != in account
+crates/spikefade/src/split18.rs:1307:5: replace account with ()
+crates/spikefade/src/split18.rs:1327:23: replace + with - in account
+crates/spikefade/src/split18.rs:1329:78: replace + with - in account
+crates/spikefade/src/split18.rs:1329:78: replace + with * in account
+crates/spikefade/src/split18.rs:1335:14: replace += with -= in account
+crates/spikefade/src/split18.rs:1350:16: replace += with -= in account
+crates/spikefade/src/split18.rs:1350:16: replace += with *= in account
+crates/spikefade/src/split18.rs:1351:19: replace += with -= in account
+crates/spikefade/src/split18.rs:1351:19: replace += with *= in account
+crates/spikefade/src/split18.rs:1351:42: replace && with || in account
+crates/spikefade/src/split18.rs:1351:45: delete ! in account
+crates/spikefade/src/split18.rs:1352:19: replace += with -= in account
+crates/spikefade/src/split18.rs:1352:42: replace && with || in account
+crates/spikefade/src/split18.rs:1354:23: replace += with -= in account
+crates/spikefade/src/split18.rs:1354:23: replace += with *= in account
+crates/spikefade/src/split18.rs:1355:26: replace += with -= in account
+crates/spikefade/src/split18.rs:1355:49: replace && with || in account
+crates/spikefade/src/split18.rs:1355:52: delete ! in account
+crates/spikefade/src/split18.rs:1356:26: replace += with -= in account
+crates/spikefade/src/split18.rs:1356:49: replace && with || in account
+crates/spikefade/src/split18.rs:1360:8: delete ! in account
+crates/spikefade/src/split18.rs:1365:58: replace / with % in account
+crates/spikefade/src/split18.rs:1365:58: replace / with * in account
+crates/spikefade/src/split18.rs:1365:53: replace - with + in account
+crates/spikefade/src/split18.rs:1365:53: replace - with / in account
+crates/spikefade/src/split18.rs:1370:27: replace > with == in account
+crates/spikefade/src/split18.rs:1370:27: replace > with < in account
+crates/spikefade/src/split18.rs:1371:21: replace += with -= in account
+crates/spikefade/src/split18.rs:1386:27: replace && with || in account
+crates/spikefade/src/split18.rs:1386:23: replace > with == in account
+crates/spikefade/src/split18.rs:1386:23: replace > with >= in account
+crates/spikefade/src/split18.rs:1386:30: delete ! in account
+crates/spikefade/src/split18.rs:1389:54: replace == with != in account
+crates/spikefade/src/split18.rs:1401:30: replace == with != in account
+crates/spikefade/src/split18.rs:1405:131: replace && with || in account
+crates/spikefade/src/split18.rs:1405:134: delete ! in account
+crates/spikefade/src/split18.rs:1419:17: replace % with + in account
+crates/spikefade/src/split18.rs:1499:47: replace < with == in fig_words
+crates/spikefade/src/split18.rs:1564:35: replace += with *= in section
+crates/spikefade/src/sw33.rs:63:5: replace on -> bool with true
+crates/spikefade/src/sw33.rs:63:5: replace on -> bool with false
+crates/spikefade/src/sw33.rs:75:5: replace set with ()
+crates/spikefade/src/sw33.rs:94:5: replace any -> bool with true
+crates/spikefade/src/sw33.rs:100:5: replace words -> String with "xyzzy".into()

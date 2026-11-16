@@ -138,3 +138,77 @@ crates/spikefade/src/split18.rs:1290:8: replace > with >= in better
 crates/spikefade/src/split18.rs:1290:38: replace < with == in better
 crates/spikefade/src/split18.rs:1290:38: replace < with > in better
 crates/spikefade/src/split18.rs:1290:38: replace < with <= in better
+crates/spikefade/src/split18.rs:1327:23: replace + with * in account
+crates/spikefade/src/split18.rs:1335:14: replace += with *= in account
+crates/spikefade/src/split18.rs:1352:19: replace += with *= in account
+crates/spikefade/src/split18.rs:1352:45: delete ! in account
+crates/spikefade/src/split18.rs:1355:26: replace += with *= in account
+crates/spikefade/src/split18.rs:1356:26: replace += with *= in account
+crates/spikefade/src/split18.rs:1356:52: delete ! in account
+crates/spikefade/src/split18.rs:1370:14: replace && with || in account
+crates/spikefade/src/split18.rs:1370:27: replace > with >= in account
+crates/spikefade/src/split18.rs:1371:21: replace += with *= in account
+crates/spikefade/src/split18.rs:1386:23: replace > with < in account
+crates/spikefade/src/split18.rs:1394:79: replace + with - in account
+crates/spikefade/src/split18.rs:1394:79: replace + with * in account
+crates/spikefade/src/split18.rs:1398:81: replace + with - in account
+crates/spikefade/src/split18.rs:1398:81: replace + with * in account
+crates/spikefade/src/split18.rs:1398:92: replace - with + in account
+crates/spikefade/src/split18.rs:1398:92: replace - with / in account
+crates/spikefade/src/split18.rs:1405:58: replace == with != in account
+crates/spikefade/src/split18.rs:1405:88: replace == with != in account
+crates/spikefade/src/split18.rs:1419:22: replace == with != in account
+crates/spikefade/src/split18.rs:1419:17: replace % with / in account
+crates/spikefade/src/split18.rs:1498:5: replace fig_words -> String with String::new()
+crates/spikefade/src/split18.rs:1498:5: replace fig_words -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1499:41: replace || with && in fig_words
+crates/spikefade/src/split18.rs:1499:29: replace == with != in fig_words
+crates/spikefade/src/split18.rs:1499:47: replace < with > in fig_words
+crates/spikefade/src/split18.rs:1499:47: replace < with <= in fig_words
+crates/spikefade/src/split18.rs:1501:39: replace || with && in fig_words
+crates/spikefade/src/split18.rs:1501:27: replace == with != in fig_words
+crates/spikefade/src/split18.rs:1501:44: replace < with == in fig_words
+crates/spikefade/src/split18.rs:1501:44: replace < with > in fig_words
+crates/spikefade/src/split18.rs:1501:44: replace < with <= in fig_words
+crates/spikefade/src/split18.rs:1520:5: replace verdict -> &'static str with ""
+crates/spikefade/src/split18.rs:1520:5: replace verdict -> &'static str with "xyzzy"
+crates/spikefade/src/split18.rs:1524:5: replace quant -> u32 with 0
+crates/spikefade/src/split18.rs:1524:5: replace quant -> u32 with 1
+crates/spikefade/src/split18.rs:1526:41: replace / with % in quant
+crates/spikefade/src/split18.rs:1526:41: replace / with * in quant
+crates/spikefade/src/split18.rs:1526:37: replace * with + in quant
+crates/spikefade/src/split18.rs:1526:37: replace * with / in quant
+crates/spikefade/src/split18.rs:1532:5: replace section -> String with String::new()
+crates/spikefade/src/split18.rs:1532:5: replace section -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1545:12: delete ! in section
+crates/spikefade/src/split18.rs:1555:23: replace += with -= in section
+crates/spikefade/src/split18.rs:1555:23: replace += with *= in section
+crates/spikefade/src/split18.rs:1557:30: replace += with -= in section
+crates/spikefade/src/split18.rs:1557:30: replace += with *= in section
+crates/spikefade/src/split18.rs:1561:37: replace && with || in section
+crates/spikefade/src/split18.rs:1561:40: delete ! in section
+crates/spikefade/src/split18.rs:1562:28: replace += with -= in section
+crates/spikefade/src/split18.rs:1562:28: replace += with *= in section
+crates/spikefade/src/split18.rs:1564:35: replace += with -= in section
+crates/spikefade/src/split18.rs:1567:212: replace && with || in section
+crates/spikefade/src/split18.rs:1567:215: delete ! in section
+crates/spikefade/src/split18.rs:1573:20: replace && with || in section
+crates/spikefade/src/split18.rs:1573:23: delete ! in section
+crates/spikefade/src/split18.rs:1580:20: replace += with -= in section
+crates/spikefade/src/split18.rs:1580:20: replace += with *= in section
+crates/spikefade/src/split18.rs:1583:20: delete ! in section
+crates/spikefade/src/split18.rs:1586:26: replace += with -= in section
+crates/spikefade/src/split18.rs:1586:26: replace += with *= in section
+crates/spikefade/src/split18.rs:1586:41: delete ! in section
+crates/spikefade/src/split18.rs:1590:55: delete ! in section
+crates/spikefade/src/split18.rs:1603:5: replace combo_table -> String with String::new()
+crates/spikefade/src/split18.rs:1603:5: replace combo_table -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1613:18: replace == with != in combo_table
+crates/spikefade/src/split18.rs:1626:5: replace tsv -> String with String::new()
+crates/spikefade/src/split18.rs:1626:5: replace tsv -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1641:5: replace picks_tsv -> String with String::new()
+crates/spikefade/src/split18.rs:1641:5: replace picks_tsv -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1648:23: replace == with != in picks_tsv
+crates/spikefade/src/split18.rs:1651:30: replace && with || in picks_tsv
+crates/spikefade/src/sw33.rs:94:5: replace any -> bool with false
+crates/spikefade/src/sw33.rs:100:5: replace words -> String with String::new()

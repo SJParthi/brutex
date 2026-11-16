@@ -295,3 +295,4 @@ crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64,
 crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![1], vec![1], vec![(0, 1, Default::default())])
 crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![1], vec![1], vec![(1, 0, Default::default())])
 crates/spikefade/src/split18.rs:1251:9: replace Sel18::batch_parts -> (u64, u64, u64, Vec<u32>, Vec<usize>, Vec<(usize, usize, Best)>) with (1, 1, 1, vec![1], vec![1], vec![(1, 1, Default::default())])
+crates/spikefade/src/split18.rs:1374:13: replace && with || in account
