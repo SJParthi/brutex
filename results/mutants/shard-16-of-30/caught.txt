@@ -1,0 +1,77 @@
+crates/spikefade/src/v32.rs:487:5: replace a19_passed -> bool with false
+crates/spikefade/src/v32.rs:490:97: replace && with || in a19_passed
+crates/spikefade/src/v32.rs:490:71: replace && with || in a19_passed
+crates/spikefade/src/v32.rs:490:37: replace && with || in a19_passed
+crates/spikefade/src/v32.rs:490:16: replace && with || in a19_passed
+crates/spikefade/src/v32.rs:490:12: replace > with == in a19_passed
+crates/spikefade/src/v32.rs:490:12: replace > with < in a19_passed
+crates/spikefade/src/v32.rs:490:33: replace > with == in a19_passed
+crates/spikefade/src/v32.rs:490:33: replace > with < in a19_passed
+crates/spikefade/src/v32.rs:490:54: replace == with != in a19_passed
+crates/spikefade/src/v32.rs:490:84: replace == with != in a19_passed
+crates/spikefade/src/v32.rs:490:109: replace == with != in a19_passed
+crates/spikefade/src/v32.rs:496:5: replace v19_words -> String with String::new()
+crates/spikefade/src/v32.rs:496:5: replace v19_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:508:5: replace v19_miss_words -> String with String::new()
+crates/spikefade/src/v32.rs:508:5: replace v19_miss_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:511:11: replace > with < in v19_miss_words
+crates/spikefade/src/v32.rs:511:11: replace > with >= in v19_miss_words
+crates/spikefade/src/v32.rs:552:51: replace > with >= in pick_tables_m
+crates/spikefade/src/v32.rs:553:53: replace < with > in pick_tables_m
+crates/spikefade/src/v32.rs:661:5: replace portfolio -> PRes with Default::default()
+crates/spikefade/src/v32.rs:672:18: replace > with == in portfolio
+crates/spikefade/src/v32.rs:672:18: replace > with < in portfolio
+crates/spikefade/src/v32.rs:676:23: replace += with -= in portfolio
+crates/spikefade/src/v32.rs:676:23: replace += with *= in portfolio
+crates/spikefade/src/v32.rs:677:21: replace -= with += in portfolio
+crates/spikefade/src/v32.rs:677:21: replace -= with /= in portfolio
+crates/spikefade/src/v32.rs:680:49: replace += with -= in portfolio
+crates/spikefade/src/v32.rs:680:49: replace += with *= in portfolio
+crates/spikefade/src/v32.rs:685:42: replace || with && in portfolio
+crates/spikefade/src/v32.rs:685:36: replace == with != in portfolio
+crates/spikefade/src/v32.rs:685:49: replace == with != in portfolio
+crates/spikefade/src/v32.rs:686:19: replace += with -= in portfolio
+crates/spikefade/src/v32.rs:686:19: replace += with *= in portfolio
+crates/spikefade/src/v32.rs:689:60: replace - with / in portfolio
+crates/spikefade/src/v32.rs:689:42: replace + with * in portfolio
+crates/spikefade/src/v32.rs:691:69: replace && with || in portfolio
+crates/spikefade/src/v32.rs:691:22: delete ! in portfolio
+crates/spikefade/src/v32.rs:691:84: replace > with < in portfolio
+crates/spikefade/src/v32.rs:691:116: replace < with > in portfolio
+crates/spikefade/src/v32.rs:693:21: replace += with -= in portfolio
+crates/spikefade/src/v32.rs:693:21: replace += with *= in portfolio
+crates/spikefade/src/v32.rs:697:16: replace += with -= in portfolio
+crates/spikefade/src/v32.rs:697:16: replace += with *= in portfolio
+crates/spikefade/src/v32.rs:698:16: replace += with -= in portfolio
+crates/spikefade/src/v32.rs:698:16: replace += with *= in portfolio
+crates/spikefade/src/v32.rs:819:5: replace share -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:828:5: replace held_why -> String with String::new()
+crates/spikefade/src/v32.rs:828:5: replace held_why -> String with "xyzzy".into()
+crates/spikefade/src/ckpt.rs:18:5: replace sum_line -> String with String::new()
+crates/spikefade/src/ckpt.rs:18:5: replace sum_line -> String with "xyzzy".into()
+crates/spikefade/src/ckpt.rs:21:48: replace || with && in sum_line
+crates/spikefade/src/ckpt.rs:35:5: replace sum_of_line -> Result<Sum, String> with Ok(Default::default())
+crates/spikefade/src/ckpt.rs:51:35: replace == with != in sum_of_line
+crates/spikefade/src/ckpt.rs:77:5: replace fig_line -> String with String::new()
+crates/spikefade/src/ckpt.rs:77:5: replace fig_line -> String with "xyzzy".into()
+crates/spikefade/src/ckpt.rs:86:170: replace == with != in fig_of_line
+crates/spikefade/src/ckpt.rs:85:5: replace fig_of_line -> Result<crate::wf::Fig, String> with Ok(Default::default())
+crates/spikefade/src/ckpt.rs:116:5: replace save -> Result<(), String> with Ok(())
+crates/spikefade/src/ckpt.rs:145:54: delete ! in save
+crates/spikefade/src/ckpt.rs:164:5: replace save_durable -> Result<(), String> with Ok(())
+crates/spikefade/src/ckpt.rs:171:22: replace && with || in save_durable
+crates/spikefade/src/ckpt.rs:171:25: delete ! in save_durable
+crates/spikefade/src/ckpt.rs:186:5: replace load -> Result<Option<Ckpt>, String> with Ok(None)
+crates/spikefade/src/ckpt.rs:186:5: replace load -> Result<Option<Ckpt>, String> with Ok(Some(Default::default()))
+crates/spikefade/src/ckpt.rs:206:8: delete ! in load
+crates/spikefade/src/ckpt.rs:226:13: delete match arm "POS" in load
+crates/spikefade/src/ckpt.rs:271:13: delete match arm "WL" | "WT" in load
+crates/spikefade/src/ckpt.rs:288:13: delete match arm "CAPC" in load
+crates/spikefade/src/ckpt.rs:287:18: replace match guard t.starts_with("S18") with true in load
+crates/spikefade/src/ckpt.rs:287:18: replace match guard t.starts_with("S18") with false in load
+crates/spikefade/src/ckpt.rs:221:23: replace != with == in load
+crates/spikefade/src/ckpt.rs:294:17: replace != with == in load
+crates/spikefade/src/side17.rs:37:5: replace idx_und -> Option<Vec<String>> with None
+crates/spikefade/src/side17.rs:37:5: replace idx_und -> Option<Vec<String>> with Some(vec![])
+crates/spikefade/src/side17.rs:37:5: replace idx_und -> Option<Vec<String>> with Some(vec![String::new()])
+crates/spikefade/src/side17.rs:37:5: replace idx_und -> Option<Vec<String>> with Some(vec!["xyzzy".into()])
