@@ -119,3 +119,44 @@ crates/spikefade/src/side17.rs:362:45: replace + with - in CandSet::of_tsv
 crates/spikefade/src/side17.rs:362:45: replace + with * in CandSet::of_tsv
 crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (0, 0, 0, 0, 0, 0, -1)
 crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (0, 0, 0, 1, 0, 1, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (0, 1, 1, 1, 0, 1, -1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 0, 0, 0, 0, 0)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 0, 0, 1, 0, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 1, 0, 0, 0, 0)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 1, 0, 1, 0, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 1, 0, 1, 1, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 1, 1, 1, 1, 1, 1)
+crates/spikefade/src/side17.rs:386:14: replace += with -= in a19_of
+crates/spikefade/src/side17.rs:398:5: replace combined -> (String, String) with (String::new(), String::new())
+crates/spikefade/src/side17.rs:398:5: replace combined -> (String, String) with (String::new(), "xyzzy".into())
+crates/spikefade/src/side17.rs:398:5: replace combined -> (String, String) with ("xyzzy".into(), String::new())
+crates/spikefade/src/side17.rs:398:5: replace combined -> (String, String) with ("xyzzy".into(), "xyzzy".into())
+crates/spikefade/src/side17.rs:402:17: replace != with == in combined
+crates/spikefade/src/side17.rs:414:26: replace == with != in combined
+crates/spikefade/src/side17.rs:415:87: replace >= with < in combined
+crates/spikefade/src/side17.rs:480:118: replace == with != in combined
+crates/spikefade/src/side17.rs:489:79: replace >= with < in combined
+crates/spikefade/src/side17.rs:497:60: replace == with != in combined
+crates/spikefade/src/side17.rs:499:18: replace += with -= in combined
+crates/spikefade/src/side17.rs:515:5: replace section_of -> (String, String) with (String::new(), String::new())
+crates/spikefade/src/side17.rs:515:5: replace section_of -> (String, String) with (String::new(), "xyzzy".into())
+crates/spikefade/src/side17.rs:515:5: replace section_of -> (String, String) with ("xyzzy".into(), String::new())
+crates/spikefade/src/side17.rs:515:5: replace section_of -> (String, String) with ("xyzzy".into(), "xyzzy".into())
+crates/spikefade/src/side17.rs:515:8: delete ! in section_of
+crates/spikefade/src/side17.rs:519:31: replace match guard !a.cands.is_empty() && !b.cands.is_empty() with false in section_of
+crates/spikefade/src/side17.rs:519:31: delete ! in section_of
+crates/spikefade/src/side17.rs:519:54: delete ! in section_of
+crates/spikefade/src/split18.rs:85:46: replace >= with < in SCal::from_days
+crates/spikefade/src/split18.rs:85:9: replace SCal::from_days -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/split18.rs:88:23: replace >= with < in SCal::from_days
+crates/spikefade/src/split18.rs:91:28: delete field days from struct Self expression in SCal::from_days
+crates/spikefade/src/split18.rs:96:18: replace != with == in SCal::from_days
+crates/spikefade/src/split18.rs:97:37: replace >= with < in SCal::from_days
+crates/spikefade/src/split18.rs:104:39: replace - with + in SCal::from_days
+crates/spikefade/src/split18.rs:104:39: replace - with / in SCal::from_days
+crates/spikefade/src/split18.rs:105:28: replace || with && in SCal::from_days
+crates/spikefade/src/split18.rs:105:18: replace != with == in SCal::from_days
+crates/spikefade/src/split18.rs:110:24: replace += with -= in SCal::from_days
+crates/spikefade/src/split18.rs:110:24: replace += with *= in SCal::from_days
+crates/spikefade/src/split18.rs:117:20: replace += with -= in SCal::from_days
+crates/spikefade/src/split18.rs:117:20: replace += with *= in SCal::from_days
