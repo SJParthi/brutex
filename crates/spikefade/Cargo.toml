@@ -1,0 +1,195 @@
+[package]
+name         = "spikefade"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "SNIPER s25b spike-fade option selling from the Top Volume screener: per-day minute cube (O(1) window queries), per-segment per-expiry Top Volume lists, spike events, REQ 70 worst-case fills (crate v2.1), Dhan charges (sell-diag estimator), account sweep over the dial grid, random-time twin. Read only on every input."
+build = false
+autobenches = false
+autoexamples = false
+autotests = false
+
+[[bin]]
+name = "spikefade"
+path = "src/main.rs"
+
+[dependencies]
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+costs       = { path = "../costs", version = "0.1.0" }
+# v2.1 (checker F-A): the FA1 copy of crate v2.1 (opt-in sparse-tape capacity reading; Row = crate v2.1 byte for byte)
+# v3 (EXITS-DYNAMIC): the crate v2.2 copy (the FA1 crate + the additive xrule module); pinned/common-fill-v21-fa1 stays as copied
+# v3.1 (MAIN-RULINGS-ENGINE-v22): the crate v2.3 copy (crate v2.2 + the ONE margin module M1 + the opt-in carried entitlement K1)
+# v3.2 (MAIN-RULINGS-ENGINE-v22 addenda 10-11): the crate v2.4 copy (crate v2.3 + margin rule v3 M3 + the executed-order count O1)
+common_fill = { path = "../../pinned/common-fill-v24" }
+# v3.2 (addenda 8 / 8b): the app's OWN Greeks code, the same crate behind /greeks.json and the screener: the app on :8080 is built from the
+# wt/APP tree (its crates/greeks = the tree the v3.1 runner's proven greeks-tsv linked; project/crates/greeks is an OLDER copy whose solver
+# reports other iteration counts), linked unmodified (no copy, no new formula); it declares no dependency (its CI gate 9b). sha256 of its
+# sources at the v3.2 build: BUILD.md.
+# fix:determinism: the Greeks crate copied in as a workspace member (make-kit.sh's form), changed only by src/hostmath.rs (exp / ln a
+# host may route; nothing installed = the platform's functions, byte for byte as before); libm 0.2.16 = the ONE pure-Rust implementation
+# --portable-math installs (pinned/libm-0.2.16: the local cargo registry's copy, .crate sha256 b6d2cec3...; default features off: no
+# arch-specific code path, soft floats only).
+greeks = { path = "../greeks" }
+libm = { path = "../../pinned/libm-0.2.16", default-features = false }
+
+[dev-dependencies]
+# fix:determinism: the Greeks crate's per-thread routing hook (unit tests run in parallel threads); never in a release build
+greeks = { path = "../greeks", features = ["det-thread"] }
+
+[features]
+# v3 host mutants (EXITS-DYNAMIC-DESIGN 6.3 + the liquidity dial): each breaks ONE property; its named test must FAIL.
+m_sf3_ttp_close = []
+m_sf3_tie_tp_first = []
+m_sf3_cut_norewalk = []
+m_sf3_cut_sends = []
+m_sf3_fill_at_level = []
+m_sf3_atr_next = []
+m_sf3_tpf_armed_above = []
+m_sf3_skip_wrong = []
+m_sf3_dedup_hash_only = []
+m_sf3_window_no_rewalk = []
+m_sf3_liq_lookahead = []
+# v3.1 host mutants (MAIN-RULINGS-ENGINE-v22 + the operator's 15 Nov decisions): each breaks ONE property; its named test must FAIL.
+m_v31_close_1540 = []
+m_v31_value_from_entry = []
+m_v31_mtm_off = []
+m_v31_dd_ungrouped = []
+m_v31_stress_sign = []
+m_v31_dm_stale_tab = []
+m_v31_headline_any_share = []
+m_v31_margin_proxy = []
+m_v31_snap_lookahead = []
+m_v31_window_pending = []
+m_v31_headline_wide_stop = []
+# v3.2 host mutants (MAIN-RULINGS-ENGINE-v22 addenda 10-16 + the v3.1 check): each breaks ONE property; its named test must FAIL.
+m_v32_orders_one_per_side = []
+m_v32_freeze_undated = []
+m_v32_ban_ignored = []
+m_v32_liq_cover_off = []
+m_v32_headline_unfilled_ok = []
+m_v32_topk_v31 = []
+m_v32_prev_close_today = []
+m_v32_dte_calendar_days = []
+m_v32_expiry_pick_nearest = []
+m_v32_month_verdict_strict = []
+m_v32_portfolio_cap_ignored = []
+m_v32_greeks_tenor_bar_end = []
+m_v32_twin_not_10 = []
+m_v32_margin_v3_host_v2 = []
+m_v32_gain_measure_ignored = []
+# v3.2 REPAIR A host mutants (check-engine-1 / check-engine-2 of 15 Nov 2026): each breaks ONE repaired property; its named test must FAIL.
+m_v32r_portfolio_no_mtm = []
+m_v32r_expiry_substitute = []
+m_v32r_sess_loaded = []
+m_v32r_wf_year_rule = []
+m_v32r_wf_learn_key_v31 = []
+m_v32r_charges_dearer = []
+m_v32r_headline_liq_off = []
+m_v32r_exit_why_held_anchor = []
+m_v32r_pct_truncate = []
+m_v32r_weeks_seen = []
+m_v32r_a19_key_no_days = []
+m_v32r_ngrid_v31 = []
+m_v32r_dedup_wrong_rep = []
+m_v32r_step_unsampled = []
+# v3.2-B host mutants (job v32-par: addenda 17 + 18), ported by round B: each breaks ONE new rule; its named test must FAIL.
+m_v32b_split_lookahead = []
+m_v32b_split_dd_cross = []
+m_v32b_split_key_no_days = []
+m_v32b_split_passed_any_wf = []
+m_v32b_idx_und_ignored = []
+m_v32b_side_no_mtm = []
+m_v32b_split_group_end_skipped = []
+m_v32b_split_fresh_trusted = []
+# v3.2 round B host mutants (the segment figures, the one side walk, the cross-run combine, the extra index data)
+m_v32rb_seg_boundary_missing = []
+m_v32rb_seg_gap_ignored = []
+m_v32rb_seg_base_per_month = []
+m_v32rb_port_segment_blind = []
+m_v32rb_combine_marks_swapped = []
+m_v32rb_cube_merge_no_shift = []
+m_v32rb_margin_extra_ignored = []
+m_v32rb_ckpt_picks_dropped = []
+# v3.3 host mutants (Addendum 28.2, job v33-fast: the exact speed switches of SPEED-PLAN S1 / S2): each breaks ONE switch; its named test
+# (tests33.rs) must FAIL.
+m_v33_c2_merge_offset = []
+m_v33_c1_stride_full = []
+m_v33_c3_derived_wrong_rep = []
+m_v33_hoist_whole_buffer = []
+m_v33_largest_drops_ties = []
+m_v33_order_not_in_fingerprint = []
+m_v33_prefetch_wrong_day = []
+m_v33_d2_ghost_reads_loss = []
+m_v33_d2_rstar_mtm_term_dropped = []
+m_v33_d2_no_rstar = []
+m_v33_d2_mtm_ref_dropped = []
+m_v33_d2_cash_offsets_dropped = []
+m_v33_d2_class_key_without_tf = []
+m_v33_tablel_want_as_got = []
+m_v33_c3_flag_lists_stored = []
+m_v33_achunk_splits_contract = []
+# v3.3 SEARCH-1D (MAIN-RULINGS-ENGINE-v22 Addendum 28.1, search:v33; ported from v33/sets/SEARCH1D-ENGINE.patch): the named test
+# v33_search1d_sets_load_and_count must FAIL
+m_v33_s1d_select_search = []
+# v3.3 integrate (integrate:v33): the BLOCKING fixes of check-engine-1r / check-engine-2r; each named test must FAIL under its mutant
+m_v33f_levels_whole_run = []
+m_v33f_cap_flat_only = []
+m_v33f_cap_filter_off = []
+m_v33f_sebi_half_missing = []
+m_v33f_stamp_label_off = []
+m_v33f_words_n_v31 = []
+m_v33f_vendor_fixed = []
+m_v33f_step_dm_unsampled = []
+m_v33f_target_exit_no_resend = []
+m_v33f_dm_rss_unprinted = []
+# v3.3 fix:v33 (Addenda 24-28): the BLOCKING items of the v3.3 gates (STANDING-SCORECARD F1 / F2 / F4 / F5 / F6, EXITS F-B2, RECHECK-V33 F1);
+# each named test (tests33g.rs) must FAIL under its mutant
+m_oob_lot_guard_off = []
+m_oob_item12_static = []
+m_v33f_gst_no_sebi = []
+m_v33f_idx_elm_flat_2pct = []
+m_v33f_mark_close = []
+m_v33g_win_sliding_swept = []
+
+# v3.4 build:shard (Addendum 30.3, the cloud shard kit E1-E6, E8, E9, E12 + critic F1-F5): each named test (tests34.rs) must FAIL under its
+# mutant
+m_kit_shasum_path = []
+m_kit_strict_bhav_swallowed = []
+m_kit_tool_mac_path = []
+m_kit_ist_utc = []
+m_kit_read_dir_unsorted = []
+m_kit_fp_counts_only = []
+m_kit_digest_counts_only = []
+m_kit_merge_ignores_unknown = []
+m_kit_merge_tops_keeps_first_tie = []
+m_shard_plan_from_size_of = []
+m_shard_skips_last_batch = []
+m_slice_drops_extra_range = []
+m_slice_reads_outside = []
+m_sfz_drops_last_row = []
+m_merge_drops_batch = []
+m_merge_double_steps = []
+m_merge_flagged_shard_order = []
+m_merge_foreign_source = []
+m_kit_args_digest_off = []
+
+# fix:determinism (16 Nov 2026; v34/determinism/FIX-DETERMINISM.md): each breaks ONE change; its named test (testsdet.rs) must FAIL
+# DET-1: every subcommand takes the E5 switches; cube-slice --transport implies PORTABLE
+m_det_common_args_ignored = []
+m_det_slice_transport_mac = []
+# DET-2: --portable-math (implied by --shard) routes every transcendental call through the pinned libm
+m_det_pmath_unhooked = []
+m_det_shard_no_pmath = []
+m_det_rate_ln1p_platform = []
+m_det_off_ln1p_libm = []
+m_det_greeks_words_v33 = []
+m_det_bsm_carry = ["greeks/m_det_bsm_carry"]
+m_det_bsm_strike = ["greeks/m_det_bsm_strike"]
+m_det_bsm_d1 = ["greeks/m_det_bsm_d1"]
+m_det_pdf = ["greeks/m_det_pdf"]
+m_det_cdf = ["greeks/m_det_cdf"]
+
+[lints.rust]
+unsafe_code = "deny"
