@@ -1,0 +1,19 @@
+crates/wf_sweep/src/lib.rs:112:17: replace >> with << in mix
+crates/wf_sweep/src/lib.rs:113:12: replace ^ with & in mix
+crates/wf_sweep/src/lib.rs:113:12: replace ^ with | in mix
+crates/wf_sweep/src/lib.rs:113:17: replace >> with << in mix
+crates/wf_sweep/src/lib.rs:114:7: replace ^ with | in mix
+crates/wf_sweep/src/lib.rs:114:7: replace ^ with & in mix
+crates/wf_sweep/src/lib.rs:114:12: replace >> with << in mix
+crates/wf_sweep/src/acc.rs:130:37: replace - with + in Layout::months
+crates/wf_sweep/src/acc.rs:148:9: replace Layout::depth -> u32 with 0
+crates/wf_sweep/src/acc.rs:148:9: replace Layout::depth -> u32 with 1
+crates/wf_sweep/src/acc.rs:274:5: replace fix -> Result<(), SweepErr> with Ok(())
+crates/wf_sweep/src/acc.rs:274:8: delete ! in fix
+crates/wf_sweep/src/acc.rs:281:16: replace * with / in fix
+crates/wf_sweep/src/acc.rs:289:13: replace += with *= in fix
+crates/wf_sweep/src/acc.rs:297:40: replace > with >= in month_into
+crates/wf_sweep/src/acc.rs:300:37: replace > with >= in month_into
+crates/wf_sweep/src/acc.rs:300:74: replace > with >= in month_into
+crates/wf_sweep/src/acc.rs:414:9: replace SweepAcc<'a>::cols -> usize with 1
+crates/wf_sweep/src/acc.rs:414:9: replace SweepAcc<'a>::cols -> usize with 0

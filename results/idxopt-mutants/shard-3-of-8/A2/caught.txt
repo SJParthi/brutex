@@ -1,0 +1,57 @@
+crates/costs/src/option_clock.rs:157:24: replace * with / in rates_on
+crates/costs/src/option_clock.rs:162:39: replace * with / in rates_on
+crates/costs/src/option_clock.rs:165:33: replace < with == in rates_on
+crates/costs/src/option_clock.rs:165:33: replace < with > in rates_on
+crates/costs/src/option_clock.rs:162:39: replace * with + in rates_on
+crates/costs/src/option_clock.rs:165:33: replace < with <= in rates_on
+crates/costs/src/option_clock.rs:165:123: replace * with + in rates_on
+crates/costs/src/option_clock.rs:168:20: replace < with == in rates_on
+crates/costs/src/option_clock.rs:165:123: replace * with / in rates_on
+crates/costs/src/option_clock.rs:168:20: replace < with > in rates_on
+crates/costs/src/option_clock.rs:168:20: replace < with <= in rates_on
+crates/costs/src/option_clock.rs:171:73: replace * with / in rates_on
+crates/costs/src/option_clock.rs:171:73: replace * with + in rates_on
+crates/costs/src/option_clock.rs:175:83: replace * with + in rates_on
+crates/costs/src/option_clock.rs:175:83: replace * with / in rates_on
+crates/costs/src/option_clock.rs:176:32: replace < with == in rates_on
+crates/costs/src/option_clock.rs:176:32: replace < with > in rates_on
+crates/costs/src/option_clock.rs:176:32: replace < with <= in rates_on
+crates/costs/src/option_clock.rs:177:40: replace >= with < in rates_on
+crates/costs/src/option_clock.rs:177:113: replace * with + in rates_on
+crates/costs/src/option_clock.rs:177:113: replace * with / in rates_on
+crates/costs/src/option_clock.rs:177:142: replace * with + in rates_on
+crates/costs/src/option_clock.rs:177:142: replace * with / in rates_on
+crates/costs/src/option_clock.rs:190:24: replace >= with < in rates_on
+crates/costs/src/option_clock.rs:196:5: replace side -> i128 with 0
+crates/costs/src/option_clock.rs:196:5: replace side -> i128 with -1
+crates/costs/src/option_clock.rs:196:5: replace side -> i128 with 1
+crates/costs/src/option_clock.rs:196:14: replace <= with > in side
+crates/costs/src/option_clock.rs:196:27: replace <= with > in side
+crates/costs/src/option_clock.rs:199:32: replace * with + in side
+crates/costs/src/option_clock.rs:199:32: replace * with / in side
+crates/costs/src/option_clock.rs:203:5: replace rupee_up -> i128 with 0
+crates/costs/src/option_clock.rs:203:5: replace rupee_up -> i128 with 1
+crates/costs/src/option_clock.rs:203:5: replace rupee_up -> i128 with -1
+crates/costs/src/option_clock.rs:203:26: replace * with + in rupee_up
+crates/costs/src/option_clock.rs:203:26: replace * with / in rupee_up
+crates/costs/src/option_clock.rs:207:5: replace to64 -> i64 with 0
+crates/costs/src/option_clock.rs:207:5: replace to64 -> i64 with 1
+crates/costs/src/option_clock.rs:207:5: replace to64 -> i64 with -1
+crates/costs/src/option_clock.rs:215:5: replace charges -> [i64; 8] with [0; 8]
+crates/costs/src/option_clock.rs:215:5: replace charges -> [i64; 8] with [1; 8]
+crates/costs/src/option_clock.rs:215:5: replace charges -> [i64; 8] with [-1; 8]
+crates/costs/src/option_clock.rs:215:45: replace && with || in charges
+crates/costs/src/option_clock.rs:215:30: replace == with != in charges
+crates/costs/src/option_clock.rs:215:48: delete ! in charges
+crates/costs/src/option_clock.rs:216:103: replace + with - in charges
+crates/costs/src/option_clock.rs:216:103: replace + with * in charges
+crates/costs/src/option_clock.rs:216:73: replace + with - in charges
+crates/costs/src/option_clock.rs:216:73: replace + with * in charges
+crates/costs/src/option_clock.rs:216:45: replace + with - in charges
+crates/costs/src/option_clock.rs:216:45: replace + with * in charges
+crates/costs/src/option_clock.rs:217:35: replace * with + in charges
+crates/costs/src/option_clock.rs:217:35: replace * with / in charges
+crates/costs/src/option_clock.rs:218:69: replace * with + in charges
+crates/costs/src/option_clock.rs:218:69: replace * with / in charges
+crates/costs/src/option_clock.rs:219:29: replace - with + in charges
+crates/costs/src/option_clock.rs:219:29: replace - with / in charges

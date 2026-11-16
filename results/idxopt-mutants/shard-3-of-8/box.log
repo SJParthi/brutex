@@ -1,0 +1,17 @@
+BOX 2026-11-16 16:02:48 UTC manifest OK: 366 files, sha256 e082593fbc5101f8691bc68b08846e44bc5a0388be924c91d79f75416d4cff30; source commit 10dacdd629ee7052c4ca3fe2312b3af275cda172
+BOX 2026-11-16 16:02:49 UTC toolchain OK: rustc 1.97.1 (8bab26f4f 2026-07-14)
+BOX 2026-11-16 16:02:50 UTC installing cargo-mutants 27.1.0
+BOX 2026-11-16 16:03:55 UTC tool OK: cargo-mutants 27.1.0
+BOX 2026-11-16 16:03:56 UTC SETUP OK
+BOX 2026-11-16 16:04:07 UTC baseline A1 OK: 73 0 0 1
+BOX 2026-11-16 16:04:15 UTC baseline A2 OK: 440 0 2 0
+BOX 2026-11-16 16:04:20 UTC baseline B2 OK: 24 0 0 2
+BOX 2026-11-16 16:04:39 UTC baseline B1 OK: 73 0 0 4
+BOX 2026-11-16 16:04:39 UTC BASELINE OK
+BOX 2026-11-16 16:04:39 UTC set A1 start: shard 3/8
+BOX 2026-11-16 16:06:55 UTC set A1 DONE: rc 2, set=A1 mutants=283 caught=162 missed=114 timeout=0 unviable=7
+BOX 2026-11-16 16:06:55 UTC set A2 start: shard 3/8
+BOX 2026-11-16 16:07:56 UTC set A2 DONE: rc 2, set=A2 mutants=58 caught=57 missed=1 timeout=0 unviable=0
+BOX 2026-11-16 16:07:56 UTC set B2 start: shard 3/8
+BOX 2026-11-16 16:09:09 UTC set B2 DONE: rc 2, set=B2 mutants=123 caught=97 missed=19 timeout=0 unviable=7
+BOX 2026-11-16 16:09:09 UTC set B1 start: shard 3/8

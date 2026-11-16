@@ -1,0 +1,162 @@
+crates/opt_pos/src/chain.rs:124:5: replace lot_at -> (i64, &'static str) with (1, "xyzzy")
+crates/opt_pos/src/chain.rs:124:5: replace lot_at -> (i64, &'static str) with (-1, "xyzzy")
+crates/opt_pos/src/chain.rs:128:21: replace && with || in lot_at
+crates/opt_pos/src/chain.rs:128:16: replace == with != in lot_at
+crates/opt_pos/src/chain.rs:131:61: replace && with || in lot_at
+crates/opt_pos/src/chain.rs:131:57: replace > with == in lot_at
+crates/opt_pos/src/chain.rs:131:57: replace > with < in lot_at
+crates/opt_pos/src/chain.rs:131:121: replace == with != in lot_at
+crates/opt_pos/src/chain.rs:131:117: replace % with / in lot_at
+crates/opt_pos/src/chain.rs:124:5: replace lot_at -> (i64, &'static str) with (-1, "")
+crates/opt_pos/src/chain.rs:131:117: replace % with + in lot_at
+crates/opt_pos/src/chain.rs:135:28: replace * with + in lot_at
+crates/opt_pos/src/chain.rs:135:28: replace * with / in lot_at
+crates/opt_pos/src/chain.rs:135:15: replace / with % in lot_at
+crates/opt_pos/src/chain.rs:135:15: replace / with * in lot_at
+crates/opt_pos/src/chain.rs:137:10: replace == with != in lot_at
+crates/opt_pos/src/chain.rs:175:74: replace < with == in itm_fit
+crates/opt_pos/src/chain.rs:175:74: replace < with > in itm_fit
+crates/opt_pos/src/chain.rs:175:74: replace < with <= in itm_fit
+crates/opt_pos/src/chain.rs:175:94: replace > with == in itm_fit
+crates/opt_pos/src/chain.rs:175:94: replace > with < in itm_fit
+crates/opt_pos/src/chain.rs:184:22: replace += with -= in itm_fit
+crates/opt_pos/src/chain.rs:184:22: replace += with *= in itm_fit
+crates/opt_pos/src/chain.rs:185:19: replace += with *= in itm_fit
+crates/opt_pos/src/chain.rs:185:19: replace += with -= in itm_fit
+crates/opt_pos/src/chain.rs:189:16: replace == with != in itm_fit
+crates/opt_pos/src/chain.rs:194:81: replace * with + in itm_fit
+crates/opt_pos/src/chain.rs:194:81: replace * with / in itm_fit
+crates/opt_pos/src/chain.rs:194:39: replace / with % in itm_fit
+crates/opt_pos/src/chain.rs:194:39: replace / with * in itm_fit
+crates/opt_pos/src/chain.rs:196:88: replace && with || in itm_fit
+crates/opt_pos/src/chain.rs:196:76: replace && with || in itm_fit
+crates/opt_pos/src/chain.rs:196:27: replace && with || in itm_fit
+crates/opt_pos/src/chain.rs:196:12: delete ! in itm_fit
+crates/opt_pos/src/chain.rs:196:30: delete ! in itm_fit
+crates/opt_pos/src/chain.rs:196:83: replace >= with < in itm_fit
+crates/opt_pos/src/chain.rs:196:130: replace <= with > in itm_fit
+crates/opt_pos/src/chain.rs:199:13: replace += with -= in itm_fit
+crates/opt_pos/src/chain.rs:199:13: replace += with *= in itm_fit
+crates/opt_pos/src/chain.rs:200:15: replace += with -= in itm_fit
+crates/opt_pos/src/chain.rs:200:15: replace += with *= in itm_fit
+crates/opt_pos/src/intraday.rs:137:5: replace pick_intraday -> Result<Result<IPick, &'static str>, String> with Ok(Ok(Default::default()))
+crates/opt_pos/src/intraday.rs:162:39: replace == with != in pick_intraday
+crates/opt_pos/src/intraday.rs:169:33: replace == with != in e1_of
+crates/opt_pos/src/intraday.rs:176:5: replace price_level -> Result<(ILevel, u32), String> with Ok((Default::default(), 0))
+crates/opt_pos/src/intraday.rs:176:5: replace price_level -> Result<(ILevel, u32), String> with Ok((Default::default(), 1))
+crates/opt_pos/src/intraday.rs:203:19: replace += with -= in price_level
+crates/opt_pos/src/intraday.rs:226:19: replace && with || in price_level
+crates/opt_pos/src/intraday.rs:226:15: replace > with == in price_level
+crates/opt_pos/src/intraday.rs:226:15: replace > with < in price_level
+crates/opt_pos/src/intraday.rs:226:22: delete ! in price_level
+crates/opt_pos/src/intraday.rs:227:11: replace |= with &= in price_level
+crates/opt_pos/src/intraday.rs:230:11: replace |= with &= in price_level
+crates/opt_pos/src/intraday.rs:233:11: replace |= with &= in price_level
+crates/opt_pos/src/intraday.rs:248:49: replace / with % in price_level
+crates/opt_pos/src/intraday.rs:248:49: replace / with * in price_level
+crates/opt_pos/src/intraday.rs:248:40: replace * with + in price_level
+crates/opt_pos/src/intraday.rs:278:5: replace price_intraday_itm -> Result<IPriced, String> with Ok(Default::default())
+crates/opt_pos/src/intraday.rs:282:35: replace < with == in price_intraday_itm
+crates/opt_pos/src/intraday.rs:282:35: replace < with > in price_intraday_itm
+crates/opt_pos/src/intraday.rs:292:24: replace == with != in price_intraday_itm
+crates/opt_pos/src/intraday.rs:296:35: delete field flags from struct ILevel expression in price_intraday_itm
+crates/opt_pos/src/intraday.rs:296:57: replace | with & in price_intraday_itm
+crates/opt_pos/src/intraday.rs:300:23: replace += with -= in price_intraday_itm
+crates/opt_pos/src/freeze.rs:33:9: replace FreezeTable::parse -> Result<Self, String> with Ok(Default::default())
+crates/opt_pos/src/freeze.rs:35:57: replace == with != in FreezeTable::parse
+crates/opt_pos/src/freeze.rs:58:9: replace FreezeTable::units -> Option<i64> with Some(0)
+crates/opt_pos/src/freeze.rs:58:9: replace FreezeTable::units -> Option<i64> with None
+crates/opt_pos/src/freeze.rs:58:9: replace FreezeTable::units -> Option<i64> with Some(1)
+crates/opt_pos/src/freeze.rs:58:9: replace FreezeTable::units -> Option<i64> with Some(-1)
+crates/opt_pos/src/freeze.rs:58:60: replace <= with > in FreezeTable::units
+crates/opt_pos/src/freeze.rs:64:9: replace FreezeTable::max_one_order -> Option<i64> with None
+crates/opt_pos/src/freeze.rs:64:9: replace FreezeTable::max_one_order -> Option<i64> with Some(0)
+crates/opt_pos/src/freeze.rs:64:9: replace FreezeTable::max_one_order -> Option<i64> with Some(1)
+crates/opt_pos/src/freeze.rs:64:9: replace FreezeTable::max_one_order -> Option<i64> with Some(-1)
+crates/opt_pos/src/freeze.rs:65:14: replace > with == in FreezeTable::max_one_order
+crates/opt_pos/src/freeze.rs:65:14: replace > with < in FreezeTable::max_one_order
+crates/opt_pos/src/freeze.rs:65:37: replace * with + in FreezeTable::max_one_order
+crates/opt_pos/src/freeze.rs:65:37: replace * with / in FreezeTable::max_one_order
+crates/opt_pos/src/freeze.rs:65:30: replace / with % in FreezeTable::max_one_order
+crates/opt_pos/src/freeze.rs:65:30: replace / with * in FreezeTable::max_one_order
+crates/opt_pos/src/freeze.rs:72:9: replace FreezeTable::strict_min -> Option<i64> with None
+crates/opt_pos/src/freeze.rs:72:9: replace FreezeTable::strict_min -> Option<i64> with Some(0)
+crates/opt_pos/src/freeze.rs:72:9: replace FreezeTable::strict_min -> Option<i64> with Some(1)
+crates/opt_pos/src/freeze.rs:72:9: replace FreezeTable::strict_min -> Option<i64> with Some(-1)
+crates/opt_pos/src/freeze.rs:72:98: replace || with && in FreezeTable::strict_min
+crates/opt_pos/src/freeze.rs:72:94: replace < with == in FreezeTable::strict_min
+crates/opt_pos/src/freeze.rs:72:94: replace < with > in FreezeTable::strict_min
+crates/opt_pos/src/freeze.rs:72:108: replace <= with > in FreezeTable::strict_min
+crates/opt_pos/src/freeze.rs:73:55: replace <= with > in FreezeTable::strict_min
+crates/opt_pos/src/freeze.rs:74:45: replace > with == in FreezeTable::strict_min
+crates/opt_pos/src/freeze.rs:74:45: replace > with < in FreezeTable::strict_min
+crates/opt_pos/src/freeze.rs:74:59: replace <= with > in FreezeTable::strict_min
+crates/opt_pos/src/ladder.rs:31:5: replace runs -> Result<Vec<i64>, String> with Ok(vec![])
+crates/opt_pos/src/ladder.rs:31:5: replace runs -> Result<Vec<i64>, String> with Ok(vec![0])
+crates/opt_pos/src/ladder.rs:31:5: replace runs -> Result<Vec<i64>, String> with Ok(vec![1])
+crates/opt_pos/src/ladder.rs:31:5: replace runs -> Result<Vec<i64>, String> with Ok(vec![-1])
+crates/opt_pos/src/ladder.rs:39:30: replace + with - in runs
+crates/opt_pos/src/ladder.rs:39:30: replace + with * in runs
+crates/opt_pos/src/ladder.rs:39:34: replace * with + in runs
+crates/opt_pos/src/ladder.rs:39:34: replace * with / in runs
+crates/opt_pos/src/ladder.rs:56:51: replace || with && in Ladder::parse
+crates/opt_pos/src/ladder.rs:54:9: replace Ladder::parse -> Result<Self, String> with Ok(Default::default())
+crates/opt_pos/src/ladder.rs:68:32: replace == with != in Ladder::parse
+crates/opt_pos/src/ladder.rs:78:9: replace Ladder::get -> Option<&LadderRow> with None
+crates/opt_pos/src/ladder.rs:78:9: replace Ladder::get -> Option<&LadderRow> with Some(Box::leak(Box::new(Default::default())))
+crates/opt_pos/src/ladder.rs:108:5: replace file_before -> Option<Day> with None
+crates/opt_pos/src/ladder.rs:108:5: replace file_before -> Option<Day> with Some(Default::default())
+crates/opt_pos/src/ladder.rs:108:122: replace < with == in file_before
+crates/opt_pos/src/ladder.rs:108:122: replace < with > in file_before
+crates/opt_pos/src/ladder.rs:108:122: replace < with <= in file_before
+crates/opt_pos/src/newpx.rs:46:18: replace < with == in NewpxDay::parse
+crates/opt_pos/src/newpx.rs:43:9: replace NewpxDay::parse -> Result<Self, String> with Ok(Default::default())
+crates/opt_pos/src/newpx.rs:46:18: replace < with > in NewpxDay::parse
+crates/opt_pos/src/newpx.rs:46:18: replace < with <= in NewpxDay::parse
+crates/opt_pos/src/newpx.rs:60:9: replace NewpxDay::open -> Result<Option<Self>, String> with Ok(None)
+crates/opt_pos/src/newpx.rs:60:9: replace NewpxDay::open -> Result<Option<Self>, String> with Ok(Some(Default::default()))
+crates/opt_pos/src/newpx.rs:71:9: replace NewpxDay::get -> Option<&[NewSec]> with None
+crates/opt_pos/src/newpx.rs:71:9: replace NewpxDay::get -> Option<&[NewSec]> with Some(Vec::leak(Vec::new()))
+crates/opt_pos/src/newpx.rs:71:9: replace NewpxDay::get -> Option<&[NewSec]> with Some(Vec::leak(vec![Default::default()]))
+crates/opt_pos/src/newpx.rs:77:9: replace NewpxDay::len -> usize with 0
+crates/opt_pos/src/newpx.rs:77:9: replace NewpxDay::len -> usize with 1
+crates/opt_pos/src/newpx.rs:108:9: replace FailKind::parse -> Option<Self> with None
+crates/opt_pos/src/newpx.rs:109:13: delete match arm "both" in FailKind::parse
+crates/opt_pos/src/newpx.rs:111:13: delete match arm "store_only" in FailKind::parse
+crates/opt_pos/src/newpx.rs:112:13: delete match arm "missing" in FailKind::parse
+crates/opt_pos/src/newpx.rs:114:13: delete match arm "unchecked" in FailKind::parse
+crates/opt_pos/src/newpx.rs:144:5: replace quad -> Option<Quad> with None
+crates/opt_pos/src/newpx.rs:144:5: replace quad -> Option<Quad> with Some(Default::default())
+crates/opt_pos/src/newpx.rs:144:32: replace + with - in quad
+crates/opt_pos/src/newpx.rs:144:32: replace + with * in quad
+crates/opt_pos/src/newpx.rs:145:13: replace == with != in quad
+crates/opt_pos/src/newpx.rs:152:5: replace hms -> Option<i64> with None
+crates/opt_pos/src/newpx.rs:152:5: replace hms -> Option<i64> with Some(0)
+crates/opt_pos/src/newpx.rs:152:5: replace hms -> Option<i64> with Some(1)
+crates/opt_pos/src/newpx.rs:152:5: replace hms -> Option<i64> with Some(-1)
+crates/opt_pos/src/newpx.rs:154:9: delete match arm [h, m, s] in hms
+crates/opt_pos/src/newpx.rs:154:45: replace + with - in hms
+crates/opt_pos/src/newpx.rs:154:45: replace + with * in hms
+crates/opt_pos/src/newpx.rs:154:36: replace + with - in hms
+crates/opt_pos/src/newpx.rs:154:36: replace + with * in hms
+crates/opt_pos/src/newpx.rs:154:29: replace * with + in hms
+crates/opt_pos/src/newpx.rs:154:29: replace * with / in hms
+crates/opt_pos/src/newpx.rs:154:40: replace * with + in hms
+crates/opt_pos/src/newpx.rs:154:40: replace * with / in hms
+crates/opt_pos/src/newpx.rs:165:9: replace Fails::add -> Result<(), String> with Ok(())
+crates/opt_pos/src/newpx.rs:166:44: replace || with && in Fails::add
+crates/opt_pos/src/newpx.rs:180:17: delete match arm FailKind::Both | FailKind::TicksOnly | FailKind::StoreOnly in Fails::add
+crates/opt_pos/src/newpx.rs:191:9: replace Fails::get -> &[FailRow] with Vec::leak(Vec::new())
+crates/opt_pos/src/newpx.rs:228:5: replace worse -> Quad with Default::default()
+crates/opt_pos/src/newpx.rs:240:36: replace == with != in day_rows
+crates/opt_pos/src/newpx.rs:243:24: replace && with || in day_rows
+crates/opt_pos/src/newpx.rs:247:47: replace && with || in day_rows
+crates/opt_pos/src/newpx.rs:247:37: replace && with || in day_rows
+crates/opt_pos/src/newpx.rs:247:29: replace >= with < in day_rows
+crates/opt_pos/src/newpx.rs:247:42: replace < with == in day_rows
+crates/opt_pos/src/newpx.rs:247:42: replace < with > in day_rows
+crates/opt_pos/src/newpx.rs:247:50: delete ! in day_rows
+crates/opt_pos/src/newpx.rs:247:84: replace && with || in day_rows
+crates/opt_pos/src/newpx.rs:247:79: replace >= with < in day_rows
+crates/opt_pos/src/newpx.rs:247:89: replace < with == in day_rows
+crates/opt_pos/src/newpx.rs:247:89: replace < with > in day_rows

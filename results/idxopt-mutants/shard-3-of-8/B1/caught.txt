@@ -1,0 +1,106 @@
+crates/sniper_host/src/instr.rs:143:5: replace opt -> Option<&'a str> with None
+crates/sniper_host/src/instr.rs:143:5: replace opt -> Option<&'a str> with Some("")
+crates/sniper_host/src/instr.rs:143:5: replace opt -> Option<&'a str> with Some("xyzzy")
+crates/sniper_host/src/instr.rs:143:47: delete ! in opt
+crates/sniper_host/src/instr.rs:147:5: replace symbol_ok -> bool with false
+crates/sniper_host/src/instr.rs:147:5: delete ! in symbol_ok
+crates/sniper_host/src/instr.rs:147:30: replace <= with > in symbol_ok
+crates/sniper_host/src/instr.rs:147:80: replace || with && in symbol_ok
+crates/sniper_host/src/instr.rs:164:19: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:164:14: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:164:28: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:174:43: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:174:29: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:174:13: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:174:38: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:174:46: delete ! in law_rows
+crates/sniper_host/src/instr.rs:177:43: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:177:29: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:177:13: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:177:38: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:177:46: delete ! in law_rows
+crates/sniper_host/src/instr.rs:184:56: replace || with && in law_rows
+crates/sniper_host/src/instr.rs:184:43: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:184:25: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:184:85: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:184:65: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:185:16: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:185:19: delete ! in law_rows
+crates/sniper_host/src/instr.rs:191:77: replace || with && in law_rows
+crates/sniper_host/src/instr.rs:191:41: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:191:25: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:191:47: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:191:102: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:191:86: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:191:108: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:192:16: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:192:19: delete ! in law_rows
+crates/sniper_host/src/instr.rs:197:66: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:197:31: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:197:13: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:197:69: delete ! in law_rows
+crates/sniper_host/src/instr.rs:201:93: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:201:29: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:201:64: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:201:13: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:201:96: delete ! in law_rows
+crates/sniper_host/src/instr.rs:205:63: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:205:36: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:205:66: delete ! in law_rows
+crates/sniper_host/src/instr.rs:207:12: delete ! in law_rows
+crates/sniper_host/src/instr.rs:212:27: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:212:13: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:212:30: delete ! in law_rows
+crates/sniper_host/src/instr.rs:214:26: replace || with && in law_rows
+crates/sniper_host/src/instr.rs:214:16: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:214:35: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:214:48: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:223:15: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:224:12: delete ! in law_rows
+crates/sniper_host/src/instr.rs:228:13: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:229:38: replace != with == in law_rows
+crates/sniper_host/src/instr.rs:235:37: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:235:17: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:240:16: delete ! in law_rows
+crates/sniper_host/src/instr.rs:261:12: delete ! in Instrument::from_rows
+crates/sniper_host/src/instr.rs:277:9: replace Instrument::underlying -> &str with ""
+crates/sniper_host/src/instr.rs:277:9: replace Instrument::underlying -> &str with "xyzzy"
+crates/sniper_host/src/instr.rs:287:9: replace Instrument::cash_tick_member -> String with String::new()
+crates/sniper_host/src/instr.rs:287:9: replace Instrument::cash_tick_member -> String with "xyzzy".into()
+crates/sniper_host/src/instr.rs:313:9: replace Instrument::require_built -> Result<(), String> with Ok(())
+crates/sniper_host/src/instr.rs:315:29: replace match guard !cfg!(feature = "m_s7w4_refuse_idx") with false in Instrument::require_built
+crates/sniper_host/src/instr.rs:315:29: delete ! in Instrument::require_built
+crates/sniper_host/src/law.rs:18:13: replace == with != in load
+crates/sniper_host/src/law.rs:21:13: replace == with != in load
+crates/sniper_host/src/monitor.rs:22:5: replace mb -> Option<u64> with None
+crates/sniper_host/src/monitor.rs:22:5: replace mb -> Option<u64> with Some(0)
+crates/sniper_host/src/monitor.rs:22:5: replace mb -> Option<u64> with Some(1)
+crates/sniper_host/src/monitor.rs:37:5: replace parse_swap -> Option<(u64, u64)> with None
+crates/sniper_host/src/monitor.rs:37:5: replace parse_swap -> Option<(u64, u64)> with Some((0, 0))
+crates/sniper_host/src/monitor.rs:37:5: replace parse_swap -> Option<(u64, u64)> with Some((0, 1))
+crates/sniper_host/src/monitor.rs:37:5: replace parse_swap -> Option<(u64, u64)> with Some((1, 0))
+crates/sniper_host/src/monitor.rs:37:5: replace parse_swap -> Option<(u64, u64)> with Some((1, 1))
+crates/sniper_host/src/monitor.rs:39:41: replace + with - in parse_swap
+crates/sniper_host/src/monitor.rs:39:41: replace + with * in parse_swap
+crates/sniper_host/src/monitor.rs:39:28: replace + with - in parse_swap
+crates/sniper_host/src/monitor.rs:39:28: replace + with * in parse_swap
+crates/sniper_host/src/newday.rs:31:49: replace += with -= in TestSums::add
+crates/sniper_host/src/newday.rs:43:5: replace append_day -> Result<String, String> with Ok(String::new())
+crates/sniper_host/src/newday.rs:43:5: replace append_day -> Result<String, String> with Ok("xyzzy".into())
+crates/sniper_host/src/newday.rs:45:20: replace != with == in append_day
+crates/sniper_host/src/posgroups.rs:45:33: replace && with || in ctx_of
+crates/sniper_host/src/posgroups.rs:62:5: replace st_stream -> Result<Vec<StC>, String> with Ok(vec![])
+crates/sniper_host/src/posgroups.rs:120:5: replace exit_of -> Option<usize> with None
+crates/sniper_host/src/posgroups.rs:120:5: replace exit_of -> Option<usize> with Some(0)
+crates/sniper_host/src/posgroups.rs:120:5: replace exit_of -> Option<usize> with Some(1)
+crates/sniper_host/src/posgroups.rs:123:34: replace == with != in exit_of
+crates/sniper_host/src/posgroups.rs:123:42: delete ! in exit_of
+crates/sniper_host/src/posgroups.rs:124:27: replace + with - in exit_of
+crates/sniper_host/src/posgroups.rs:124:27: replace + with * in exit_of
+crates/sniper_host/src/posgroups.rs:126:27: replace && with || in exit_of
+crates/sniper_host/src/posgroups.rs:126:41: replace || with && in exit_of
+crates/sniper_host/src/posgroups.rs:126:49: replace == with != in exit_of
+crates/sniper_host/src/posgroups.rs:126:57: delete ! in exit_of
+crates/sniper_host/src/posgroups.rs:129:19: replace += with -= in exit_of
+crates/sniper_host/src/posgroups.rs:134:38: replace == with != in exit_of
+crates/sniper_host/src/posgroups.rs:135:27: replace + with - in exit_of

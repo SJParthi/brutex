@@ -1,0 +1,75 @@
+crates/sniper_host/src/idxpos.rs:1571:44: replace >= with < in context_pos
+crates/sniper_host/src/idxpos.rs:1572:27: replace += with *= in context_pos
+crates/sniper_host/src/idxpos.rs:1572:27: replace += with -= in context_pos
+crates/sniper_host/src/idxpos.rs:1613:22: replace += with -= in context_pos
+crates/sniper_host/src/idxpos.rs:1613:22: replace += with *= in context_pos
+crates/sniper_host/src/idxpos.rs:1614:22: replace += with -= in context_pos
+crates/sniper_host/src/idxpos.rs:1614:22: replace += with *= in context_pos
+crates/sniper_host/src/idxpos.rs:1615:17: replace += with -= in context_pos
+crates/sniper_host/src/idxpos.rs:1615:17: replace += with *= in context_pos
+crates/sniper_host/src/idxpos.rs:1615:35: replace && with || in context_pos
+crates/sniper_host/src/instr.rs:147:5: replace symbol_ok -> bool with true
+crates/sniper_host/src/instr.rs:147:36: replace && with || in symbol_ok
+crates/sniper_host/src/instr.rs:147:19: replace && with || in symbol_ok
+crates/sniper_host/src/instr.rs:147:115: replace || with && in symbol_ok
+crates/sniper_host/src/instr.rs:147:102: replace || with && in symbol_ok
+crates/sniper_host/src/instr.rs:147:107: replace == with != in symbol_ok
+crates/sniper_host/src/instr.rs:147:120: replace == with != in symbol_ok
+crates/sniper_host/src/instr.rs:214:40: replace || with && in law_rows
+crates/sniper_host/src/instr.rs:240:75: replace == with != in law_rows
+crates/sniper_host/src/instr.rs:249:5: replace declined_line -> bool with true
+crates/sniper_host/src/instr.rs:249:5: replace declined_line -> bool with false
+crates/sniper_host/src/instr.rs:249:90: replace && with || in declined_line
+crates/sniper_host/src/instr.rs:296:9: replace Instrument::check_cash_files -> Result<(), String> with Ok(())
+crates/sniper_host/src/instr.rs:298:28: replace match guard v == want with true in Instrument::check_cash_files
+crates/sniper_host/src/instr.rs:298:28: replace match guard v == want with false in Instrument::check_cash_files
+crates/sniper_host/src/instr.rs:298:30: replace == with != in Instrument::check_cash_files
+crates/sniper_host/src/instr.rs:315:29: replace match guard !cfg!(feature = "m_s7w4_refuse_idx") with true in Instrument::require_built
+crates/sniper_host/src/monitor.rs:12:5: replace out -> Option<String> with None
+crates/sniper_host/src/monitor.rs:12:5: replace out -> Option<String> with Some(String::new())
+crates/sniper_host/src/monitor.rs:12:5: replace out -> Option<String> with Some("xyzzy".into())
+crates/sniper_host/src/monitor.rs:18:5: replace pressure -> Option<u32> with None
+crates/sniper_host/src/monitor.rs:18:5: replace pressure -> Option<u32> with Some(0)
+crates/sniper_host/src/monitor.rs:18:5: replace pressure -> Option<u32> with Some(1)
+crates/sniper_host/src/monitor.rs:30:5: replace swap -> Option<(u64, u64)> with None
+crates/sniper_host/src/monitor.rs:30:5: replace swap -> Option<(u64, u64)> with Some((0, 0))
+crates/sniper_host/src/monitor.rs:30:5: replace swap -> Option<(u64, u64)> with Some((0, 1))
+crates/sniper_host/src/monitor.rs:30:5: replace swap -> Option<(u64, u64)> with Some((1, 0))
+crates/sniper_host/src/monitor.rs:30:5: replace swap -> Option<(u64, u64)> with Some((1, 1))
+crates/sniper_host/src/monitor.rs:48:5: replace disk_free_gib -> Option<u64> with None
+crates/sniper_host/src/monitor.rs:48:5: replace disk_free_gib -> Option<u64> with Some(0)
+crates/sniper_host/src/monitor.rs:48:5: replace disk_free_gib -> Option<u64> with Some(1)
+crates/sniper_host/src/monitor.rs:75:5: replace launch_gate -> Result<Gate, String> with Ok(Default::default())
+crates/sniper_host/src/monitor.rs:75:24: delete field pressure from struct Gate expression in launch_gate
+crates/sniper_host/src/monitor.rs:75:46: delete field disk_free_gib from struct Gate expression in launch_gate
+crates/sniper_host/src/monitor.rs:85:20: replace match guard p <= pmax with true in launch_gate
+crates/sniper_host/src/monitor.rs:85:20: replace match guard p <= pmax with false in launch_gate
+crates/sniper_host/src/monitor.rs:85:22: replace <= with > in launch_gate
+crates/sniper_host/src/monitor.rs:90:20: replace match guard u <= swap_base_mb + growth with true in launch_gate
+crates/sniper_host/src/monitor.rs:90:20: replace match guard u <= swap_base_mb + growth with false in launch_gate
+crates/sniper_host/src/monitor.rs:90:22: replace <= with > in launch_gate
+crates/sniper_host/src/monitor.rs:90:38: replace + with - in launch_gate
+crates/sniper_host/src/monitor.rs:90:38: replace + with * in launch_gate
+crates/sniper_host/src/monitor.rs:95:14: replace < with == in launch_gate
+crates/sniper_host/src/monitor.rs:95:14: replace < with > in launch_gate
+crates/sniper_host/src/monitor.rs:95:14: replace < with <= in launch_gate
+crates/sniper_host/src/monitor.rs:100:20: replace match guard d >= floor + extra_gib with true in launch_gate
+crates/sniper_host/src/monitor.rs:100:20: replace match guard d >= floor + extra_gib with false in launch_gate
+crates/sniper_host/src/monitor.rs:100:22: replace >= with < in launch_gate
+crates/sniper_host/src/monitor.rs:100:31: replace + with - in launch_gate
+crates/sniper_host/src/monitor.rs:100:31: replace + with * in launch_gate
+crates/sniper_host/src/monitor.rs:111:5: replace rss_mb -> Option<u64> with None
+crates/sniper_host/src/monitor.rs:111:5: replace rss_mb -> Option<u64> with Some(0)
+crates/sniper_host/src/monitor.rs:111:5: replace rss_mb -> Option<u64> with Some(1)
+crates/sniper_host/src/monitor.rs:111:124: replace / with % in rss_mb
+crates/sniper_host/src/monitor.rs:111:124: replace / with * in rss_mb
+crates/sniper_host/src/monitor.rs:119:5: replace heartbeat -> Result<(), String> with Ok(())
+crates/sniper_host/src/monitor.rs:119:15: delete ! in heartbeat
+crates/sniper_host/src/newday.rs:28:9: replace TestSums::add -> Result<(), String> with Ok(())
+crates/sniper_host/src/newday.rs:31:49: replace += with *= in TestSums::add
+crates/sniper_host/src/posgroups.rs:39:28: replace != with == in ctx_of
+crates/sniper_host/src/posgroups.rs:76:32: replace + with * in st_stream
+crates/sniper_host/src/posgroups.rs:76:32: replace + with - in st_stream
+crates/sniper_host/src/posgroups.rs:99:9: replace Rule::id -> &'static str with ""
+crates/sniper_host/src/posgroups.rs:99:9: replace Rule::id -> &'static str with "xyzzy"
+crates/sniper_host/src/posgroups.rs:135:27: replace + with * in exit_of

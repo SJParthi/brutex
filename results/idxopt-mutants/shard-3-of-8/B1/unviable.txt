@@ -1,0 +1,10 @@
+crates/sniper_host/src/instr.rs:156:5: replace law_rows -> Result<(Kind, Hold, u8), String> with Ok((Default::default(), Default::default(), 0))
+crates/sniper_host/src/instr.rs:156:5: replace law_rows -> Result<(Kind, Hold, u8), String> with Ok((Default::default(), Default::default(), 1))
+crates/sniper_host/src/instr.rs:224:9: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:223:9: replace && with || in law_rows
+crates/sniper_host/src/instr.rs:258:9: replace Instrument::from_rows -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/law.rs:18:5: replace load -> Result<HostLaw, String> with Ok(Default::default())
+crates/sniper_host/src/monitor.rs:95:9: replace && with || in launch_gate
+crates/sniper_host/src/posgroups.rs:37:5: replace ctx_of -> CandleCtx with Default::default()
+crates/sniper_host/src/posgroups.rs:51:5: replace cfg_a -> SeriesCfg with Default::default()
+crates/sniper_host/src/posgroups.rs:62:5: replace st_stream -> Result<Vec<StC>, String> with Ok(vec![Default::default()])

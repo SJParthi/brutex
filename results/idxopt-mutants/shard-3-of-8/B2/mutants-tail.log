@@ -1,0 +1,23 @@
+Found 123 mutants to test
+ok       Unmutated baseline in 2s build + 1s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/wf_sweep/src/lib.rs:112:17: replace >> with << in mix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lib.rs:113:12: replace ^ with & in mix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lib.rs:113:12: replace ^ with | in mix in 3s build + 1s test
+MISSED   crates/wf_sweep/src/lib.rs:113:17: replace >> with << in mix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lib.rs:114:7: replace ^ with | in mix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lib.rs:114:7: replace ^ with & in mix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lib.rs:114:12: replace >> with << in mix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:130:37: replace - with + in Layout::months in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:148:9: replace Layout::depth -> u32 with 0 in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:148:9: replace Layout::depth -> u32 with 1 in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:274:5: replace fix -> Result<(), SweepErr> with Ok(()) in 0s build + 3s test
+MISSED   crates/wf_sweep/src/acc.rs:274:8: delete ! in fix in 0s build + 2s test
+MISSED   crates/wf_sweep/src/acc.rs:281:16: replace * with / in fix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:289:13: replace += with *= in fix in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:297:40: replace > with >= in month_into in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:300:37: replace > with >= in month_into in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:300:74: replace > with >= in month_into in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:414:9: replace SweepAcc<'a>::cols -> usize with 1 in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:414:9: replace SweepAcc<'a>::cols -> usize with 0 in 0s build + 1s test
+123 mutants tested in 72s: 19 missed, 97 caught, 7 unviable

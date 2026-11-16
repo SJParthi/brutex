@@ -1,0 +1,7 @@
+crates/opt_pos/src/chain.rs:175:5: replace itm_fit -> Result<ItmPick, String> with Ok(Default::default())
+crates/opt_pos/src/freeze.rs:80:9: replace FreezeTable::rows -> &[FreezeRow] with Vec::leak(vec![Default::default()])
+crates/opt_pos/src/newpx.rs:108:9: replace FailKind::parse -> Option<Self> with Some(Default::default())
+crates/opt_pos/src/newpx.rs:191:9: replace Fails::get -> &[FailRow] with Vec::leak(vec![Default::default()])
+crates/opt_pos/src/newpx.rs:196:9: replace Fails::keys -> impl Iterator<Item =&(String, Day)> with ::std::iter::once(Box::leak(Box::new((String::new(), Default::default()))))
+crates/opt_pos/src/newpx.rs:196:9: replace Fails::keys -> impl Iterator<Item =&(String, Day)> with ::std::iter::once(Box::leak(Box::new(("xyzzy".into(), Default::default()))))
+crates/opt_pos/src/newpx.rs:239:5: replace day_rows -> DayRows with Default::default()

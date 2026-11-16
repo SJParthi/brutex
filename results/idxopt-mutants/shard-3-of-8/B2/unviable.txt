@@ -1,0 +1,7 @@
+crates/wf_sweep/src/acc.rs:140:9: replace Layout::new_pos -> Result<Self, SweepErr> with Ok(Default::default())
+crates/wf_sweep/src/acc.rs:165:9: replace Node::combine -> Result<Self, SweepErr> with Ok(Default::default())
+crates/wf_sweep/src/acc.rs:175:9: replace Node::combine_fast -> Result<Self, SweepErr> with Ok(Default::default())
+crates/wf_sweep/src/acc.rs:270:40: replace / with *
+crates/wf_sweep/src/acc.rs:308:5: replace value -> Result<Node, SweepErr> with Ok(Default::default())
+crates/wf_sweep/src/acc.rs:420:9: replace SweepAcc<'a>::layout -> &Layout with Box::leak(Box::new(Default::default()))
+crates/wf_sweep/src/acc.rs:429:9: replace SweepAcc<'a>::new_eager -> Result<Self, SweepErr> with Ok(Default::default())
