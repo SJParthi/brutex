@@ -1,0 +1,3 @@
+crates/spikefade/src/report3.rs:3420:16: delete field x from struct Sum expression in twin10
+crates/spikefade/src/report3.rs:3707:41: delete field money from struct RowX expression in trade_row
+crates/spikefade/src/stage.rs:139:29: delete field units from struct Trip expression in held_trip
