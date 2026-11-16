@@ -424,3 +424,21 @@ crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i6
 crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, 1, -1, false))
 crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, 0, true))
 crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, 0, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, 1, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, -1, true))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, -1, false))
+crates/spikefade/src/gk.rs:56:51: replace < with > in TBill::rate_for
+crates/spikefade/src/gk.rs:56:51: replace < with <= in TBill::rate_for
+crates/spikefade/src/gk.rs:58:25: replace - with + in TBill::rate_for
+crates/spikefade/src/gk.rs:58:25: replace - with / in TBill::rate_for
+crates/spikefade/src/gk.rs:58:38: replace > with == in TBill::rate_for
+crates/spikefade/src/gk.rs:58:38: replace > with < in TBill::rate_for
+crates/spikefade/src/gk.rs:58:38: replace > with >= in TBill::rate_for
+crates/spikefade/src/gk.rs:58:34: replace - with / in TBill::rate_for
+crates/spikefade/src/gk.rs:65:5: replace ye4_of -> Option<u32> with None
+crates/spikefade/src/gk.rs:65:5: replace ye4_of -> Option<u32> with Some(0)
+crates/spikefade/src/gk.rs:67:20: replace || with && in ye4_of
+crates/spikefade/src/gk.rs:67:16: replace > with < in ye4_of
+crates/spikefade/src/gk.rs:67:16: replace > with >= in ye4_of
+crates/spikefade/src/gk.rs:71:22: replace < with == in ye4_of
+crates/spikefade/src/gk.rs:71:22: replace < with <= in ye4_of
