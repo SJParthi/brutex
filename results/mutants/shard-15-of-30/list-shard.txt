@@ -1,0 +1,815 @@
+crates/spikefade/src/gk.rs:80:20: replace / with * in continuous
+crates/spikefade/src/gk.rs:81:38: replace / with % in continuous
+crates/spikefade/src/gk.rs:81:38: replace / with * in continuous
+crates/spikefade/src/gk.rs:82:28: replace / with % in continuous
+crates/spikefade/src/gk.rs:82:28: replace / with * in continuous
+crates/spikefade/src/gk.rs:82:13: replace * with + in continuous
+crates/spikefade/src/gk.rs:82:13: replace * with / in continuous
+crates/spikefade/src/gk.rs:113:5: replace bar_greeks -> G with Default::default()
+crates/spikefade/src/gk.rs:113:27: replace * with + in bar_greeks
+crates/spikefade/src/gk.rs:113:27: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:116:32: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:116:32: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:117:25: replace < with == in bar_greeks
+crates/spikefade/src/gk.rs:117:25: replace < with > in bar_greeks
+crates/spikefade/src/gk.rs:117:25: replace < with <= in bar_greeks
+crates/spikefade/src/gk.rs:117:34: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:117:34: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:118:21: delete field rate from struct G expression in bar_greeks
+crates/spikefade/src/gk.rs:118:27: delete field years from struct G expression in bar_greeks
+crates/spikefade/src/gk.rs:118:34: delete field below_band from struct G expression in bar_greeks
+crates/spikefade/src/gk.rs:119:115: replace <= with > in bar_greeks
+crates/spikefade/src/gk.rs:137:33: replace * with + in bar_greeks
+crates/spikefade/src/gk.rs:137:33: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:138:41: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:138:41: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:138:33: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:138:33: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:139:39: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:139:39: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:139:31: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:139:31: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:140:37: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:140:37: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:140:29: replace / with % in bar_greeks
+crates/spikefade/src/gk.rs:140:29: replace / with * in bar_greeks
+crates/spikefade/src/gk.rs:141:35: replace * with + in bar_greeks
+crates/spikefade/src/gk.rs:141:35: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:142:37: replace * with + in bar_greeks
+crates/spikefade/src/gk.rs:142:37: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:143:37: replace * with + in bar_greeks
+crates/spikefade/src/gk.rs:143:37: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:144:35: replace * with + in bar_greeks
+crates/spikefade/src/gk.rs:144:35: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:145:33: replace * with + in bar_greeks
+crates/spikefade/src/gk.rs:145:33: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:155:5: replace close_of_expiry -> i64 with 0
+crates/spikefade/src/gk.rs:155:5: replace close_of_expiry -> i64 with 1
+crates/spikefade/src/gk.rs:155:5: replace close_of_expiry -> i64 with -1
+crates/spikefade/src/gk.rs:155:19: replace >= with < in close_of_expiry
+crates/spikefade/src/gk.rs:155:63: replace + with - in close_of_expiry
+crates/spikefade/src/gk.rs:155:63: replace + with * in close_of_expiry
+crates/spikefade/src/gk.rs:155:55: replace * with + in close_of_expiry
+crates/spikefade/src/gk.rs:155:55: replace * with / in close_of_expiry
+crates/spikefade/src/gk.rs:155:68: replace * with + in close_of_expiry
+crates/spikefade/src/gk.rs:155:68: replace * with / in close_of_expiry
+crates/spikefade/src/gk.rs:155:93: replace + with - in close_of_expiry
+crates/spikefade/src/gk.rs:155:93: replace + with * in close_of_expiry
+crates/spikefade/src/gk.rs:155:85: replace * with + in close_of_expiry
+crates/spikefade/src/gk.rs:155:85: replace * with / in close_of_expiry
+crates/spikefade/src/gk.rs:155:98: replace * with + in close_of_expiry
+crates/spikefade/src/gk.rs:155:98: replace * with / in close_of_expiry
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with None
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 0, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, 1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 0, -1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 0, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, 1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, 1, -1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 0, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, 1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((0, -1, -1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 0, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, 1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 0, -1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 0, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, 1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, 1, -1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 0, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, 1, -1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, 0, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, 0, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, 0, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, 1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, 1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, 1, -1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, -1, 0))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, -1, 1))
+crates/spikefade/src/gk.rs:162:5: replace inputs_at -> Option<(usize, i64, i64, i64, i64)> with Some((1, -1, -1, -1, -1))
+crates/spikefade/src/gk.rs:163:39: replace - with + in inputs_at
+crates/spikefade/src/gk.rs:163:39: replace - with / in inputs_at
+crates/spikefade/src/gk.rs:163:35: replace - with + in inputs_at
+crates/spikefade/src/gk.rs:163:35: replace - with / in inputs_at
+crates/spikefade/src/gk.rs:164:10: replace >= with < in inputs_at
+crates/spikefade/src/gk.rs:167:36: replace + with - in inputs_at
+crates/spikefade/src/gk.rs:167:36: replace + with * in inputs_at
+crates/spikefade/src/gk.rs:167:41: replace * with + in inputs_at
+crates/spikefade/src/gk.rs:167:41: replace * with / in inputs_at
+crates/spikefade/src/gk.rs:172:72: replace + with - in inputs_at
+crates/spikefade/src/gk.rs:172:72: replace + with * in inputs_at
+crates/spikefade/src/gk.rs:173:61: replace - with + in inputs_at
+crates/spikefade/src/gk.rs:173:61: replace - with / in inputs_at
+crates/spikefade/src/gk.rs:173:39: replace + with - in inputs_at
+crates/spikefade/src/gk.rs:173:39: replace + with * in inputs_at
+crates/spikefade/src/gk.rs:173:30: replace * with + in inputs_at
+crates/spikefade/src/gk.rs:173:30: replace * with / in inputs_at
+crates/spikefade/src/gk.rs:173:21: replace - with + in inputs_at
+crates/spikefade/src/gk.rs:173:21: replace - with / in inputs_at
+crates/spikefade/src/gk.rs:183:5: replace cmd_greeks_tsv -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/gk.rs:183:5: replace cmd_greeks_tsv -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/gk.rs:189:35: replace || with && in cmd_greeks_tsv
+crates/spikefade/src/gk.rs:194:20: replace < with == in cmd_greeks_tsv
+crates/spikefade/src/gk.rs:194:20: replace < with > in cmd_greeks_tsv
+crates/spikefade/src/gk.rs:194:20: replace < with <= in cmd_greeks_tsv
+crates/spikefade/src/v32.rs:72:5: replace mark_at -> i64 with 0
+crates/spikefade/src/v32.rs:72:5: replace mark_at -> i64 with 1
+crates/spikefade/src/v32.rs:72:5: replace mark_at -> i64 with -1
+crates/spikefade/src/v32.rs:72:14: replace == with != in mark_at
+crates/spikefade/src/v32.rs:75:61: replace / with % in mark_at
+crates/spikefade/src/v32.rs:75:61: replace / with * in mark_at
+crates/spikefade/src/v32.rs:75:39: replace - with + in mark_at
+crates/spikefade/src/v32.rs:75:39: replace - with / in mark_at
+crates/spikefade/src/v32.rs:76:10: replace < with == in mark_at
+crates/spikefade/src/v32.rs:76:10: replace < with > in mark_at
+crates/spikefade/src/v32.rs:76:10: replace < with <= in mark_at
+crates/spikefade/src/v32.rs:79:31: replace - with + in mark_at
+crates/spikefade/src/v32.rs:79:31: replace - with / in mark_at
+crates/spikefade/src/v32.rs:79:68: replace - with + in mark_at
+crates/spikefade/src/v32.rs:79:68: replace - with / in mark_at
+crates/spikefade/src/v32.rs:80:34: replace + with - in mark_at
+crates/spikefade/src/v32.rs:80:34: replace + with * in mark_at
+crates/spikefade/src/v32.rs:80:30: replace - with + in mark_at
+crates/spikefade/src/v32.rs:80:30: replace - with / in mark_at
+crates/spikefade/src/v32.rs:86:5: replace mark_in_minute -> i64 with 0
+crates/spikefade/src/v32.rs:86:5: replace mark_in_minute -> i64 with 1
+crates/spikefade/src/v32.rs:86:5: replace mark_in_minute -> i64 with -1
+crates/spikefade/src/v32.rs:86:14: replace == with != in mark_in_minute
+crates/spikefade/src/v32.rs:89:34: replace + with - in mark_in_minute
+crates/spikefade/src/v32.rs:89:34: replace + with * in mark_in_minute
+crates/spikefade/src/v32.rs:89:30: replace - with + in mark_in_minute
+crates/spikefade/src/v32.rs:89:30: replace - with / in mark_in_minute
+crates/spikefade/src/v32.rs:89:57: replace - with + in mark_in_minute
+crates/spikefade/src/v32.rs:89:57: replace - with / in mark_in_minute
+crates/spikefade/src/v32.rs:96:5: replace loss_at -> i64 with 0
+crates/spikefade/src/v32.rs:96:5: replace loss_at -> i64 with 1
+crates/spikefade/src/v32.rs:96:5: replace loss_at -> i64 with -1
+crates/spikefade/src/v32.rs:96:13: replace <= with > in loss_at
+crates/spikefade/src/v32.rs:99:47: replace - with + in loss_at
+crates/spikefade/src/v32.rs:99:47: replace - with / in loss_at
+crates/spikefade/src/v32.rs:99:11: replace * with + in loss_at
+crates/spikefade/src/v32.rs:99:11: replace * with / in loss_at
+crates/spikefade/src/v32.rs:110:5: replace delta_band -> usize with 0
+crates/spikefade/src/v32.rs:110:5: replace delta_band -> usize with 1
+crates/spikefade/src/v32.rs:112:20: replace match guard x < 0.10 with true in delta_band
+crates/spikefade/src/v32.rs:112:20: replace match guard x < 0.10 with false in delta_band
+crates/spikefade/src/v32.rs:113:20: replace match guard x < 0.25 with true in delta_band
+crates/spikefade/src/v32.rs:113:20: replace match guard x < 0.25 with false in delta_band
+crates/spikefade/src/v32.rs:114:20: replace match guard x < 0.40 with true in delta_band
+crates/spikefade/src/v32.rs:114:20: replace match guard x < 0.40 with false in delta_band
+crates/spikefade/src/v32.rs:115:20: replace match guard x < 0.55 with true in delta_band
+crates/spikefade/src/v32.rs:115:20: replace match guard x < 0.55 with false in delta_band
+crates/spikefade/src/v32.rs:112:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:112:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:112:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:113:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:113:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:113:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:114:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:114:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:114:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:115:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:115:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:115:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:123:5: replace iv_band -> usize with 0
+crates/spikefade/src/v32.rs:123:5: replace iv_band -> usize with 1
+crates/spikefade/src/v32.rs:125:20: replace match guard x < 0.20 with true in iv_band
+crates/spikefade/src/v32.rs:125:20: replace match guard x < 0.20 with false in iv_band
+crates/spikefade/src/v32.rs:126:20: replace match guard x < 0.40 with true in iv_band
+crates/spikefade/src/v32.rs:126:20: replace match guard x < 0.40 with false in iv_band
+crates/spikefade/src/v32.rs:127:20: replace match guard x < 0.80 with true in iv_band
+crates/spikefade/src/v32.rs:127:20: replace match guard x < 0.80 with false in iv_band
+crates/spikefade/src/v32.rs:128:20: replace match guard x < 1.50 with true in iv_band
+crates/spikefade/src/v32.rs:128:20: replace match guard x < 1.50 with false in iv_band
+crates/spikefade/src/v32.rs:125:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:125:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:125:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:126:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:126:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:126:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:127:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:127:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:127:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:128:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:128:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:128:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:136:5: replace gain_words -> String with String::new()
+crates/spikefade/src/v32.rs:136:5: replace gain_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:136:18: replace || with && in gain_words
+crates/spikefade/src/v32.rs:136:13: replace <= with > in gain_words
+crates/spikefade/src/v32.rs:136:24: replace <= with > in gain_words
+crates/spikefade/src/v32.rs:139:35: replace / with % in gain_words
+crates/spikefade/src/v32.rs:139:35: replace / with * in gain_words
+crates/spikefade/src/v32.rs:139:26: replace * with + in gain_words
+crates/spikefade/src/v32.rs:139:26: replace * with / in gain_words
+crates/spikefade/src/v32.rs:139:18: replace - with + in gain_words
+crates/spikefade/src/v32.rs:139:18: replace - with / in gain_words
+crates/spikefade/src/v32.rs:146:5: replace bp_round -> i64 with 0
+crates/spikefade/src/v32.rs:146:5: replace bp_round -> i64 with 1
+crates/spikefade/src/v32.rs:146:5: replace bp_round -> i64 with -1
+crates/spikefade/src/v32.rs:146:12: replace == with != in bp_round
+crates/spikefade/src/v32.rs:151:29: replace / with % in bp_round
+crates/spikefade/src/v32.rs:151:29: replace / with * in bp_round
+crates/spikefade/src/v32.rs:151:20: replace * with + in bp_round
+crates/spikefade/src/v32.rs:151:20: replace * with / in bp_round
+crates/spikefade/src/v32.rs:153:29: replace * with + in bp_round
+crates/spikefade/src/v32.rs:153:29: replace * with / in bp_round
+crates/spikefade/src/v32.rs:155:37: replace / with % in bp_round
+crates/spikefade/src/v32.rs:155:37: replace / with * in bp_round
+crates/spikefade/src/v32.rs:155:26: replace + with - in bp_round
+crates/spikefade/src/v32.rs:155:26: replace + with * in bp_round
+crates/spikefade/src/v32.rs:155:16: replace * with + in bp_round
+crates/spikefade/src/v32.rs:155:16: replace * with / in bp_round
+crates/spikefade/src/v32.rs:155:42: replace * with + in bp_round
+crates/spikefade/src/v32.rs:155:42: replace * with / in bp_round
+crates/spikefade/src/v32.rs:156:30: replace != with == in bp_round
+crates/spikefade/src/v32.rs:156:25: replace < with == in bp_round
+crates/spikefade/src/v32.rs:156:25: replace < with > in bp_round
+crates/spikefade/src/v32.rs:156:25: replace < with <= in bp_round
+crates/spikefade/src/v32.rs:156:36: replace < with == in bp_round
+crates/spikefade/src/v32.rs:156:36: replace < with > in bp_round
+crates/spikefade/src/v32.rs:156:36: replace < with <= in bp_round
+crates/spikefade/src/v32.rs:156:43: delete - in bp_round
+crates/spikefade/src/v32.rs:162:5: replace gain_words_r -> String with String::new()
+crates/spikefade/src/v32.rs:162:5: replace gain_words_r -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:162:18: replace || with && in gain_words_r
+crates/spikefade/src/v32.rs:162:13: replace <= with > in gain_words_r
+crates/spikefade/src/v32.rs:162:24: replace <= with > in gain_words_r
+crates/spikefade/src/v32.rs:165:26: replace - with + in gain_words_r
+crates/spikefade/src/v32.rs:165:26: replace - with / in gain_words_r
+crates/spikefade/src/v32.rs:174:5: replace level_words -> String with String::new()
+crates/spikefade/src/v32.rs:174:5: replace level_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:193:5: replace pct_bp -> String with String::new()
+crates/spikefade/src/v32.rs:193:5: replace pct_bp -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:193:10: replace == with != in pct_bp
+crates/spikefade/src/v32.rs:196:24: replace / with % in pct_bp
+crates/spikefade/src/v32.rs:196:24: replace / with * in pct_bp
+crates/spikefade/src/v32.rs:196:15: replace * with + in pct_bp
+crates/spikefade/src/v32.rs:196:15: replace * with / in pct_bp
+crates/spikefade/src/v32.rs:203:5: replace week_of -> i64 with 0
+crates/spikefade/src/v32.rs:203:5: replace week_of -> i64 with 1
+crates/spikefade/src/v32.rs:203:5: replace week_of -> i64 with -1
+crates/spikefade/src/v32.rs:203:8: replace - with + in week_of
+crates/spikefade/src/v32.rs:203:8: replace - with / in week_of
+crates/spikefade/src/v32.rs:209:5: replace month_id -> i64 with 0
+crates/spikefade/src/v32.rs:209:5: replace month_id -> i64 with 1
+crates/spikefade/src/v32.rs:209:5: replace month_id -> i64 with -1
+crates/spikefade/src/v32.rs:210:16: replace - with + in month_id
+crates/spikefade/src/v32.rs:210:16: replace - with / in month_id
+crates/spikefade/src/v32.rs:210:12: replace + with - in month_id
+crates/spikefade/src/v32.rs:210:12: replace + with * in month_id
+crates/spikefade/src/v32.rs:210:7: replace * with + in month_id
+crates/spikefade/src/v32.rs:210:7: replace * with / in month_id
+crates/spikefade/src/v32.rs:216:5: replace month_name -> String with String::new()
+crates/spikefade/src/v32.rs:216:5: replace month_name -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, -1)
+crates/spikefade/src/v32.rs:229:23: replace || with && in utilization
+crates/spikefade/src/v32.rs:229:18: replace <= with > in utilization
+crates/spikefade/src/v32.rs:229:28: replace >= with < in utilization
+crates/spikefade/src/v32.rs:232:54: replace / with % in utilization
+crates/spikefade/src/v32.rs:232:54: replace / with * in utilization
+crates/spikefade/src/v32.rs:232:49: replace - with + in utilization
+crates/spikefade/src/v32.rs:232:49: replace - with / in utilization
+crates/spikefade/src/v32.rs:232:60: replace * with + in utilization
+crates/spikefade/src/v32.rs:232:60: replace * with / in utilization
+crates/spikefade/src/v32.rs:233:82: replace / with % in utilization
+crates/spikefade/src/v32.rs:233:82: replace / with * in utilization
+crates/spikefade/src/v32.rs:233:77: replace - with + in utilization
+crates/spikefade/src/v32.rs:233:77: replace - with / in utilization
+crates/spikefade/src/v32.rs:233:53: replace + with - in utilization
+crates/spikefade/src/v32.rs:233:53: replace + with * in utilization
+crates/spikefade/src/v32.rs:233:49: replace - with + in utilization
+crates/spikefade/src/v32.rs:233:49: replace - with / in utilization
+crates/spikefade/src/v32.rs:233:58: replace * with + in utilization
+crates/spikefade/src/v32.rs:233:58: replace * with / in utilization
+crates/spikefade/src/v32.rs:233:88: replace * with + in utilization
+crates/spikefade/src/v32.rs:233:88: replace * with / in utilization
+crates/spikefade/src/v32.rs:235:20: replace += with -= in utilization
+crates/spikefade/src/v32.rs:235:20: replace += with *= in utilization
+crates/spikefade/src/v32.rs:244:59: replace > with == in utilization
+crates/spikefade/src/v32.rs:244:59: replace > with < in utilization
+crates/spikefade/src/v32.rs:244:59: replace > with >= in utilization
+crates/spikefade/src/v32.rs:244:54: replace * with + in utilization
+crates/spikefade/src/v32.rs:244:54: replace * with / in utilization
+crates/spikefade/src/v32.rs:244:83: replace * with + in utilization
+crates/spikefade/src/v32.rs:244:83: replace * with / in utilization
+crates/spikefade/src/v32.rs:245:56: replace == with != in utilization
+crates/spikefade/src/v32.rs:249:26: replace / with % in utilization
+crates/spikefade/src/v32.rs:249:26: replace / with * in utilization
+crates/spikefade/src/v32.rs:249:66: replace / with % in utilization
+crates/spikefade/src/v32.rs:249:66: replace / with * in utilization
+crates/spikefade/src/v32.rs:249:57: replace * with + in utilization
+crates/spikefade/src/v32.rs:249:57: replace * with / in utilization
+crates/spikefade/src/v32.rs:249:85: replace / with % in utilization
+crates/spikefade/src/v32.rs:249:85: replace / with * in utilization
+crates/spikefade/src/v32.rs:249:76: replace * with + in utilization
+crates/spikefade/src/v32.rs:249:76: replace * with / in utilization
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 0, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, 1, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (0, -1, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 0, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, 1, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (1, -1, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 0, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, 1, 1, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 0, -1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, 0, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, 0, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, 0, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, 1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, 1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, 1, -1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, -1, 0)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, -1, 1)
+crates/spikefade/src/v32.rs:257:5: replace margin_mtm_peak -> (i64, i64, usize, i64, i64) with (-1, -1, 1, -1, -1)
+crates/spikefade/src/v32.rs:262:23: replace || with && in margin_mtm_peak
+crates/spikefade/src/v32.rs:262:18: replace <= with > in margin_mtm_peak
+crates/spikefade/src/v32.rs:262:28: replace >= with < in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:54: replace / with % in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:54: replace / with * in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:49: replace - with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:49: replace - with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:60: replace * with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:60: replace * with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:82: replace / with % in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:82: replace / with * in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:77: replace - with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:77: replace - with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:53: replace + with - in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:53: replace + with * in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:49: replace - with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:49: replace - with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:58: replace * with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:58: replace * with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:88: replace * with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:88: replace * with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:268:20: replace += with -= in margin_mtm_peak
+crates/spikefade/src/v32.rs:268:20: replace += with *= in margin_mtm_peak
+crates/spikefade/src/v32.rs:268:25: replace + with - in margin_mtm_peak
+crates/spikefade/src/v32.rs:268:25: replace + with * in margin_mtm_peak
+crates/spikefade/src/v32.rs:272:15: replace += with -= in margin_mtm_peak
+crates/spikefade/src/v32.rs:272:15: replace += with *= in margin_mtm_peak
+crates/spikefade/src/v32.rs:273:18: replace > with == in margin_mtm_peak
+crates/spikefade/src/v32.rs:273:18: replace > with < in margin_mtm_peak
+crates/spikefade/src/v32.rs:273:18: replace > with >= in margin_mtm_peak
+crates/spikefade/src/v32.rs:274:23: replace += with -= in margin_mtm_peak
+crates/spikefade/src/v32.rs:274:23: replace += with *= in margin_mtm_peak
+crates/spikefade/src/v32.rs:276:18: replace > with == in margin_mtm_peak
+crates/spikefade/src/v32.rs:276:18: replace > with < in margin_mtm_peak
+crates/spikefade/src/v32.rs:276:18: replace > with >= in margin_mtm_peak
+crates/spikefade/src/v32.rs:289:5: replace mtm_peak_words -> String with String::new()
+crates/spikefade/src/v32.rs:289:5: replace mtm_peak_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:290:13: replace == with != in mtm_peak_words
+crates/spikefade/src/v32.rs:303:5: replace portfolio_mtm -> (PRes, u32) with (Default::default(), 0)
+crates/spikefade/src/v32.rs:303:5: replace portfolio_mtm -> (PRes, u32) with (Default::default(), 1)
+crates/spikefade/src/v32.rs:312:30: replace + with - in portfolio_mtm
+crates/spikefade/src/v32.rs:312:30: replace + with * in portfolio_mtm
+crates/spikefade/src/v32.rs:358:5: replace port_walk -> WalkRes with Default::default()
+crates/spikefade/src/v32.rs:363:27: delete field mo from struct WalkRes expression in port_walk
+crates/spikefade/src/v32.rs:370:22: replace > with == in port_walk
+crates/spikefade/src/v32.rs:370:22: replace > with < in port_walk
+crates/spikefade/src/v32.rs:370:22: replace > with >= in port_walk
+crates/spikefade/src/v32.rs:374:22: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:374:22: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:375:20: replace -= with += in port_walk
+crates/spikefade/src/v32.rs:375:20: replace -= with /= in port_walk
+crates/spikefade/src/v32.rs:377:34: replace - with + in port_walk
+crates/spikefade/src/v32.rs:377:34: replace - with / in port_walk
+crates/spikefade/src/v32.rs:378:55: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:378:55: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:379:50: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:379:50: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:382:82: replace || with && in port_walk
+crates/spikefade/src/v32.rs:382:91: replace == with != in port_walk
+crates/spikefade/src/v32.rs:383:44: replace && with || in port_walk
+crates/spikefade/src/v32.rs:383:63: replace || with && in port_walk
+crates/spikefade/src/v32.rs:383:54: replace == with != in port_walk
+crates/spikefade/src/v32.rs:383:72: replace == with != in port_walk
+crates/spikefade/src/v32.rs:384:21: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:384:21: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:389:23: replace > with == in port_walk
+crates/spikefade/src/v32.rs:389:23: replace > with < in port_walk
+crates/spikefade/src/v32.rs:389:23: replace > with >= in port_walk
+crates/spikefade/src/v32.rs:389:19: replace + with - in port_walk
+crates/spikefade/src/v32.rs:389:19: replace + with * in port_walk
+crates/spikefade/src/v32.rs:390:19: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:390:19: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:394:61: replace - with + in port_walk
+crates/spikefade/src/v32.rs:394:61: replace - with / in port_walk
+crates/spikefade/src/v32.rs:394:43: replace + with - in port_walk
+crates/spikefade/src/v32.rs:394:43: replace + with * in port_walk
+crates/spikefade/src/v32.rs:396:67: replace || with && in port_walk
+crates/spikefade/src/v32.rs:397:22: replace < with == in port_walk
+crates/spikefade/src/v32.rs:397:22: replace < with > in port_walk
+crates/spikefade/src/v32.rs:397:22: replace < with <= in port_walk
+crates/spikefade/src/v32.rs:397:18: replace - with + in port_walk
+crates/spikefade/src/v32.rs:397:18: replace - with / in port_walk
+crates/spikefade/src/v32.rs:398:22: replace >= with < in port_walk
+crates/spikefade/src/v32.rs:399:23: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:399:23: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:402:24: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:402:24: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:408:16: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:408:16: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:409:44: replace + with - in port_walk
+crates/spikefade/src/v32.rs:409:44: replace + with * in port_walk
+crates/spikefade/src/v32.rs:410:18: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:410:18: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:412:16: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:412:16: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:420:18: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:420:18: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:422:30: replace - with + in port_walk
+crates/spikefade/src/v32.rs:422:30: replace - with / in port_walk
+crates/spikefade/src/v32.rs:423:51: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:423:51: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:424:46: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:424:46: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:454:5: replace v19_of -> V19 with Default::default()
+crates/spikefade/src/v32.rs:456:35: replace += with -= in v19_of
+crates/spikefade/src/v32.rs:456:35: replace += with *= in v19_of
+crates/spikefade/src/v32.rs:464:49: replace || with && in v19_of
+crates/spikefade/src/v32.rs:464:12: delete ! in v19_of
+crates/spikefade/src/v32.rs:465:48: replace += with -= in v19_of
+crates/spikefade/src/v32.rs:465:48: replace += with *= in v19_of
+crates/spikefade/src/v32.rs:467:45: replace += with -= in v19_of
+crates/spikefade/src/v32.rs:467:45: replace += with *= in v19_of
+crates/spikefade/src/v32.rs:470:42: replace > with == in v19_of
+crates/spikefade/src/v32.rs:470:42: replace > with < in v19_of
+crates/spikefade/src/v32.rs:470:42: replace > with >= in v19_of
+crates/spikefade/src/v32.rs:471:43: replace > with == in v19_of
+crates/spikefade/src/v32.rs:471:43: replace > with < in v19_of
+crates/spikefade/src/v32.rs:471:43: replace > with >= in v19_of
+crates/spikefade/src/v32.rs:473:47: replace > with == in v19_of
+crates/spikefade/src/v32.rs:473:47: replace > with < in v19_of
+crates/spikefade/src/v32.rs:473:47: replace > with >= in v19_of
+crates/spikefade/src/v32.rs:475:55: replace + with - in v19_of
+crates/spikefade/src/v32.rs:475:55: replace + with * in v19_of
+crates/spikefade/src/v32.rs:475:51: replace * with + in v19_of
+crates/spikefade/src/v32.rs:475:51: replace * with / in v19_of
+crates/spikefade/src/v32.rs:477:50: replace <= with > in v19_of
+crates/spikefade/src/v32.rs:477:78: replace + with - in v19_of
+crates/spikefade/src/v32.rs:477:78: replace + with * in v19_of
+crates/spikefade/src/v32.rs:477:74: replace * with + in v19_of
+crates/spikefade/src/v32.rs:477:74: replace * with / in v19_of
+crates/spikefade/src/v32.rs:478:49: delete ! in v19_of
+crates/spikefade/src/v32.rs:487:5: replace a19_passed -> bool with true

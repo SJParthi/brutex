@@ -1,0 +1,18 @@
+crates/spikefade/src/gk.rs:145:33: replace * with + in bar_greeks
+crates/spikefade/src/v32.rs:76:10: replace < with == in mark_at
+crates/spikefade/src/v32.rs:79:31: replace - with / in mark_at
+crates/spikefade/src/v32.rs:80:30: replace - with / in mark_at
+crates/spikefade/src/v32.rs:89:57: replace - with / in mark_in_minute
+crates/spikefade/src/v32.rs:114:20: replace match guard x < 0.40 with false in delta_band
+crates/spikefade/src/v32.rs:125:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, 1)
+crates/spikefade/src/v32.rs:233:58: replace * with / in utilization
+crates/spikefade/src/v32.rs:244:59: replace > with == in utilization
+crates/spikefade/src/v32.rs:244:54: replace * with / in utilization
+crates/spikefade/src/v32.rs:265:54: replace / with % in margin_mtm_peak
+crates/spikefade/src/v32.rs:379:50: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:478:49: delete ! in v19_of

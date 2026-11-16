@@ -537,3 +537,10 @@ crates/spikefade/src/v32.rs:475:55: replace + with - in v19_of
 crates/spikefade/src/v32.rs:475:55: replace + with * in v19_of
 crates/spikefade/src/v32.rs:475:51: replace * with + in v19_of
 crates/spikefade/src/v32.rs:475:51: replace * with / in v19_of
+crates/spikefade/src/v32.rs:477:50: replace <= with > in v19_of
+crates/spikefade/src/v32.rs:477:78: replace + with - in v19_of
+crates/spikefade/src/v32.rs:477:78: replace + with * in v19_of
+crates/spikefade/src/v32.rs:477:74: replace * with + in v19_of
+crates/spikefade/src/v32.rs:477:74: replace * with / in v19_of
+crates/spikefade/src/v32.rs:478:49: delete ! in v19_of
+crates/spikefade/src/v32.rs:487:5: replace a19_passed -> bool with true
