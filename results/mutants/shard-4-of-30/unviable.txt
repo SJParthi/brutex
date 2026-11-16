@@ -1,0 +1,14 @@
+crates/greeks/src/moneyness.rs:100:9: replace Moneyness::from_ladder -> Result<Self, GreeksError> with Ok(Default::default())
+crates/greeks/src/solver.rs:176:40: replace + with -
+crates/greeks/src/solver.rs:176:25: replace + with -
+crates/greeks/src/solver.rs:265:9: replace Contract::implied_volatility -> Result<ImpliedVolatility, GreeksError> with Ok(Default::default())
+crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (0.0, Default::default(), 0)
+crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (0.0, Default::default(), 1)
+crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (1.0, Default::default(), 0)
+crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (1.0, Default::default(), 1)
+crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (-1.0, Default::default(), 1)
+crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (-1.0, Default::default(), 0)
+crates/spikefade/src/acct.rs:185:9: replace <impl PartialOrd for Keyed>::partial_cmp -> Option<Ordering> with Some(Default::default())
+crates/spikefade/src/acct.rs:190:9: replace <impl Ord for Keyed>::cmp -> Ordering with Default::default()
+crates/spikefade/src/acct.rs:221:13: replace && with || in Tops::push_view
+crates/spikefade/src/acct.rs:467:5: replace detail_list -> (Vec<Dec>, Sum) with (vec![Default::default()], Default::default())
