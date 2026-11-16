@@ -297,3 +297,56 @@ crates/spikefade/src/freeze.rs:238:14: replace > with >= in Freeze::units
 crates/spikefade/src/freeze.rs:238:28: replace - with + in Freeze::units
 crates/spikefade/src/freeze.rs:238:28: replace - with / in Freeze::units
 crates/spikefade/src/freeze.rs:245:5: replace slice_of -> u64 with 0
+crates/spikefade/src/freeze.rs:245:5: replace slice_of -> u64 with 1
+crates/spikefade/src/freeze.rs:246:21: replace * with + in slice_of
+crates/spikefade/src/freeze.rs:246:21: replace * with / in slice_of
+crates/spikefade/src/freeze.rs:246:15: replace / with % in slice_of
+crates/spikefade/src/freeze.rs:246:15: replace / with * in slice_of
+crates/spikefade/src/freeze.rs:247:10: replace == with != in slice_of
+crates/spikefade/src/freeze.rs:265:5: replace slice_units_in -> u64 with 0
+crates/spikefade/src/freeze.rs:265:5: replace slice_units_in -> u64 with 1
+crates/spikefade/src/freeze.rs:270:19: replace == with != in slice_units_in
+crates/spikefade/src/freeze.rs:280:110: replace * with + in slice_units_in
+crates/spikefade/src/freeze.rs:280:110: replace * with / in slice_units_in
+crates/spikefade/src/freeze.rs:280:104: replace / with % in slice_units_in
+crates/spikefade/src/freeze.rs:280:104: replace / with * in slice_units_in
+crates/spikefade/src/freeze.rs:319:71: replace == with != in from_args
+crates/spikefade/src/freeze.rs:349:5: replace f3_refused -> bool with true
+crates/spikefade/src/freeze.rs:358:5: replace f3_refused_in -> bool with true
+crates/spikefade/src/freeze.rs:358:5: replace f3_refused_in -> bool with false
+crates/spikefade/src/freeze.rs:359:20: replace || with && in f3_refused_in
+crates/spikefade/src/freeze.rs:359:15: replace != with == in f3_refused_in
+crates/spikefade/src/freeze.rs:359:23: delete ! in f3_refused_in
+crates/spikefade/src/freeze.rs:364:9: delete match arm Some(None) in f3_refused_in
+crates/spikefade/src/freeze.rs:367:13: delete ! in f3_refused_in
+crates/spikefade/src/freeze.rs:385:5: replace f3_note -> bool with true
+crates/spikefade/src/freeze.rs:385:5: replace f3_note -> bool with false
+crates/spikefade/src/freeze.rs:385:45: replace + with - in f3_note
+crates/spikefade/src/freeze.rs:385:45: replace + with * in f3_note
+crates/spikefade/src/freeze.rs:411:5: replace f3_counts -> [u64; 5] with [0; 5]
+crates/spikefade/src/freeze.rs:411:5: replace f3_counts -> [u64; 5] with [1; 5]
+crates/spikefade/src/freeze.rs:413:55: replace & with | in f3_counts
+crates/spikefade/src/freeze.rs:413:55: replace & with ^ in f3_counts
+crates/spikefade/src/freeze.rs:414:16: replace += with -= in f3_counts
+crates/spikefade/src/freeze.rs:414:16: replace += with *= in f3_counts
+crates/spikefade/src/freeze.rs:416:21: replace != with == in f3_counts
+crates/spikefade/src/freeze.rs:416:17: replace & with | in f3_counts
+crates/spikefade/src/freeze.rs:416:17: replace & with ^ in f3_counts
+crates/spikefade/src/freeze.rs:419:16: replace += with -= in f3_counts
+crates/spikefade/src/freeze.rs:419:16: replace += with *= in f3_counts
+crates/spikefade/src/freeze.rs:440:49: replace % with / in f3_lat
+crates/spikefade/src/freeze.rs:442:20: replace < with > in f3_lat
+crates/spikefade/src/freeze.rs:442:24: replace << with >> in f3_lat
+crates/spikefade/src/freeze.rs:466:5: replace trade_words -> String with "xyzzy".into()
+crates/spikefade/src/freeze.rs:467:15: replace != with == in trade_words
+crates/spikefade/src/freeze.rs:488:5: replace item12_f3 -> (&'static str, String) with ("", "xyzzy".into())
+crates/spikefade/src/freeze.rs:488:5: replace item12_f3 -> (&'static str, String) with ("xyzzy", String::new())
+crates/spikefade/src/freeze.rs:492:74: replace && with || in item12_f3
+crates/spikefade/src/freeze.rs:492:69: replace == with != in item12_f3
+crates/spikefade/src/freeze.rs:502:60: replace / with * in f3_line
+crates/spikefade/src/freeze.rs:509:5: replace counts_line -> String with String::new()
+crates/spikefade/src/freeze.rs:523:5: replace nse_symbol -> String with "xyzzy".into()
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((0, 1, -1, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((0, -1, -1, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, 0, 0, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, 1, true))

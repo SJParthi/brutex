@@ -3,3 +3,8 @@ crates/spikefade/src/bhav.rs:164:9: replace Bhav::file_of -> Option<&Path> with 
 crates/spikefade/src/bhav.rs:183:13: replace && with || in Bhav::day
 crates/spikefade/src/bhav.rs:303:13: replace && with || in day_extremes
 crates/spikefade/src/expiry.rs:256:13: replace && with || in regular_and_moved
+crates/spikefade/src/freeze.rs:271:9: replace && with || in slice_units_in
+crates/spikefade/src/freeze.rs:270:9: replace && with || in slice_units_in
+crates/spikefade/src/freeze.rs:417:13: replace && with || in f3_counts
+crates/spikefade/src/freeze.rs:442:9: replace && with || in f3_lat
+crates/spikefade/src/freeze.rs:441:9: replace && with || in f3_lat
