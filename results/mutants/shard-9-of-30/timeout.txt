@@ -1,0 +1,4 @@
+crates/spikefade/src/kern.rs:1013:15: replace += with *= in walk_account
+crates/spikefade/src/kern.rs:1013:20: replace + with - in walk_account
+crates/spikefade/src/kern.rs:1013:20: replace + with * in walk_account
+crates/spikefade/src/kern.rs:1015:15: replace += with *= in walk_account

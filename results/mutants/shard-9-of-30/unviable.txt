@@ -7,3 +7,11 @@ crates/spikefade/src/kern.rs:655:9: replace && with || in finish_pieces
 crates/spikefade/src/kern.rs:654:9: replace && with || in finish_pieces
 crates/spikefade/src/kern.rs:661:9: replace && with || in finish_pieces
 crates/spikefade/src/kern.rs:660:9: replace && with || in finish_pieces
+crates/spikefade/src/kern.rs:850:26: replace && with || in step3g
+crates/spikefade/src/kern.rs:856:26: replace && with || in step3g
+crates/spikefade/src/kern.rs:874:18: replace && with || in step3g
+crates/spikefade/src/kern.rs:888:22: replace && with || in step3g
+crates/spikefade/src/kern.rs:898:18: replace && with || in step3g
+crates/spikefade/src/kern.rs:918:18: replace && with || in step3g
+crates/spikefade/src/kern.rs:937:14: replace && with || in step3g
+crates/spikefade/src/kern.rs:1053:5: replace detail3 -> (Vec<Dec3>, Sum, Acc) with (vec![Default::default()], Default::default(), Default::default())
