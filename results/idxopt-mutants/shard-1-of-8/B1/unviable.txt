@@ -1,0 +1,11 @@
+crates/sniper_host/src/ctxdials.rs:246:127: replace && with || in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:246:53: replace && with || in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:246:36: replace && with || in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:292:5: replace read_index -> Result<(Vec<Candle>, Vec<String>), String> with Ok((vec![Default::default()], vec![]))
+crates/sniper_host/src/ctxdials.rs:292:5: replace read_index -> Result<(Vec<Candle>, Vec<String>), String> with Ok((vec![Default::default()], vec![String::new()]))
+crates/sniper_host/src/ctxdials.rs:292:5: replace read_index -> Result<(Vec<Candle>, Vec<String>), String> with Ok((vec![Default::default()], vec!["xyzzy".into()]))
+crates/sniper_host/src/db.rs:29:9: replace Db::open -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/db.rs:36:9: replace Db::dir -> &Path with Box::leak(Box::new(Default::default()))
+crates/sniper_host/src/esn1.rs:55:5: replace load_inputs -> Result<Inputs, String> with Ok(Default::default())
+crates/sniper_host/src/esn1.rs:139:5: replace day_tape -> Result<Option<Day>, String> with Ok(Some(Default::default()))
+crates/sniper_host/src/esn1.rs:157:5: replace plan_of -> Result<Plan, &'static str> with Ok(Default::default())

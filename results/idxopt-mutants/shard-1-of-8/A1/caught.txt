@@ -1,0 +1,108 @@
+crates/idx_cal/src/day.rs:16:25: replace - with / in from_civil
+crates/idx_cal/src/day.rs:16:19: replace + with * in from_civil
+crates/idx_cal/src/day.rs:16:9: replace * with + in from_civil
+crates/idx_cal/src/day.rs:16:9: replace * with / in from_civil
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (0, 0, 0)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (0, 0, 1)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (0, 1, 0)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (0, 1, 1)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (1, 0, 0)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (1, 0, 1)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (1, 1, 0)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (1, 1, 1)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (-1, 0, 0)
+crates/idx_cal/src/day.rs:16:19: replace + with - in from_civil
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (-1, 0, 1)
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (-1, 1, 0)
+crates/idx_cal/src/day.rs:22:15: replace + with - in to_civil
+crates/idx_cal/src/day.rs:22:5: replace to_civil -> (i32, u32, u32) with (-1, 1, 1)
+crates/idx_cal/src/day.rs:22:15: replace + with * in to_civil
+crates/idx_cal/src/day.rs:23:52: replace / with % in to_civil
+crates/idx_cal/src/day.rs:23:52: replace / with * in to_civil
+crates/idx_cal/src/day.rs:23:20: replace >= with < in to_civil
+crates/idx_cal/src/day.rs:24:17: replace - with + in to_civil
+crates/idx_cal/src/day.rs:24:17: replace - with / in to_civil
+crates/idx_cal/src/day.rs:24:23: replace * with + in to_civil
+crates/idx_cal/src/day.rs:24:23: replace * with / in to_civil
+crates/idx_cal/src/day.rs:25:65: replace / with % in to_civil
+crates/idx_cal/src/day.rs:25:65: replace / with * in to_civil
+crates/idx_cal/src/day.rs:25:33: replace + with * in to_civil
+crates/idx_cal/src/day.rs:25:20: replace - with + in to_civil
+crates/idx_cal/src/day.rs:25:20: replace - with / in to_civil
+crates/idx_cal/src/day.rs:25:26: replace / with % in to_civil
+crates/idx_cal/src/day.rs:25:26: replace / with * in to_civil
+crates/idx_cal/src/day.rs:25:39: replace / with % in to_civil
+crates/idx_cal/src/day.rs:25:39: replace / with * in to_civil
+crates/idx_cal/src/day.rs:25:54: replace / with % in to_civil
+crates/idx_cal/src/day.rs:25:54: replace / with * in to_civil
+crates/idx_cal/src/day.rs:26:17: replace + with - in to_civil
+crates/idx_cal/src/day.rs:26:17: replace + with * in to_civil
+crates/idx_cal/src/day.rs:26:23: replace * with + in to_civil
+crates/idx_cal/src/day.rs:26:23: replace * with / in to_civil
+crates/idx_cal/src/day.rs:27:19: replace - with + in to_civil
+crates/idx_cal/src/day.rs:27:19: replace - with / in to_civil
+crates/idx_cal/src/day.rs:27:42: replace - with / in to_civil
+crates/idx_cal/src/day.rs:27:32: replace + with - in to_civil
+crates/idx_cal/src/day.rs:27:32: replace + with * in to_civil
+crates/idx_cal/src/day.rs:27:26: replace * with + in to_civil
+crates/idx_cal/src/day.rs:27:26: replace * with / in to_civil
+crates/idx_cal/src/day.rs:27:38: replace / with % in to_civil
+crates/idx_cal/src/day.rs:27:38: replace / with * in to_civil
+crates/idx_cal/src/day.rs:27:48: replace / with % in to_civil
+crates/idx_cal/src/day.rs:27:48: replace / with * in to_civil
+crates/idx_cal/src/day.rs:28:28: replace / with % in to_civil
+crates/idx_cal/src/day.rs:28:28: replace / with * in to_civil
+crates/idx_cal/src/day.rs:28:23: replace + with - in to_civil
+crates/idx_cal/src/day.rs:28:23: replace + with * in to_civil
+crates/idx_cal/src/day.rs:28:17: replace * with + in to_civil
+crates/idx_cal/src/day.rs:28:17: replace * with / in to_civil
+crates/idx_cal/src/day.rs:29:38: replace + with - in to_civil
+crates/idx_cal/src/day.rs:29:38: replace + with * in to_civil
+crates/idx_cal/src/day.rs:29:17: replace - with + in to_civil
+crates/idx_cal/src/day.rs:29:17: replace - with / in to_civil
+crates/idx_cal/src/day.rs:29:34: replace / with % in to_civil
+crates/idx_cal/src/day.rs:29:34: replace / with * in to_civil
+crates/idx_cal/src/day.rs:29:29: replace + with - in to_civil
+crates/idx_cal/src/day.rs:29:29: replace + with * in to_civil
+crates/idx_cal/src/day.rs:29:24: replace * with + in to_civil
+crates/idx_cal/src/day.rs:29:24: replace * with / in to_civil
+crates/idx_cal/src/day.rs:30:19: replace < with == in to_civil
+crates/idx_cal/src/day.rs:30:19: replace < with > in to_civil
+crates/idx_cal/src/day.rs:30:19: replace < with <= in to_civil
+crates/idx_cal/src/day.rs:30:29: replace + with - in to_civil
+crates/idx_cal/src/day.rs:30:29: replace + with * in to_civil
+crates/idx_cal/src/day.rs:30:45: replace - with + in to_civil
+crates/idx_cal/src/day.rs:30:45: replace - with / in to_civil
+crates/idx_cal/src/day.rs:33:11: replace <= with > in to_civil
+crates/idx_cal/src/day.rs:33:20: replace + with - in to_civil
+crates/idx_cal/src/day.rs:33:20: replace + with * in to_civil
+crates/idx_cal/src/day.rs:39:5: replace weekday -> u32 with 0
+crates/idx_cal/src/day.rs:39:5: replace weekday -> u32 with 1
+crates/idx_cal/src/day.rs:40:16: replace + with * in weekday
+crates/idx_cal/src/day.rs:40:16: replace + with - in weekday
+crates/idx_cal/src/day.rs:47:5: replace weekday_name -> &'static str with "xyzzy"
+crates/idx_cal/src/day.rs:47:5: replace weekday_name -> &'static str with ""
+crates/idx_cal/src/day.rs:53:5: replace fmt -> String with String::new()
+crates/idx_cal/src/day.rs:53:5: replace fmt -> String with "xyzzy".into()
+crates/idx_cal/src/day.rs:60:5: replace parse -> Option<Day> with None
+crates/idx_cal/src/day.rs:60:5: replace parse -> Option<Day> with Some(Default::default())
+crates/idx_cal/src/day.rs:61:16: replace != with == in parse
+crates/idx_cal/src/day.rs:61:34: replace != with == in parse
+crates/idx_cal/src/day.rs:61:61: replace != with == in parse
+crates/idx_cal/src/day.rs:68:18: replace == with != in parse
+crates/idx_cal/src/day.rs:74:5: replace parse_dmy -> Option<Day> with None
+crates/idx_cal/src/day.rs:74:5: replace parse_dmy -> Option<Day> with Some(Default::default())
+crates/idx_cal/src/day.rs:81:73: replace + with - in parse_dmy
+crates/idx_cal/src/day.rs:81:73: replace + with * in parse_dmy
+crates/idx_cal/src/day.rs:81:57: replace == with != in parse_dmy
+crates/idx_cal/src/day.rs:83:18: replace == with != in parse_dmy
+crates/idx_cal/src/day.rs:93:25: replace == with != in month_end
+crates/idx_cal/src/day.rs:93:59: replace + with - in month_end
+crates/idx_cal/src/day.rs:93:59: replace + with * in month_end
+crates/idx_cal/src/day.rs:94:27: replace - with + in month_end
+crates/idx_cal/src/day.rs:94:27: replace - with / in month_end
+crates/idx_cal/src/listing.rs:40:5: replace parse_listing -> Result<Listing, String> with Ok(Default::default())
+crates/idx_cal/src/listing.rs:42:47: replace || with && in parse_listing
+crates/idx_cal/src/listing.rs:51:13: delete match arm "udiff" in parse_listing
+crates/idx_cal/src/listing.rs:42:25: replace || with && in parse_listing
+crates/idx_cal/src/listing.rs:52:13: delete match arm "old" in parse_listing

@@ -1,0 +1,169 @@
+crates/idx_cal/src/day.rs:23:40: replace - with + in to_civil
+crates/idx_cal/src/day.rs:23:40: replace - with / in to_civil
+crates/idx_cal/src/day.rs:25:48: replace - with / in to_civil
+crates/idx_cal/src/day.rs:25:48: replace - with + in to_civil
+crates/idx_cal/src/day.rs:25:33: replace + with - in to_civil
+crates/idx_cal/src/day.rs:27:42: replace - with + in to_civil
+crates/idx_cal/src/day.rs:61:49: replace || with && in parse
+crates/idx_cal/src/day.rs:61:22: replace || with && in parse
+crates/idx_cal/src/day.rs:93:36: replace + with - in month_end
+crates/idx_cal/src/day.rs:93:36: replace + with * in month_end
+crates/idx_cal/src/day.rs:100:5: replace ym -> (i32, u32) with (0, 0)
+crates/idx_cal/src/day.rs:100:5: replace ym -> (i32, u32) with (0, 1)
+crates/idx_cal/src/day.rs:100:5: replace ym -> (i32, u32) with (1, 0)
+crates/idx_cal/src/day.rs:100:5: replace ym -> (i32, u32) with (1, 1)
+crates/idx_cal/src/day.rs:100:5: replace ym -> (i32, u32) with (-1, 0)
+crates/idx_cal/src/day.rs:100:5: replace ym -> (i32, u32) with (-1, 1)
+crates/idx_cal/src/listing.rs:77:59: replace == with != in parse_listing
+crates/idx_cal/src/listing.rs:89:5: replace parse_days -> Result<BTreeSet<Day>, String> with Ok(BTreeSet::new())
+crates/idx_cal/src/listing.rs:89:5: replace parse_days -> Result<BTreeSet<Day>, String> with Ok(BTreeSet::from_iter([Default::default()]))
+crates/idx_cal/src/listing.rs:92:25: replace || with && in parse_days
+crates/idx_cal/src/listing.rs:116:5: replace parse_specials -> Result<Vec<Special>, String> with Ok(vec![])
+crates/idx_cal/src/listing.rs:118:47: replace || with && in parse_specials
+crates/idx_cal/src/listing.rs:118:25: replace || with && in parse_specials
+crates/idx_cal/src/storeio.rs:24:5: replace at_sod -> i64 with 0
+crates/idx_cal/src/storeio.rs:24:5: replace at_sod -> i64 with 1
+crates/idx_cal/src/storeio.rs:24:5: replace at_sod -> i64 with -1
+crates/idx_cal/src/storeio.rs:24:44: replace * with + in at_sod
+crates/idx_cal/src/storeio.rs:24:44: replace * with / in at_sod
+crates/idx_cal/src/storeio.rs:24:37: replace + with - in at_sod
+crates/idx_cal/src/storeio.rs:24:37: replace + with * in at_sod
+crates/idx_cal/src/storeio.rs:24:28: replace - with + in at_sod
+crates/idx_cal/src/storeio.rs:24:28: replace - with / in at_sod
+crates/idx_cal/src/storeio.rs:24:19: replace * with + in at_sod
+crates/idx_cal/src/storeio.rs:24:19: replace * with / in at_sod
+crates/idx_cal/src/storeio.rs:30:5: replace ist_of -> (Day, i64) with (Default::default(), 0)
+crates/idx_cal/src/storeio.rs:30:5: replace ist_of -> (Day, i64) with (Default::default(), 1)
+crates/idx_cal/src/storeio.rs:30:5: replace ist_of -> (Day, i64) with (Default::default(), -1)
+crates/idx_cal/src/storeio.rs:30:31: replace + with - in ist_of
+crates/idx_cal/src/storeio.rs:30:31: replace + with * in ist_of
+crates/idx_cal/src/storeio.rs:37:5: replace hms -> String with String::new()
+crates/idx_cal/src/storeio.rs:37:5: replace hms -> String with "xyzzy".into()
+crates/idx_cal/src/storeio.rs:43:5: replace sym_id -> u32 with 0
+crates/idx_cal/src/storeio.rs:43:5: replace sym_id -> u32 with 1
+crates/idx_cal/src/storeio.rs:43:56: replace & with | in sym_id
+crates/idx_cal/src/storeio.rs:43:56: replace & with ^ in sym_id
+crates/idx_cal/src/storeio.rs:93:5: replace read_range -> Result<Vec<Bar>, String> with Ok(vec![])
+crates/idx_cal/src/storeio.rs:93:5: replace read_range -> Result<Vec<Bar>, String> with Ok(vec![Default::default()])
+crates/idx_cal/src/storeio.rs:105:5: replace ym_of -> (u16, u8) with (0, 0)
+crates/idx_cal/src/storeio.rs:105:5: replace ym_of -> (u16, u8) with (0, 1)
+crates/idx_cal/src/storeio.rs:105:5: replace ym_of -> (u16, u8) with (1, 0)
+crates/idx_cal/src/storeio.rs:105:5: replace ym_of -> (u16, u8) with (1, 1)
+crates/idx_cal/src/storeio.rs:115:5: replace day_bars -> Result<Option<Vec<Bar>>, String> with Ok(None)
+crates/idx_cal/src/storeio.rs:115:5: replace day_bars -> Result<Option<Vec<Bar>>, String> with Ok(Some(vec![]))
+crates/idx_cal/src/storeio.rs:115:5: replace day_bars -> Result<Option<Vec<Bar>>, String> with Ok(Some(vec![Default::default()]))
+crates/idx_cal/src/storeio.rs:139:9: replace MonthCache::month -> &Result<Vec<Bar>, String> with Box::leak(Box::new(Ok(vec![])))
+crates/idx_cal/src/storeio.rs:139:9: replace MonthCache::month -> &Result<Vec<Bar>, String> with Box::leak(Box::new(Ok(vec![Default::default()])))
+crates/idx_cal/src/storeio.rs:159:9: replace MonthCache::clear with ()
+crates/idx_cal/src/storeio.rs:166:5: replace slice -> &[Bar] with Vec::leak(Vec::new())
+crates/idx_cal/src/storeio.rs:166:5: replace slice -> &[Bar] with Vec::leak(vec![Default::default()])
+crates/idx_cal/src/storeio.rs:166:50: replace < with == in slice
+crates/idx_cal/src/storeio.rs:166:50: replace < with > in slice
+crates/idx_cal/src/storeio.rs:166:50: replace < with <= in slice
+crates/idx_cal/src/storeio.rs:167:50: replace < with == in slice
+crates/idx_cal/src/storeio.rs:167:50: replace < with > in slice
+crates/idx_cal/src/storeio.rs:167:50: replace < with <= in slice
+crates/idx_cal/src/storeio.rs:174:5: replace contract_name -> String with String::new()
+crates/idx_cal/src/storeio.rs:174:5: replace contract_name -> String with "xyzzy".into()
+crates/idx_cal/src/storeio.rs:183:5: replace list_contracts -> Result<(ContractMap, Vec<String>), String> with Ok((Default::default(), vec![]))
+crates/idx_cal/src/storeio.rs:183:5: replace list_contracts -> Result<(ContractMap, Vec<String>), String> with Ok((Default::default(), vec![String::new()]))
+crates/idx_cal/src/storeio.rs:183:5: replace list_contracts -> Result<(ContractMap, Vec<String>), String> with Ok((Default::default(), vec!["xyzzy".into()]))
+crates/idx_cal/src/storeio.rs:195:17: delete match arm "CE" in list_contracts
+crates/idx_cal/src/storeio.rs:196:17: delete match arm "PE" in list_contracts
+crates/idx_cal/src/storeio.rs:204:59: delete ! in list_contracts
+crates/idx_cal/src/ticks.rs:20:29: replace << with >>
+crates/idx_cal/src/ticks.rs:56:9: replace Sec::price_only -> bool with true
+crates/idx_cal/src/ticks.rs:56:9: replace Sec::price_only -> bool with false
+crates/idx_cal/src/ticks.rs:56:21: replace == with != in Sec::price_only
+crates/idx_cal/src/ticks.rs:61:5: replace unzstd -> Result<Vec<u8>, String> with Ok(vec![])
+crates/idx_cal/src/ticks.rs:61:5: replace unzstd -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/idx_cal/src/ticks.rs:61:5: replace unzstd -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/idx_cal/src/ticks.rs:65:53: replace == with != in unzstd
+crates/idx_cal/src/ticks.rs:79:9: replace Cur<'_>::take -> Result<&[u8], String> with Ok(Vec::leak(vec![0]))
+crates/idx_cal/src/ticks.rs:79:9: replace Cur<'_>::take -> Result<&[u8], String> with Ok(Vec::leak(Vec::new()))
+crates/idx_cal/src/ticks.rs:79:9: replace Cur<'_>::take -> Result<&[u8], String> with Ok(Vec::leak(vec![1]))
+crates/idx_cal/src/ticks.rs:85:9: replace Cur<'_>::u8 -> Result<u8, String> with Ok(0)
+crates/idx_cal/src/ticks.rs:85:9: replace Cur<'_>::u8 -> Result<u8, String> with Ok(1)
+crates/idx_cal/src/ticks.rs:88:9: replace Cur<'_>::u16 -> Result<u16, String> with Ok(0)
+crates/idx_cal/src/ticks.rs:88:9: replace Cur<'_>::u16 -> Result<u16, String> with Ok(1)
+crates/idx_cal/src/ticks.rs:92:9: replace Cur<'_>::u32 -> Result<u32, String> with Ok(0)
+crates/idx_cal/src/ticks.rs:92:9: replace Cur<'_>::u32 -> Result<u32, String> with Ok(1)
+crates/idx_cal/src/ticks.rs:96:9: replace Cur<'_>::u64 -> Result<u64, String> with Ok(0)
+crates/idx_cal/src/ticks.rs:96:9: replace Cur<'_>::u64 -> Result<u64, String> with Ok(1)
+crates/idx_cal/src/ticks.rs:102:5: replace read_at -> Result<Vec<u8>, String> with Ok(vec![])
+crates/idx_cal/src/ticks.rs:102:5: replace read_at -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/idx_cal/src/ticks.rs:102:5: replace read_at -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/idx_cal/src/ticks.rs:131:17: replace || with && in read_index
+crates/idx_cal/src/ticks.rs:131:12: replace < with == in read_index
+crates/idx_cal/src/ticks.rs:131:12: replace < with > in read_index
+crates/idx_cal/src/ticks.rs:131:12: replace < with <= in read_index
+crates/idx_cal/src/ticks.rs:131:43: replace != with == in read_index
+crates/idx_cal/src/ticks.rs:134:36: replace - with + in read_index
+crates/idx_cal/src/ticks.rs:134:36: replace - with / in read_index
+crates/idx_cal/src/ticks.rs:137:19: replace != with == in read_index
+crates/idx_cal/src/ticks.rs:140:76: replace || with && in read_index
+crates/idx_cal/src/ticks.rs:140:63: replace != with == in read_index
+crates/idx_cal/src/ticks.rs:140:84: replace < with == in read_index
+crates/idx_cal/src/ticks.rs:140:84: replace < with > in read_index
+crates/idx_cal/src/ticks.rs:140:84: replace < with <= in read_index
+crates/idx_cal/src/ticks.rs:144:22: replace != with == in read_index
+crates/idx_cal/src/ticks.rs:159:22: replace && with || in read_index
+crates/idx_cal/src/ticks.rs:159:17: replace != with == in read_index
+crates/idx_cal/src/ticks.rs:159:34: replace || with && in read_index
+crates/idx_cal/src/ticks.rs:159:30: replace < with == in read_index
+crates/idx_cal/src/ticks.rs:159:30: replace < with > in read_index
+crates/idx_cal/src/ticks.rs:159:30: replace < with <= in read_index
+crates/idx_cal/src/ticks.rs:159:76: replace > with == in read_index
+crates/idx_cal/src/ticks.rs:159:76: replace > with < in read_index
+crates/idx_cal/src/ticks.rs:159:76: replace > with >= in read_index
+crates/idx_cal/src/ticks.rs:170:5: replace basename -> &str with ""
+crates/idx_cal/src/ticks.rs:170:5: replace basename -> &str with "xyzzy"
+crates/idx_cal/src/ticks.rs:180:5: replace render -> String with String::new()
+crates/idx_cal/src/ticks.rs:180:5: replace render -> String with "xyzzy".into()
+crates/idx_cal/src/ticks.rs:180:21: replace != with == in render
+crates/idx_cal/src/ticks.rs:180:14: replace & with | in render
+crates/idx_cal/src/ticks.rs:180:14: replace & with ^ in render
+crates/idx_cal/src/ticks.rs:183:31: replace & with | in render
+crates/idx_cal/src/ticks.rs:183:31: replace & with ^ in render
+crates/idx_cal/src/ticks.rs:185:10: replace > with == in render
+crates/idx_cal/src/ticks.rs:185:10: replace > with < in render
+crates/idx_cal/src/ticks.rs:185:10: replace > with >= in render
+crates/idx_cal/src/ticks.rs:186:26: replace - with + in render
+crates/idx_cal/src/ticks.rs:186:26: replace - with / in render
+crates/idx_cal/src/ticks.rs:188:21: replace != with == in render
+crates/idx_cal/src/ticks.rs:188:14: replace & with | in render
+crates/idx_cal/src/ticks.rs:188:14: replace & with ^ in render
+crates/idx_cal/src/ticks.rs:199:38: replace == with != in decode_column
+crates/idx_cal/src/ticks.rs:197:12: replace == with != in decode_column
+crates/idx_cal/src/ticks.rs:200:20: replace != with == in decode_column
+crates/idx_cal/src/ticks.rs:207:43: replace + with - in decode_column
+crates/idx_cal/src/ticks.rs:207:43: replace + with * in decode_column
+crates/idx_cal/src/ticks.rs:208:35: replace + with - in decode_column
+crates/idx_cal/src/ticks.rs:208:35: replace + with * in decode_column
+crates/idx_cal/src/ticks.rs:208:49: replace + with - in decode_column
+crates/idx_cal/src/ticks.rs:208:45: replace + with - in decode_column
+crates/idx_cal/src/ticks.rs:208:49: replace + with * in decode_column
+crates/idx_cal/src/ticks.rs:208:45: replace + with * in decode_column
+crates/idx_cal/src/ticks.rs:208:53: replace * with + in decode_column
+crates/idx_cal/src/ticks.rs:208:53: replace * with / in decode_column
+crates/idx_cal/src/ticks.rs:214:45: replace + with - in decode_column
+crates/idx_cal/src/ticks.rs:214:45: replace + with * in decode_column
+crates/idx_cal/src/ticks.rs:214:38: replace * with + in decode_column
+crates/idx_cal/src/ticks.rs:215:15: replace |= with &= in decode_column
+crates/idx_cal/src/ticks.rs:214:38: replace * with / in decode_column
+crates/idx_cal/src/ticks.rs:215:40: replace * with + in decode_column
+crates/idx_cal/src/ticks.rs:215:34: replace << with >> in decode_column
+crates/idx_cal/src/ticks.rs:215:40: replace * with / in decode_column
+crates/idx_cal/src/ticks.rs:217:46: replace ^ with | in decode_column
+crates/idx_cal/src/ticks.rs:217:46: replace ^ with & in decode_column
+crates/idx_cal/src/ticks.rs:217:40: replace >> with << in decode_column
+crates/idx_cal/src/ticks.rs:217:51: replace & with | in decode_column
+crates/idx_cal/src/ticks.rs:217:51: replace & with ^ in decode_column
+crates/idx_cal/src/ticks.rs:218:26: replace == with != in decode_column
+crates/idx_cal/src/ticks.rs:226:5: replace field -> Option<String> with None
+crates/idx_cal/src/ticks.rs:226:5: replace field -> Option<String> with Some(String::new())
+crates/idx_cal/src/ticks.rs:226:5: replace field -> Option<String> with Some("xyzzy".into())
+crates/idx_cal/src/ticks.rs:234:5: replace paisa -> Option<i64> with None
+crates/idx_cal/src/ticks.rs:234:5: replace paisa -> Option<i64> with Some(0)
+crates/idx_cal/src/ticks.rs:234:5: replace paisa -> Option<i64> with Some(1)
+crates/idx_cal/src/ticks.rs:234:5: replace paisa -> Option<i64> with Some(-1)

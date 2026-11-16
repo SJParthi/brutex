@@ -1,0 +1,112 @@
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, 0, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, 0, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, 0, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, 1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, 1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, 1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, -1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, -1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 0, -1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, 0, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, 0, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, 0, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, 1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, 1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, 1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, -1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, -1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, 1, -1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, 0, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, 0, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, 0, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, 1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, 1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, 1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, -1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, -1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(0, -1, -1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, 0, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, 0, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, 0, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, 1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, 1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, 1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, -1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, -1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 0, -1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, 0, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, 0, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, 0, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, 1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, 1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, 1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, -1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, -1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, 1, -1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, 0, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, 0, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, 0, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, 1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, 1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, 1, -1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, -1, 0)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, -1, 1)]
+crates/sniper_host/src/ctxdials.rs:236:5: replace day_range_so_far -> Vec<(usize, i64, i64, i64)> with vec![(1, -1, -1, -1)]
+crates/sniper_host/src/ctxdials.rs:240:32: replace match guard s == i with true in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:240:32: replace match guard s == i with false in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:240:34: replace == with != in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with None
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((0, 0))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((0, 1))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((0, -1))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((1, 0))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((1, 1))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((1, -1))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((-1, 0))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((-1, 1))
+crates/sniper_host/src/ctxdials.rs:257:5: replace drng -> Option<(i128, i128)> with Some((-1, -1))
+crates/sniper_host/src/ctxdials.rs:257:31: replace > with == in drng
+crates/sniper_host/src/ctxdials.rs:257:31: replace > with < in drng
+crates/sniper_host/src/ctxdials.rs:258:51: replace * with + in drng
+crates/sniper_host/src/ctxdials.rs:258:51: replace * with / in drng
+crates/sniper_host/src/ctxdials.rs:258:45: replace * with + in drng
+crates/sniper_host/src/ctxdials.rs:258:45: replace * with / in drng
+crates/sniper_host/src/ctxdials.rs:258:27: replace - with + in drng
+crates/sniper_host/src/ctxdials.rs:258:27: replace - with / in drng
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with None
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((0, 0))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((0, 1))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((0, -1))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((1, 0))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((1, 1))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((1, -1))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((-1, 0))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((-1, 1))
+crates/sniper_host/src/ctxdials.rs:267:5: replace reading -> Option<(i128, i128)> with Some((-1, -1))
+crates/sniper_host/src/ctxdials.rs:268:57: delete - in reading
+crates/sniper_host/src/ctxdials.rs:271:9: delete match arm "X-VIX" in reading
+crates/sniper_host/src/ctxdials.rs:272:9: delete match arm "G-52H" in reading
+crates/sniper_host/src/ctxdials.rs:279:9: delete match arm "G-52L" in reading
+crates/sniper_host/src/ctxdials.rs:286:9: delete match arm "G-DRNG" in reading
+crates/sniper_host/src/db.rs:40:9: replace Db::audit_path -> PathBuf with Default::default()
+crates/sniper_host/src/db.rs:44:9: replace Db::last_link -> Result<(u64, String), String> with Ok((0, String::new()))
+crates/sniper_host/src/db.rs:44:9: replace Db::last_link -> Result<(u64, String), String> with Ok((0, "xyzzy".into()))
+crates/sniper_host/src/db.rs:44:9: replace Db::last_link -> Result<(u64, String), String> with Ok((1, String::new()))
+crates/sniper_host/src/db.rs:44:9: replace Db::last_link -> Result<(u64, String), String> with Ok((1, "xyzzy".into()))
+crates/sniper_host/src/db.rs:45:12: delete ! in Db::last_link
+crates/sniper_host/src/db.rs:49:53: delete ! in Db::last_link
+crates/sniper_host/src/db.rs:59:9: replace Db::write -> Result<String, String> with Ok(String::new())
+crates/sniper_host/src/db.rs:59:9: replace Db::write -> Result<String, String> with Ok("xyzzy".into())
+crates/sniper_host/src/db.rs:62:48: replace == with != in Db::write
+crates/sniper_host/src/db.rs:66:24: replace != with == in Db::write
+crates/sniper_host/src/db.rs:102:9: replace Db::write_bin -> Result<String, String> with Ok(String::new())
+crates/sniper_host/src/db.rs:102:9: replace Db::write_bin -> Result<String, String> with Ok("xyzzy".into())
+crates/sniper_host/src/db.rs:174:9: replace Db::audit -> Result<(), String> with Ok(())
+crates/sniper_host/src/db.rs:191:9: replace Db::verify -> Result<u64, String> with Ok(0)
+crates/sniper_host/src/db.rs:191:9: replace Db::verify -> Result<u64, String> with Ok(1)
+crates/sniper_host/src/db.rs:194:39: delete ! in Db::verify
+crates/sniper_host/src/db.rs:197:22: replace != with == in Db::verify
+crates/sniper_host/src/db.rs:201:33: replace != with == in Db::verify
+crates/sniper_host/src/db.rs:205:15: replace += with -= in Db::verify
+crates/sniper_host/src/db.rs:205:15: replace += with *= in Db::verify

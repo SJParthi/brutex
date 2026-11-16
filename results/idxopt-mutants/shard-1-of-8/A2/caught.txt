@@ -1,0 +1,52 @@
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (0, -1, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, 0, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, 0, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, 0, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, 1, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, 1, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, 1, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, -1, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, -1, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (1, -1, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, 0, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, 0, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, 0, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, 1, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, 1, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, 1, -1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, -1, 0)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, -1, 1)
+crates/costs/src/option_clock.rs:113:5: replace civil -> (i64, i64, i64) with (-1, -1, -1)
+crates/costs/src/option_clock.rs:113:15: replace + with - in civil
+crates/costs/src/option_clock.rs:113:15: replace + with * in civil
+crates/costs/src/option_clock.rs:114:52: replace / with % in civil
+crates/costs/src/option_clock.rs:114:52: replace / with * in civil
+crates/costs/src/option_clock.rs:114:20: replace >= with < in civil
+crates/costs/src/option_clock.rs:115:17: replace - with + in civil
+crates/costs/src/option_clock.rs:115:17: replace - with / in civil
+crates/costs/src/option_clock.rs:115:23: replace * with + in civil
+crates/costs/src/option_clock.rs:115:23: replace * with / in civil
+crates/costs/src/option_clock.rs:116:65: replace / with % in civil
+crates/costs/src/option_clock.rs:116:65: replace / with * in civil
+crates/costs/src/option_clock.rs:116:33: replace + with * in civil
+crates/costs/src/option_clock.rs:116:20: replace - with + in civil
+crates/costs/src/option_clock.rs:116:20: replace - with / in civil
+crates/costs/src/option_clock.rs:116:26: replace / with % in civil
+crates/costs/src/option_clock.rs:116:26: replace / with * in civil
+crates/costs/src/option_clock.rs:116:39: replace / with % in civil
+crates/costs/src/option_clock.rs:116:39: replace / with * in civil
+crates/costs/src/option_clock.rs:116:54: replace / with % in civil
+crates/costs/src/option_clock.rs:116:54: replace / with * in civil
+crates/costs/src/option_clock.rs:117:17: replace + with - in civil
+crates/costs/src/option_clock.rs:117:17: replace + with * in civil
+crates/costs/src/option_clock.rs:117:23: replace * with + in civil
+crates/costs/src/option_clock.rs:117:23: replace * with / in civil
+crates/costs/src/option_clock.rs:118:19: replace - with + in civil
+crates/costs/src/option_clock.rs:118:19: replace - with / in civil
+crates/costs/src/option_clock.rs:118:42: replace - with / in civil
+crates/costs/src/option_clock.rs:118:32: replace + with - in civil
+crates/costs/src/option_clock.rs:118:32: replace + with * in civil
+crates/costs/src/option_clock.rs:118:26: replace * with + in civil
+crates/costs/src/option_clock.rs:118:26: replace * with / in civil
+crates/costs/src/option_clock.rs:118:38: replace / with % in civil
+crates/costs/src/option_clock.rs:118:38: replace / with * in civil

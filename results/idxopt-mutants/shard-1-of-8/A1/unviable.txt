@@ -1,0 +1,6 @@
+crates/idx_cal/src/day.rs:92:5: replace month_end -> Day with Default::default()
+crates/idx_cal/src/listing.rs:116:5: replace parse_specials -> Result<Vec<Special>, String> with Ok(vec![Default::default()])
+crates/idx_cal/src/storeio.rs:61:5: replace open_month -> MonthFile with Default::default()
+crates/idx_cal/src/ticks.rs:129:5: replace read_index -> Result<(File, Vec<Entry>), String> with Ok((Default::default(), vec![]))
+crates/idx_cal/src/ticks.rs:129:5: replace read_index -> Result<(File, Vec<Entry>), String> with Ok((Default::default(), vec![Default::default()]))
+crates/idx_cal/src/ticks.rs:192:5: replace decode_column -> Result<Col, String> with Ok(Default::default())

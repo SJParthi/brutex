@@ -1,0 +1,103 @@
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![], vec![-1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![None], vec![0])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![None], vec![])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![None], vec![1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![None], vec![-1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(0)], vec![])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(0)], vec![0])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(0)], vec![1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(0)], vec![-1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(1)], vec![])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(1)], vec![0])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(1)], vec![1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(1)], vec![-1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(-1)], vec![])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(-1)], vec![0])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(-1)], vec![1])
+crates/sniper_host/src/ctxdials.rs:199:5: replace daily_atr -> (Vec<Option<i128>>, Vec<i32>) with (vec![Some(-1)], vec![-1])
+crates/sniper_host/src/ctxdials.rs:206:26: replace >= with < in daily_atr
+crates/sniper_host/src/ctxdials.rs:207:17: replace && with || in daily_atr
+crates/sniper_host/src/ctxdials.rs:211:12: delete ! in daily_atr
+crates/sniper_host/src/ctxdials.rs:212:31: replace >= with < in daily_atr
+crates/sniper_host/src/ctxdials.rs:217:23: replace += with -= in daily_atr
+crates/sniper_host/src/ctxdials.rs:217:23: replace += with *= in daily_atr
+crates/sniper_host/src/ctxdials.rs:226:31: replace >= with < in daily_atr
+crates/sniper_host/src/ctxdials.rs:246:49: replace > with == in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:246:49: replace > with < in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:246:49: replace > with >= in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:246:137: replace == with != in day_range_so_far
+crates/sniper_host/src/ctxdials.rs:257:31: replace > with >= in drng
+crates/sniper_host/src/ctxdials.rs:270:9: delete match arm "X-NIFTY" in reading
+crates/sniper_host/src/ctxdials.rs:292:5: replace read_index -> Result<(Vec<Candle>, Vec<String>), String> with Ok((vec![], vec![]))
+crates/sniper_host/src/ctxdials.rs:292:5: replace read_index -> Result<(Vec<Candle>, Vec<String>), String> with Ok((vec![], vec![String::new()]))
+crates/sniper_host/src/ctxdials.rs:292:5: replace read_index -> Result<(Vec<Candle>, Vec<String>), String> with Ok((vec![], vec!["xyzzy".into()]))
+crates/sniper_host/src/ctxdials.rs:299:5: replace known_line -> String with String::new()
+crates/sniper_host/src/ctxdials.rs:299:5: replace known_line -> String with "xyzzy".into()
+crates/sniper_host/src/ctxdials.rs:309:5: replace attach -> Result<Attached, String> with Ok(Default::default())
+crates/sniper_host/src/ctxdials.rs:312:39: replace || with && in attach
+crates/sniper_host/src/ctxdials.rs:312:22: replace || with && in attach
+crates/sniper_host/src/ctxdials.rs:331:61: replace != with == in attach
+crates/sniper_host/src/ctxdials.rs:332:15: replace += with -= in attach
+crates/sniper_host/src/ctxdials.rs:332:15: replace += with *= in attach
+crates/sniper_host/src/ctxdials.rs:347:37: replace || with && in attach
+crates/sniper_host/src/ctxdials.rs:347:18: replace != with == in attach
+crates/sniper_host/src/ctxdials.rs:347:62: replace && with || in attach
+crates/sniper_host/src/ctxdials.rs:347:65: delete ! in attach
+crates/sniper_host/src/ctxdials.rs:362:44: replace == with != in attach
+crates/sniper_host/src/ctxdials.rs:363:45: replace == with != in attach
+crates/sniper_host/src/ctxdials.rs:445:9: replace Counts::add with ()
+crates/sniper_host/src/ctxdials.rs:445:16: replace += with -= in Counts::add
+crates/sniper_host/src/ctxdials.rs:445:16: replace += with *= in Counts::add
+crates/sniper_host/src/ctxdials.rs:450:24: replace += with -= in Counts::add
+crates/sniper_host/src/ctxdials.rs:450:24: replace += with *= in Counts::add
+crates/sniper_host/src/ctxdials.rs:457:19: replace += with -= in Counts::add
+crates/sniper_host/src/ctxdials.rs:457:19: replace += with *= in Counts::add
+crates/sniper_host/src/ctxdials.rs:457:40: replace == with != in Counts::add
+crates/sniper_host/src/ctxdials.rs:458:19: replace += with -= in Counts::add
+crates/sniper_host/src/ctxdials.rs:458:19: replace += with *= in Counts::add
+crates/sniper_host/src/ctxdials.rs:458:41: replace == with != in Counts::add
+crates/sniper_host/src/ctxdials.rs:471:5: replace prepare -> Result<Prep, String> with Ok(Default::default())
+crates/sniper_host/src/ctxdials.rs:474:39: replace || with && in prepare
+crates/sniper_host/src/ctxdials.rs:474:22: replace || with && in prepare
+crates/sniper_host/src/ctxdials.rs:497:5: replace read_one -> CtxRead with Default::default()
+crates/sniper_host/src/ctxdials.rs:498:26: replace match guard d == day with true in read_one
+crates/sniper_host/src/ctxdials.rs:498:26: replace match guard d == day with false in read_one
+crates/sniper_host/src/ctxdials.rs:498:28: replace == with != in read_one
+crates/sniper_host/src/ctxdials.rs:516:5: replace lines -> Attached with Default::default()
+crates/sniper_host/src/db.rs:59:31: replace || with && in Db::write
+crates/sniper_host/src/db.rs:72:50: replace || with && in Db::write
+crates/sniper_host/src/db.rs:102:31: replace || with && in Db::write_bin
+crates/sniper_host/src/db.rs:125:9: replace Db::tmp_path -> PathBuf with Default::default()
+crates/sniper_host/src/db.rs:135:9: replace Db::adopt_bin -> Result<String, String> with Ok(String::new())
+crates/sniper_host/src/db.rs:135:9: replace Db::adopt_bin -> Result<String, String> with Ok("xyzzy".into())
+crates/sniper_host/src/db.rs:135:31: replace || with && in Db::adopt_bin
+crates/sniper_host/src/db.rs:155:9: replace Db::verify_stream -> Result<u64, String> with Ok(0)
+crates/sniper_host/src/db.rs:155:9: replace Db::verify_stream -> Result<u64, String> with Ok(1)
+crates/sniper_host/src/db.rs:158:39: delete ! in Db::verify_stream
+crates/sniper_host/src/db.rs:161:22: replace != with == in Db::verify_stream
+crates/sniper_host/src/db.rs:164:69: replace != with == in Db::verify_stream
+crates/sniper_host/src/db.rs:168:15: replace += with -= in Db::verify_stream
+crates/sniper_host/src/db.rs:168:15: replace += with *= in Db::verify_stream
+crates/sniper_host/src/db.rs:176:19: delete ! in Db::audit
+crates/sniper_host/src/esn1.rs:76:19: replace == with != in load_inputs
+crates/sniper_host/src/esn1.rs:80:36: replace == with != in load_inputs
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (0, 0, 0)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (0, 0, 1)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (0, 1, 0)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (0, 1, 1)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (1, 0, 0)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (1, 0, 1)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (1, 1, 0)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (1, 1, 1)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (-1, 0, 0)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (-1, 0, 1)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (-1, 1, 0)
+crates/sniper_host/src/esn1.rs:133:5: replace civil -> (i32, u32, u32) with (-1, 1, 1)
+crates/sniper_host/src/esn1.rs:139:5: replace day_tape -> Result<Option<Day>, String> with Ok(None)
+crates/sniper_host/src/esn1.rs:152:59: replace == with != in day_tape
+crates/sniper_host/src/esn1.rs:158:164: replace * with + in plan_of
+crates/sniper_host/src/esn1.rs:158:164: replace * with / in plan_of
+crates/sniper_host/src/esn1.rs:164:39: replace match guard end * US_S < sq with true in plan_of
+crates/sniper_host/src/esn1.rs:164:39: replace match guard end * US_S < sq with false in plan_of
+crates/sniper_host/src/esn1.rs:164:50: replace < with == in plan_of
+crates/sniper_host/src/esn1.rs:164:50: replace < with > in plan_of
