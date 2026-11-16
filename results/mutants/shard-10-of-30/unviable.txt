@@ -1,0 +1,7 @@
+crates/spikefade/src/screen.rs:147:25: replace && with || in lists_all
+crates/spikefade/src/screen.rs:288:5: replace prev_closes -> std::sync::Arc<Vec<i32>> with Arc::new(vec![])
+crates/spikefade/src/screen.rs:288:5: replace prev_closes -> std::sync::Arc<Vec<i32>> with Arc::new(vec![0])
+crates/spikefade/src/screen.rs:288:5: replace prev_closes -> std::sync::Arc<Vec<i32>> with Arc::new(vec![1])
+crates/spikefade/src/screen.rs:288:5: replace prev_closes -> std::sync::Arc<Vec<i32>> with Arc::new(vec![-1])
+crates/spikefade/src/screen.rs:290:9: replace && with || in prev_closes
+crates/spikefade/src/screen.rs:640:57: replace && with || in generate

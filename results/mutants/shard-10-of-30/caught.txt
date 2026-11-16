@@ -1,0 +1,211 @@
+crates/spikefade/src/screen.rs:37:28: replace * with +
+crates/spikefade/src/screen.rs:42:5: replace cfg_id -> usize with 0
+crates/spikefade/src/screen.rs:42:5: replace cfg_id -> usize with 1
+crates/spikefade/src/screen.rs:37:28: replace * with /
+crates/spikefade/src/screen.rs:42:61: replace + with - in cfg_id
+crates/spikefade/src/screen.rs:42:61: replace + with * in cfg_id
+crates/spikefade/src/screen.rs:42:54: replace * with / in cfg_id
+crates/spikefade/src/screen.rs:42:46: replace + with - in cfg_id
+crates/spikefade/src/screen.rs:42:46: replace + with * in cfg_id
+crates/spikefade/src/screen.rs:42:36: replace + with - in cfg_id
+crates/spikefade/src/screen.rs:42:36: replace + with * in cfg_id
+crates/spikefade/src/screen.rs:42:26: replace + with - in cfg_id
+crates/spikefade/src/screen.rs:42:26: replace + with * in cfg_id
+crates/spikefade/src/screen.rs:42:16: replace + with - in cfg_id
+crates/spikefade/src/screen.rs:42:16: replace + with * in cfg_id
+crates/spikefade/src/screen.rs:42:12: replace * with / in cfg_id
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 0, 0, 1, 1, 0)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 0, 1, 0, 0, 0)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 0, 1, 0, 1, 0)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 1, 0, 1, 0, 0)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 1, 1, 0, 1, 0)
+crates/spikefade/src/screen.rs:52:16: replace % with / in cfg_parts
+crates/spikefade/src/screen.rs:53:15: replace / with % in cfg_parts
+crates/spikefade/src/screen.rs:57:8: replace / with % in cfg_parts
+crates/spikefade/src/screen.rs:63:5: replace thr_name -> String with String::new()
+crates/spikefade/src/screen.rs:106:5: replace lists -> Vec<(u32, Vec<u32>)> with vec![]
+crates/spikefade/src/screen.rs:106:5: replace lists -> Vec<(u32, Vec<u32>)> with vec![(0, vec![])]
+crates/spikefade/src/screen.rs:106:5: replace lists -> Vec<(u32, Vec<u32>)> with vec![(0, vec![0])]
+crates/spikefade/src/screen.rs:106:5: replace lists -> Vec<(u32, Vec<u32>)> with vec![(0, vec![1])]
+crates/spikefade/src/screen.rs:106:5: replace lists -> Vec<(u32, Vec<u32>)> with vec![(1, vec![])]
+crates/spikefade/src/screen.rs:106:5: replace lists -> Vec<(u32, Vec<u32>)> with vec![(1, vec![0])]
+crates/spikefade/src/screen.rs:106:5: replace lists -> Vec<(u32, Vec<u32>)> with vec![(1, vec![1])]
+crates/spikefade/src/screen.rs:112:5: replace lists_all -> Vec<(u32, Vec<u32>)> with vec![]
+crates/spikefade/src/screen.rs:112:5: replace lists_all -> Vec<(u32, Vec<u32>)> with vec![(0, vec![])]
+crates/spikefade/src/screen.rs:112:5: replace lists_all -> Vec<(u32, Vec<u32>)> with vec![(0, vec![0])]
+crates/spikefade/src/screen.rs:112:5: replace lists_all -> Vec<(u32, Vec<u32>)> with vec![(0, vec![1])]
+crates/spikefade/src/screen.rs:112:5: replace lists_all -> Vec<(u32, Vec<u32>)> with vec![(1, vec![])]
+crates/spikefade/src/screen.rs:112:5: replace lists_all -> Vec<(u32, Vec<u32>)> with vec![(1, vec![0])]
+crates/spikefade/src/screen.rs:112:5: replace lists_all -> Vec<(u32, Vec<u32>)> with vec![(1, vec![1])]
+crates/spikefade/src/screen.rs:119:61: replace == with != in lists_all
+crates/spikefade/src/screen.rs:175:23: replace != with == in lists_all
+crates/spikefade/src/screen.rs:181:30: replace != with == in lists_all
+crates/spikefade/src/screen.rs:194:19: replace != with == in lists_all
+crates/spikefade/src/screen.rs:200:56: replace && with || in lists_all
+crates/spikefade/src/screen.rs:200:34: replace && with || in lists_all
+crates/spikefade/src/screen.rs:200:22: replace && with || in lists_all
+crates/spikefade/src/screen.rs:200:29: replace == with != in lists_all
+crates/spikefade/src/screen.rs:200:47: replace == with != in lists_all
+crates/spikefade/src/screen.rs:200:66: replace != with == in lists_all
+crates/spikefade/src/screen.rs:205:22: replace || with && in lists_all
+crates/spikefade/src/screen.rs:205:17: replace == with != in lists_all
+crates/spikefade/src/screen.rs:205:34: replace != with == in lists_all
+crates/spikefade/src/screen.rs:219:5: replace stock_roll_facts -> (u32, u32) with (0, 0)
+crates/spikefade/src/screen.rs:219:5: replace stock_roll_facts -> (u32, u32) with (0, 1)
+crates/spikefade/src/screen.rs:219:5: replace stock_roll_facts -> (u32, u32) with (1, 0)
+crates/spikefade/src/screen.rs:219:5: replace stock_roll_facts -> (u32, u32) with (1, 1)
+crates/spikefade/src/screen.rs:221:19: replace == with != in stock_roll_facts
+crates/spikefade/src/screen.rs:221:37: replace == with != in stock_roll_facts
+crates/spikefade/src/screen.rs:222:23: replace != with == in stock_roll_facts
+crates/spikefade/src/screen.rs:223:24: replace += with -= in stock_roll_facts
+crates/spikefade/src/screen.rs:223:24: replace += with *= in stock_roll_facts
+crates/spikefade/src/screen.rs:225:25: replace += with -= in stock_roll_facts
+crates/spikefade/src/screen.rs:225:25: replace += with *= in stock_roll_facts
+crates/spikefade/src/screen.rs:236:5: replace rank_key -> u32 with 0
+crates/spikefade/src/screen.rs:236:5: replace rank_key -> u32 with 1
+crates/spikefade/src/screen.rs:236:74: replace | with & in rank_key
+crates/spikefade/src/screen.rs:236:94: replace & with | in rank_key
+crates/spikefade/src/screen.rs:236:94: replace & with ^ in rank_key
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with None
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((0, 0, 0))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((0, 0, 1))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((0, 0, -1))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((0, 1, 0))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((0, 1, 1))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((0, 1, -1))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((1, 0, 0))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((1, 0, 1))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((1, 0, -1))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((1, 1, 0))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((1, 1, 1))
+crates/spikefade/src/screen.rs:242:5: replace window -> Option<(usize, usize, i64)> with Some((1, 1, -1))
+crates/spikefade/src/screen.rs:242:37: replace + with - in window
+crates/spikefade/src/screen.rs:242:24: replace == with != in window
+crates/spikefade/src/screen.rs:242:37: replace + with * in window
+crates/spikefade/src/screen.rs:242:54: replace * with + in window
+crates/spikefade/src/screen.rs:242:54: replace * with / in window
+crates/spikefade/src/screen.rs:242:77: replace * with + in window
+crates/spikefade/src/screen.rs:242:77: replace * with / in window
+crates/spikefade/src/screen.rs:242:72: replace + with - in window
+crates/spikefade/src/screen.rs:242:72: replace + with * in window
+crates/spikefade/src/screen.rs:243:20: replace + with - in window
+crates/spikefade/src/screen.rs:243:20: replace + with * in window
+crates/spikefade/src/screen.rs:243:45: replace * with + in window
+crates/spikefade/src/screen.rs:243:45: replace * with / in window
+crates/spikefade/src/screen.rs:244:15: replace || with && in window
+crates/spikefade/src/screen.rs:244:10: replace > with < in window
+crates/spikefade/src/screen.rs:244:20: replace > with == in window
+crates/spikefade/src/screen.rs:244:20: replace > with < in window
+crates/spikefade/src/screen.rs:244:20: replace > with >= in window
+crates/spikefade/src/screen.rs:250:5: replace member -> Option<Member> with None
+crates/spikefade/src/screen.rs:250:5: replace member -> Option<Member> with Some(Default::default())
+crates/spikefade/src/screen.rs:251:14: replace == with != in member
+crates/spikefade/src/screen.rs:254:33: replace / with % in member
+crates/spikefade/src/screen.rs:255:13: replace == with != in member
+crates/spikefade/src/screen.rs:259:11: replace <= with > in member
+crates/spikefade/src/screen.rs:264:33: replace < with == in member
+crates/spikefade/src/screen.rs:264:33: replace < with > in member
+crates/spikefade/src/screen.rs:265:21: replace && with || in member
+crates/spikefade/src/screen.rs:265:17: replace > with == in member
+crates/spikefade/src/screen.rs:265:17: replace > with < in member
+crates/spikefade/src/screen.rs:265:17: replace > with >= in member
+crates/spikefade/src/screen.rs:265:46: replace > with == in member
+crates/spikefade/src/screen.rs:265:46: replace > with < in member
+crates/spikefade/src/screen.rs:265:46: replace > with >= in member
+crates/spikefade/src/screen.rs:265:41: replace - with + in member
+crates/spikefade/src/screen.rs:265:41: replace - with / in member
+crates/spikefade/src/screen.rs:266:27: replace - with + in member
+crates/spikefade/src/screen.rs:266:27: replace - with / in member
+crates/spikefade/src/screen.rs:267:36: replace >= with < in member
+crates/spikefade/src/screen.rs:267:46: replace < with == in member
+crates/spikefade/src/screen.rs:267:46: replace < with > in member
+crates/spikefade/src/screen.rs:272:11: replace <= with > in member
+crates/spikefade/src/screen.rs:275:60: replace / with % in member
+crates/spikefade/src/screen.rs:275:51: replace * with + in member
+crates/spikefade/src/screen.rs:275:51: replace * with / in member
+crates/spikefade/src/screen.rs:275:60: replace / with * in member
+crates/spikefade/src/screen.rs:275:34: replace - with / in member
+crates/spikefade/src/screen.rs:275:34: replace - with + in member
+crates/spikefade/src/screen.rs:296:127: replace > with == in prev_closes
+crates/spikefade/src/screen.rs:309:5: replace member_prev -> Option<Member> with None
+crates/spikefade/src/screen.rs:309:5: replace member_prev -> Option<Member> with Some(Default::default())
+crates/spikefade/src/screen.rs:313:19: replace || with && in member_prev
+crates/spikefade/src/screen.rs:313:14: replace == with != in member_prev
+crates/spikefade/src/screen.rs:313:27: replace <= with > in member_prev
+crates/spikefade/src/screen.rs:316:33: replace / with % in member_prev
+crates/spikefade/src/screen.rs:316:33: replace / with * in member_prev
+crates/spikefade/src/screen.rs:317:13: replace == with != in member_prev
+crates/spikefade/src/screen.rs:321:11: replace <= with > in member_prev
+crates/spikefade/src/screen.rs:324:62: replace / with % in member_prev
+crates/spikefade/src/screen.rs:324:62: replace / with * in member_prev
+crates/spikefade/src/screen.rs:324:53: replace * with + in member_prev
+crates/spikefade/src/screen.rs:324:53: replace * with / in member_prev
+crates/spikefade/src/screen.rs:324:34: replace - with + in member_prev
+crates/spikefade/src/screen.rs:324:34: replace - with / in member_prev
+crates/spikefade/src/screen.rs:331:64: replace == with != in members
+crates/spikefade/src/screen.rs:330:5: replace members with ()
+crates/spikefade/src/screen.rs:350:5: replace round2 -> u64 with 1
+crates/spikefade/src/screen.rs:354:17: replace >= with < in round2
+crates/spikefade/src/screen.rs:365:36: replace - with / in quant
+crates/spikefade/src/screen.rs:475:12: replace ^ with | in splitmix
+crates/spikefade/src/screen.rs:483:16: replace + with - in path_after
+crates/spikefade/src/screen.rs:502:5: replace generate -> DayEvents with Default::default()
+crates/spikefade/src/screen.rs:503:30: delete field lists from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:517:29: delete ! in generate
+crates/spikefade/src/screen.rs:532:45: replace ^ with & in generate
+crates/spikefade/src/screen.rs:546:40: replace == with != in generate
+crates/spikefade/src/screen.rs:555:25: replace += with -= in generate
+crates/spikefade/src/screen.rs:569:50: replace - with / in generate
+crates/spikefade/src/screen.rs:572:69: replace > with < in generate
+crates/spikefade/src/screen.rs:573:44: replace >= with < in generate
+crates/spikefade/src/screen.rs:587:43: replace + with - in generate
+crates/spikefade/src/screen.rs:589:32: replace += with -= in generate
+crates/spikefade/src/screen.rs:590:33: replace += with -= in generate
+crates/spikefade/src/screen.rs:590:76: replace <= with > in generate
+crates/spikefade/src/screen.rs:600:48: replace >= with < in generate
+crates/spikefade/src/screen.rs:600:65: replace >= with < in generate
+crates/spikefade/src/screen.rs:602:47: replace >= with < in generate
+crates/spikefade/src/screen.rs:612:75: replace >= with < in generate
+crates/spikefade/src/screen.rs:621:46: replace >= with < in generate
+crates/spikefade/src/screen.rs:625:58: replace < with == in generate
+crates/spikefade/src/screen.rs:625:58: replace < with > in generate
+crates/spikefade/src/screen.rs:625:58: replace < with <= in generate
+crates/spikefade/src/screen.rs:625:62: replace * with + in generate
+crates/spikefade/src/screen.rs:630:65: replace - with + in generate
+crates/spikefade/src/screen.rs:625:62: replace * with / in generate
+crates/spikefade/src/screen.rs:630:65: replace - with / in generate
+crates/spikefade/src/screen.rs:631:59: replace || with && in generate
+crates/spikefade/src/screen.rs:631:54: replace >= with < in generate
+crates/spikefade/src/screen.rs:631:72: replace <= with > in generate
+crates/spikefade/src/screen.rs:638:69: replace += with -= in generate
+crates/spikefade/src/screen.rs:639:75: replace == with != in generate
+crates/spikefade/src/screen.rs:640:104: replace + with - in generate
+crates/spikefade/src/screen.rs:640:104: replace + with * in generate
+crates/spikefade/src/screen.rs:640:97: replace * with + in generate
+crates/spikefade/src/screen.rs:640:97: replace * with / in generate
+crates/spikefade/src/screen.rs:642:60: replace += with -= in generate
+crates/spikefade/src/screen.rs:642:60: replace += with *= in generate
+crates/spikefade/src/screen.rs:652:44: delete ! in generate
+crates/spikefade/src/screen.rs:655:47: replace += with -= in generate
+crates/spikefade/src/screen.rs:655:47: replace += with *= in generate
+crates/spikefade/src/screen.rs:665:44: delete ! in generate
+crates/spikefade/src/screen.rs:672:63: replace + with - in generate
+crates/spikefade/src/screen.rs:672:63: replace + with * in generate
+crates/spikefade/src/screen.rs:675:56: replace += with -= in generate
+crates/spikefade/src/screen.rs:685:56: replace += with -= in generate
+crates/spikefade/src/screen.rs:690:52: replace += with -= in generate
+crates/spikefade/src/screen.rs:694:54: replace + with - in generate
+crates/spikefade/src/screen.rs:696:62: replace += with -= in generate
+crates/spikefade/src/screen.rs:709:48: delete ! in generate
+crates/spikefade/src/screen.rs:715:56: delete ! in generate
+crates/spikefade/src/screen.rs:720:76: replace <= with > in generate
+crates/spikefade/src/screen.rs:720:71: replace + with - in generate
+crates/spikefade/src/screen.rs:722:78: replace += with -= in generate
+crates/spikefade/src/screen.rs:723:79: replace < with == in generate
+crates/spikefade/src/screen.rs:724:83: replace += with *= in generate
+crates/spikefade/src/screen.rs:750:25: replace == with != in generate
+crates/spikefade/src/screen.rs:769:5: replace rank_at -> Option<(usize, usize, usize, Member)> with None
+crates/spikefade/src/screen.rs:771:43: replace - with / in rank_at
+crates/spikefade/src/screen.rs:789:75: replace && with || in rank_at
+crates/spikefade/src/screen.rs:789:84: replace >= with < in rank_at
+crates/spikefade/src/screen.rs:798:15: replace >= with < in rank_at

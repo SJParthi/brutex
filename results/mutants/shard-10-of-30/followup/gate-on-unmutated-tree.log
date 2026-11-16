@@ -1,0 +1,28 @@
+# Unmutated tree, two concurrent emulated cargo-mutants jobs (A, B), 12 cycles each, 2026-11-16T12:27:09Z to 2026-11-16T12:29:21Z.
+# Each cycle: touch crates/spikefade/src/screen.rs (no content change); cargo test --no-run --package=spikefade@0.1.0 --locked;
+# then the shard's exact test command (cargo test --package=spikefade@0.1.0 --locked -- --exact + the 14 skips).
+# Columns: job, cycle, test rc, the gate's result, every FAILED test, the gate's panic message.
+A iter=1 rc=0 gate=ok failed=[] 
+A iter=2 rc=101 gate=FAILED failed=[split18::tests::v32rb_split_o1_gates,] 25 months: account p99 4079415 ns
+A iter=3 rc=0 gate=ok failed=[] 
+A iter=4 rc=0 gate=ok failed=[] 
+A iter=5 rc=0 gate=ok failed=[] 
+A iter=6 rc=0 gate=ok failed=[] 
+A iter=7 rc=0 gate=ok failed=[] 
+A iter=8 rc=0 gate=ok failed=[] 
+A iter=9 rc=0 gate=ok failed=[] 
+A iter=10 rc=0 gate=ok failed=[] 
+A iter=11 rc=0 gate=ok failed=[] 
+A iter=12 rc=0 gate=ok failed=[] 
+B iter=1 rc=0 gate=ok failed=[] 
+B iter=2 rc=0 gate=ok failed=[] 
+B iter=3 rc=0 gate=ok failed=[] 
+B iter=4 rc=101 gate=FAILED failed=[split18::tests::v32rb_split_o1_gates,] 97 months: account p99 4046135 ns
+B iter=5 rc=0 gate=ok failed=[] 
+B iter=6 rc=0 gate=ok failed=[] 
+B iter=7 rc=0 gate=ok failed=[] 
+B iter=8 rc=0 gate=ok failed=[] 
+B iter=9 rc=0 gate=ok failed=[] 
+B iter=10 rc=0 gate=ok failed=[] 
+B iter=11 rc=0 gate=ok failed=[] 
+B iter=12 rc=0 gate=ok failed=[] 
