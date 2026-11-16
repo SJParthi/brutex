@@ -2,3 +2,38 @@ crates/spikefade/src/report.rs:1400:20: replace ^ with | in twin
 crates/spikefade/src/report.rs:1413:111: replace < with <= in twin
 crates/spikefade/src/report.rs:1447:5: replace manifest_stats -> (f64, BTreeMap<String, u64>) with (-1.0, BTreeMap::from_iter([("xyzzy".into(), 1)]))
 crates/spikefade/src/report.rs:1762:41: replace < with > in v2_top
+crates/spikefade/src/report.rs:1982:78: replace * with + in gap_stat
+crates/spikefade/src/report.rs:1988:19: replace += with -= in gap_stat
+crates/spikefade/src/report.rs:1998:5: replace pct1 -> String with String::new()
+crates/spikefade/src/report.rs:2003:5: replace why_alpha -> String with "xyzzy".into()
+crates/spikefade/src/report.rs:2009:5: replace checker_rows -> HashMap<(String, String), Vec<String>> with HashMap::from_iter([((String::new(), String::new()), vec![String::new()])])
+crates/spikefade/src/report.rs:2096:240: replace && with || in v21_top
+crates/spikefade/src/report.rs:2096:118: replace && with || in v21_top
+crates/spikefade/src/report.rs:2096:126: replace == with != in v21_top
+crates/spikefade/src/report.rs:2116:33: replace == with != in v21_top
+crates/spikefade/src/report.rs:2177:57: replace == with != in v21_top
+crates/spikefade/src/report.rs:2348:34: delete field ua from struct RowGap expression in row_gap
+crates/spikefade/src/rules.rs:43:5: replace weekday -> i64 with 0
+crates/spikefade/src/rules.rs:43:5: replace weekday -> i64 with 1
+crates/spikefade/src/rules.rs:43:5: replace weekday -> i64 with -1
+crates/spikefade/src/rules.rs:43:10: replace + with - in weekday
+crates/spikefade/src/rules.rs:43:10: replace + with * in weekday
+crates/spikefade/src/rules.rs:52:5: replace wd_name -> &'static str with ""
+crates/spikefade/src/rules.rs:52:5: replace wd_name -> &'static str with "xyzzy"
+crates/spikefade/src/rules.rs:103:9: replace Calendar::is_trading -> bool with true
+crates/spikefade/src/rules.rs:103:9: replace Calendar::is_trading -> bool with false
+crates/spikefade/src/rules.rs:103:24: replace && with || in Calendar::is_trading
+crates/spikefade/src/rules.rs:103:20: replace < with == in Calendar::is_trading
+crates/spikefade/src/rules.rs:103:20: replace < with > in Calendar::is_trading
+crates/spikefade/src/rules.rs:103:20: replace < with <= in Calendar::is_trading
+crates/spikefade/src/rules.rs:103:27: delete ! in Calendar::is_trading
+crates/spikefade/src/rules.rs:109:9: replace Calendar::sessions -> i64 with 0
+crates/spikefade/src/rules.rs:109:9: replace Calendar::sessions -> i64 with 1
+crates/spikefade/src/rules.rs:109:9: replace Calendar::sessions -> i64 with -1
+crates/spikefade/src/rules.rs:109:15: replace <= with > in Calendar::sessions
+crates/spikefade/src/rules.rs:112:30: replace + with - in Calendar::sessions
+crates/spikefade/src/rules.rs:112:30: replace + with * in Calendar::sessions
+crates/spikefade/src/rules.rs:118:9: replace Calendar::prev_trading -> i64 with 0
+crates/spikefade/src/rules.rs:118:9: replace Calendar::prev_trading -> i64 with 1
+crates/spikefade/src/rules.rs:118:9: replace Calendar::prev_trading -> i64 with -1
+crates/spikefade/src/rules.rs:123:15: replace -= with += in Calendar::prev_trading
