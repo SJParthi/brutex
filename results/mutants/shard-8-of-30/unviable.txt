@@ -1,3 +1,10 @@
 crates/spikefade/src/trade.rs:957:13: replace && with || in book_dearest
 crates/spikefade/src/trade.rs:984:61: replace / with * in buy_path_rd
 crates/spikefade/src/trade.rs:1007:65: replace / with * in sq_path_rd
+crates/spikefade/src/trade.rs:1277:9: replace && with || in size_event_mx
+crates/spikefade/src/trade.rs:1312:13: replace && with || in size_event_mx
+crates/spikefade/src/trade.rs:1364:17: replace && with || in price_event
+crates/spikefade/src/trade.rs:1363:17: replace && with || in price_event
+crates/spikefade/src/trade.rs:1416:13: replace && with || in trade_once
+crates/spikefade/src/trade.rs:1470:5: replace evidence -> Result<Option<Evid>, String> with Ok(Some(Default::default()))
+crates/spikefade/src/v2.rs:125:5: replace eval_entries_full -> Result<Full, String> with Ok(Default::default())
