@@ -29,3 +29,20 @@ crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<
 crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, 0, 0), (0, 1))]))
 crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, 0, 0), (-1, 1))]))
 crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, 0, 1), (0, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, 0, 1), (-1, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, 1, 0), (0, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, -1, 0), (1, 0))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, -1, 1), (0, 1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, String::new(), 1, -1, 1), (1, 1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 0, 0, 1), (0, 0))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 0, 0, 1), (1, 0))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 0, 1, 0), (1, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 0, 1, 1), (-1, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 1, 0, 1), (0, -1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 1, 1, 0), (1, 1))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 1, 1, 1), (-1, 0))]))
+crates/spikefade/src/fix34.rs:913:9: replace BandTable::parse -> Result<HashMap<(u32, String, u32, i64, u8), (i64, i64)>, String> with Ok(HashMap::from_iter([((1, "xyzzy".into(), 1, -1, 0), (1, -1))]))
+crates/spikefade/src/fix34.rs:913:49: delete ! in BandTable::parse
+crates/spikefade/src/fix34.rs:1175:71: replace > with >= in mem_over
+crates/spikefade/src/fix34.rs:1195:5: replace carry_words -> String with String::new()
+crates/spikefade/src/fix34.rs:1279:20: delete ! in wick_mark
