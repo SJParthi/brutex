@@ -1,0 +1,2 @@
+crates/spikefade/src/fix33.rs:356:89: replace * with / in cap_minutes
+crates/spikefade/src/fix33.rs:363:61: replace * with / in cap_minutes
