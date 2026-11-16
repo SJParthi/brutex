@@ -1,0 +1,1 @@
+crates/spikefade/src/csvgz.rs:21:9: replace GzLines::open -> Result<Self, String> with Ok(Default::default())

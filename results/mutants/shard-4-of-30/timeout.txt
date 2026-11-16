@@ -1,0 +1,6 @@
+crates/spikefade/src/csvgz.rs:75:19: replace += with *= in split
+crates/spikefade/src/csvgz.rs:91:21: replace && with || in split
+crates/spikefade/src/csvgz.rs:92:15: replace += with -= in split
+crates/spikefade/src/csvgz.rs:92:15: replace += with *= in split
+crates/spikefade/src/csvgz.rs:98:11: replace += with -= in split
+crates/spikefade/src/csvgz.rs:98:11: replace += with *= in split

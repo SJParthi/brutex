@@ -1,0 +1,25 @@
+crates/spikefade/src/charges.rs:160:37: replace + with * in charges_est_sell
+crates/spikefade/src/charges.rs:160:32: replace + with * in charges_est_sell
+crates/spikefade/src/charges.rs:161:32: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:162:52: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:162:43: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:162:34: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:162:34: replace + with * in charges_est_sell
+crates/spikefade/src/charges.rs:163:48: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:163:48: replace + with * in charges_est_sell
+crates/spikefade/src/charges.rs:163:39: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:163:30: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:172:16: replace > with >= in charged_sell
+crates/spikefade/src/charges.rs:172:11: replace + with * in charged_sell
+crates/spikefade/src/charges.rs:172:21: replace + with - in charged_sell
+crates/spikefade/src/charges.rs:172:33: replace + with * in charged_sell
+crates/spikefade/src/csvgz.rs:31:9: replace GzLines::next_line -> Result<Option<&[u8]>, String> with Ok(None)
+crates/spikefade/src/csvgz.rs:31:9: replace GzLines::next_line -> Result<Option<&[u8]>, String> with Ok(Some(Vec::leak(Vec::new())))
+crates/spikefade/src/csvgz.rs:31:9: replace GzLines::next_line -> Result<Option<&[u8]>, String> with Ok(Some(Vec::leak(vec![0])))
+crates/spikefade/src/csvgz.rs:31:9: replace GzLines::next_line -> Result<Option<&[u8]>, String> with Ok(Some(Vec::leak(vec![1])))
+crates/spikefade/src/csvgz.rs:33:14: replace == with != in GzLines::next_line
+crates/spikefade/src/csvgz.rs:47:9: replace GzLines::finish -> Result<(), String> with Ok(())
+crates/spikefade/src/csvgz.rs:67:21: replace < with <= in split
+crates/spikefade/src/csvgz.rs:70:27: replace += with -= in split
+crates/spikefade/src/csvgz.rs:70:27: replace += with *= in split
+crates/spikefade/src/csvgz.rs:91:17: replace < with <= in split
