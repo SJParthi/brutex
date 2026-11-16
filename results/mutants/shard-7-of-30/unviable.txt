@@ -6,3 +6,9 @@ crates/spikefade/src/trade.rs:247:17: replace && with || in gap_facts
 crates/spikefade/src/trade.rs:268:5: replace dial -> Result<Dial, String> with Ok(Default::default())
 crates/spikefade/src/trade.rs:506:5: replace cand_kind -> Kind with Default::default()
 crates/spikefade/src/trade.rs:517:5: replace rules_of -> [Rule; NRULE] with [Default::default(); NRULE]
+crates/spikefade/src/trade.rs:759:5: replace record_base -> Result<Paths, BaseErr> with Ok(Default::default())
+crates/spikefade/src/trade.rs:769:5: replace record_base_f7 -> Result<Paths, BaseErr> with Ok(Default::default())
+crates/spikefade/src/trade.rs:778:17: replace && with || in record_base_f7
+crates/spikefade/src/trade.rs:792:9: replace && with || in record_base_f7
+crates/spikefade/src/trade.rs:791:9: replace && with || in record_base_f7
+crates/spikefade/src/trade.rs:810:17: replace && with || in record_base_f7
