@@ -395,3 +395,65 @@ crates/spikefade/src/cube.rs:1197:24: replace == with != in decode_sec
 crates/spikefade/src/cube.rs:1201:15: replace != with == in decode_sec
 crates/spikefade/src/cube.rs:1199:21: replace == with != in decode_sec
 crates/spikefade/src/margin.rs:39:63: replace || with && in hundredths
+crates/spikefade/src/margin.rs:75:5: replace pct_up -> i64 with 0
+crates/spikefade/src/margin.rs:75:5: replace pct_up -> i64 with 1
+crates/spikefade/src/margin.rs:75:5: replace pct_up -> i64 with -1
+crates/spikefade/src/margin.rs:75:34: replace * with + in pct_up
+crates/spikefade/src/margin.rs:75:34: replace * with / in pct_up
+crates/spikefade/src/margin.rs:76:31: replace / with % in pct_up
+crates/spikefade/src/margin.rs:76:31: replace / with * in pct_up
+crates/spikefade/src/margin.rs:76:22: replace + with - in pct_up
+crates/spikefade/src/margin.rs:76:22: replace + with * in pct_up
+crates/spikefade/src/margin.rs:95:5: replace per_unit_stock -> Unit with Default::default()
+crates/spikefade/src/margin.rs:95:33: replace - with + in per_unit_stock
+crates/spikefade/src/margin.rs:95:57: replace - with + in per_unit_stock
+crates/spikefade/src/margin.rs:95:57: replace - with / in per_unit_stock
+crates/spikefade/src/margin.rs:96:39: replace - with + in per_unit_stock
+crates/spikefade/src/margin.rs:96:39: replace - with / in per_unit_stock
+crates/spikefade/src/margin.rs:98:45: replace + with - in per_unit_stock
+crates/spikefade/src/margin.rs:98:45: replace + with * in per_unit_stock
+crates/spikefade/src/margin.rs:104:5: replace per_unit_index -> Unit with Default::default()
+crates/spikefade/src/margin.rs:104:33: replace - with + in per_unit_index
+crates/spikefade/src/margin.rs:104:33: replace - with / in per_unit_index
+crates/spikefade/src/margin.rs:105:41: replace - with + in per_unit_index
+crates/spikefade/src/margin.rs:105:41: replace - with / in per_unit_index
+crates/spikefade/src/margin.rs:106:44: replace + with - in per_unit_index
+crates/spikefade/src/margin.rs:106:44: replace + with * in per_unit_index
+crates/spikefade/src/margin.rs:107:45: replace + with - in per_unit_index
+crates/spikefade/src/margin.rs:107:45: replace + with * in per_unit_index
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![], None)
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![], Some(0))
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![], Some(1))
+crates/spikefade/src/mtable.rs:70:9: replace Manifest::of_day -> (Vec<&SnapMeta>, Option<i64>) with (vec![], Some(-1))
+crates/spikefade/src/mtable.rs:70:71: replace == with != in Manifest::of_day
+crates/spikefade/src/mtable.rs:71:12: delete ! in Manifest::of_day
+crates/spikefade/src/mtable.rs:74:57: replace < with == in Manifest::of_day
+crates/spikefade/src/mtable.rs:74:57: replace < with > in Manifest::of_day
+crates/spikefade/src/mtable.rs:90:5: replace append_rows with ()
+crates/spikefade/src/mtable.rs:163:5: replace load_day -> Result<DayM, String> with Ok(Default::default())
+crates/spikefade/src/mtable.rs:168:18: replace != with == in load_day
+crates/spikefade/src/mtable.rs:166:22: delete ! in load_day
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 0, 1, 0)
+crates/spikefade/src/mtable.rs:222:9: replace Lat::line -> String with String::new()
+crates/spikefade/src/mtable.rs:239:5: replace resolve -> ConM with Default::default()
+crates/spikefade/src/mtable.rs:250:74: replace + with - in resolve
+crates/spikefade/src/mtable.rs:250:66: replace * with + in resolve
+crates/spikefade/src/mtable.rs:286:5: replace idx_dated -> Result<(Parts, u8, i32), ()> with Ok((Default::default(), 0, 0))
+crates/spikefade/src/mtable.rs:286:5: replace idx_dated -> Result<(Parts, u8, i32), ()> with Ok((Default::default(), 0, 1))
+crates/spikefade/src/mtable.rs:286:5: replace idx_dated -> Result<(Parts, u8, i32), ()> with Ok((Default::default(), 0, -1))
+crates/spikefade/src/mtable.rs:286:5: replace idx_dated -> Result<(Parts, u8, i32), ()> with Ok((Default::default(), 1, 0))
+crates/spikefade/src/mtable.rs:286:5: replace idx_dated -> Result<(Parts, u8, i32), ()> with Ok((Default::default(), 1, 1))
+crates/spikefade/src/mtable.rs:286:5: replace idx_dated -> Result<(Parts, u8, i32), ()> with Ok((Default::default(), 1, -1))
+crates/spikefade/src/mtable.rs:286:8: delete ! in idx_dated
+crates/spikefade/src/mtable.rs:289:24: replace - with + in idx_dated
+crates/spikefade/src/mtable.rs:289:24: replace - with / in idx_dated
+crates/spikefade/src/mtable.rs:297:25: delete field elm from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:297:30: delete field nse_only from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:297:40: delete field exact from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:297:47: delete field rate_h from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:306:5: replace exact_at -> MarginAt with Default::default()
+crates/spikefade/src/mtable.rs:310:112: replace < with == in exact_at
+crates/spikefade/src/mtable.rs:310:112: replace < with > in exact_at
+crates/spikefade/src/mtable.rs:310:112: replace < with <= in exact_at
+crates/spikefade/src/mtable.rs:315:48: replace + with - in exact_at
+crates/spikefade/src/mtable.rs:315:37: replace * with + in exact_at

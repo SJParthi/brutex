@@ -255,3 +255,81 @@ crates/spikefade/src/margin.rs:37:5: replace hundredths -> Option<i64> with Some
 crates/spikefade/src/margin.rs:37:5: replace hundredths -> Option<i64> with Some(1)
 crates/spikefade/src/margin.rs:37:5: replace hundredths -> Option<i64> with Some(-1)
 crates/spikefade/src/margin.rs:39:105: replace || with && in hundredths
+crates/spikefade/src/margin.rs:39:21: replace || with && in hundredths
+crates/spikefade/src/margin.rs:39:24: delete ! in hundredths
+crates/spikefade/src/margin.rs:39:66: delete ! in hundredths
+crates/spikefade/src/margin.rs:39:116: replace > with == in hundredths
+crates/spikefade/src/margin.rs:39:116: replace > with < in hundredths
+crates/spikefade/src/margin.rs:39:116: replace > with >= in hundredths
+crates/spikefade/src/margin.rs:43:73: replace * with + in hundredths
+crates/spikefade/src/margin.rs:43:73: replace * with / in hundredths
+crates/spikefade/src/margin.rs:43:86: replace == with != in hundredths
+crates/spikefade/src/margin.rs:44:22: replace + with - in hundredths
+crates/spikefade/src/margin.rs:44:22: replace + with * in hundredths
+crates/spikefade/src/margin.rs:44:16: replace * with + in hundredths
+crates/spikefade/src/margin.rs:44:16: replace * with / in hundredths
+crates/spikefade/src/margin.rs:52:5: replace load_var -> Result<BTreeMap<String, VarRow>, String> with Ok(BTreeMap::new())
+crates/spikefade/src/margin.rs:52:5: replace load_var -> Result<BTreeMap<String, VarRow>, String> with Ok(BTreeMap::from_iter([(String::new(), Default::default())]))
+crates/spikefade/src/margin.rs:52:5: replace load_var -> Result<BTreeMap<String, VarRow>, String> with Ok(BTreeMap::from_iter([("xyzzy".into(), Default::default())]))
+crates/spikefade/src/margin.rs:57:11: replace != with == in load_var
+crates/spikefade/src/margin.rs:63:54: replace || with && in load_var
+crates/spikefade/src/margin.rs:63:26: replace || with && in load_var
+crates/spikefade/src/margin.rs:63:20: replace != with == in load_var
+crates/spikefade/src/margin.rs:63:39: replace != with == in load_var
+crates/spikefade/src/margin.rs:63:66: replace != with == in load_var
+crates/spikefade/src/margin.rs:95:33: replace - with / in per_unit_stock
+crates/spikefade/src/margin.rs:104:57: replace - with + in per_unit_index
+crates/spikefade/src/margin.rs:104:57: replace - with / in per_unit_index
+crates/spikefade/src/mtable.rs:50:9: replace Manifest::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/mtable.rs:59:29: replace == with != in Manifest::load
+crates/spikefade/src/mtable.rs:74:57: replace < with <= in Manifest::of_day
+crates/spikefade/src/mtable.rs:93:45: replace == with != in append_rows
+crates/spikefade/src/mtable.rs:93:87: replace + with - in append_rows
+crates/spikefade/src/mtable.rs:93:87: replace + with * in append_rows
+crates/spikefade/src/mtable.rs:94:25: replace && with || in append_rows
+crates/spikefade/src/mtable.rs:94:8: delete ! in append_rows
+crates/spikefade/src/mtable.rs:94:28: delete ! in append_rows
+crates/spikefade/src/mtable.rs:105:5: replace read_table -> Result<Vec<u8>, String> with Ok(vec![])
+crates/spikefade/src/mtable.rs:105:5: replace read_table -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/spikefade/src/mtable.rs:105:5: replace read_table -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/spikefade/src/mtable.rs:106:8: delete ! in read_table
+crates/spikefade/src/mtable.rs:127:9: replace Futures::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/mtable.rs:141:9: replace Futures::base -> Option<i64> with None
+crates/spikefade/src/mtable.rs:141:9: replace Futures::base -> Option<i64> with Some(0)
+crates/spikefade/src/mtable.rs:141:9: replace Futures::base -> Option<i64> with Some(1)
+crates/spikefade/src/mtable.rs:141:9: replace Futures::base -> Option<i64> with Some(-1)
+crates/spikefade/src/mtable.rs:166:19: replace && with || in load_day
+crates/spikefade/src/mtable.rs:174:103: replace && with || in load_day
+crates/spikefade/src/mtable.rs:174:90: replace == with != in load_day
+crates/spikefade/src/mtable.rs:174:114: replace == with != in load_day
+crates/spikefade/src/mtable.rs:175:23: replace && with || in load_day
+crates/spikefade/src/mtable.rs:175:26: delete ! in load_day
+crates/spikefade/src/mtable.rs:177:22: replace != with == in load_day
+crates/spikefade/src/mtable.rs:205:9: replace Lat::merge with ()
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 0, 0, 0)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 0, 0, 1)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 0, 1, 1)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 1, 0, 0)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 1, 0, 1)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 1, 1, 0)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (0, 1, 1, 1)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 0, 0, 0)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 0, 0, 1)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 0, 1, 0)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 0, 1, 1)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 1, 0, 0)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 1, 0, 1)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 1, 1, 0)
+crates/spikefade/src/mtable.rs:213:9: replace Lat::q -> (u32, u32, u32, usize) with (1, 1, 1, 1)
+crates/spikefade/src/mtable.rs:215:67: replace / with % in Lat::q
+crates/spikefade/src/mtable.rs:215:67: replace / with * in Lat::q
+crates/spikefade/src/mtable.rs:215:63: replace * with + in Lat::q
+crates/spikefade/src/mtable.rs:215:63: replace * with / in Lat::q
+crates/spikefade/src/mtable.rs:222:9: replace Lat::line -> String with "xyzzy".into()
+crates/spikefade/src/mtable.rs:250:74: replace + with * in resolve
+crates/spikefade/src/mtable.rs:250:66: replace * with / in resolve
+crates/spikefade/src/mtable.rs:307:30: delete field fallback from struct MarginAt expression in exact_at
+crates/spikefade/src/mtable.rs:310:91: replace <= with > in exact_at
+crates/spikefade/src/mtable.rs:315:48: replace + with * in exact_at
+crates/spikefade/src/mtable.rs:315:37: replace * with / in exact_at
+crates/spikefade/src/mtable.rs:325:36: replace match guard r.oth_h < 0 with true in exact_at
