@@ -88,3 +88,31 @@ crates/sniper_host/src/rows.rs:44:34: replace == with != in col
 crates/sniper_host/src/rows.rs:59:9: replace RunRows::parse -> Result<Self, String> with Ok(Default::default())
 crates/sniper_host/src/rows.rs:79:9: replace RunRows::get -> Result<&str, String> with Ok("")
 crates/sniper_host/src/rows.rs:79:9: replace RunRows::get -> Result<&str, String> with Ok("xyzzy")
+crates/sniper_host/src/rows.rs:309:5: replace read_with_sha -> Result<(String, String), String> with Ok((String::new(), String::new()))
+crates/sniper_host/src/rows.rs:309:5: replace read_with_sha -> Result<(String, String), String> with Ok((String::new(), "xyzzy".into()))
+crates/sniper_host/src/rows.rs:309:5: replace read_with_sha -> Result<(String, String), String> with Ok(("xyzzy".into(), String::new()))
+crates/sniper_host/src/rows.rs:309:5: replace read_with_sha -> Result<(String, String), String> with Ok(("xyzzy".into(), "xyzzy".into()))
+crates/sniper_host/src/search.rs:84:9: replace Slice::load -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/search.rs:87:35: replace || with && in Slice::load
+crates/sniper_host/src/search.rs:106:9: replace Slice::keeps -> bool with true
+crates/sniper_host/src/search.rs:106:9: replace Slice::keeps -> bool with false
+crates/sniper_host/src/search.rs:106:49: replace && with || in Slice::keeps
+crates/sniper_host/src/search.rs:106:41: replace == with != in Slice::keeps
+crates/sniper_host/src/search.rs:106:78: replace || with && in Slice::keeps
+crates/sniper_host/src/search.rs:106:64: replace || with && in Slice::keeps
+crates/sniper_host/src/search.rs:106:55: replace == with != in Slice::keeps
+crates/sniper_host/src/search.rs:106:69: replace == with != in Slice::keeps
+crates/sniper_host/src/search.rs:106:83: replace == with != in Slice::keeps
+crates/sniper_host/src/search.rs:141:9: replace Decoder::n_weight -> Option<Code> with None
+crates/sniper_host/src/search.rs:141:9: replace Decoder::n_weight -> Option<Code> with Some(Default::default())
+crates/sniper_host/src/search.rs:154:18: replace != with == in Decoder::decode
+crates/sniper_host/src/search.rs:170:5: replace combo_rows -> Vec<usize> with vec![]
+crates/sniper_host/src/search.rs:170:5: replace combo_rows -> Vec<usize> with vec![1]
+crates/sniper_host/src/search.rs:170:5: replace combo_rows -> Vec<usize> with vec![0]
+crates/sniper_host/src/search.rs:171:103: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:171:55: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:171:45: replace >= with < in combo_rows
+crates/sniper_host/src/search.rs:171:94: replace >= with < in combo_rows
+crates/sniper_host/src/search.rs:171:142: replace >= with < in combo_rows
+crates/sniper_host/src/search.rs:177:23: replace != with == in combo_rows
+crates/sniper_host/src/search.rs:1111:16: delete ! in context

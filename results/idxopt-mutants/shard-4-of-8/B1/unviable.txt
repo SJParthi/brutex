@@ -1,3 +1,18 @@
 crates/sniper_host/src/rows.rs:87:9: replace RunRows::num -> Result<T, String> with Ok(Default::default())
 crates/sniper_host/src/rows.rs:95:9: replace RunRows::list -> Result<Vec<T>, String> with Ok(vec![Default::default()])
 crates/sniper_host/src/rows.rs:125:9: replace Windows::parse -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/rows.rs:157:5: replace core_ladders -> Result<(CoreLadders, CoreLadders), String> with Ok((Default::default(), Default::default()))
+crates/sniper_host/src/rows.rs:192:5: replace dial_rows -> Result<Vec<DialRow>, String> with Ok(vec![Default::default()])
+crates/sniper_host/src/rows.rs:234:5: replace xc_kind -> Result<ExitKind, String> with Ok(Default::default())
+crates/sniper_host/src/rows.rs:263:5: replace exit_sets -> Result<Vec<ExitSet>, String> with Ok(vec![Default::default()])
+crates/sniper_host/src/search.rs:149:9: replace Decoder::decode -> Result<Combo, String> with Ok(Default::default())
+crates/sniper_host/src/search.rs:178:13: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:177:13: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:186:13: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:185:13: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:184:13: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:183:13: replace && with || in combo_rows
+crates/sniper_host/src/search.rs:223:9: replace Table::empty -> Self with Default::default()
+crates/sniper_host/src/search.rs:297:5: replace compact -> Result<RowOut, String> with Ok(Default::default())
+crates/sniper_host/src/search.rs:318:5: replace price_all -> Result<Table, String> with Ok(Default::default())
+crates/sniper_host/src/search.rs:684:5: replace context -> Result<CtxOut, String> with Ok(Default::default())
