@@ -81,3 +81,50 @@ crates/spikefade/src/fixg.rs:290:26: replace || with && in IdxElm::parse
 crates/spikefade/src/fixg.rs:290:21: replace > with >= in IdxElm::parse
 crates/spikefade/src/fixg.rs:318:52: replace < with <= in IdxElm::at
 crates/spikefade/src/fixg.rs:353:13: replace += with *= in idx_cover
+crates/spikefade/src/fixg.rs:416:5: replace win_line -> String with String::new()
+crates/spikefade/src/fixg.rs:416:5: replace win_line -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:141:5: replace any -> bool with false
+crates/spikefade/src/fix34.rs:147:24: delete ! in any_result
+crates/spikefade/src/fix34.rs:154:9: delete match arm HALTS in word
+crates/spikefade/src/fix34.rs:155:9: delete match arm LOT0 in word
+crates/spikefade/src/fix34.rs:156:9: delete match arm ELMPRE in word
+crates/spikefade/src/fix34.rs:157:9: delete match arm STAMP in word
+crates/spikefade/src/fix34.rs:158:9: delete match arm BANDS in word
+crates/spikefade/src/fix34.rs:159:9: delete match arm BANONCE in word
+crates/spikefade/src/fix34.rs:160:9: delete match arm RUNID in word
+crates/spikefade/src/fix34.rs:161:9: delete match arm DURABLE in word
+crates/spikefade/src/fix34.rs:162:9: delete match arm MEMGUARD in word
+crates/spikefade/src/fix34.rs:163:9: delete match arm CARRYSTAT in word
+crates/spikefade/src/fix34.rs:164:9: delete match arm RISKCAP in word
+crates/spikefade/src/fix34.rs:165:9: delete match arm SIDECAP in word
+crates/spikefade/src/fix34.rs:166:9: delete match arm EXPDIAL in word
+crates/spikefade/src/fix34.rs:167:9: delete match arm EVENTCAL in word
+crates/spikefade/src/fix34.rs:168:9: delete match arm TAILGATE in word
+crates/spikefade/src/fix34.rs:169:9: delete match arm STRICTSPAN in word
+crates/spikefade/src/fix34.rs:171:9: delete match arm READINGS in word
+crates/spikefade/src/fix34.rs:172:9: delete match arm TTWORDS in word
+crates/spikefade/src/fix34.rs:180:5: replace dial_words -> String with String::new()
+crates/spikefade/src/fix34.rs:180:5: replace dial_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:186:5: replace words -> String with String::new()
+crates/spikefade/src/fix34.rs:206:24: replace match guard v == yes with true in from_args
+crates/spikefade/src/fix34.rs:206:24: replace match guard v == yes with false in from_args
+crates/spikefade/src/fix34.rs:207:24: replace match guard v == no with true in from_args
+crates/spikefade/src/fix34.rs:207:24: replace match guard v == no with false in from_args
+crates/spikefade/src/fix34.rs:206:26: replace == with != in from_args
+crates/spikefade/src/fix34.rs:233:90: replace * with + in from_args
+crates/spikefade/src/fix34.rs:233:90: replace * with / in from_args
+crates/spikefade/src/fix34.rs:243:90: replace + with - in from_args
+crates/spikefade/src/fix34.rs:243:90: replace + with * in from_args
+crates/spikefade/src/fix34.rs:243:82: replace * with + in from_args
+crates/spikefade/src/fix34.rs:243:82: replace * with / in from_args
+crates/spikefade/src/fix34.rs:243:157: replace * with + in from_args
+crates/spikefade/src/fix34.rs:243:157: replace * with / in from_args
+crates/spikefade/src/fix34.rs:307:53: replace && with || in from_args
+crates/spikefade/src/fix34.rs:394:5: replace cap_count_excluded with ()
+crates/spikefade/src/fix34.rs:415:5: replace cap_test_failed -> bool with true
+crates/spikefade/src/fix34.rs:415:15: replace && with || in cap_test_failed
+crates/spikefade/src/fix34.rs:421:19: replace || with && in cap_months
+crates/spikefade/src/fix34.rs:424:65: replace - with + in cap_months
+crates/spikefade/src/fix34.rs:424:65: replace - with / in cap_months
+crates/spikefade/src/fix34.rs:425:71: replace - with + in cap_months
+crates/spikefade/src/fix34.rs:425:71: replace - with / in cap_months
