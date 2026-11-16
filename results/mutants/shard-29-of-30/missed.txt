@@ -1,0 +1,114 @@
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![1], vec![])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![1], vec![1])))
+crates/spikefade/src/slice.rs:74:17: replace != with == in slice_bytes
+crates/spikefade/src/slice.rs:79:8: delete ! in slice_bytes
+crates/spikefade/src/slice.rs:84:21: replace == with != in slice_bytes
+crates/spikefade/src/slice.rs:87:61: replace || with && in slice_bytes
+crates/spikefade/src/slice.rs:87:35: replace || with && in slice_bytes
+crates/spikefade/src/slice.rs:87:17: replace != with == in slice_bytes
+crates/spikefade/src/slice.rs:87:43: replace != with == in slice_bytes
+crates/spikefade/src/slice.rs:87:77: replace != with == in slice_bytes
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((true, true, "xyzzy".into()))
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((true, false, String::new()))
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((true, false, "xyzzy".into()))
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((false, true, "xyzzy".into()))
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((false, false, String::new()))
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((false, false, "xyzzy".into()))
+crates/spikefade/src/slice.rs:105:13: replace && with || in root_day_digest
+crates/spikefade/src/slice.rs:119:5: replace zstd_pipe -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/spikefade/src/slice.rs:119:5: replace zstd_pipe -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/spikefade/src/slice.rs:132:8: delete ! in zstd_pipe
+crates/spikefade/src/slice.rs:143:5: replace zstd_c -> Result<Vec<u8>, String> with Ok(vec![])
+crates/spikefade/src/slice.rs:143:5: replace zstd_c -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/spikefade/src/slice.rs:143:5: replace zstd_c -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/spikefade/src/slice.rs:151:5: replace zstd_d -> Result<Vec<u8>, String> with Ok(vec![])
+crates/spikefade/src/slice.rs:151:5: replace zstd_d -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/spikefade/src/slice.rs:151:5: replace zstd_d -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/spikefade/src/slice.rs:157:5: replace put_var with ()
+crates/spikefade/src/slice.rs:157:13: replace >= with < in put_var
+crates/spikefade/src/slice.rs:158:52: replace | with & in put_var
+crates/spikefade/src/slice.rs:158:52: replace | with ^ in put_var
+crates/spikefade/src/slice.rs:158:31: replace & with | in put_var
+crates/spikefade/src/slice.rs:158:31: replace & with ^ in put_var
+crates/spikefade/src/slice.rs:159:11: replace >>= with <<= in put_var
+crates/spikefade/src/slice.rs:165:5: replace get_var -> Result<u64, String> with Ok(0)
+crates/spikefade/src/slice.rs:165:5: replace get_var -> Result<u64, String> with Ok(1)
+crates/spikefade/src/slice.rs:169:12: replace += with -= in get_var
+crates/spikefade/src/slice.rs:169:12: replace += with *= in get_var
+crates/spikefade/src/slice.rs:170:15: replace > with == in get_var
+crates/spikefade/src/slice.rs:170:15: replace > with < in get_var
+crates/spikefade/src/slice.rs:170:15: replace > with >= in get_var
+crates/spikefade/src/slice.rs:173:11: replace |= with &= in get_var
+crates/spikefade/src/slice.rs:173:34: replace << with >> in get_var
+crates/spikefade/src/slice.rs:173:26: replace & with | in get_var
+crates/spikefade/src/slice.rs:174:21: replace == with != in get_var
+crates/spikefade/src/slice.rs:174:14: replace & with | in get_var
+crates/spikefade/src/slice.rs:174:14: replace & with ^ in get_var
+crates/spikefade/src/slice.rs:177:12: replace += with -= in get_var
+crates/spikefade/src/slice.rs:177:12: replace += with *= in get_var
+crates/spikefade/src/slice.rs:182:5: replace zz -> u64 with 1
+crates/spikefade/src/slice.rs:182:15: replace ^ with | in zz
+crates/spikefade/src/slice.rs:182:15: replace ^ with & in zz
+crates/spikefade/src/slice.rs:182:9: replace << with >> in zz
+crates/spikefade/src/slice.rs:182:20: replace >> with << in zz
+crates/spikefade/src/slice.rs:186:5: replace unzz -> i64 with 0
+crates/spikefade/src/slice.rs:186:5: replace unzz -> i64 with 1
+crates/spikefade/src/slice.rs:186:5: replace unzz -> i64 with -1
+crates/spikefade/src/slice.rs:186:23: replace ^ with | in unzz
+crates/spikefade/src/slice.rs:186:23: replace ^ with & in unzz
+crates/spikefade/src/slice.rs:186:9: replace >> with << in unzz
+crates/spikefade/src/slice.rs:186:25: delete - in unzz
+crates/spikefade/src/slice.rs:186:30: replace & with | in unzz
+crates/spikefade/src/slice.rs:186:30: replace & with ^ in unzz
+crates/spikefade/src/slice.rs:193:5: replace sec_split -> Result<(usize, usize), String> with Ok((0, 0))
+crates/spikefade/src/slice.rs:193:5: replace sec_split -> Result<(usize, usize), String> with Ok((0, 1))
+crates/spikefade/src/slice.rs:193:5: replace sec_split -> Result<(usize, usize), String> with Ok((1, 1))
+crates/spikefade/src/slice.rs:193:20: replace != with == in sec_split
+crates/spikefade/src/slice.rs:196:40: replace + with - in sec_split
+crates/spikefade/src/slice.rs:196:40: replace + with * in sec_split
+crates/spikefade/src/slice.rs:199:19: replace + with - in sec_split
+crates/spikefade/src/slice.rs:199:19: replace + with * in sec_split
+crates/spikefade/src/slice.rs:199:30: replace * with + in sec_split
+crates/spikefade/src/slice.rs:199:30: replace * with / in sec_split
+crates/spikefade/src/slice.rs:199:25: replace + with - in sec_split
+crates/spikefade/src/slice.rs:199:25: replace + with * in sec_split
+crates/spikefade/src/slice.rs:201:16: replace != with == in sec_split
+crates/spikefade/src/slice.rs:201:24: replace + with * in sec_split
+crates/spikefade/src/slice.rs:201:29: replace * with + in sec_split
+crates/spikefade/src/slice.rs:201:29: replace * with / in sec_split
+crates/spikefade/src/slice.rs:212:5: replace sfz_encode -> Result<Vec<u8>, String> with Ok(vec![])
+crates/spikefade/src/slice.rs:212:5: replace sfz_encode -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/spikefade/src/slice.rs:216:22: replace + with - in sfz_encode
+crates/spikefade/src/slice.rs:216:22: replace + with * in sfz_encode
+crates/spikefade/src/slice.rs:216:26: replace * with + in sfz_encode
+crates/spikefade/src/slice.rs:217:38: replace + with - in sfz_encode
+crates/spikefade/src/slice.rs:217:38: replace + with * in sfz_encode
+crates/spikefade/src/slice.rs:217:42: replace * with + in sfz_encode
+crates/spikefade/src/slice.rs:217:57: replace + with - in sfz_encode
+crates/spikefade/src/slice.rs:217:57: replace + with * in sfz_encode
+crates/spikefade/src/slice.rs:217:49: replace + with - in sfz_encode
+crates/spikefade/src/slice.rs:217:53: replace * with + in sfz_encode
+crates/spikefade/src/slice.rs:217:53: replace * with / in sfz_encode
+crates/spikefade/src/slice.rs:220:28: replace - with + in sfz_encode
+crates/spikefade/src/slice.rs:220:28: replace - with / in sfz_encode
+crates/spikefade/src/slice.rs:221:29: replace - with + in sfz_encode
+crates/spikefade/src/slice.rs:221:29: replace - with / in sfz_encode
+crates/spikefade/src/slice.rs:222:29: replace - with + in sfz_encode
+crates/spikefade/src/slice.rs:222:29: replace - with / in sfz_encode
+crates/spikefade/src/slice.rs:252:5: replace sfz_head -> Result<(u32, u32), String> with Ok((0, 0))
+crates/spikefade/src/slice.rs:252:5: replace sfz_head -> Result<(u32, u32), String> with Ok((0, 1))
+crates/spikefade/src/slice.rs:252:5: replace sfz_head -> Result<(u32, u32), String> with Ok((1, 0))
+crates/spikefade/src/slice.rs:252:5: replace sfz_head -> Result<(u32, u32), String> with Ok((1, 1))
+crates/spikefade/src/slice.rs:252:20: replace != with == in sfz_head
+crates/spikefade/src/slice.rs:255:35: replace + with - in sfz_head
+crates/spikefade/src/slice.rs:255:35: replace + with * in sfz_head
+crates/spikefade/src/slice.rs:256:19: replace || with && in sfz_head
+crates/spikefade/src/slice.rs:256:14: replace != with == in sfz_head
+crates/spikefade/src/slice.rs:256:29: replace != with == in sfz_head
+crates/spikefade/src/slice.rs:264:5: replace sections -> Result<Vec<(usize, std::ops::Range<usize>, [u8; 32])>, String> with Ok(vec![])
+crates/spikefade/src/slice.rs:265:21: replace + with * in sections
+crates/spikefade/src/slice.rs:265:29: replace * with + in sections
+crates/spikefade/src/slice.rs:265:29: replace * with / in sections
+crates/spikefade/src/slice.rs:267:20: replace + with - in sections
+crates/spikefade/src/slice.rs:267:20: replace + with * in sections
+crates/spikefade/src/slice.rs:267:24: replace * with + in sections

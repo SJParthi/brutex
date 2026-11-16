@@ -1,0 +1,13 @@
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![1], vec![0])))
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((true, true, String::new()))
+crates/spikefade/src/slice.rs:103:5: replace root_day_digest -> Result<(bool, bool, String), String> with Ok((false, true, String::new()))
+crates/spikefade/src/slice.rs:105:8: delete ! in root_day_digest
+crates/spikefade/src/slice.rs:119:5: replace zstd_pipe -> Result<Vec<u8>, String> with Ok(vec![])
+crates/spikefade/src/slice.rs:173:26: replace & with ^ in get_var
+crates/spikefade/src/slice.rs:182:5: replace zz -> u64 with 0
+crates/spikefade/src/slice.rs:193:5: replace sec_split -> Result<(usize, usize), String> with Ok((1, 0))
+crates/spikefade/src/slice.rs:201:24: replace + with - in sec_split
+crates/spikefade/src/slice.rs:212:5: replace sfz_encode -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/spikefade/src/slice.rs:216:26: replace * with / in sfz_encode
+crates/spikefade/src/slice.rs:217:42: replace * with / in sfz_encode
+crates/spikefade/src/slice.rs:217:49: replace + with * in sfz_encode
