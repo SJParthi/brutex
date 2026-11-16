@@ -126,3 +126,77 @@ crates/spikefade/src/bhav.rs:243:5: replace strict_day -> Option<Arc<BhavDay>> w
 crates/spikefade/src/bhav.rs:247:16: delete ! in strict_day
 crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (-1, 1))]))
 crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (1, -1))]))
+crates/spikefade/src/expiry.rs:46:5: replace is_session -> bool with true
+crates/spikefade/src/expiry.rs:46:66: replace < with <= in is_session
+crates/spikefade/src/expiry.rs:66:5: replace sessions_between -> i64 with 0
+crates/spikefade/src/expiry.rs:66:5: replace sessions_between -> i64 with 1
+crates/spikefade/src/expiry.rs:66:5: replace sessions_between -> i64 with -1
+crates/spikefade/src/expiry.rs:66:19: replace <= with > in sessions_between
+crates/spikefade/src/expiry.rs:73:19: replace + with - in sessions_between
+crates/spikefade/src/expiry.rs:73:19: replace + with * in sessions_between
+crates/spikefade/src/expiry.rs:73:71: replace || with && in sessions_between
+crates/spikefade/src/expiry.rs:73:101: replace && with || in sessions_between
+crates/spikefade/src/expiry.rs:73:97: replace < with == in sessions_between
+crates/spikefade/src/expiry.rs:73:97: replace < with > in sessions_between
+crates/spikefade/src/expiry.rs:73:97: replace < with <= in sessions_between
+crates/spikefade/src/expiry.rs:73:78: replace + with - in sessions_between
+crates/spikefade/src/expiry.rs:73:78: replace + with * in sessions_between
+crates/spikefade/src/expiry.rs:73:104: delete ! in sessions_between
+crates/spikefade/src/expiry.rs:80:5: replace bucket -> usize with 0
+crates/spikefade/src/expiry.rs:80:5: replace bucket -> usize with 1
+crates/spikefade/src/expiry.rs:81:9: delete match arm i64::MIN..= 0 in bucket
+crates/spikefade/src/expiry.rs:84:9: delete match arm 3 | 4 in bucket
+crates/spikefade/src/expiry.rs:101:5: replace weekday -> &'static str with ""
+crates/spikefade/src/expiry.rs:101:5: replace weekday -> &'static str with "xyzzy"
+crates/spikefade/src/expiry.rs:101:78: replace + with - in weekday
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::from_iter([(0, vec![0])])
+crates/spikefade/src/expiry.rs:123:5: replace monthly_of -> Option<u32> with None
+crates/spikefade/src/expiry.rs:123:5: replace monthly_of -> Option<u32> with Some(0)
+crates/spikefade/src/expiry.rs:123:5: replace monthly_of -> Option<u32> with Some(1)
+crates/spikefade/src/expiry.rs:123:16: replace == with != in monthly_of
+crates/spikefade/src/expiry.rs:126:22: replace / with % in monthly_of
+crates/spikefade/src/expiry.rs:126:22: replace / with * in monthly_of
+crates/spikefade/src/expiry.rs:127:52: replace && with || in monthly_of
+crates/spikefade/src/expiry.rs:127:46: replace == with != in monthly_of
+crates/spikefade/src/expiry.rs:127:40: replace / with % in monthly_of
+crates/spikefade/src/expiry.rs:127:40: replace / with * in monthly_of
+crates/spikefade/src/expiry.rs:127:57: replace >= with < in monthly_of
+crates/spikefade/src/expiry.rs:134:5: replace pick_of -> Option<u32> with None
+crates/spikefade/src/expiry.rs:134:5: replace pick_of -> Option<u32> with Some(0)
+crates/spikefade/src/expiry.rs:134:5: replace pick_of -> Option<u32> with Some(1)
+crates/spikefade/src/expiry.rs:138:9: delete match arm 0 in pick_of
+crates/spikefade/src/expiry.rs:139:9: delete match arm 1 in pick_of
+crates/spikefade/src/expiry.rs:140:9: delete match arm 2 in pick_of
+crates/spikefade/src/expiry.rs:139:20: replace != with == in pick_of
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![], vec![]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![], vec![String::new()]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![], vec!["xyzzy".into()]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![0], vec![]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![0], vec![String::new()]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![0], vec!["xyzzy".into()]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![1], vec![]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![1], vec![String::new()]))
+crates/spikefade/src/expiry.rs:155:5: replace dial_allowed -> Result<(Vec<u32>, Vec<String>), String> with Ok((vec![1], vec!["xyzzy".into()]))
+crates/spikefade/src/expiry.rs:155:13: replace == with != in dial_allowed
+crates/spikefade/src/expiry.rs:156:31: replace != with == in dial_allowed
+crates/spikefade/src/expiry.rs:161:68: replace >= with < in dial_allowed
+crates/spikefade/src/expiry.rs:169:14: replace == with != in dial_allowed
+crates/spikefade/src/expiry.rs:173:12: delete ! in dial_allowed
+crates/spikefade/src/expiry.rs:174:59: replace && with || in dial_allowed
+crates/spikefade/src/expiry.rs:182:9: delete match arm 1 in dial_allowed
+crates/spikefade/src/expiry.rs:183:9: delete match arm 2 in dial_allowed
+crates/spikefade/src/expiry.rs:190:54: replace != with == in dial_allowed
+crates/spikefade/src/expiry.rs:223:5: replace candidates -> Vec<u32> with vec![]
+crates/spikefade/src/expiry.rs:223:5: replace candidates -> Vec<u32> with vec![0]
+crates/spikefade/src/expiry.rs:223:5: replace candidates -> Vec<u32> with vec![1]
+crates/spikefade/src/expiry.rs:223:118: replace != with == in candidates
+crates/spikefade/src/expiry.rs:234:70: replace == with != in busiest
+crates/spikefade/src/expiry.rs:249:5: replace regular_and_moved -> (usize, bool) with (0, true)
+crates/spikefade/src/expiry.rs:249:5: replace regular_and_moved -> (usize, bool) with (0, false)
+crates/spikefade/src/expiry.rs:249:5: replace regular_and_moved -> (usize, bool) with (1, true)
+crates/spikefade/src/expiry.rs:249:5: replace regular_and_moved -> (usize, bool) with (1, false)
+crates/spikefade/src/expiry.rs:250:45: replace + with - in regular_and_moved
+crates/spikefade/src/expiry.rs:255:28: replace <= with > in regular_and_moved
+crates/spikefade/src/expiry.rs:255:16: replace - with + in regular_and_moved
+crates/spikefade/src/expiry.rs:258:16: replace += with -= in regular_and_moved
+crates/spikefade/src/expiry.rs:258:16: replace += with *= in regular_and_moved

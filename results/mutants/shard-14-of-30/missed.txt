@@ -121,3 +121,56 @@ crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize
 crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (-1, 0))]))
 crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (-1, 1))]))
 crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (-1, -1))]))
+crates/spikefade/src/bhav.rs:294:8: delete ! in day_extremes
+crates/spikefade/src/bhav.rs:302:87: replace & with | in day_extremes
+crates/spikefade/src/bhav.rs:302:87: replace & with ^ in day_extremes
+crates/spikefade/src/bhav.rs:303:19: replace > with == in day_extremes
+crates/spikefade/src/bhav.rs:303:19: replace > with < in day_extremes
+crates/spikefade/src/bhav.rs:303:19: replace > with >= in day_extremes
+crates/spikefade/src/expiry.rs:46:5: replace is_session -> bool with false
+crates/spikefade/src/expiry.rs:46:66: replace < with == in is_session
+crates/spikefade/src/expiry.rs:46:66: replace < with > in is_session
+crates/spikefade/src/expiry.rs:46:47: replace + with - in is_session
+crates/spikefade/src/expiry.rs:46:47: replace + with * in is_session
+crates/spikefade/src/expiry.rs:51:31: replace && with || in is_session
+crates/spikefade/src/expiry.rs:51:27: replace < with == in is_session
+crates/spikefade/src/expiry.rs:51:27: replace < with > in is_session
+crates/spikefade/src/expiry.rs:51:27: replace < with <= in is_session
+crates/spikefade/src/expiry.rs:51:8: replace + with - in is_session
+crates/spikefade/src/expiry.rs:51:8: replace + with * in is_session
+crates/spikefade/src/expiry.rs:51:34: delete ! in is_session
+crates/spikefade/src/expiry.rs:57:5: replace sessions_to -> i64 with 0
+crates/spikefade/src/expiry.rs:57:5: replace sessions_to -> i64 with 1
+crates/spikefade/src/expiry.rs:57:5: replace sessions_to -> i64 with -1
+crates/spikefade/src/expiry.rs:71:27: replace - with + in sessions_between
+crates/spikefade/src/expiry.rs:71:27: replace - with / in sessions_between
+crates/spikefade/src/expiry.rs:82:9: delete match arm 1 in bucket
+crates/spikefade/src/expiry.rs:83:9: delete match arm 2 in bucket
+crates/spikefade/src/expiry.rs:92:5: replace dte_pass -> bool with true
+crates/spikefade/src/expiry.rs:92:5: replace dte_pass -> bool with false
+crates/spikefade/src/expiry.rs:94:33: replace == with != in dte_pass
+crates/spikefade/src/expiry.rs:94:29: replace - with + in dte_pass
+crates/spikefade/src/expiry.rs:94:29: replace - with / in dte_pass
+crates/spikefade/src/expiry.rs:101:78: replace + with * in weekday
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::new()
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::from_iter([(0, vec![])])
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::from_iter([(0, vec![1])])
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::from_iter([(1, vec![])])
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::from_iter([(1, vec![0])])
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::from_iter([(1, vec![1])])
+crates/spikefade/src/expiry.rs:110:12: delete ! in staged
+crates/spikefade/src/expiry.rs:174:70: replace != with == in dial_allowed
+crates/spikefade/src/expiry.rs:212:5: replace not_staged_words -> String with String::new()
+crates/spikefade/src/expiry.rs:212:5: replace not_staged_words -> String with "xyzzy".into()
+crates/spikefade/src/expiry.rs:232:5: replace busiest -> Option<u32> with None
+crates/spikefade/src/expiry.rs:232:5: replace busiest -> Option<u32> with Some(0)
+crates/spikefade/src/expiry.rs:232:5: replace busiest -> Option<u32> with Some(1)
+crates/spikefade/src/expiry.rs:234:77: replace && with || in busiest
+crates/spikefade/src/expiry.rs:234:89: replace == with != in busiest
+crates/spikefade/src/expiry.rs:235:34: replace > with == in busiest
+crates/spikefade/src/expiry.rs:235:34: replace > with < in busiest
+crates/spikefade/src/expiry.rs:235:34: replace > with >= in busiest
+crates/spikefade/src/expiry.rs:250:45: replace + with * in regular_and_moved
+crates/spikefade/src/expiry.rs:255:16: replace - with / in regular_and_moved
+crates/spikefade/src/expiry.rs:262:52: replace == with != in regular_and_moved
+crates/spikefade/src/expiry.rs:262:101: replace == with != in regular_and_moved
