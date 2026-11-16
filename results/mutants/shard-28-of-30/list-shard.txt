@@ -1,0 +1,815 @@
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, 1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, -1, -1))])
+crates/spikefade/src/fix34.rs:1309:54: replace == with != in wick_compare
+crates/spikefade/src/fix34.rs:1309:50: replace & with | in wick_compare
+crates/spikefade/src/fix34.rs:1309:50: replace & with ^ in wick_compare
+crates/spikefade/src/fix34.rs:1314:16: replace == with != in wick_compare
+crates/spikefade/src/fix34.rs:1317:17: replace += with -= in wick_compare
+crates/spikefade/src/fix34.rs:1317:17: replace += with *= in wick_compare
+crates/spikefade/src/fix34.rs:1319:69: replace > with == in wick_compare
+crates/spikefade/src/fix34.rs:1319:69: replace > with < in wick_compare
+crates/spikefade/src/fix34.rs:1319:69: replace > with >= in wick_compare
+crates/spikefade/src/fix34.rs:1319:88: replace < with == in wick_compare
+crates/spikefade/src/fix34.rs:1319:88: replace < with > in wick_compare
+crates/spikefade/src/fix34.rs:1319:88: replace < with <= in wick_compare
+crates/spikefade/src/fix34.rs:1331:5: replace wick_high -> Option<i64> with None
+crates/spikefade/src/fix34.rs:1331:5: replace wick_high -> Option<i64> with Some(0)
+crates/spikefade/src/fix34.rs:1331:5: replace wick_high -> Option<i64> with Some(1)
+crates/spikefade/src/fix34.rs:1331:5: replace wick_high -> Option<i64> with Some(-1)
+crates/spikefade/src/fix34.rs:1331:95: replace == with != in wick_high
+crates/spikefade/src/fix34.rs:1337:5: replace wick_tsv -> String with String::new()
+crates/spikefade/src/fix34.rs:1337:5: replace wick_tsv -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:1350:5: replace wick_flagged -> bool with true
+crates/spikefade/src/fix34.rs:1350:5: replace wick_flagged -> bool with false
+crates/spikefade/src/fix34.rs:1350:14: replace && with || in wick_flagged
+crates/spikefade/src/fix34.rs:1356:5: replace wick_words -> String with String::new()
+crates/spikefade/src/fix34.rs:1356:5: replace wick_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:1367:5: replace dial_lots -> i64 with 0
+crates/spikefade/src/fix34.rs:1367:5: replace dial_lots -> i64 with 1
+crates/spikefade/src/fix34.rs:1367:5: replace dial_lots -> i64 with -1
+crates/spikefade/src/fix34.rs:1369:53: replace / with % in dial_lots
+crates/spikefade/src/fix34.rs:1369:53: replace / with * in dial_lots
+crates/spikefade/src/fix34.rs:1369:31: replace - with + in dial_lots
+crates/spikefade/src/fix34.rs:1369:31: replace - with / in dial_lots
+crates/spikefade/src/fix34.rs:1370:23: replace >= with < in dial_lots
+crates/spikefade/src/fix34.rs:1370:73: replace - with + in dial_lots
+crates/spikefade/src/fix34.rs:1370:73: replace - with / in dial_lots
+crates/spikefade/src/fix34.rs:1375:55: replace * with + in dial_lots
+crates/spikefade/src/fix34.rs:1375:55: replace * with / in dial_lots
+crates/spikefade/src/fix34.rs:1375:38: replace * with + in dial_lots
+crates/spikefade/src/fix34.rs:1375:38: replace * with / in dial_lots
+crates/spikefade/src/fix34.rs:1377:24: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1377:20: replace > with == in dial_lots
+crates/spikefade/src/fix34.rs:1377:20: replace > with < in dial_lots
+crates/spikefade/src/fix34.rs:1377:20: replace > with >= in dial_lots
+crates/spikefade/src/fix34.rs:1377:27: delete ! in dial_lots
+crates/spikefade/src/fix34.rs:1378:65: replace / with % in dial_lots
+crates/spikefade/src/fix34.rs:1378:65: replace / with * in dial_lots
+crates/spikefade/src/fix34.rs:1378:56: replace * with + in dial_lots
+crates/spikefade/src/fix34.rs:1378:56: replace * with / in dial_lots
+crates/spikefade/src/fix34.rs:1382:38: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1382:20: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1382:74: replace == with != in dial_lots
+crates/spikefade/src/fix34.rs:1383:11: replace /= with %= in dial_lots
+crates/spikefade/src/fix34.rs:1383:11: replace /= with *= in dial_lots
+crates/spikefade/src/fix34.rs:1385:34: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1385:21: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1385:72: replace == with != in dial_lots
+crates/spikefade/src/fix34.rs:1386:11: replace /= with %= in dial_lots
+crates/spikefade/src/fix34.rs:1386:11: replace /= with *= in dial_lots
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (0, 0)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (0, 1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (0, -1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (1, 0)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (1, 1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (1, -1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (-1, 0)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (-1, 1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (-1, -1)
+crates/spikefade/src/fix34.rs:1422:114: replace / with % in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1422:114: replace / with * in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1422:84: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1422:84: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:111: replace / with % in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:111: replace / with * in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:81: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:81: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:153: replace + with - in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:153: replace + with * in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1432:22: replace == with != in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1434:30: replace += with -= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1434:30: replace += with *= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:36: replace && with || in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:27: replace && with || in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:22: replace <= with > in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:32: replace < with == in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:32: replace < with > in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:32: replace < with <= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:47: replace > with == in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:47: replace > with < in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1436:47: replace > with >= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1437:61: replace + with - in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1437:61: replace + with * in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1437:57: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1437:57: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1437:84: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1437:84: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1438:27: replace > with == in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1438:27: replace > with < in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1438:27: replace > with >= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1439:41: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1439:41: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1439:57: replace * with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1439:57: replace * with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1440:33: replace += with -= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1440:33: replace += with *= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1441:35: replace += with -= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1441:35: replace += with *= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1441:39: delete - in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1446:42: replace + with - in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1446:42: replace + with * in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1446:31: replace + with - in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1446:31: replace + with * in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1448:30: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1448:30: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1453:18: replace >= with < in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1454:26: replace += with -= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1454:26: replace += with *= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1457:18: replace += with -= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1457:18: replace += with *= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1459:26: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1459:26: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1468:5: replace first_minute_high -> Option<i64> with None
+crates/spikefade/src/fix34.rs:1468:5: replace first_minute_high -> Option<i64> with Some(0)
+crates/spikefade/src/fix34.rs:1468:5: replace first_minute_high -> Option<i64> with Some(1)
+crates/spikefade/src/fix34.rs:1468:5: replace first_minute_high -> Option<i64> with Some(-1)
+crates/spikefade/src/fix34.rs:1471:47: replace == with != in first_minute_high
+crates/spikefade/src/fix34.rs:1474:47: replace == with != in first_minute_high
+crates/spikefade/src/fix34.rs:1474:43: replace & with | in first_minute_high
+crates/spikefade/src/fix34.rs:1474:43: replace & with ^ in first_minute_high
+crates/spikefade/src/fix34.rs:1483:5: replace stress_set -> Vec<i64> with vec![]
+crates/spikefade/src/fix34.rs:1483:5: replace stress_set -> Vec<i64> with vec![0]
+crates/spikefade/src/fix34.rs:1483:5: replace stress_set -> Vec<i64> with vec![1]
+crates/spikefade/src/fix34.rs:1483:5: replace stress_set -> Vec<i64> with vec![-1]
+crates/spikefade/src/fix34.rs:1493:5: replace wick_bound_extra -> i64 with 0
+crates/spikefade/src/fix34.rs:1493:5: replace wick_bound_extra -> i64 with 1
+crates/spikefade/src/fix34.rs:1493:5: replace wick_bound_extra -> i64 with -1
+crates/spikefade/src/fix34.rs:1493:64: replace - with + in wick_bound_extra
+crates/spikefade/src/fix34.rs:1493:64: replace - with / in wick_bound_extra
+crates/spikefade/src/fix34.rs:1500:5: replace tail_ok -> bool with true
+crates/spikefade/src/fix34.rs:1500:5: replace tail_ok -> bool with false
+crates/spikefade/src/fix34.rs:1500:8: delete ! in tail_ok
+crates/spikefade/src/fix34.rs:1503:38: replace / with % in tail_ok
+crates/spikefade/src/fix34.rs:1503:38: replace / with * in tail_ok
+crates/spikefade/src/fix34.rs:1506:63: replace || with && in tail_ok
+crates/spikefade/src/fix34.rs:1506:46: replace || with && in tail_ok
+crates/spikefade/src/fix34.rs:1506:58: replace >= with < in tail_ok
+crates/spikefade/src/fix34.rs:1506:98: replace <= with > in tail_ok
+crates/spikefade/src/fix34.rs:1506:67: delete - in tail_ok
+crates/spikefade/src/fix34.rs:1513:5: replace best_move_bp -> i64 with 0
+crates/spikefade/src/fix34.rs:1513:5: replace best_move_bp -> i64 with 1
+crates/spikefade/src/fix34.rs:1513:5: replace best_move_bp -> i64 with -1
+crates/spikefade/src/fix34.rs:1513:12: replace <= with > in best_move_bp
+crates/spikefade/src/fix34.rs:1516:37: replace + with - in best_move_bp
+crates/spikefade/src/fix34.rs:1516:37: replace + with * in best_move_bp
+crates/spikefade/src/fix34.rs:1516:91: replace / with % in best_move_bp
+crates/spikefade/src/fix34.rs:1516:91: replace / with * in best_move_bp
+crates/spikefade/src/fix34.rs:1516:82: replace * with + in best_move_bp
+crates/spikefade/src/fix34.rs:1516:82: replace * with / in best_move_bp
+crates/spikefade/src/fix34.rs:1516:76: replace - with + in best_move_bp
+crates/spikefade/src/fix34.rs:1516:76: replace - with / in best_move_bp
+crates/spikefade/src/fix34.rs:1524:5: replace stop_hunt -> bool with true
+crates/spikefade/src/fix34.rs:1524:5: replace stop_hunt -> bool with false
+crates/spikefade/src/fix34.rs:1524:52: replace && with || in stop_hunt
+crates/spikefade/src/fix34.rs:1524:39: replace && with || in stop_hunt
+crates/spikefade/src/fix34.rs:1524:5: delete ! in stop_hunt
+crates/spikefade/src/fix34.rs:1524:48: replace > with == in stop_hunt
+crates/spikefade/src/fix34.rs:1524:48: replace > with < in stop_hunt
+crates/spikefade/src/fix34.rs:1524:48: replace > with >= in stop_hunt
+crates/spikefade/src/fix34.rs:1524:76: replace + with - in stop_hunt
+crates/spikefade/src/fix34.rs:1524:76: replace + with * in stop_hunt
+crates/spikefade/src/fix34.rs:1524:105: replace + with - in stop_hunt
+crates/spikefade/src/fix34.rs:1524:105: replace + with * in stop_hunt
+crates/spikefade/src/fix34.rs:1524:109: replace * with + in stop_hunt
+crates/spikefade/src/fix34.rs:1524:109: replace * with / in stop_hunt
+crates/spikefade/src/fix34.rs:1524:159: replace < with == in stop_hunt
+crates/spikefade/src/fix34.rs:1524:159: replace < with > in stop_hunt
+crates/spikefade/src/fix34.rs:1524:159: replace < with <= in stop_hunt
+crates/spikefade/src/fix34.rs:1532:5: replace tt_word -> &'static str with ""
+crates/spikefade/src/fix34.rs:1532:5: replace tt_word -> &'static str with "xyzzy"
+crates/spikefade/src/fix34.rs:1532:20: replace && with || in tt_word
+crates/spikefade/src/fix34.rs:1532:23: delete ! in tt_word
+crates/spikefade/src/fix34.rs:1538:5: replace elm_pre_used -> bool with true
+crates/spikefade/src/fix34.rs:1538:5: replace elm_pre_used -> bool with false
+crates/spikefade/src/fix34.rs:1538:16: replace && with || in elm_pre_used
+crates/spikefade/src/fix34.rs:1546:5: replace elm_pre_rule_words -> &'static str with ""
+crates/spikefade/src/fix34.rs:1546:5: replace elm_pre_rule_words -> &'static str with "xyzzy"
+crates/spikefade/src/fix34.rs:1555:5: replace elm_pre_words -> String with String::new()
+crates/spikefade/src/fix34.rs:1555:5: replace elm_pre_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:1555:106: replace >= with < in elm_pre_words
+crates/spikefade/src/fix34.rs:1563:5: replace halt_trade_words -> String with String::new()
+crates/spikefade/src/fix34.rs:1563:5: replace halt_trade_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:1563:81: replace && with || in halt_trade_words
+crates/spikefade/src/fix34.rs:1563:74: replace < with == in halt_trade_words
+crates/spikefade/src/fix34.rs:1563:74: replace < with > in halt_trade_words
+crates/spikefade/src/fix34.rs:1563:74: replace < with <= in halt_trade_words
+crates/spikefade/src/fix34.rs:1563:94: replace >= with < in halt_trade_words
+crates/spikefade/src/ckmerge.rs:40:5: replace merge -> Result<(crate::ckpt::Ckpt, Stats), String> with Ok((Default::default(), Default::default()))
+crates/spikefade/src/ckmerge.rs:41:26: delete field batches from struct Stats expression in merge
+crates/spikefade/src/ckmerge.rs:44:28: replace && with || in merge
+crates/spikefade/src/ckmerge.rs:44:8: delete ! in merge
+crates/spikefade/src/ckmerge.rs:44:31: delete ! in merge
+crates/spikefade/src/ckmerge.rs:47:53: replace == with != in merge
+crates/spikefade/src/ckmerge.rs:72:82: replace || with && in merge
+crates/spikefade/src/ckmerge.rs:72:63: replace || with && in merge
+crates/spikefade/src/ckmerge.rs:72:48: replace || with && in merge
+crates/spikefade/src/ckmerge.rs:72:35: replace || with && in merge
+crates/spikefade/src/ckmerge.rs:72:22: replace || with && in merge
+crates/spikefade/src/ckmerge.rs:72:15: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:72:28: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:72:42: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:72:54: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:72:70: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:72:90: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:75:24: replace && with || in merge
+crates/spikefade/src/ckmerge.rs:75:15: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:75:27: delete ! in merge
+crates/spikefade/src/ckmerge.rs:79:109: replace || with && in merge
+crates/spikefade/src/ckmerge.rs:79:86: replace || with && in merge
+crates/spikefade/src/ckmerge.rs:79:75: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:79:100: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:79:121: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:82:46: replace != with == in merge
+crates/spikefade/src/ckmerge.rs:87:51: replace && with || in merge
+crates/spikefade/src/ckmerge.rs:87:56: replace == with != in merge
+crates/spikefade/src/ckmerge.rs:88:19: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:88:19: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:92:17: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:92:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:93:17: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:93:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:96:16: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:96:16: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:100:13: delete match arm (true, Some(v)) in merge
+crates/spikefade/src/ckmerge.rs:105:13: delete match arm (false, None) in merge
+crates/spikefade/src/ckmerge.rs:102:24: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:102:24: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:117:17: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:117:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:118:17: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:118:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:119:17: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:119:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:132:14: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:132:14: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:133:17: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:133:17: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:134:16: replace += with -= in merge
+crates/spikefade/src/ckmerge.rs:134:16: replace += with *= in merge
+crates/spikefade/src/ckmerge.rs:156:5: replace bck_files -> Result<Vec<PathBuf>, String> with Ok(vec![])
+crates/spikefade/src/ckmerge.rs:156:5: replace bck_files -> Result<Vec<PathBuf>, String> with Ok(vec![Default::default()])
+crates/spikefade/src/ckmerge.rs:156:100: replace && with || in bck_files
+crates/spikefade/src/ckmerge.rs:165:5: replace read_all -> Result<(Vec<Bck>, Stats, Vec<String>), String> with Ok((vec![], Default::default(), vec![]))
+crates/spikefade/src/ckmerge.rs:165:5: replace read_all -> Result<(Vec<Bck>, Stats, Vec<String>), String> with Ok((vec![], Default::default(), vec![String::new()]))
+crates/spikefade/src/ckmerge.rs:165:5: replace read_all -> Result<(Vec<Bck>, Stats, Vec<String>), String> with Ok((vec![], Default::default(), vec!["xyzzy".into()]))
+crates/spikefade/src/ckmerge.rs:165:5: replace read_all -> Result<(Vec<Bck>, Stats, Vec<String>), String> with Ok((vec![Default::default()], Default::default(), vec![]))
+crates/spikefade/src/ckmerge.rs:165:5: replace read_all -> Result<(Vec<Bck>, Stats, Vec<String>), String> with Ok((vec![Default::default()], Default::default(), vec![String::new()]))
+crates/spikefade/src/ckmerge.rs:165:5: replace read_all -> Result<(Vec<Bck>, Stats, Vec<String>), String> with Ok((vec![Default::default()], Default::default(), vec!["xyzzy".into()]))
+crates/spikefade/src/ckmerge.rs:173:22: replace += with -= in read_all
+crates/spikefade/src/ckmerge.rs:173:22: replace += with *= in read_all
+crates/spikefade/src/ckmerge.rs:176:16: delete ! in read_all
+crates/spikefade/src/ckmerge.rs:178:21: replace && with || in read_all
+crates/spikefade/src/ckmerge.rs:178:29: replace != with == in read_all
+crates/spikefade/src/ckmerge.rs:182:25: replace != with == in read_all
+crates/spikefade/src/ckmerge.rs:187:32: replace match guard *x != pv with true in read_all
+crates/spikefade/src/ckmerge.rs:187:32: replace match guard *x != pv with false in read_all
+crates/spikefade/src/ckmerge.rs:187:35: replace != with == in read_all
+crates/spikefade/src/ckmerge.rs:192:28: replace match guard x.0 == b.p0 && x.1 == b.p1 with true in read_all
+crates/spikefade/src/ckmerge.rs:192:28: replace match guard x.0 == b.p0 && x.1 == b.p1 with false in read_all
+crates/spikefade/src/ckmerge.rs:192:40: replace && with || in read_all
+crates/spikefade/src/ckmerge.rs:192:32: replace == with != in read_all
+crates/spikefade/src/ckmerge.rs:192:47: replace == with != in read_all
+crates/spikefade/src/ckmerge.rs:196:31: replace == with != in read_all
+crates/spikefade/src/ckmerge.rs:197:29: replace += with -= in read_all
+crates/spikefade/src/ckmerge.rs:197:29: replace += with *= in read_all
+crates/spikefade/src/ckmerge.rs:208:16: replace == with != in read_all
+crates/spikefade/src/ckmerge.rs:220:5: replace cmd_ckpt_merge -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:220:5: replace cmd_ckpt_merge -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:220:49: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:220:76: replace + with - in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:220:76: replace + with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:222:21: replace && with || in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:222:12: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:222:28: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:238:50: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:240:27: replace + with - in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:240:27: replace + with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:243:75: delete ! in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:256:15: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:258:43: replace - with + in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:258:43: replace - with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:64: replace || with && in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:55: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:60: replace * with + in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:60: replace * with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:71: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:83: replace * with + in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:83: replace * with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:78: replace + with - in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:259:78: replace + with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:264:22: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:278:20: replace match guard old == new with true in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:278:20: replace match guard old == new with false in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:278:24: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:299:28: replace match guard *x != t with true in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:299:28: replace match guard *x != t with false in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:299:31: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:307:22: replace match guard o == *t with true in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:307:22: replace match guard o == *t with false in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:307:24: replace == with != in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:100: replace / with % in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:100: replace / with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:64: replace / with % in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:64: replace / with * in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:60: replace * with + in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:314:60: replace * with / in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:335:5: replace canon -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:335:5: replace canon -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:340:8: delete ! in canon
+crates/spikefade/src/ckmerge.rs:349:88: replace > with == in canon
+crates/spikefade/src/ckmerge.rs:349:88: replace > with < in canon
+crates/spikefade/src/ckmerge.rs:349:88: replace > with >= in canon
+crates/spikefade/src/ckmerge.rs:349:92: replace + with - in canon
+crates/spikefade/src/ckmerge.rs:349:92: replace + with * in canon
+crates/spikefade/src/ckmerge.rs:349:183: replace > with == in canon
+crates/spikefade/src/ckmerge.rs:349:183: replace > with < in canon
+crates/spikefade/src/ckmerge.rs:349:183: replace > with >= in canon
+crates/spikefade/src/ckmerge.rs:349:187: replace + with - in canon
+crates/spikefade/src/ckmerge.rs:349:187: replace + with * in canon
+crates/spikefade/src/ckmerge.rs:401:5: replace cmd_ckpt_canon -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:401:5: replace cmd_ckpt_canon -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:402:46: replace == with != in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:403:75: replace == with != in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:403:50: replace + with - in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:403:50: replace + with * in cmd_ckpt_canon
+crates/spikefade/src/ckmerge.rs:415:5: replace cmd_bck_check -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:415:5: replace cmd_bck_check -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/ckmerge.rs:422:11: replace += with -= in cmd_bck_check
+crates/spikefade/src/ckmerge.rs:422:11: replace += with *= in cmd_bck_check
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (0, 0, 0)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (0, 0, 1)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (0, 1, 0)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (0, 1, 1)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (1, 0, 0)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (1, 0, 1)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (1, 1, 0)
+crates/spikefade/src/ckmerge.rs:431:5: replace ident -> (u32, u16, u8) with (1, 1, 1)
+crates/spikefade/src/kit.rs:59:5: replace on -> bool with true
+crates/spikefade/src/kit.rs:59:5: replace on -> bool with false
+crates/spikefade/src/kit.rs:71:5: replace set with ()
+crates/spikefade/src/kit.rs:90:5: replace any -> bool with true
+crates/spikefade/src/kit.rs:90:5: replace any -> bool with false
+crates/spikefade/src/kit.rs:96:5: replace words -> String with String::new()
+crates/spikefade/src/kit.rs:96:5: replace words -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:138:5: replace args_digest -> String with String::new()
+crates/spikefade/src/kit.rs:138:5: replace args_digest -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:138:65: replace && with || in args_digest
+crates/spikefade/src/kit.rs:138:42: replace && with || in args_digest
+crates/spikefade/src/kit.rs:138:36: replace == with != in args_digest
+crates/spikefade/src/kit.rs:138:88: replace == with != in args_digest
+crates/spikefade/src/kit.rs:142:11: replace += with -= in args_digest
+crates/spikefade/src/kit.rs:142:11: replace += with *= in args_digest
+crates/spikefade/src/kit.rs:143:12: delete ! in args_digest
+crates/spikefade/src/kit.rs:146:58: replace && with || in args_digest
+crates/spikefade/src/kit.rs:146:37: delete ! in args_digest
+crates/spikefade/src/kit.rs:146:61: delete ! in args_digest
+crates/spikefade/src/kit.rs:148:15: replace += with -= in args_digest
+crates/spikefade/src/kit.rs:148:15: replace += with *= in args_digest
+crates/spikefade/src/kit.rs:175:5: replace from_args -> Result<Vec<String>, String> with Ok(vec![])
+crates/spikefade/src/kit.rs:175:5: replace from_args -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/spikefade/src/kit.rs:175:5: replace from_args -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/spikefade/src/kit.rs:175:49: replace == with != in from_args
+crates/spikefade/src/kit.rs:175:76: replace + with - in from_args
+crates/spikefade/src/kit.rs:175:76: replace + with * in from_args
+crates/spikefade/src/kit.rs:190:65: replace || with && in from_args
+crates/spikefade/src/kit.rs:190:56: replace || with && in from_args
+crates/spikefade/src/kit.rs:191:61: replace || with && in from_args
+crates/spikefade/src/kit.rs:191:52: replace || with && in from_args
+crates/spikefade/src/kit.rs:209:55: replace > with == in from_args
+crates/spikefade/src/kit.rs:209:55: replace > with < in from_args
+crates/spikefade/src/kit.rs:209:55: replace > with >= in from_args
+crates/spikefade/src/kit.rs:217:40: replace == with != in from_args
+crates/spikefade/src/kit.rs:218:33: replace == with != in from_args
+crates/spikefade/src/kit.rs:222:48: replace && with || in from_args
+crates/spikefade/src/kit.rs:222:17: replace || with && in from_args
+crates/spikefade/src/kit.rs:222:51: delete ! in from_args
+crates/spikefade/src/kit.rs:222:78: replace && with || in from_args
+crates/spikefade/src/kit.rs:222:56: replace && with || in from_args
+crates/spikefade/src/kit.rs:226:50: replace || with && in from_args
+crates/spikefade/src/kit.rs:226:21: replace || with && in from_args
+crates/spikefade/src/kit.rs:226:12: delete ! in from_args
+crates/spikefade/src/kit.rs:226:53: delete ! in from_args
+crates/spikefade/src/kit.rs:230:13: replace && with || in from_args
+crates/spikefade/src/kit.rs:230:55: replace >= with < in from_args
+crates/spikefade/src/kit.rs:235:15: replace && with || in from_args
+crates/spikefade/src/kit.rs:235:28: replace || with && in from_args
+crates/spikefade/src/kit.rs:235:19: delete ! in from_args
+crates/spikefade/src/kit.rs:235:31: delete ! in from_args
+crates/spikefade/src/kit.rs:238:14: replace && with || in from_args
+crates/spikefade/src/kit.rs:241:18: replace && with || in from_args
+crates/spikefade/src/kit.rs:241:21: delete ! in from_args
+crates/spikefade/src/kit.rs:255:5: replace shard_walks -> bool with true
+crates/spikefade/src/kit.rs:255:5: replace shard_walks -> bool with false
+crates/spikefade/src/kit.rs:255:59: replace && with || in shard_walks
+crates/spikefade/src/kit.rs:255:101: replace == with != in shard_walks
+crates/spikefade/src/kit.rs:256:51: replace && with || in shard_walks
+crates/spikefade/src/kit.rs:256:42: replace && with || in shard_walks
+crates/spikefade/src/kit.rs:256:45: delete ! in shard_walks
+crates/spikefade/src/kit.rs:256:54: delete ! in shard_walks
+crates/spikefade/src/kit.rs:264:5: replace parse_set -> Result<BTreeSet<usize>, String> with Ok(BTreeSet::new())
+crates/spikefade/src/kit.rs:264:5: replace parse_set -> Result<BTreeSet<usize>, String> with Ok(BTreeSet::from_iter([0]))
+crates/spikefade/src/kit.rs:264:5: replace parse_set -> Result<BTreeSet<usize>, String> with Ok(BTreeSet::from_iter([1]))
+crates/spikefade/src/kit.rs:265:10: replace == with != in parse_set
+crates/spikefade/src/kit.rs:269:41: delete ! in parse_set
+crates/spikefade/src/kit.rs:272:18: replace > with == in parse_set
+crates/spikefade/src/kit.rs:272:18: replace > with < in parse_set
+crates/spikefade/src/kit.rs:272:18: replace > with >= in parse_set
+crates/spikefade/src/kit.rs:316:9: replace Sha256::block with ()
+crates/spikefade/src/kit.rs:323:47: replace - with + in Sha256::block
+crates/spikefade/src/kit.rs:323:47: replace - with / in Sha256::block
+crates/spikefade/src/kit.rs:323:84: replace - with + in Sha256::block
+crates/spikefade/src/kit.rs:323:84: replace - with / in Sha256::block
+crates/spikefade/src/kit.rs:323:120: replace - with + in Sha256::block
+crates/spikefade/src/kit.rs:323:120: replace - with / in Sha256::block
+crates/spikefade/src/kit.rs:323:157: replace - with + in Sha256::block
+crates/spikefade/src/kit.rs:323:157: replace - with / in Sha256::block
+crates/spikefade/src/kit.rs:324:65: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:324:65: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:324:42: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:324:42: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:324:72: replace >> with << in Sha256::block
+crates/spikefade/src/kit.rs:325:64: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:325:64: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:325:42: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:325:42: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:325:70: replace >> with << in Sha256::block
+crates/spikefade/src/kit.rs:332:61: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:332:61: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:332:40: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:332:40: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:333:30: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:333:30: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:333:25: replace & with | in Sha256::block
+crates/spikefade/src/kit.rs:333:25: replace & with ^ in Sha256::block
+crates/spikefade/src/kit.rs:333:36: replace & with | in Sha256::block
+crates/spikefade/src/kit.rs:333:36: replace & with ^ in Sha256::block
+crates/spikefade/src/kit.rs:333:33: delete ! in Sha256::block
+crates/spikefade/src/kit.rs:335:61: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:335:61: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:335:40: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:335:40: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:336:42: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:336:42: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:336:32: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:336:32: replace ^ with & in Sha256::block
+crates/spikefade/src/kit.rs:336:26: replace & with | in Sha256::block
+crates/spikefade/src/kit.rs:336:26: replace & with ^ in Sha256::block
+crates/spikefade/src/kit.rs:336:37: replace & with | in Sha256::block
+crates/spikefade/src/kit.rs:336:37: replace & with ^ in Sha256::block
+crates/spikefade/src/kit.rs:336:48: replace & with | in Sha256::block
+crates/spikefade/src/kit.rs:336:48: replace & with ^ in Sha256::block
+crates/spikefade/src/kit.rs:354:9: replace Sha256::update with ()
+crates/spikefade/src/kit.rs:355:22: replace > with == in Sha256::update
+crates/spikefade/src/kit.rs:355:22: replace > with < in Sha256::update
+crates/spikefade/src/kit.rs:355:22: replace > with >= in Sha256::update
+crates/spikefade/src/kit.rs:356:28: replace - with + in Sha256::update
+crates/spikefade/src/kit.rs:356:28: replace - with / in Sha256::update
+crates/spikefade/src/kit.rs:357:84: replace + with - in Sha256::update
+crates/spikefade/src/kit.rs:357:84: replace + with * in Sha256::update
+crates/spikefade/src/kit.rs:360:23: replace += with -= in Sha256::update
+crates/spikefade/src/kit.rs:360:23: replace += with *= in Sha256::update
+crates/spikefade/src/kit.rs:362:26: replace == with != in Sha256::update
+crates/spikefade/src/kit.rs:373:12: delete ! in Sha256::update
+crates/spikefade/src/kit.rs:384:9: replace Sha256::finish -> [u8; 32] with [0; 32]
+crates/spikefade/src/kit.rs:384:9: replace Sha256::finish -> [u8; 32] with [1; 32]
+crates/spikefade/src/kit.rs:386:25: replace != with == in Sha256::finish
+crates/spikefade/src/kit.rs:398:9: replace Sha256::update_pad with ()
+crates/spikefade/src/kit.rs:406:9: replace Sha256::hex -> String with String::new()
+crates/spikefade/src/kit.rs:406:9: replace Sha256::hex -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:413:5: replace hex -> String with String::new()
+crates/spikefade/src/kit.rs:413:5: replace hex -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:423:5: replace sha256_bytes -> String with String::new()
+crates/spikefade/src/kit.rs:423:5: replace sha256_bytes -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:431:5: replace sha256_file -> Option<String> with None
+crates/spikefade/src/kit.rs:431:5: replace sha256_file -> Option<String> with Some(String::new())
+crates/spikefade/src/kit.rs:431:5: replace sha256_file -> Option<String> with Some("xyzzy".into())
+crates/spikefade/src/kit.rs:437:14: replace == with != in sha256_file
+crates/spikefade/src/kit.rs:451:5: replace tool -> String with String::new()
+crates/spikefade/src/kit.rs:451:5: replace tool -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:461:21: replace && with || in tool
+crates/spikefade/src/kit.rs:461:24: delete ! in tool
+crates/spikefade/src/kit.rs:463:13: replace && with || in tool
+crates/spikefade/src/kit.rs:463:16: delete ! in tool
+crates/spikefade/src/kit.rs:470:9: delete match arm "zstd" in tool
+crates/spikefade/src/kit.rs:471:9: delete match arm "unzip" in tool
+crates/spikefade/src/kit.rs:472:9: delete match arm "gzip" in tool
+crates/spikefade/src/kit.rs:473:9: delete match arm "ps" in tool
+crates/spikefade/src/kit.rs:474:9: delete match arm "hostname" in tool
+crates/spikefade/src/kit.rs:491:5: replace utc_now -> u64 with 0
+crates/spikefade/src/kit.rs:491:5: replace utc_now -> u64 with 1
+crates/spikefade/src/kit.rs:498:5: replace ist_label -> String with String::new()
+crates/spikefade/src/kit.rs:498:5: replace ist_label -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:499:43: replace + with - in ist_label
+crates/spikefade/src/kit.rs:499:43: replace + with * in ist_label
+crates/spikefade/src/kit.rs:508:5: replace utc_label -> String with String::new()
+crates/spikefade/src/kit.rs:508:5: replace utc_label -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:517:5: replace now_ist -> Option<String> with None
+crates/spikefade/src/kit.rs:517:5: replace now_ist -> Option<String> with Some(String::new())
+crates/spikefade/src/kit.rs:517:5: replace now_ist -> Option<String> with Some("xyzzy".into())
+crates/spikefade/src/kit.rs:523:5: replace proc_status_rss_kb -> Option<u64> with None
+crates/spikefade/src/kit.rs:523:5: replace proc_status_rss_kb -> Option<u64> with Some(0)
+crates/spikefade/src/kit.rs:523:5: replace proc_status_rss_kb -> Option<u64> with Some(1)
+crates/spikefade/src/kit.rs:529:5: replace proc_stat_ticks -> Option<u64> with None
+crates/spikefade/src/kit.rs:529:5: replace proc_stat_ticks -> Option<u64> with Some(0)
+crates/spikefade/src/kit.rs:529:5: replace proc_stat_ticks -> Option<u64> with Some(1)
+crates/spikefade/src/kit.rs:534:12: replace + with - in proc_stat_ticks
+crates/spikefade/src/kit.rs:534:12: replace + with * in proc_stat_ticks
+crates/spikefade/src/kit.rs:540:5: replace rss_kb -> Option<u64> with None
+crates/spikefade/src/kit.rs:540:5: replace rss_kb -> Option<u64> with Some(0)
+crates/spikefade/src/kit.rs:540:5: replace rss_kb -> Option<u64> with Some(1)
+crates/spikefade/src/kit.rs:541:9: replace && with || in rss_kb
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with None
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(0.0)
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(1.0)
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(-1.0)
+crates/spikefade/src/kit.rs:553:8: delete ! in proc_cpu_s
+crates/spikefade/src/kit.rs:557:42: replace / with % in proc_cpu_s
+crates/spikefade/src/kit.rs:557:42: replace / with * in proc_cpu_s
+crates/spikefade/src/kit.rs:565:5: replace sorted_dir -> Result<Vec<(String, PathBuf)>, String> with Ok(vec![])
+crates/spikefade/src/kit.rs:565:5: replace sorted_dir -> Result<Vec<(String, PathBuf)>, String> with Ok(vec![(String::new(), Default::default())])
+crates/spikefade/src/kit.rs:565:5: replace sorted_dir -> Result<Vec<(String, PathBuf)>, String> with Ok(vec![("xyzzy".into(), Default::default())])
+crates/spikefade/src/kit.rs:568:8: delete ! in sorted_dir
+crates/spikefade/src/kit.rs:576:5: replace strict_fail -> bool with true
+crates/spikefade/src/kit.rs:576:5: replace strict_fail -> bool with false
+crates/spikefade/src/kit.rs:576:8: delete ! in strict_fail
+crates/spikefade/src/kit.rs:580:20: replace < with == in strict_fail
+crates/spikefade/src/kit.rs:580:20: replace < with > in strict_fail
+crates/spikefade/src/kit.rs:580:20: replace < with <= in strict_fail
+crates/spikefade/src/kit.rs:582:27: replace == with != in strict_fail
+crates/spikefade/src/kit.rs:594:5: replace strict_check -> Result<(), String> with Ok(())
+crates/spikefade/src/kit.rs:595:8: delete ! in strict_check
+crates/spikefade/src/kit.rs:599:10: replace > with == in strict_check
+crates/spikefade/src/kit.rs:599:10: replace > with < in strict_check
+crates/spikefade/src/kit.rs:599:10: replace > with >= in strict_check
+crates/spikefade/src/kit.rs:624:5: replace probe_tools -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/kit.rs:624:5: replace probe_tools -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/kit.rs:625:29: replace != with == in probe_tools
+crates/spikefade/src/kit.rs:630:12: delete ! in probe_tools
+crates/spikefade/src/kit.rs:635:32: replace && with || in probe_tools
+crates/spikefade/src/kit.rs:635:12: delete ! in probe_tools
+crates/spikefade/src/kit.rs:635:35: delete ! in probe_tools
+crates/spikefade/src/kit.rs:635:50: replace && with || in probe_tools
+crates/spikefade/src/kit.rs:635:39: replace == with != in probe_tools
+crates/spikefade/src/kit.rs:635:53: delete ! in probe_tools
+crates/spikefade/src/kit.rs:669:9: replace Plan::text -> String with String::new()
+crates/spikefade/src/kit.rs:669:9: replace Plan::text -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:693:9: replace Plan::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/kit.rs:704:9: replace Plan::parse -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/kit.rs:704:12: delete ! in Plan::parse
+crates/spikefade/src/kit.rs:707:29: delete field sha from struct Self expression in Plan::parse
+crates/spikefade/src/kit.rs:714:37: replace match guard i == 0 with true in Plan::parse
+crates/spikefade/src/kit.rs:714:37: replace match guard i == 0 with false in Plan::parse
+crates/spikefade/src/kit.rs:714:39: replace == with != in Plan::parse
+crates/spikefade/src/kit.rs:715:33: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:722:76: delete ! in Plan::parse
+crates/spikefade/src/kit.rs:723:38: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:737:26: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:742:86: delete ! in Plan::parse
+crates/spikefade/src/kit.rs:744:48: replace || with && in Plan::parse
+crates/spikefade/src/kit.rs:744:36: replace || with && in Plan::parse
+crates/spikefade/src/kit.rs:744:27: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:744:42: replace <= with > in Plan::parse
+crates/spikefade/src/kit.rs:744:61: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:744:67: replace - with + in Plan::parse
+crates/spikefade/src/kit.rs:744:67: replace - with / in Plan::parse
+crates/spikefade/src/kit.rs:753:15: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:756:43: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:759:28: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:762:26: replace != with == in Plan::parse
+crates/spikefade/src/kit.rs:774:9: replace Plan::check -> Result<(), String> with Ok(())
+crates/spikefade/src/kit.rs:774:30: replace && with || in Plan::check
+crates/spikefade/src/kit.rs:774:22: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:774:33: delete ! in Plan::check
+crates/spikefade/src/kit.rs:778:117: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:778:94: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:778:70: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:778:49: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:778:28: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:778:21: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:778:41: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:778:62: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:778:81: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:778:108: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:778:134: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:782:34: replace && with || in Plan::check
+crates/spikefade/src/kit.rs:782:24: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:782:37: delete ! in Plan::check
+crates/spikefade/src/kit.rs:787:39: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:787:26: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:787:79: replace != with == in Plan::check
+crates/spikefade/src/kit.rs:799:9: replace Plan::batch_at -> Result<(usize, usize), String> with Ok((0, 0))
+crates/spikefade/src/kit.rs:799:9: replace Plan::batch_at -> Result<(usize, usize), String> with Ok((0, 1))
+crates/spikefade/src/kit.rs:799:9: replace Plan::batch_at -> Result<(usize, usize), String> with Ok((1, 0))
+crates/spikefade/src/kit.rs:799:9: replace Plan::batch_at -> Result<(usize, usize), String> with Ok((1, 1))
+crates/spikefade/src/kit.rs:799:48: replace < with == in Plan::batch_at
+crates/spikefade/src/kit.rs:799:48: replace < with > in Plan::batch_at
+crates/spikefade/src/kit.rs:799:48: replace < with <= in Plan::batch_at
+crates/spikefade/src/kit.rs:801:24: replace match guard x.0 == b0 with true in Plan::batch_at
+crates/spikefade/src/kit.rs:801:24: replace match guard x.0 == b0 with false in Plan::batch_at
+crates/spikefade/src/kit.rs:801:28: replace == with != in Plan::batch_at
+crates/spikefade/src/kit.rs:810:5: replace fp_part -> String with String::new()
+crates/spikefade/src/kit.rs:810:5: replace fp_part -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:811:9: delete match arm (Some(p), Some(d)) in fp_part
+crates/spikefade/src/kit.rs:812:9: delete match arm (Some(p), None) in fp_part
+crates/spikefade/src/kit.rs:822:5: replace par_digest -> [u8; 32] with [0; 32]
+crates/spikefade/src/kit.rs:822:5: replace par_digest -> [u8; 32] with [1; 32]
+crates/spikefade/src/kit.rs:831:26: replace >= with < in par_digest
+crates/spikefade/src/kit.rs:835:32: replace * with + in par_digest
+crates/spikefade/src/kit.rs:835:32: replace * with / in par_digest
+crates/spikefade/src/kit.rs:835:50: replace * with + in par_digest
+crates/spikefade/src/kit.rs:835:50: replace * with / in par_digest
+crates/spikefade/src/kit.rs:835:45: replace + with - in par_digest
+crates/spikefade/src/kit.rs:835:45: replace + with * in par_digest
+crates/spikefade/src/kit.rs:863:5: replace list_digest -> String with String::new()
+crates/spikefade/src/kit.rs:863:5: replace list_digest -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:879:8: delete ! in list_digest
+crates/spikefade/src/kit.rs:886:8: delete ! in list_digest
+crates/spikefade/src/kit.rs:900:25: replace && with || in list_digest
+crates/spikefade/src/kit.rs:900:12: delete ! in list_digest
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec![])
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/spikefade/src/kit.rs:921:12: delete ! in table_lines
+crates/spikefade/src/kit.rs:921:42: replace || with && in table_lines
+crates/spikefade/src/kit.rs:921:50: replace == with != in table_lines
+crates/spikefade/src/kit.rs:924:31: replace + with - in table_lines
+crates/spikefade/src/kit.rs:924:31: replace + with * in table_lines
+crates/spikefade/src/kit.rs:927:40: replace || with && in table_lines
+crates/spikefade/src/kit.rs:927:17: replace == with != in table_lines
+crates/spikefade/src/kit.rs:927:48: replace == with != in table_lines
+crates/spikefade/src/kit.rs:975:5: replace inputs_manifest -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/kit.rs:975:5: replace inputs_manifest -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/kit.rs:1020:5: replace check_inputs -> Result<(), String> with Ok(())
+crates/spikefade/src/kit.rs:1021:13: replace == with != in check_inputs
+crates/spikefade/src/kit.rs:1027:21: replace != with == in check_inputs
+crates/spikefade/src/kit.rs:1029:28: replace >= with < in check_inputs
+crates/spikefade/src/kit.rs:1087:9: replace Bck::body -> String with String::new()
+crates/spikefade/src/kit.rs:1087:9: replace Bck::body -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1128:9: replace Bck::text -> String with String::new()
+crates/spikefade/src/kit.rs:1128:9: replace Bck::text -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1140:9: replace Bck::prov_of -> Option<&str> with None
+crates/spikefade/src/kit.rs:1140:9: replace Bck::prov_of -> Option<&str> with Some("")
+crates/spikefade/src/kit.rs:1140:9: replace Bck::prov_of -> Option<&str> with Some("xyzzy")
+crates/spikefade/src/kit.rs:1140:39: replace == with != in Bck::prov_of
+crates/spikefade/src/kit.rs:1149:9: replace Bck::parse -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/kit.rs:1149:12: delete ! in Bck::parse
+crates/spikefade/src/kit.rs:1164:24: replace && with || in Bck::parse
+crates/spikefade/src/kit.rs:1164:31: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1169:36: replace match guard i == 0 with true in Bck::parse
+crates/spikefade/src/kit.rs:1169:36: replace match guard i == 0 with false in Bck::parse
+crates/spikefade/src/kit.rs:1323:22: replace match guard cfg!(feature = "m_kit_merge_ignores_unknown") with true in Bck::parse
+crates/spikefade/src/kit.rs:1323:22: replace match guard cfg!(feature = "m_kit_merge_ignores_unknown") with false in Bck::parse
+crates/spikefade/src/kit.rs:1169:38: replace == with != in Bck::parse
+crates/spikefade/src/kit.rs:1171:26: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1182:52: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1182:36: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1182:28: replace >= with < in Bck::parse
+crates/spikefade/src/kit.rs:1182:44: replace <= with > in Bck::parse
+crates/spikefade/src/kit.rs:1182:60: replace > with == in Bck::parse
+crates/spikefade/src/kit.rs:1182:60: replace > with < in Bck::parse
+crates/spikefade/src/kit.rs:1182:60: replace > with >= in Bck::parse
+crates/spikefade/src/kit.rs:1205:32: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1215:32: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1229:26: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1246:26: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1255:41: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1255:26: replace >= with < in Bck::parse
+crates/spikefade/src/kit.rs:1262:36: replace == with != in Bck::parse
+crates/spikefade/src/kit.rs:1263:41: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1263:26: replace >= with < in Bck::parse
+crates/spikefade/src/kit.rs:1273:56: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1273:41: replace >= with < in Bck::parse
+crates/spikefade/src/kit.rs:1273:62: replace >= with < in Bck::parse
+crates/spikefade/src/kit.rs:1281:33: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1287:61: delete ! in Bck::parse
+crates/spikefade/src/kit.rs:1291:63: replace >= with < in Bck::parse
+crates/spikefade/src/kit.rs:1303:28: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1312:62: delete ! in Bck::parse
+crates/spikefade/src/kit.rs:1319:43: delete ! in Bck::parse
+crates/spikefade/src/kit.rs:1329:20: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1332:65: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1332:46: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1332:22: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1332:12: delete ! in Bck::parse
+crates/spikefade/src/kit.rs:1332:40: replace != with == in Bck::parse
+crates/spikefade/src/kit.rs:1332:73: replace == with != in Bck::parse
+crates/spikefade/src/kit.rs:1337:17: delete match arm (Some((key, sm)), Some(lf), Some(tf)) in Bck::parse
+crates/spikefade/src/kit.rs:1338:17: delete match arm (None, None, None) in Bck::parse
+crates/spikefade/src/kit.rs:1347:5: replace num_i -> Result<i64, String> with Ok(0)
+crates/spikefade/src/kit.rs:1347:5: replace num_i -> Result<i64, String> with Ok(1)
+crates/spikefade/src/kit.rs:1347:5: replace num_i -> Result<i64, String> with Ok(-1)
+crates/spikefade/src/kit.rs:1353:5: replace bck_path -> PathBuf with Default::default()
+crates/spikefade/src/kit.rs:1362:5: replace write_bck -> Result<PathBuf, String> with Ok(Default::default())
+crates/spikefade/src/kit.rs:1367:22: replace match guard o.body_sha == sha256_bytes(b.body().as_bytes()) with true in write_bck
+crates/spikefade/src/kit.rs:1367:22: replace match guard o.body_sha == sha256_bytes(b.body().as_bytes()) with false in write_bck
+crates/spikefade/src/kit.rs:1367:33: replace == with != in write_bck
+crates/spikefade/src/kit.rs:1390:5: replace bck_done -> Result<bool, String> with Ok(true)
+crates/spikefade/src/kit.rs:1390:5: replace bck_done -> Result<bool, String> with Ok(false)
+crates/spikefade/src/kit.rs:1393:18: replace match guard b.fp == fp && b.k == k with true in bck_done
+crates/spikefade/src/kit.rs:1393:18: replace match guard b.fp == fp && b.k == k with false in bck_done
+crates/spikefade/src/kit.rs:1393:29: replace && with || in bck_done
+crates/spikefade/src/kit.rs:1393:23: replace == with != in bck_done
+crates/spikefade/src/kit.rs:1393:36: replace == with != in bck_done
+crates/spikefade/src/kit.rs:1405:5: replace exe_sha -> String with String::new()
+crates/spikefade/src/kit.rs:1405:5: replace exe_sha -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1411:5: replace host -> String with String::new()
+crates/spikefade/src/kit.rs:1411:5: replace host -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1412:154: delete ! in host
+crates/spikefade/src/kit.rs:1418:5: replace source_sha -> &'static str with ""
+crates/spikefade/src/kit.rs:1418:5: replace source_sha -> &'static str with "xyzzy"
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![(String::new(), String::new())]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![(String::new(), "xyzzy".into())]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![("xyzzy".into(), String::new())]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![("xyzzy".into(), "xyzzy".into())]
+crates/spikefade/src/slice.rs:41:5: replace seg_range -> Result<(usize, usize), String> with Ok((0, 0))
+crates/spikefade/src/slice.rs:41:5: replace seg_range -> Result<(usize, usize), String> with Ok((0, 1))
+crates/spikefade/src/slice.rs:41:5: replace seg_range -> Result<(usize, usize), String> with Ok((1, 0))
+crates/spikefade/src/slice.rs:41:5: replace seg_range -> Result<(usize, usize), String> with Ok((1, 1))
+crates/spikefade/src/slice.rs:41:53: replace == with != in seg_range
+crates/spikefade/src/slice.rs:42:64: replace == with != in seg_range
+crates/spikefade/src/slice.rs:45:15: replace == with != in seg_range
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![], vec![]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![], vec![0]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![], vec![1]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![0], vec![]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![0], vec![0]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![0], vec![1]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![1], vec![]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![1], vec![0]))
+crates/spikefade/src/slice.rs:53:5: replace slice_of -> Result<(Vec<u8>, Vec<u8>), String> with Ok((vec![1], vec![1]))
+crates/spikefade/src/slice.rs:54:20: replace != with == in slice_of
+crates/spikefade/src/slice.rs:54:36: replace + with - in slice_of
+crates/spikefade/src/slice.rs:54:36: replace + with * in slice_of
+crates/spikefade/src/slice.rs:61:5: replace magic_of -> &[u8] with Vec::leak(Vec::new())
+crates/spikefade/src/slice.rs:61:5: replace magic_of -> &[u8] with Vec::leak(vec![0])
+crates/spikefade/src/slice.rs:61:5: replace magic_of -> &[u8] with Vec::leak(vec![1])
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(None)
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![], vec![])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![], vec![0])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![], vec![1])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![0], vec![])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![0], vec![0])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![0], vec![1])))
