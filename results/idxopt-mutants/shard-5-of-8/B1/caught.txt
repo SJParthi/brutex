@@ -1,0 +1,2 @@
+crates/sniper_host/src/sec.rs:760:94: replace >= with < in build_family_ctx
+crates/sniper_host/src/sec.rs:1013:53: replace & with ^ in SecFamily::pass
