@@ -1,0 +1,19 @@
+crates/wf_sweep/src/acc.rs:936:41: replace * with / in SweepAcc<'_>::eligible_std
+crates/wf_sweep/src/acc.rs:970:14: replace >= with < in OfferSink<'_>::count
+crates/wf_sweep/src/acc.rs:1003:39: replace == with != in eligible_from
+crates/wf_sweep/src/acc.rs:1031:75: replace && with || in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1031:61: replace && with || in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1031:33: replace && with || in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1031:36: delete ! in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1031:67: replace <= with > in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1031:115: replace <= with > in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1032:12: delete ! in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1035:65: replace + with - in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1035:65: replace + with * in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1035:58: replace * with + in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1035:58: replace * with / in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1081:45: replace * with / in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1086:70: replace > with >= in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1122:78: replace + with * in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/acc.rs:1122:78: replace + with - in SweepAcc<'_>::offer_all
+crates/wf_sweep/src/lists.rs:37:9: replace <impl PartialOrd for Ck>::partial_cmp -> Option<std::cmp::Ordering> with None

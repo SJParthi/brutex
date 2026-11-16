@@ -1,0 +1,136 @@
+Found 283 mutants to test
+ok       Unmutated baseline in 8s build + 0s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/opt_pos/src/pos.rs:1108:67: replace + with * in run in 1s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1124:19: replace < with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1124:19: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1114:75: delete field label from struct StreamOut expression in run in 9s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1153:46: delete field kind from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1153:69: delete field day from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1153:77: delete field decided from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1153:89: delete field folder from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1161:82: replace || with && in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1161:65: replace || with && in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1165:24: replace < with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1165:24: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1165:24: replace < with > in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1172:45: replace && with || in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1172:50: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1181:61: replace > with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1181:61: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1181:61: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1185:23: replace > with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1185:23: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1185:23: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1188:64: replace == with != in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1190:43: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1195:35: replace && with || in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1195:54: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1205:92: delete field expiry from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1205:163: delete field buy_slices from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1209:49: delete field trip from struct Held expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1212:27: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1235:26: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1242:33: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1246:47: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1247:46: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1248:29: replace > with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1248:29: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1248:29: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1274:67: replace && with || in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1274:77: replace < with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1274:77: replace < with > in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1274:77: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1299:31: replace == with != in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1350:82: replace || with && in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1350:65: replace || with && in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1352:42: delete field kind from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1352:74: delete field day from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1352:82: delete field decided from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1352:125: delete field strike from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1352:99: delete field folder from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1352:149: delete field pick from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1352:143: delete field free from struct LegOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1355:24: replace < with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1355:24: replace < with > in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1359:61: replace > with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1355:24: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1359:61: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1359:61: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1363:23: replace > with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1363:23: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1363:23: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1369:61: replace && with || in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1372:70: replace == with != in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1381:37: replace < with > in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1381:37: replace < with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1381:37: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1389:40: delete field folder from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1389:66: delete field strike from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1389:84: delete field ce from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1389:94: delete field expiry from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1389:113: delete field units_in from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1389:134: delete field value_in from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1389:167: delete field buy_slices from struct TripOut expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1396:27: replace < with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1396:27: replace < with > in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1396:27: replace < with <= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1437:22: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1459:46: delete field units from struct Held expression in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1488:43: replace > with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1488:43: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1488:43: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1489:42: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1490:25: replace > with == in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1490:25: replace > with >= in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/pos.rs:1490:25: replace > with < in run in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:165:34: replace && with || in walk1 in 1s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:165:46: replace > with >= in walk1 in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:176:5: replace segments -> Vec<Seg> with vec![] in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:176:35: replace + with - in segments in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:176:28: replace * with + in segments in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:176:28: replace * with / in segments in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:176:40: replace * with + in segments in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:176:40: replace * with / in segments in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:188:5: replace leg_count -> u32 with 0 in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:188:5: replace leg_count -> u32 with 1 in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:205:37: replace + with - in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:205:37: replace + with * in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:205:30: replace * with + in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:205:30: replace * with / in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:205:42: replace * with + in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:205:42: replace * with / in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:211:40: replace < with == in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:211:40: replace < with > in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:211:40: replace < with <= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:216:31: delete field kept from struct PathOut expression in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:228:21: replace > with == in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:228:21: replace > with < in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:228:21: replace > with >= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:234:29: replace || with && in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:237:18: replace -= with += in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:239:17: replace > with >= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:243:29: replace || with && in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:248:69: replace && with || in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:248:77: replace < with <= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:251:17: replace > with >= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:260:40: replace > with >= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:264:48: replace - with + in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:264:48: replace - with / in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:273:93: replace > with == in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:273:93: replace > with < in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:273:93: replace > with >= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:273:125: replace > with >= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:274:44: replace > with < in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:280:23: replace > with >= in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:285:31: delete field qty from struct Trip expression in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:285:139: delete field broker_orders from struct Trip expression in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:286:35: delete field entry_orders from struct Trip expression in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:286:65: delete field exit_orders from struct Trip expression in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:286:99: replace + with * in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:286:87: replace + with * in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:287:39: delete field entry_orders from struct Trip expression in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:287:73: delete field exit_orders from struct Trip expression in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:287:115: replace + with * in price_intraday_holes in 0s build + 0s test
+MISSED   crates/opt_pos/src/price.rs:287:99: replace + with * in price_intraday_holes in 0s build + 0s test
+283 mutants tested in 2m: 132 missed, 146 caught, 5 unviable

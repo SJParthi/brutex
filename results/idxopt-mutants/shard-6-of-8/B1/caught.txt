@@ -1,0 +1,1 @@
+crates/sniper_host/src/sec.rs:1309:5: replace sec_eq -> (u64, usize, Vec<String>) with (1, 1, vec![String::new()])

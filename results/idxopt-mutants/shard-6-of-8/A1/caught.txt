@@ -1,0 +1,146 @@
+crates/opt_pos/src/pos.rs:1124:19: replace < with > in run
+crates/opt_pos/src/pos.rs:1129:19: replace != with == in run
+crates/opt_pos/src/pos.rs:1133:23: replace * with + in run
+crates/opt_pos/src/pos.rs:1133:23: replace * with / in run
+crates/opt_pos/src/pos.rs:1141:38: replace && with || in run
+crates/opt_pos/src/pos.rs:1141:43: replace >= with < in run
+crates/opt_pos/src/pos.rs:1161:89: replace == with != in run
+crates/opt_pos/src/pos.rs:1172:34: replace == with != in run
+crates/opt_pos/src/pos.rs:1172:50: replace < with == in run
+crates/opt_pos/src/pos.rs:1172:50: replace < with > in run
+crates/opt_pos/src/pos.rs:1175:61: replace && with || in run
+crates/opt_pos/src/pos.rs:1175:27: delete ! in run
+crates/opt_pos/src/pos.rs:1175:71: replace <= with > in run
+crates/opt_pos/src/pos.rs:1190:24: replace && with || in run
+crates/opt_pos/src/pos.rs:1190:43: replace > with == in run
+crates/opt_pos/src/pos.rs:1190:43: replace > with < in run
+crates/opt_pos/src/pos.rs:1195:54: replace > with == in run
+crates/opt_pos/src/pos.rs:1195:54: replace > with < in run
+crates/opt_pos/src/pos.rs:1201:29: replace == with != in run
+crates/opt_pos/src/pos.rs:1205:38: delete field folder from struct TripOut expression in run
+crates/opt_pos/src/pos.rs:1205:64: delete field strike from struct TripOut expression in run
+crates/opt_pos/src/pos.rs:1205:82: delete field ce from struct TripOut expression in run
+crates/opt_pos/src/pos.rs:1205:111: delete field units_in from struct TripOut expression in run
+crates/opt_pos/src/pos.rs:1205:131: delete field value_in from struct TripOut expression in run
+crates/opt_pos/src/pos.rs:1205:151: delete field buy_day from struct TripOut expression in run
+crates/opt_pos/src/pos.rs:1207:40: replace - with + in run
+crates/opt_pos/src/pos.rs:1207:40: replace - with / in run
+crates/opt_pos/src/pos.rs:1209:32: delete field units from struct Held expression in run
+crates/opt_pos/src/pos.rs:1209:59: delete field e0 from struct Held expression in run
+crates/opt_pos/src/pos.rs:1212:27: replace < with == in run
+crates/opt_pos/src/pos.rs:1212:27: replace < with > in run
+crates/opt_pos/src/pos.rs:1223:109: replace == with != in run
+crates/opt_pos/src/pos.rs:1224:46: replace + with - in run
+crates/opt_pos/src/pos.rs:1224:46: replace + with * in run
+crates/opt_pos/src/pos.rs:1235:26: replace > with == in run
+crates/opt_pos/src/pos.rs:1235:26: replace > with < in run
+crates/opt_pos/src/pos.rs:1238:40: replace - with + in run
+crates/opt_pos/src/pos.rs:1238:40: replace - with / in run
+crates/opt_pos/src/pos.rs:1242:33: replace > with == in run
+crates/opt_pos/src/pos.rs:1242:33: replace > with < in run
+crates/opt_pos/src/pos.rs:1246:47: replace > with == in run
+crates/opt_pos/src/pos.rs:1246:47: replace > with < in run
+crates/opt_pos/src/pos.rs:1247:46: replace > with == in run
+crates/opt_pos/src/pos.rs:1247:46: replace > with >= in run
+crates/opt_pos/src/pos.rs:1265:37: replace > with == in run
+crates/opt_pos/src/pos.rs:1265:37: replace > with < in run
+crates/opt_pos/src/pos.rs:1265:37: replace > with >= in run
+crates/opt_pos/src/pos.rs:1269:35: replace >= with < in run
+crates/opt_pos/src/pos.rs:1304:27: replace == with != in run
+crates/opt_pos/src/pos.rs:1306:50: replace == with != in run
+crates/opt_pos/src/pos.rs:1350:89: replace == with != in run
+crates/opt_pos/src/pos.rs:1369:27: delete ! in run
+crates/opt_pos/src/pos.rs:1369:71: replace <= with > in run
+crates/opt_pos/src/pos.rs:1376:29: replace > with == in run
+crates/opt_pos/src/pos.rs:1376:29: replace > with < in run
+crates/opt_pos/src/pos.rs:1376:29: replace > with >= in run
+crates/opt_pos/src/pos.rs:1385:30: replace == with != in run
+crates/opt_pos/src/pos.rs:1389:155: delete field buy_day from struct TripOut expression in run
+crates/opt_pos/src/pos.rs:1390:40: replace - with + in run
+crates/opt_pos/src/pos.rs:1390:40: replace - with / in run
+crates/opt_pos/src/pos.rs:1392:33: delete field trip from struct Held expression in run
+crates/opt_pos/src/pos.rs:1405:23: replace == with != in run
+crates/opt_pos/src/pos.rs:1417:34: replace != with == in run
+crates/opt_pos/src/pos.rs:1408:24: delete ! in run
+crates/opt_pos/src/pos.rs:1437:22: replace > with == in run
+crates/opt_pos/src/pos.rs:1437:22: replace > with >= in run
+crates/opt_pos/src/pos.rs:1440:36: replace - with + in run
+crates/opt_pos/src/pos.rs:1440:36: replace - with / in run
+crates/opt_pos/src/pos.rs:1441:50: replace == with != in run
+crates/opt_pos/src/pos.rs:1443:29: replace > with == in run
+crates/opt_pos/src/pos.rs:1443:29: replace > with < in run
+crates/opt_pos/src/pos.rs:1443:29: replace > with >= in run
+crates/opt_pos/src/pos.rs:1446:53: replace == with != in run
+crates/opt_pos/src/pos.rs:1447:29: replace && with || in run
+crates/opt_pos/src/pos.rs:1447:25: replace > with == in run
+crates/opt_pos/src/pos.rs:1447:25: replace > with < in run
+crates/opt_pos/src/pos.rs:1447:25: replace > with >= in run
+crates/opt_pos/src/pos.rs:1447:32: delete ! in run
+crates/opt_pos/src/pos.rs:1451:63: replace && with || in run
+crates/opt_pos/src/pos.rs:1457:55: replace + with - in run
+crates/opt_pos/src/pos.rs:1457:55: replace + with * in run
+crates/opt_pos/src/pos.rs:1457:48: replace * with + in run
+crates/opt_pos/src/pos.rs:1457:48: replace * with / in run
+crates/opt_pos/src/pos.rs:1457:60: replace * with + in run
+crates/opt_pos/src/pos.rs:1457:60: replace * with / in run
+crates/opt_pos/src/pos.rs:1489:42: replace > with == in run
+crates/opt_pos/src/pos.rs:1489:42: replace > with >= in run
+crates/opt_pos/src/pos.rs:1510:20: replace != with == in run
+crates/opt_pos/src/pos.rs:1542:15: replace += with -= in run
+crates/opt_pos/src/pos.rs:1542:15: replace += with *= in run
+crates/opt_pos/src/price.rs:155:5: replace walk1 -> Result<(Vec<Fill>, LevelFill), String> with Ok((vec![], Default::default()))
+crates/opt_pos/src/price.rs:165:19: replace == with != in walk1
+crates/opt_pos/src/price.rs:165:46: replace > with == in walk1
+crates/opt_pos/src/price.rs:165:46: replace > with < in walk1
+crates/opt_pos/src/price.rs:176:5: replace segments -> Vec<Seg> with vec![Default::default()]
+crates/opt_pos/src/price.rs:176:35: replace + with * in segments
+crates/opt_pos/src/price.rs:196:5: replace price_intraday -> Result<Priced, String> with Ok(Default::default())
+crates/opt_pos/src/price.rs:205:5: replace price_intraday_holes -> Result<Priced, String> with Ok(Default::default())
+crates/opt_pos/src/price.rs:237:18: replace -= with /= in price_intraday_holes
+crates/opt_pos/src/price.rs:239:17: replace > with == in price_intraday_holes
+crates/opt_pos/src/price.rs:239:17: replace > with < in price_intraday_holes
+crates/opt_pos/src/price.rs:246:18: replace -= with += in price_intraday_holes
+crates/opt_pos/src/price.rs:246:18: replace -= with /= in price_intraday_holes
+crates/opt_pos/src/price.rs:248:61: replace >= with < in price_intraday_holes
+crates/opt_pos/src/price.rs:248:77: replace < with == in price_intraday_holes
+crates/opt_pos/src/price.rs:248:77: replace < with > in price_intraday_holes
+crates/opt_pos/src/price.rs:251:17: replace > with == in price_intraday_holes
+crates/opt_pos/src/price.rs:251:17: replace > with < in price_intraday_holes
+crates/opt_pos/src/price.rs:260:40: replace > with == in price_intraday_holes
+crates/opt_pos/src/price.rs:260:40: replace > with < in price_intraday_holes
+crates/opt_pos/src/price.rs:260:49: replace / with % in price_intraday_holes
+crates/opt_pos/src/price.rs:260:49: replace / with * in price_intraday_holes
+crates/opt_pos/src/price.rs:266:61: replace * with + in price_intraday_holes
+crates/opt_pos/src/price.rs:266:61: replace * with / in price_intraday_holes
+crates/opt_pos/src/price.rs:267:31: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:267:31: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:267:25: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:267:25: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:273:125: replace > with == in price_intraday_holes
+crates/opt_pos/src/price.rs:273:125: replace > with < in price_intraday_holes
+crates/opt_pos/src/price.rs:274:49: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:274:49: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:274:44: replace > with == in price_intraday_holes
+crates/opt_pos/src/price.rs:274:44: replace > with >= in price_intraday_holes
+crates/opt_pos/src/price.rs:275:45: replace && with || in price_intraday_holes
+crates/opt_pos/src/price.rs:275:41: replace > with == in price_intraday_holes
+crates/opt_pos/src/price.rs:275:41: replace > with < in price_intraday_holes
+crates/opt_pos/src/price.rs:275:41: replace > with >= in price_intraday_holes
+crates/opt_pos/src/price.rs:275:48: delete ! in price_intraday_holes
+crates/opt_pos/src/price.rs:275:82: replace && with || in price_intraday_holes
+crates/opt_pos/src/price.rs:280:23: replace > with == in price_intraday_holes
+crates/opt_pos/src/price.rs:280:23: replace > with < in price_intraday_holes
+crates/opt_pos/src/price.rs:281:28: replace == with != in price_intraday_holes
+crates/opt_pos/src/price.rs:285:36: delete field buy_value from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:285:59: delete field sell_value from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:285:83: delete field entry_orders from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:285:100: delete field exit_orders from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:285:127: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:285:127: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:286:99: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:286:87: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:287:115: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:287:99: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:291:45: replace - with + in price_intraday_holes
+crates/opt_pos/src/price.rs:291:45: replace - with / in price_intraday_holes
+crates/opt_pos/src/price.rs:291:31: replace - with + in price_intraday_holes

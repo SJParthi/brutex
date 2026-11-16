@@ -1,0 +1,23 @@
+Found 123 mutants to test
+ok       Unmutated baseline in 2s build + 1s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/wf_sweep/src/acc.rs:936:41: replace * with / in SweepAcc<'_>::eligible_std in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:970:14: replace >= with < in OfferSink<'_>::count in 0s build + 11s test
+MISSED   crates/wf_sweep/src/acc.rs:1003:39: replace == with != in eligible_from in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1031:75: replace && with || in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1031:61: replace && with || in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1031:33: replace && with || in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1031:36: delete ! in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1031:67: replace <= with > in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1031:115: replace <= with > in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1032:12: delete ! in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1035:65: replace + with - in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1035:65: replace + with * in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1035:58: replace * with + in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1035:58: replace * with / in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1081:45: replace * with / in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1086:70: replace > with >= in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1122:78: replace + with * in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:1122:78: replace + with - in SweepAcc<'_>::offer_all in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:37:9: replace <impl PartialOrd for Ck>::partial_cmp -> Option<std::cmp::Ordering> with None in 0s build + 1s test
+123 mutants tested in 2m: 19 missed, 101 caught, 3 unviable

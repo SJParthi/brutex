@@ -1,0 +1,3 @@
+crates/wf_sweep/src/lists.rs:16:5: replace code_cmp -> std::cmp::Ordering with Default::default()
+crates/wf_sweep/src/lists.rs:31:9: replace <impl Ord for Ck>::cmp -> std::cmp::Ordering with Default::default()
+crates/wf_sweep/src/lists.rs:37:9: replace <impl PartialOrd for Ck>::partial_cmp -> Option<std::cmp::Ordering> with Some(Default::default())

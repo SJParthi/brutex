@@ -1,0 +1,5 @@
+crates/costs/src/option_clock.rs:260:25: replace > with == in charges_est
+crates/costs/src/option_clock.rs:260:25: replace > with < in charges_est
+crates/costs/src/option_clock.rs:260:25: replace > with >= in charges_est
+crates/costs/src/option_clock.rs:260:37: replace > with >= in charges_est
+crates/costs/src/option_clock.rs:268:30: replace + with - in charges_est

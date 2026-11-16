@@ -1,0 +1,5 @@
+crates/opt_pos/src/pos.rs:1310:33: replace && with || in run
+crates/opt_pos/src/pos.rs:1410:25: replace && with || in run
+crates/opt_pos/src/pos.rs:1409:25: replace && with || in run
+crates/opt_pos/src/price.rs:155:5: replace walk1 -> Result<(Vec<Fill>, LevelFill), String> with Ok((vec![Default::default()], Default::default()))
+crates/opt_pos/src/price.rs:228:13: replace && with || in price_intraday_holes
