@@ -24,3 +24,100 @@ crates/spikefade/src/bhav.rs:79:22: replace && with || in ymd_of
 crates/spikefade/src/bhav.rs:96:34: delete field file from struct BhavDay expression in parse
 crates/spikefade/src/bhav.rs:96:57: delete field sha from struct BhavDay expression in parse
 crates/spikefade/src/bhav.rs:113:13: delete match arm "CE" in parse
+crates/spikefade/src/bhav.rs:120:12: delete ! in parse
+crates/spikefade/src/bhav.rs:148:19: replace += with *= in Bhav::add_dir
+crates/spikefade/src/bhav.rs:158:9: replace Bhav::sessions -> Vec<i64> with vec![]
+crates/spikefade/src/bhav.rs:158:9: replace Bhav::sessions -> Vec<i64> with vec![0]
+crates/spikefade/src/bhav.rs:158:9: replace Bhav::sessions -> Vec<i64> with vec![1]
+crates/spikefade/src/bhav.rs:164:9: replace Bhav::file_of -> Option<&Path> with None
+crates/spikefade/src/bhav.rs:189:12: delete ! in Bhav::day
+crates/spikefade/src/bhav.rs:207:5: replace from_args -> Result<Option<String>, String> with Ok(Some(String::new()))
+crates/spikefade/src/bhav.rs:207:5: replace from_args -> Result<Option<String>, String> with Ok(None)
+crates/spikefade/src/bhav.rs:207:70: replace == with != in from_args
+crates/spikefade/src/bhav.rs:207:115: replace + with - in from_args
+crates/spikefade/src/bhav.rs:207:115: replace + with * in from_args
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 0, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 0, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 0, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 0, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 1, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 1, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 1, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 1, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 1, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, -1, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, -1, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, -1, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, -1, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, -1, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 0, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 0, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 0, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 0, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 0, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 1, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 1, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 1, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 1, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 1, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, -1, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, -1, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, -1, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, -1, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, -1, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 0, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 0, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 0, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 0, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 0, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 1, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 1, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 1, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 1, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 1, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, -1, 0, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, -1, 0, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, -1, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, -1, 1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, -1, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, -1, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with None
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((0, vec![]))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((0, vec![1]))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((1, vec![]))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((1, vec![1]))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((-1, vec![]))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((-1, vec![0]))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((-1, vec![1]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::new())
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (0, 0))]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (0, 1))]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (0, -1))]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (1, 0))]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (1, 1))]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (1, -1))]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (-1, 0))]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (-1, -1))]))
+crates/spikefade/src/bhav.rs:263:52: replace == with != in parse_hilo
+crates/spikefade/src/bhav.rs:274:12: delete ! in parse_hilo
+crates/spikefade/src/bhav.rs:279:13: delete match arm "CE" in parse_hilo
+crates/spikefade/src/bhav.rs:280:13: delete match arm "PE" in parse_hilo
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with None
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::new())
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (0, 0))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (0, 1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (0, -1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (1, 0))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (1, 1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (1, -1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (-1, 0))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (-1, 1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(0, (-1, -1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (0, 0))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (0, 1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (0, -1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (1, 0))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (1, 1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (-1, 0))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (-1, 1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (-1, -1))]))
