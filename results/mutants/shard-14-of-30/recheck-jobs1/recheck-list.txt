@@ -1,0 +1,88 @@
+crates/spikefade/src/wf.rs:69:23: delete field all_pos from struct Fig expression in compose
+crates/spikefade/src/wf.rs:108:78: replace + with - in learn_key
+crates/spikefade/src/ban.rs:126:5: replace counts_line -> String with "xyzzy".into()
+crates/spikefade/src/ban.rs:169:5: replace counts_line34 -> String with "xyzzy".into()
+crates/spikefade/src/bhav.rs:96:29: delete field day from struct BhavDay expression in parse
+crates/spikefade/src/bhav.rs:96:34: delete field file from struct BhavDay expression in parse
+crates/spikefade/src/bhav.rs:96:57: delete field sha from struct BhavDay expression in parse
+crates/spikefade/src/bhav.rs:158:9: replace Bhav::sessions -> Vec<i64> with vec![-1]
+crates/spikefade/src/bhav.rs:207:5: replace from_args -> Result<Option<String>, String> with Ok(Some("xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with None
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 0, 1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 0, -1, String::new()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, 1, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((0, -1, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 0, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, 1, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((1, -1, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 0, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:223:5: replace prev_close -> Option<(i64, i64, i64, String)> with Some((-1, 1, -1, "xyzzy".into()))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((0, vec![0]))
+crates/spikefade/src/bhav.rs:234:5: replace expiries -> Option<(i64, Vec<u32>)> with Some((1, vec![0]))
+crates/spikefade/src/bhav.rs:261:5: replace parse_hilo -> Result<HashMap<Key, (i64, i64)>, String> with Ok(HashMap::from_iter([(Default::default(), (-1, 1))]))
+crates/spikefade/src/bhav.rs:291:5: replace day_extremes -> Option<HashMap<usize, (i64, i64)>> with Some(HashMap::from_iter([(1, (1, -1))]))
+crates/spikefade/src/expiry.rs:46:5: replace is_session -> bool with true
+crates/spikefade/src/expiry.rs:46:66: replace < with <= in is_session
+crates/spikefade/src/expiry.rs:107:5: replace staged -> HashMap<u16, Vec<u32>> with HashMap::from_iter([(0, vec![0])])
+crates/spikefade/src/expiry.rs:234:70: replace == with != in busiest
+crates/spikefade/src/expiry.rs:280:108: replace && with || in regular_and_moved
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "xyzzy", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "xyzzy", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "xyzzy", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "xyzzy", 1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "xyzzy", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "", "", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "", "xyzzy", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", 1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "xyzzy", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "xyzzy", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "", "xyzzy", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "", "xyzzy", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "xyzzy", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "xyzzy", 1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "xyzzy", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "xyzzy", "", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, false, "", "xyzzy", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, false, "", "xyzzy", -1, true))
+crates/spikefade/src/freeze.rs:88:28: delete field path from struct Self expression in StockDated::parse
+crates/spikefade/src/freeze.rs:88:51: delete field sha from struct Self expression in StockDated::parse
+crates/spikefade/src/freeze.rs:88:72: delete field first from struct Self expression in StockDated::parse
+crates/spikefade/src/freeze.rs:88:89: delete field last from struct Self expression in StockDated::parse
+crates/spikefade/src/freeze.rs:108:42: replace || with && in StockDated::parse
+crates/spikefade/src/freeze.rs:169:29: replace match guard parse_day(d).is_some() with true in Freeze::add
+crates/spikefade/src/freeze.rs:198:19: replace += with *= in Freeze::add
+crates/spikefade/src/freeze.rs:319:71: replace == with != in from_args
+crates/spikefade/src/freeze.rs:440:49: replace % with / in f3_lat
+crates/spikefade/src/freeze.rs:442:20: replace < with > in f3_lat
+crates/spikefade/src/freeze.rs:442:24: replace << with >> in f3_lat
+crates/spikefade/src/freeze.rs:466:5: replace trade_words -> String with "xyzzy".into()
+crates/spikefade/src/freeze.rs:467:15: replace != with == in trade_words
+crates/spikefade/src/freeze.rs:488:5: replace item12_f3 -> (&'static str, String) with ("", "xyzzy".into())
+crates/spikefade/src/freeze.rs:488:5: replace item12_f3 -> (&'static str, String) with ("xyzzy", String::new())
+crates/spikefade/src/freeze.rs:492:74: replace && with || in item12_f3
+crates/spikefade/src/freeze.rs:492:69: replace == with != in item12_f3
+crates/spikefade/src/freeze.rs:502:60: replace / with * in f3_line
+crates/spikefade/src/freeze.rs:509:5: replace counts_line -> String with String::new()
+crates/spikefade/src/freeze.rs:523:5: replace nse_symbol -> String with "xyzzy".into()
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((0, 1, -1, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((0, -1, -1, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, 0, 0, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, 1, true))
+crates/spikefade/src/gk.rs:56:51: replace < with == in TBill::rate_for
+crates/spikefade/src/gk.rs:58:34: replace - with + in TBill::rate_for
+crates/spikefade/src/gk.rs:65:5: replace ye4_of -> Option<u32> with Some(1)
+crates/spikefade/src/gk.rs:67:16: replace > with == in ye4_of
+crates/spikefade/src/gk.rs:71:22: replace < with > in ye4_of
+crates/spikefade/src/gk.rs:118:21: delete field rate from struct G expression in bar_greeks
+crates/spikefade/src/gk.rs:118:27: delete field years from struct G expression in bar_greeks
+crates/spikefade/src/gk.rs:118:34: delete field below_band from struct G expression in bar_greeks

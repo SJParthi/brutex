@@ -58,3 +58,30 @@ crates/spikefade/src/freeze.rs:88:28: delete field path from struct Self express
 crates/spikefade/src/freeze.rs:88:51: delete field sha from struct Self expression in StockDated::parse
 crates/spikefade/src/freeze.rs:88:89: delete field last from struct Self expression in StockDated::parse
 crates/spikefade/src/freeze.rs:108:42: replace || with && in StockDated::parse
+crates/spikefade/src/freeze.rs:169:29: replace match guard parse_day(d).is_some() with true in Freeze::add
+crates/spikefade/src/freeze.rs:198:19: replace += with *= in Freeze::add
+crates/spikefade/src/freeze.rs:319:71: replace == with != in from_args
+crates/spikefade/src/freeze.rs:440:49: replace % with / in f3_lat
+crates/spikefade/src/freeze.rs:442:20: replace < with > in f3_lat
+crates/spikefade/src/freeze.rs:442:24: replace << with >> in f3_lat
+crates/spikefade/src/freeze.rs:466:5: replace trade_words -> String with "xyzzy".into()
+crates/spikefade/src/freeze.rs:467:15: replace != with == in trade_words
+crates/spikefade/src/freeze.rs:488:5: replace item12_f3 -> (&'static str, String) with ("", "xyzzy".into())
+crates/spikefade/src/freeze.rs:488:5: replace item12_f3 -> (&'static str, String) with ("xyzzy", String::new())
+crates/spikefade/src/freeze.rs:492:74: replace && with || in item12_f3
+crates/spikefade/src/freeze.rs:492:69: replace == with != in item12_f3
+crates/spikefade/src/freeze.rs:502:60: replace / with * in f3_line
+crates/spikefade/src/freeze.rs:509:5: replace counts_line -> String with String::new()
+crates/spikefade/src/freeze.rs:523:5: replace nse_symbol -> String with "xyzzy".into()
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((0, 1, -1, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((0, -1, -1, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, 0, 0, false))
+crates/spikefade/src/gk.rs:56:9: replace TBill::rate_for -> Option<(u32, i64, i64, bool)> with Some((1, -1, 1, true))
+crates/spikefade/src/gk.rs:56:51: replace < with == in TBill::rate_for
+crates/spikefade/src/gk.rs:58:34: replace - with + in TBill::rate_for
+crates/spikefade/src/gk.rs:65:5: replace ye4_of -> Option<u32> with Some(1)
+crates/spikefade/src/gk.rs:67:16: replace > with == in ye4_of
+crates/spikefade/src/gk.rs:71:22: replace < with > in ye4_of
+crates/spikefade/src/gk.rs:118:21: delete field rate from struct G expression in bar_greeks
+crates/spikefade/src/gk.rs:118:27: delete field years from struct G expression in bar_greeks
+crates/spikefade/src/gk.rs:118:34: delete field below_band from struct G expression in bar_greeks
