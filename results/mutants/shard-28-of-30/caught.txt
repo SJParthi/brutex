@@ -1,0 +1,120 @@
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, 1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (0, -1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 0, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, 1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (1, -1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 0, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, 1, -1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 0, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 0, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 0, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, 1, -1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, -1, 0))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, -1, 1))])
+crates/spikefade/src/fix34.rs:1301:5: replace wick_compare -> (Vec<(u32, i64)>, u64, Vec<((i64, u32), (i64, i64, i64, i64))>) with (vec![(1, -1)], 1, vec![((-1, 1), (-1, -1, -1, -1))])
+crates/spikefade/src/fix34.rs:1309:54: replace == with != in wick_compare
+crates/spikefade/src/fix34.rs:1309:50: replace & with | in wick_compare
+crates/spikefade/src/fix34.rs:1309:50: replace & with ^ in wick_compare
+crates/spikefade/src/fix34.rs:1314:16: replace == with != in wick_compare
+crates/spikefade/src/fix34.rs:1317:17: replace += with -= in wick_compare
+crates/spikefade/src/fix34.rs:1317:17: replace += with *= in wick_compare
+crates/spikefade/src/fix34.rs:1319:88: replace < with == in wick_compare
+crates/spikefade/src/fix34.rs:1319:88: replace < with > in wick_compare
+crates/spikefade/src/fix34.rs:1319:88: replace < with <= in wick_compare
+crates/spikefade/src/fix34.rs:1331:95: replace == with != in wick_high
+crates/spikefade/src/fix34.rs:1367:5: replace dial_lots -> i64 with 0
+crates/spikefade/src/fix34.rs:1367:5: replace dial_lots -> i64 with 1
+crates/spikefade/src/fix34.rs:1367:5: replace dial_lots -> i64 with -1
+crates/spikefade/src/fix34.rs:1369:53: replace / with % in dial_lots
+crates/spikefade/src/fix34.rs:1369:53: replace / with * in dial_lots
+crates/spikefade/src/fix34.rs:1369:31: replace - with + in dial_lots
+crates/spikefade/src/fix34.rs:1369:31: replace - with / in dial_lots
+crates/spikefade/src/fix34.rs:1370:23: replace >= with < in dial_lots
+crates/spikefade/src/fix34.rs:1375:55: replace * with + in dial_lots
+crates/spikefade/src/fix34.rs:1375:55: replace * with / in dial_lots
+crates/spikefade/src/fix34.rs:1375:38: replace * with + in dial_lots
+crates/spikefade/src/fix34.rs:1375:38: replace * with / in dial_lots
+crates/spikefade/src/fix34.rs:1377:20: replace > with == in dial_lots
+crates/spikefade/src/fix34.rs:1377:20: replace > with < in dial_lots
+crates/spikefade/src/fix34.rs:1377:27: delete ! in dial_lots
+crates/spikefade/src/fix34.rs:1378:65: replace / with % in dial_lots
+crates/spikefade/src/fix34.rs:1378:65: replace / with * in dial_lots
+crates/spikefade/src/fix34.rs:1378:56: replace * with + in dial_lots
+crates/spikefade/src/fix34.rs:1378:56: replace * with / in dial_lots
+crates/spikefade/src/fix34.rs:1382:38: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1382:20: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1382:74: replace == with != in dial_lots
+crates/spikefade/src/fix34.rs:1383:11: replace /= with %= in dial_lots
+crates/spikefade/src/fix34.rs:1383:11: replace /= with *= in dial_lots
+crates/spikefade/src/fix34.rs:1385:34: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1385:21: replace && with || in dial_lots
+crates/spikefade/src/fix34.rs:1385:72: replace == with != in dial_lots
+crates/spikefade/src/fix34.rs:1386:11: replace /= with %= in dial_lots
+crates/spikefade/src/fix34.rs:1386:11: replace /= with *= in dial_lots
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (0, 0)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (0, 1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (0, -1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (1, 0)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (1, 1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (1, -1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (-1, 0)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (-1, 1)
+crates/spikefade/src/fix34.rs:1412:5: replace intraday_mtm_dd -> (i64, i64) with (-1, -1)
+crates/spikefade/src/fix34.rs:1422:84: replace - with + in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:111: replace / with % in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:111: replace / with * in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:81: replace - with / in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1423:153: replace + with - in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1432:22: replace == with != in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1434:30: replace += with -= in intraday_mtm_dd
+crates/spikefade/src/fix34.rs:1434:30: replace += with *= in intraday_mtm_dd
