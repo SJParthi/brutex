@@ -1,0 +1,97 @@
+[package]
+name = "common_fill"
+version = "2.4.0"
+edition = "2024"
+rust-version = "1.97"
+description = "THE common fill module of Brutex, crate v2.1 = crate v2 (THE STANDARD req70-2s: REQ 70 + 70a + 70b + 70c, changes C1-C8, gate G0) plus the numbered changes C9 (the block-length dial of REQ 73b, promoted from the idx1s lane build), C10 (gap tables, paired legs and the shared-volume ledger on every block length) and C11 (limits::size_units_closest, SNIPER s16), each with its red tests (CHANGES-v21.md). At the default 2-second block every reading is crate v2s, byte for byte. Pure integer functions: std only, no I/O, no float."
+publish = false
+# No build script: a build.rs dropped into this directory later must never run (the hosts' build glue also refuses unlisted files).
+build = false
+autobenches = false
+autoexamples = false
+autotests = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "cf_bench"
+path = "benches/cf_bench.rs"
+harness = false
+
+[features]
+# The red-first switch (design section 3, 10.4): under `red` the walk family returns the OLD rule through the same API: the per-second
+# REQ 58b core (1-second steps from the first printed second at or after T, the worse of the second and the next printed second, one
+# 5-paisa tick against the trader; `cmp::req58b`). A host refuses a headline or search run built with it (`refuse_if_red`, `RED`).
+red = []
+# The named mutants m1-m11 (design 10.4): each breaks ONE property; the test suite must catch each one (a build with any of them is RED too).
+m1 = []
+m2 = []
+m3 = []
+m4 = []
+m5 = []
+m6 = []
+m7 = []
+m8 = []
+m9 = []
+m10 = []
+m11 = []
+# CRATE v2.2 (spikefade v3, EXITS-DYNAMIC-DESIGN 6.3 + critic R3): each breaks ONE property of the xrule module; its named test must FAIL.
+m_sf3_trail_own_level = []
+m_sf3_r_from_p0 = []
+m_sf3_reach_strict = []
+m_sf3_gopos_le = []
+m_sf3_be_same_second = []
+m_sf3_trailpct_abs = []
+m_sf3_vol0_prints = []
+m_sf3_lift_off_by_one = []
+m_sf3_trail_rows = []
+# CRATE v2.3 (spikefade v3.1): each breaks ONE property of the margin module (M1) or the carried entitlement (K1); its named test must FAIL.
+m_v31_elm_round_down = []
+m_v31_margin_no_premium = []
+m_v31_carry_per_block = []
+m_v31_addon_per_lot = []
+m_v31_resend_off = []
+# CRATE v2.4 (spikefade v3.2): each breaks ONE property of margin rule v3 (M3) or the executed-order count (O1); its named test must FAIL.
+m_v32_margin_v3_otm_row = []
+m_v32_orders_blocks_only = []
+# CRATE v2.6 (spikefade v3.4 integrate:D, CHANGE S1: the strict order readings of data:F7): each breaks ONE property; its named test must FAIL.
+m_v34i_lpp_ref_ub_for_buy = []
+m_v34i_band_lock_off = []
+m_v34i_lock_any_print_at_band = []
+m_v34i_mpp_no_min_abs = []
+m_v34i_lpp_ignored = []
+m_v34i_known_band_ignores_runmax = []
+m_v34i_clip_to_bound = []
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = 1
+overflow-checks = true
+
+[profile.bench]
+inherits = "release"
+
+# The tools' workspace lint set, copied (this crate sits outside every tool's workspace: design section 2).
+[lints.rust]
+unsafe_code            = "deny"
+missing_docs           = "warn"
+unreachable_pub        = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+unexpected_cfgs        = { level = "warn", check-cfg = [] }
+
+[lints.clippy]
+all                 = { level = "deny", priority = -1 }
+pedantic            = { level = "warn", priority = -1 }
+unwrap_used         = "deny"
+expect_used         = "deny"
+panic               = "deny"
+indexing_slicing    = "deny"
+float_arithmetic    = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss      = "deny"
+todo                = "deny"
+unimplemented       = "deny"
+dbg_macro           = "deny"
