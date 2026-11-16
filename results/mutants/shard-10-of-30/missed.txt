@@ -175,3 +175,55 @@ crates/spikefade/src/report3.rs:204:98: replace + with - in Seg3::ul_day
 crates/spikefade/src/report3.rs:204:98: replace + with * in Seg3::ul_day
 crates/spikefade/src/report3.rs:206:57: replace < with <= in Seg3::ul_day
 crates/spikefade/src/report3.rs:206:94: replace < with <= in Seg3::ul_day
+crates/spikefade/src/report3.rs:215:53: replace < with <= in Seg3::ul_day
+crates/spikefade/src/report3.rs:215:86: replace < with <= in Seg3::ul_day
+crates/spikefade/src/report3.rs:238:5: replace tie_key -> u32 with 0
+crates/spikefade/src/report3.rs:238:5: replace tie_key -> u32 with 1
+crates/spikefade/src/report3.rs:240:9: delete match arm Kind::SlP in tie_key
+crates/spikefade/src/report3.rs:241:9: delete match arm Kind::SlA1 in tie_key
+crates/spikefade/src/report3.rs:242:9: delete match arm Kind::SlA5 in tie_key
+crates/spikefade/src/report3.rs:243:9: delete match arm Kind::SlH in tie_key
+crates/spikefade/src/report3.rs:244:9: delete match arm Kind::SlS in tie_key
+crates/spikefade/src/report3.rs:245:9: delete match arm Kind::SlV in tie_key
+crates/spikefade/src/report3.rs:249:49: replace | with & in tie_key
+crates/spikefade/src/report3.rs:249:49: replace | with ^ in tie_key
+crates/spikefade/src/report3.rs:249:34: replace | with & in tie_key
+crates/spikefade/src/report3.rs:249:34: replace | with ^ in tie_key
+crates/spikefade/src/report3.rs:249:27: replace << with >> in tie_key
+crates/spikefade/src/report3.rs:249:42: replace << with >> in tie_key
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:257:23: replace / with % in wtie
+crates/spikefade/src/report3.rs:257:23: replace / with * in wtie
+crates/spikefade/src/report3.rs:257:43: replace % with / in wtie
+crates/spikefade/src/report3.rs:257:43: replace % with + in wtie
+crates/spikefade/src/report3.rs:315:27: delete ! in slice_ok
+crates/spikefade/src/report3.rs:398:50: replace && with || in Store::release
+crates/spikefade/src/report3.rs:430:9: replace Store::cube_only -> Result<Cube, String> with Ok(Default::default())
+crates/spikefade/src/report3.rs:430:31: replace == with != in Store::cube_only
+crates/spikefade/src/report3.rs:443:9: replace Store::n -> usize with 0
+crates/spikefade/src/report3.rs:443:9: replace Store::n -> usize with 1
+crates/spikefade/src/report3.rs:456:9: replace Store::put with ()
+crates/spikefade/src/report3.rs:469:24: replace += with *= in Store::put
+crates/spikefade/src/report3.rs:502:24: replace += with -= in offer_windows
+crates/spikefade/src/report3.rs:502:24: replace += with *= in offer_windows
+crates/spikefade/src/report3.rs:518:53: replace || with && in offer_windows
+crates/spikefade/src/report3.rs:518:47: replace > with == in offer_windows

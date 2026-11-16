@@ -222,3 +222,80 @@ crates/spikefade/src/report3.rs:206:57: replace < with == in Seg3::ul_day
 crates/spikefade/src/report3.rs:206:57: replace < with > in Seg3::ul_day
 crates/spikefade/src/report3.rs:206:94: replace < with == in Seg3::ul_day
 crates/spikefade/src/report3.rs:206:94: replace < with > in Seg3::ul_day
+crates/spikefade/src/report3.rs:215:53: replace < with == in Seg3::ul_day
+crates/spikefade/src/report3.rs:215:53: replace < with > in Seg3::ul_day
+crates/spikefade/src/report3.rs:215:86: replace < with == in Seg3::ul_day
+crates/spikefade/src/report3.rs:215:86: replace < with > in Seg3::ul_day
+crates/spikefade/src/report3.rs:227:9: replace Seg3::flag_lists33 -> HashMap<u32, Vec<u32>> with HashMap::new()
+crates/spikefade/src/report3.rs:227:9: replace Seg3::flag_lists33 -> HashMap<u32, Vec<u32>> with HashMap::from_iter([(0, vec![])])
+crates/spikefade/src/report3.rs:227:9: replace Seg3::flag_lists33 -> HashMap<u32, Vec<u32>> with HashMap::from_iter([(0, vec![0])])
+crates/spikefade/src/report3.rs:227:9: replace Seg3::flag_lists33 -> HashMap<u32, Vec<u32>> with HashMap::from_iter([(0, vec![1])])
+crates/spikefade/src/report3.rs:227:9: replace Seg3::flag_lists33 -> HashMap<u32, Vec<u32>> with HashMap::from_iter([(1, vec![0])])
+crates/spikefade/src/report3.rs:227:9: replace Seg3::flag_lists33 -> HashMap<u32, Vec<u32>> with HashMap::from_iter([(1, vec![])])
+crates/spikefade/src/report3.rs:227:9: replace Seg3::flag_lists33 -> HashMap<u32, Vec<u32>> with HashMap::from_iter([(1, vec![1])])
+crates/spikefade/src/report3.rs:227:29: replace || with && in Seg3::flag_lists33
+crates/spikefade/src/report3.rs:227:12: delete ! in Seg3::flag_lists33
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (0, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:255:5: replace wtie -> (u32, u16, u32, u16, u8) with (1, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:266:5: replace headline_gate -> bool with true
+crates/spikefade/src/report3.rs:266:5: replace headline_gate -> bool with false
+crates/spikefade/src/report3.rs:272:5: replace headline_gate_liq -> bool with true
+crates/spikefade/src/report3.rs:272:5: replace headline_gate_liq -> bool with false
+crates/spikefade/src/report3.rs:277:5: replace dd_grouped_pub -> i64 with 0
+crates/spikefade/src/report3.rs:277:5: replace dd_grouped_pub -> i64 with 1
+crates/spikefade/src/report3.rs:277:5: replace dd_grouped_pub -> i64 with -1
+crates/spikefade/src/report3.rs:286:5: replace headline_ok -> bool with true
+crates/spikefade/src/report3.rs:286:5: replace headline_ok -> bool with false
+crates/spikefade/src/report3.rs:286:42: replace && with || in headline_ok
+crates/spikefade/src/report3.rs:286:30: replace && with || in headline_ok
+crates/spikefade/src/report3.rs:286:37: replace == with != in headline_ok
+crates/spikefade/src/report3.rs:286:45: delete ! in headline_ok
+crates/spikefade/src/report3.rs:290:63: replace || with && in headline_ok
+crates/spikefade/src/report3.rs:290:68: replace <= with > in headline_ok
+crates/spikefade/src/report3.rs:292:62: replace || with && in headline_ok
+crates/spikefade/src/report3.rs:295:85: replace || with && in headline_ok
+crates/spikefade/src/report3.rs:295:37: replace || with && in headline_ok
+crates/spikefade/src/report3.rs:295:18: delete ! in headline_ok
+crates/spikefade/src/report3.rs:295:101: replace == with != in headline_ok
+crates/spikefade/src/report3.rs:298:42: replace && with || in headline_ok
+crates/spikefade/src/report3.rs:298:52: replace && with || in headline_ok
+crates/spikefade/src/report3.rs:298:25: replace && with || in headline_ok
+crates/spikefade/src/report3.rs:298:13: replace && with || in headline_ok
+crates/spikefade/src/report3.rs:298:38: replace > with < in headline_ok
+crates/spikefade/src/report3.rs:298:38: replace > with == in headline_ok
+crates/spikefade/src/report3.rs:298:38: replace > with >= in headline_ok
+crates/spikefade/src/report3.rs:315:5: replace slice_ok -> Result<(), String> with Ok(())
+crates/spikefade/src/report3.rs:315:24: replace && with || in slice_ok
+crates/spikefade/src/report3.rs:356:83: replace == with != in Store::ensure
+crates/spikefade/src/report3.rs:356:9: replace Store::ensure -> Result<(), String> with Ok(())
+crates/spikefade/src/report3.rs:383:24: replace += with -= in Store::ensure
+crates/spikefade/src/report3.rs:383:24: replace += with *= in Store::ensure
+crates/spikefade/src/report3.rs:390:9: replace Store::release with ()
+crates/spikefade/src/report3.rs:390:12: delete ! in Store::release
+crates/spikefade/src/report3.rs:394:12: delete ! in Store::release
+crates/spikefade/src/report3.rs:398:35: replace == with != in Store::release
+crates/spikefade/src/report3.rs:398:53: delete ! in Store::release
+crates/spikefade/src/report3.rs:411:9: replace Store::sample_rss with ()
+crates/spikefade/src/report3.rs:449:9: replace Store::src_of -> Option<(PathBuf, String)> with None
+crates/spikefade/src/report3.rs:449:9: replace Store::src_of -> Option<(PathBuf, String)> with Some((Default::default(), String::new()))
+crates/spikefade/src/report3.rs:449:9: replace Store::src_of -> Option<(PathBuf, String)> with Some((Default::default(), "xyzzy".into()))
+crates/spikefade/src/report3.rs:469:24: replace += with -= in Store::put
+crates/spikefade/src/report3.rs:463:31: replace == with != in Store::put
+crates/spikefade/src/report3.rs:493:5: replace offer_windows with ()
+crates/spikefade/src/report3.rs:495:19: replace || with && in offer_windows
+crates/spikefade/src/report3.rs:495:12: delete ! in offer_windows
+crates/spikefade/src/report3.rs:499:23: replace += with -= in offer_windows
+crates/spikefade/src/report3.rs:499:23: replace += with *= in offer_windows
+crates/spikefade/src/report3.rs:505:23: replace += with -= in offer_windows
+crates/spikefade/src/report3.rs:505:23: replace += with *= in offer_windows
+crates/spikefade/src/report3.rs:509:22: replace == with != in offer_windows
