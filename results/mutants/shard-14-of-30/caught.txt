@@ -200,3 +200,39 @@ crates/spikefade/src/expiry.rs:255:28: replace <= with > in regular_and_moved
 crates/spikefade/src/expiry.rs:255:16: replace - with + in regular_and_moved
 crates/spikefade/src/expiry.rs:258:16: replace += with -= in regular_and_moved
 crates/spikefade/src/expiry.rs:258:16: replace += with *= in regular_and_moved
+crates/spikefade/src/expiry.rs:267:24: replace + with - in regular_and_moved
+crates/spikefade/src/expiry.rs:267:24: replace + with * in regular_and_moved
+crates/spikefade/src/expiry.rs:269:25: replace == with != in regular_and_moved
+crates/spikefade/src/expiry.rs:270:24: delete ! in regular_and_moved
+crates/spikefade/src/expiry.rs:279:92: replace && with || in regular_and_moved
+crates/spikefade/src/expiry.rs:279:41: replace && with || in regular_and_moved
+crates/spikefade/src/expiry.rs:279:34: replace != with == in regular_and_moved
+crates/spikefade/src/expiry.rs:279:76: replace >= with < in regular_and_moved
+crates/spikefade/src/expiry.rs:280:22: replace == with != in regular_and_moved
+crates/spikefade/src/expiry.rs:280:108: replace && with || in regular_and_moved
+crates/spikefade/src/expiry.rs:280:50: replace != with == in regular_and_moved
+crates/spikefade/src/expiry.rs:280:92: replace >= with < in regular_and_moved
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "xyzzy", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "xyzzy", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "", "xyzzy", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "xyzzy", 1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, true, "xyzzy", "xyzzy", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "", "", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "", "xyzzy", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", 1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "xyzzy", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((0, false, "xyzzy", "xyzzy", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "", "xyzzy", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "", "xyzzy", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "xyzzy", "", 1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "", -1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "xyzzy", 1, true))
