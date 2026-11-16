@@ -10,3 +10,4 @@ crates/spikefade/src/trade.rs:1470:5: replace evidence -> Result<Option<Evid>, S
 crates/spikefade/src/v2.rs:125:5: replace eval_entries_full -> Result<Full, String> with Ok(Default::default())
 crates/spikefade/src/v2.rs:226:13: replace && with || in why_words
 crates/spikefade/src/kern.rs:357:13: replace && with || in flush
+crates/spikefade/src/kern.rs:543:9: replace && with || in cap_mark
