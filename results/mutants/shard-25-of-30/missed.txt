@@ -1,0 +1,97 @@
+crates/spikefade/src/side17.rs:519:31: replace match guard !a.cands.is_empty() && !b.cands.is_empty() with true in section_of
+crates/spikefade/src/side17.rs:519:51: replace && with || in section_of
+crates/spikefade/src/side17.rs:530:5: replace cmd_combine -> Result<(), String> with Ok(())
+crates/spikefade/src/side17.rs:533:21: replace || with && in cmd_combine
+crates/spikefade/src/side17.rs:533:16: replace != with == in cmd_combine
+crates/spikefade/src/side17.rs:533:32: replace != with == in cmd_combine
+crates/spikefade/src/split18.rs:105:33: replace != with == in SCal::from_days
+crates/spikefade/src/split18.rs:110:24: replace += with *= in SCal::from_days
+crates/spikefade/src/split18.rs:117:20: replace += with *= in SCal::from_days
+crates/spikefade/src/split18.rs:131:118: replace && with || in SCal::set_segments
+crates/spikefade/src/split18.rs:131:114: replace > with >= in SCal::set_segments
+crates/spikefade/src/split18.rs:131:123: replace < with <= in SCal::set_segments
+crates/spikefade/src/split18.rs:134:29: replace != with == in SCal::set_segments
+crates/spikefade/src/split18.rs:138:27: replace - with / in SCal::set_segments
+crates/spikefade/src/split18.rs:144:18: replace > with >= in SCal::set_segments
+crates/spikefade/src/split18.rs:178:9: replace SCal::month_name -> String with String::new()
+crates/spikefade/src/split18.rs:178:9: replace SCal::month_name -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:184:9: replace SCal::day_name -> String with String::new()
+crates/spikefade/src/split18.rs:184:9: replace SCal::day_name -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:190:9: replace SCal::wp_name -> String with String::new()
+crates/spikefade/src/split18.rs:190:9: replace SCal::wp_name -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:191:13: delete match arm (Some(&a), Some(&b)) in SCal::wp_name
+crates/spikefade/src/split18.rs:286:9: replace MSeries::boxed -> Option<Box<Self>> with None
+crates/spikefade/src/split18.rs:306:27: replace > with >= in MSeries::seal_day
+crates/spikefade/src/split18.rs:309:27: replace < with <= in MSeries::seal_day
+crates/spikefade/src/split18.rs:331:28: replace < with <= in MSeries::seal_wp
+crates/spikefade/src/split18.rs:380:30: replace || with && in MSeries::group_end
+crates/spikefade/src/split18.rs:400:9: replace MSeries::cash with ()
+crates/spikefade/src/split18.rs:486:95: replace - with + in SSeries::seg_of_mo
+crates/spikefade/src/split18.rs:486:95: replace - with / in SSeries::seg_of_mo
+crates/spikefade/src/split18.rs:497:27: replace > with >= in SSeries::seal_day
+crates/spikefade/src/split18.rs:500:27: replace < with <= in SSeries::seal_day
+crates/spikefade/src/split18.rs:521:28: replace < with <= in SSeries::seal_wp
+crates/spikefade/src/split18.rs:551:27: replace < with <= in SSeries::seal_month
+crates/spikefade/src/split18.rs:581:91: replace == with != in SSeries::close
+crates/spikefade/src/split18.rs:643:41: replace < with <= in SSeries::figs
+crates/spikefade/src/split18.rs:643:84: replace < with == in SSeries::figs
+crates/spikefade/src/split18.rs:643:84: replace < with > in SSeries::figs
+crates/spikefade/src/split18.rs:643:84: replace < with <= in SSeries::figs
+crates/spikefade/src/split18.rs:719:9: replace Ser18::cash with ()
+crates/spikefade/src/split18.rs:759:5: replace min_at -> (i64, u16) with (0, 1)
+crates/spikefade/src/split18.rs:827:9: replace Fig18::pass19 -> bool with true
+crates/spikefade/src/split18.rs:827:9: replace Fig18::pass19 -> bool with false
+crates/spikefade/src/split18.rs:827:50: replace && with || in Fig18::pass19
+crates/spikefade/src/split18.rs:827:23: replace && with || in Fig18::pass19
+crates/spikefade/src/split18.rs:827:19: replace > with == in Fig18::pass19
+crates/spikefade/src/split18.rs:827:19: replace > with < in Fig18::pass19
+crates/spikefade/src/split18.rs:827:19: replace > with >= in Fig18::pass19
+crates/spikefade/src/split18.rs:827:37: replace == with != in Fig18::pass19
+crates/spikefade/src/split18.rs:827:65: replace == with != in Fig18::pass19
+crates/spikefade/src/split18.rs:833:9: replace Fig18::pass15 -> bool with true
+crates/spikefade/src/split18.rs:833:9: replace Fig18::pass15 -> bool with false
+crates/spikefade/src/split18.rs:833:23: replace && with || in Fig18::pass15
+crates/spikefade/src/split18.rs:833:19: replace > with == in Fig18::pass15
+crates/spikefade/src/split18.rs:833:19: replace > with < in Fig18::pass15
+crates/spikefade/src/split18.rs:833:19: replace > with >= in Fig18::pass15
+crates/spikefade/src/split18.rs:833:37: replace == with != in Fig18::pass15
+crates/spikefade/src/split18.rs:847:9: replace Fig18::worst_week -> i64 with 1
+crates/spikefade/src/split18.rs:847:9: replace Fig18::worst_week -> i64 with -1
+crates/spikefade/src/split18.rs:847:25: replace < with == in Fig18::worst_week
+crates/spikefade/src/split18.rs:847:25: replace < with > in Fig18::worst_week
+crates/spikefade/src/split18.rs:847:25: replace < with <= in Fig18::worst_week
+crates/spikefade/src/split18.rs:847:80: replace == with != in Fig18::worst_week
+crates/spikefade/src/split18.rs:852:9: replace Fig18::worst_day -> i64 with 1
+crates/spikefade/src/split18.rs:852:9: replace Fig18::worst_day -> i64 with -1
+crates/spikefade/src/split18.rs:852:24: replace < with == in Fig18::worst_day
+crates/spikefade/src/split18.rs:852:24: replace < with > in Fig18::worst_day
+crates/spikefade/src/split18.rs:852:24: replace < with <= in Fig18::worst_day
+crates/spikefade/src/split18.rs:852:76: replace == with != in Fig18::worst_day
+crates/spikefade/src/split18.rs:860:77: replace * with / in cmp_bad
+crates/spikefade/src/split18.rs:860:119: replace * with / in cmp_bad
+crates/spikefade/src/split18.rs:861:6: delete ! in cmp_bad
+crates/spikefade/src/split18.rs:862:15: delete ! in cmp_bad
+crates/spikefade/src/split18.rs:863:27: replace - with + in cmp_bad
+crates/spikefade/src/split18.rs:863:53: replace - with + in cmp_bad
+crates/spikefade/src/split18.rs:886:30: replace < with <= in Dst::build
+crates/spikefade/src/split18.rs:896:21: replace < with <= in Dst::build
+crates/spikefade/src/split18.rs:898:24: replace < with <= in Dst::build
+crates/spikefade/src/split18.rs:902:38: replace - with / in Dst::build
+crates/spikefade/src/split18.rs:926:18: replace || with && in Dst::query
+crates/spikefade/src/split18.rs:969:9: replace Split::wf -> bool with true
+crates/spikefade/src/split18.rs:969:9: replace Split::wf -> bool with false
+crates/spikefade/src/split18.rs:969:19: replace != with == in Split::wf
+crates/spikefade/src/split18.rs:1024:9: replace Fig18c::of -> Self with Default::default()
+crates/spikefade/src/split18.rs:1024:150: replace == with != in Fig18c::of
+crates/spikefade/src/split18.rs:1028:9: replace Fig18c::words -> String with String::new()
+crates/spikefade/src/split18.rs:1028:9: replace Fig18c::words -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:1051:11: replace > with >= in passed
+crates/spikefade/src/split18.rs:1110:9: replace Sel18::merge with ()
+crates/spikefade/src/split18.rs:1111:28: delete field dst from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:49: delete field items from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:85: delete field suf from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1114:19: replace += with *= in Sel18::merge
+crates/spikefade/src/split18.rs:1115:22: replace += with -= in Sel18::merge
+crates/spikefade/src/split18.rs:1115:22: replace += with *= in Sel18::merge
+crates/spikefade/src/split18.rs:1117:21: replace += with -= in Sel18::merge
+crates/spikefade/src/split18.rs:1117:21: replace += with *= in Sel18::merge
