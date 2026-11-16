@@ -540,3 +540,18 @@ crates/spikefade/src/screen.rs:709:48: delete ! in generate
 crates/spikefade/src/screen.rs:710:93: replace % with / in generate
 crates/spikefade/src/screen.rs:713:78: replace == with != in generate
 crates/spikefade/src/screen.rs:715:56: delete ! in generate
+crates/spikefade/src/screen.rs:716:101: replace % with / in generate
+crates/spikefade/src/screen.rs:716:101: replace % with + in generate
+crates/spikefade/src/screen.rs:720:82: replace && with || in generate
+crates/spikefade/src/screen.rs:720:76: replace <= with > in generate
+crates/spikefade/src/screen.rs:720:71: replace + with * in generate
+crates/spikefade/src/screen.rs:720:88: replace > with == in generate
+crates/spikefade/src/screen.rs:720:88: replace > with < in generate
+crates/spikefade/src/screen.rs:720:88: replace > with >= in generate
+crates/spikefade/src/screen.rs:722:78: replace += with *= in generate
+crates/spikefade/src/screen.rs:723:79: replace < with == in generate
+crates/spikefade/src/screen.rs:723:79: replace < with > in generate
+crates/spikefade/src/screen.rs:723:79: replace < with <= in generate
+crates/spikefade/src/screen.rs:724:83: replace += with -= in generate
+crates/spikefade/src/screen.rs:724:83: replace += with *= in generate
+crates/spikefade/src/screen.rs:727:134: replace / with % in generate

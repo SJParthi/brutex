@@ -247,3 +247,5 @@ crates/spikefade/src/screen.rs:694:71: replace > with == in generate
 crates/spikefade/src/screen.rs:696:62: replace += with -= in generate
 crates/spikefade/src/screen.rs:701:116: replace / with % in generate
 crates/spikefade/src/screen.rs:710:93: replace % with + in generate
+crates/spikefade/src/screen.rs:720:71: replace + with - in generate
+crates/spikefade/src/screen.rs:722:78: replace += with -= in generate
