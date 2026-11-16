@@ -1,0 +1,2 @@
+crates/spikefade/src/report3.rs:2415:5: replace batch_next -> Result<(usize, usize), String> with Ok((0, 0))
+crates/spikefade/src/report3.rs:3420:16: delete field x from struct Sum expression in twin10
