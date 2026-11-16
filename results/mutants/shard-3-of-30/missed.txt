@@ -281,3 +281,127 @@ crates/spikefade/src/charges.rs:111:33: replace * with + in charges_est
 crates/spikefade/src/charges.rs:111:47: replace + with - in charges_est
 crates/spikefade/src/charges.rs:111:47: replace + with * in charges_est
 crates/spikefade/src/charges.rs:112:26: replace * with / in charges_est
+crates/spikefade/src/charges.rs:112:40: replace + with - in charges_est
+crates/spikefade/src/charges.rs:112:40: replace + with * in charges_est
+crates/spikefade/src/charges.rs:114:35: replace + with - in charges_est
+crates/spikefade/src/charges.rs:114:67: replace * with + in charges_est
+crates/spikefade/src/charges.rs:114:67: replace * with / in charges_est
+crates/spikefade/src/charges.rs:115:34: replace * with + in charges_est
+crates/spikefade/src/charges.rs:115:34: replace * with / in charges_est
+crates/spikefade/src/charges.rs:115:49: replace + with - in charges_est
+crates/spikefade/src/charges.rs:115:49: replace + with * in charges_est
+crates/spikefade/src/charges.rs:116:27: replace * with + in charges_est
+crates/spikefade/src/charges.rs:117:100: replace * with + in charges_est
+crates/spikefade/src/charges.rs:117:100: replace * with / in charges_est
+crates/spikefade/src/charges.rs:118:33: replace + with - in charges_est
+crates/spikefade/src/charges.rs:118:33: replace + with * in charges_est
+crates/spikefade/src/charges.rs:118:25: replace * with + in charges_est
+crates/spikefade/src/charges.rs:118:25: replace * with / in charges_est
+crates/spikefade/src/charges.rs:119:55: replace + with - in charges_est
+crates/spikefade/src/charges.rs:122:32: replace + with - in charges_est
+crates/spikefade/src/charges.rs:122:32: replace + with * in charges_est
+crates/spikefade/src/charges.rs:123:37: replace + with - in charges_est
+crates/spikefade/src/charges.rs:123:37: replace + with * in charges_est
+crates/spikefade/src/charges.rs:123:32: replace + with - in charges_est
+crates/spikefade/src/charges.rs:123:32: replace + with * in charges_est
+crates/spikefade/src/charges.rs:124:47: replace + with - in charges_est
+crates/spikefade/src/charges.rs:124:47: replace + with * in charges_est
+crates/spikefade/src/charges.rs:124:38: replace + with - in charges_est
+crates/spikefade/src/charges.rs:124:38: replace + with * in charges_est
+crates/spikefade/src/charges.rs:124:29: replace + with - in charges_est
+crates/spikefade/src/charges.rs:124:29: replace + with * in charges_est
+crates/spikefade/src/charges.rs:125:41: replace || with && in charges_est
+crates/spikefade/src/charges.rs:125:29: replace || with && in charges_est
+crates/spikefade/src/charges.rs:125:25: replace > with == in charges_est
+crates/spikefade/src/charges.rs:125:25: replace > with < in charges_est
+crates/spikefade/src/charges.rs:125:25: replace > with >= in charges_est
+crates/spikefade/src/charges.rs:125:37: replace > with == in charges_est
+crates/spikefade/src/charges.rs:125:37: replace > with < in charges_est
+crates/spikefade/src/charges.rs:125:37: replace > with >= in charges_est
+crates/spikefade/src/charges.rs:125:101: replace + with - in charges_est
+crates/spikefade/src/charges.rs:125:101: replace + with * in charges_est
+crates/spikefade/src/charges.rs:125:91: replace + with - in charges_est
+crates/spikefade/src/charges.rs:125:91: replace + with * in charges_est
+crates/spikefade/src/charges.rs:125:82: replace + with - in charges_est
+crates/spikefade/src/charges.rs:125:82: replace + with * in charges_est
+crates/spikefade/src/charges.rs:125:73: replace + with - in charges_est
+crates/spikefade/src/charges.rs:125:73: replace + with * in charges_est
+crates/spikefade/src/charges.rs:125:68: replace + with - in charges_est
+crates/spikefade/src/charges.rs:125:68: replace + with * in charges_est
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 0, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 0, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 0, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 0, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 0, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 0, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 1, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 1, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 1, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 1, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 1, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, 1, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, -1, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, -1, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, -1, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, -1, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, -1, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (0, -1, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 0, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 0, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 0, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 0, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 0, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 1, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 1, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 1, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 1, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, 1, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, -1, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, -1, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, -1, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, -1, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, -1, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (1, -1, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 0, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 0, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 0, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 0, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 0, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 1, 0, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 1, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 1, 1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 1, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 1, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, 1, -1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, -1, 0, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, -1, 1, false)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, -1, -1, true)
+crates/spikefade/src/charges.rs:133:5: replace charged -> (i64, i64, i64, bool) with (-1, -1, -1, false)
+crates/spikefade/src/charges.rs:135:16: replace > with == in charged
+crates/spikefade/src/charges.rs:135:16: replace > with < in charged
+crates/spikefade/src/charges.rs:135:16: replace > with >= in charged
+crates/spikefade/src/charges.rs:135:11: replace + with - in charged
+crates/spikefade/src/charges.rs:135:11: replace + with * in charged
+crates/spikefade/src/charges.rs:135:21: replace + with - in charged
+crates/spikefade/src/charges.rs:135:21: replace + with * in charged
+crates/spikefade/src/charges.rs:135:33: replace + with - in charged
+crates/spikefade/src/charges.rs:135:33: replace + with * in charged
+crates/spikefade/src/charges.rs:135:66: replace + with - in charged
+crates/spikefade/src/charges.rs:135:66: replace + with * in charged
+crates/spikefade/src/charges.rs:148:66: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:149:99: replace * with + in charges_est_sell
+crates/spikefade/src/charges.rs:149:99: replace * with / in charges_est_sell
+crates/spikefade/src/charges.rs:150:33: replace * with + in charges_est_sell
+crates/spikefade/src/charges.rs:150:33: replace * with / in charges_est_sell
+crates/spikefade/src/charges.rs:150:47: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:150:47: replace + with * in charges_est_sell
+crates/spikefade/src/charges.rs:151:34: replace * with + in charges_est_sell
+crates/spikefade/src/charges.rs:151:34: replace * with / in charges_est_sell
+crates/spikefade/src/charges.rs:151:48: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:151:48: replace + with * in charges_est_sell
+crates/spikefade/src/charges.rs:154:34: replace * with + in charges_est_sell
+crates/spikefade/src/charges.rs:154:34: replace * with / in charges_est_sell
+crates/spikefade/src/charges.rs:154:49: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:154:49: replace + with * in charges_est_sell
+crates/spikefade/src/charges.rs:155:35: replace * with + in charges_est_sell
+crates/spikefade/src/charges.rs:157:55: replace + with - in charges_est_sell
