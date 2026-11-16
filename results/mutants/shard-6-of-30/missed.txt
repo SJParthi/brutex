@@ -390,3 +390,50 @@ crates/spikefade/src/screen.rs:131:64: replace && with || in lists_all
 crates/spikefade/src/screen.rs:131:26: replace && with || in lists_all
 crates/spikefade/src/screen.rs:131:17: replace && with || in lists_all
 crates/spikefade/src/screen.rs:131:12: replace == with != in lists_all
+crates/spikefade/src/screen.rs:131:20: delete ! in lists_all
+crates/spikefade/src/screen.rs:138:23: replace != with == in lists_all
+crates/spikefade/src/screen.rs:146:24: delete ! in lists_all
+crates/spikefade/src/screen.rs:162:28: replace || with && in lists_all
+crates/spikefade/src/screen.rs:162:23: replace != with == in lists_all
+crates/spikefade/src/screen.rs:162:31: delete ! in lists_all
+crates/spikefade/src/screen.rs:171:26: replace && with || in lists_all
+crates/spikefade/src/screen.rs:171:12: replace == with != in lists_all
+crates/spikefade/src/screen.rs:171:20: delete ! in lists_all
+crates/spikefade/src/screen.rs:175:23: replace != with == in lists_all
+crates/spikefade/src/screen.rs:181:35: replace && with || in lists_all
+crates/spikefade/src/screen.rs:181:30: replace != with == in lists_all
+crates/spikefade/src/screen.rs:181:47: replace == with != in lists_all
+crates/spikefade/src/screen.rs:221:24: replace && with || in stock_roll_facts
+crates/spikefade/src/screen.rs:236:74: replace | with ^ in rank_key
+crates/spikefade/src/screen.rs:236:68: replace << with >> in rank_key
+crates/spikefade/src/screen.rs:236:94: replace & with ^ in rank_key
+crates/spikefade/src/screen.rs:244:10: replace > with == in window
+crates/spikefade/src/screen.rs:244:10: replace > with >= in window
+crates/spikefade/src/screen.rs:254:33: replace / with * in member
+crates/spikefade/src/screen.rs:264:33: replace < with <= in member
+crates/spikefade/src/screen.rs:267:41: replace && with || in member
+crates/spikefade/src/screen.rs:267:46: replace < with <= in member
+crates/spikefade/src/screen.rs:296:127: replace > with == in prev_closes
+crates/spikefade/src/screen.rs:296:127: replace > with < in prev_closes
+crates/spikefade/src/screen.rs:350:5: replace round2 -> u64 with 1
+crates/spikefade/src/screen.rs:350:5: replace round2 -> u64 with 0
+crates/spikefade/src/screen.rs:350:10: replace < with == in round2
+crates/spikefade/src/screen.rs:350:10: replace < with <= in round2
+crates/spikefade/src/screen.rs:354:17: replace >= with < in round2
+crates/spikefade/src/screen.rs:354:13: replace / with % in round2
+crates/spikefade/src/screen.rs:354:13: replace / with * in round2
+crates/spikefade/src/screen.rs:355:11: replace *= with += in round2
+crates/spikefade/src/screen.rs:357:13: replace * with + in round2
+crates/spikefade/src/screen.rs:357:13: replace * with / in round2
+crates/spikefade/src/screen.rs:357:8: replace / with % in round2
+crates/spikefade/src/screen.rs:357:8: replace / with * in round2
+crates/spikefade/src/screen.rs:361:5: replace quant -> u64 with 0
+crates/spikefade/src/screen.rs:361:5: replace quant -> u64 with 1
+crates/spikefade/src/screen.rs:365:58: replace / with % in quant
+crates/spikefade/src/screen.rs:365:58: replace / with * in quant
+crates/spikefade/src/screen.rs:365:54: replace * with + in quant
+crates/spikefade/src/screen.rs:365:54: replace * with / in quant
+crates/spikefade/src/screen.rs:365:36: replace - with + in quant
+crates/spikefade/src/screen.rs:365:36: replace - with / in quant
+crates/spikefade/src/screen.rs:372:5: replace measure -> Levels with Default::default()
+crates/spikefade/src/screen.rs:382:44: replace == with != in measure
