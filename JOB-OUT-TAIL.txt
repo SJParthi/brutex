@@ -1,0 +1,35 @@
+BEGIN det-branch Linux recheck utc=2026-11-16T14:57:16Z
+BOX Linux 6.18.44-fc-v470 x86_64 nproc=4 mem_total_kb=16473776 cgroup_memory_max=- cpu=Intel(R) Xeon(R) Processor @ 2.10GHz user=root disk_free_kb=31408396
+INSTALL zstd rc=0
+TOOLS zstd=v1.5.5 unzip=/usr/bin/unzip ps=/usr/bin/ps shasum=/usr/bin/shasum hostname=/usr/bin/hostname node=v22.23.4 cargo=/root/.cargo/bin/cargo
+CLONE rc=0
+CHECKOUT 8d74dc01d39d66f9f69b8621c1339fc164ae35fc 2026-11-16T20:09:13+05:30
+MANIFEST IDENTICAL files=310 sha256=36ac16ea55b16dff38206a3bca0fbe20afefbab96e46473bf3cea002ed5c63a9 (Mac: 310 36ac16ea55b16dff38206a3bca0fbe20afefbab96e46473bf3cea002ed5c63a9)
+RUSTC rustc 1.97.1 (8bab26f4f 2026-07-14) IDENTICAL
+BUILD rc=0 wall_s=34 binary_sha256=ce326f0e70fe7c7450c61533926758b082b59bf167cfbe0f4588ff5d68a06a19 (not expected to equal the Mac's)
+TESTS-DET rc=0 wall_s=23 IDENTICAL test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 168 filtered out; finished in 0.04s
+TESTS-SUITE rc=0 IDENTICAL test result: ok. 168 passed; 0 failed; 2 ignored; 0 measured; 7 filtered out; finished in 0.74s
+ROWS rows-int.tsv sha256=aed7242a715899e572090749d7b1414bcc23c6bda37630282446649b35322b79 IDENTICAL
+GREEKS --portable-math on: rows-int IDENTICAL 5bee85a0d6c54e0b6c60fc55bacba68a7ed48bf2c7d98d3c8e16ff0cc1ab1da8; C2G IDENTICAL c88a08d0999f8097c8ff13a0c22054e6c96f0b9c8ad73c1e503ac8e1234c7241
+GREEKS switch off (this box's own libm; report only, a difference from the Mac is expected): rows-int 3a6e93bfbbb62ad3d69b9eaa275de3e13722387f767c4054ffd5c676fd419d4c; C2G e79cc267b2521064d46a1f6cfbd3b9c8a66dde4d34fa11c4506db8287a73702d (Mac arm64 d386b3b7... 605af083...; Mac x86_64 b469d574... 3ec5a922...)
+C2LITE IDENTICAL rc synth=0 cube-slice-main=0 cube-slice-extra=0; set IDENTICAL; slices IDENTICAL
+C2LITE set=7712d2a26cfa59b49061db1eebe72edf14f25c7c75029d76fff48162df46b452
+C2LITE slices=2023-03-28 [0, 48) of 120 5557864 3baba231092570bd7165c2f2b66f5d5aa08f840553c53781517b1f98775666c4;2023-03-29 [0, 48) of 120 5580264 72a8c0b6534de82795d05aecfce7ec9767c21fa0c6da090f9853bd4cdb549fd1;2023-03-28 [0, 24) of 24 1110384 aa244322b69a74e6628427094fb687cbdb0d861ed28633b6456e504deaf79887;2023-03-29 [0, 24) of 24 1162048 6cd411e8b49b25210cde88d9c12277b5dc05d0fa49c5e29ffab6a167487e3d9c;
+C2LITE transport sizes (this box's zstd; not compared): transport 553345 B transport 545229 B transport 266718 B transport 282041 B 
+C2 INPUTS tar IDENTICAL sha256=a85e450b97a966dfdb7c2b1490e51d7d7c68b4d4a9e0b6b1fd532489d75a9810
+C2 INPUTS 7 files IDENTICAL
+C2 threads=4 IDENTICAL wall_s=14 rc synth=0 cube-slice-main=0 cube-slice-extra=0 run3-shard=0 bck-check=0
+C2 body 0	6d11c2ea0e3414c870295c4b275deaabacd918f18c2c0f824201c475a954d3c3
+C2 body 1	89f6bc992d9047cb2ddf2e3abb38d08462956ce8c98915f3684a459ff5c87677
+C2 body 2	1aa6fc820b7ca103d7cc0c8f211d4851626e50b84ac93d223ab14fd466525ab8
+C2 body 3	d43bedb8916aba25d7bf38f0a295fb4d4bd93022c81a9122c3068486d0c4f663
+C2 PROV IDENTICAL source=36ac16ea55b16dff38206a3bca0fbe20afefbab96e46473bf3cea002ed5c63a9;rustc=rustc 1.97.1 (8bab26f4f 2026-07-14);inputs=b64f6cf68d6387d8299ccee96f9f8673ca6c080dd7c05a26baa99b7caf4a3e6e;plan=d73fdf30ed716da41ca2f02f8443d4a1fc3bc3bc77c716687e08751838b69ec2; target=x86_64-linux threads=4 
+C2 SHARD DONE: segment INDEX options, batch set [0, 1, 2, 3] of 25 batches: every assigned batch's file written or verified in syn/sh-ck; 400000 batch(es) walked by this process; no closing pass run (merge with `spikefade ckpt-merge`
+C2 threads=2 IDENTICAL wall_s=25 rc synth=0 cube-slice-main=0 cube-slice-extra=0 run3-shard=0 bck-check=0
+C2 body 0	6d11c2ea0e3414c870295c4b275deaabacd918f18c2c0f824201c475a954d3c3
+C2 body 1	89f6bc992d9047cb2ddf2e3abb38d08462956ce8c98915f3684a459ff5c87677
+C2 body 2	1aa6fc820b7ca103d7cc0c8f211d4851626e50b84ac93d223ab14fd466525ab8
+C2 body 3	d43bedb8916aba25d7bf38f0a295fb4d4bd93022c81a9122c3068486d0c4f663
+C2 PROV IDENTICAL source=36ac16ea55b16dff38206a3bca0fbe20afefbab96e46473bf3cea002ed5c63a9;rustc=rustc 1.97.1 (8bab26f4f 2026-07-14);inputs=b64f6cf68d6387d8299ccee96f9f8673ca6c080dd7c05a26baa99b7caf4a3e6e;plan=d73fdf30ed716da41ca2f02f8443d4a1fc3bc3bc77c716687e08751838b69ec2; target=x86_64-linux threads=2 
+C2 SHARD DONE: segment INDEX options, batch set [0, 1, 2, 3] of 25 batches: every assigned batch's file written or verified in syn/sh-ck; 400000 batch(es) walked by this process; no closing pass run (merge with `spikefade ckpt-merge`
+END
