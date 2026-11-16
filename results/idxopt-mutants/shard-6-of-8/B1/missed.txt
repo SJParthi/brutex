@@ -113,3 +113,280 @@ crates/sniper_host/src/sec.rs:1360:95: delete field kmax from struct SecFamily e
 crates/sniper_host/src/sec.rs:1360:112: delete field not_entry from struct SecFamily expression in compress_family
 crates/sniper_host/src/sec.rs:1360:139: delete field refused from struct SecFamily expression in compress_family
 crates/sniper_host/src/sec.rs:1360:170: delete field resets from struct SecFamily expression in compress_family
+crates/sniper_host/src/sec.rs:1360:199: delete field htf_reset_refused from struct SecFamily expression in compress_family
+crates/sniper_host/src/sec.rs:1360:250: delete field htf_names from struct SecFamily expression in compress_family
+crates/sniper_host/src/sec.rs:1360:285: delete field lv from struct SecFamily expression in compress_family
+crates/sniper_host/src/sec.rs:1363:108: replace + with - in compress_family
+crates/sniper_host/src/sec.rs:1363:108: replace + with * in compress_family
+crates/sniper_host/src/sec.rs:1363:95: replace * with + in compress_family
+crates/sniper_host/src/sec.rs:1363:95: replace * with / in compress_family
+crates/sniper_host/src/sec.rs:1365:12: delete ! in compress_family
+crates/sniper_host/src/sec.rs:1373:19: replace * with + in compress_family
+crates/sniper_host/src/sec.rs:1373:19: replace * with / in compress_family
+crates/sniper_host/src/sec.rs:1374:46: replace + with - in compress_family
+crates/sniper_host/src/sec.rs:1374:46: replace + with * in compress_family
+crates/sniper_host/src/sec.rs:1383:5: replace htf_pack_for_test -> [u8; HTF_B] with [0; HTF_B]
+crates/sniper_host/src/sec.rs:1383:5: replace htf_pack_for_test -> [u8; HTF_B] with [1; HTF_B]
+crates/sniper_host/src/secrun.rs:52:5: replace cells_path -> PathBuf with Default::default()
+crates/sniper_host/src/secrun.rs:69:5: replace cell_of -> Cell with Default::default()
+crates/sniper_host/src/secrun.rs:72:48: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:72:48: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:72:62: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:72:62: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:72:58: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:72:58: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:72:76: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:72:76: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:72:72: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:72:72: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:72:90: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:72:90: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:72:86: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:72:86: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:75:39: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:75:39: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:75:43: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:75:43: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:75:54: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:75:54: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:75:58: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:75:58: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:78:39: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:78:39: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:78:43: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:78:43: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:78:54: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:78:54: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:78:58: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:78:58: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:78:69: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:78:69: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:78:73: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:78:73: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:78:84: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:78:84: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:78:88: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:78:88: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:81:39: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:81:39: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:81:43: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:81:43: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:81:54: replace + with - in cell_of
+crates/sniper_host/src/secrun.rs:81:54: replace + with * in cell_of
+crates/sniper_host/src/secrun.rs:81:58: replace * with + in cell_of
+crates/sniper_host/src/secrun.rs:81:58: replace * with / in cell_of
+crates/sniper_host/src/secrun.rs:87:5: replace cell_bytes -> Result<[u8; CELL_B], String> with Ok([0; CELL_B])
+crates/sniper_host/src/secrun.rs:87:5: replace cell_bytes -> Result<[u8; CELL_B], String> with Ok([1; CELL_B])
+crates/sniper_host/src/secrun.rs:89:56: replace + with - in cell_bytes
+crates/sniper_host/src/secrun.rs:89:56: replace + with * in cell_bytes
+crates/sniper_host/src/secrun.rs:89:49: replace * with + in cell_bytes
+crates/sniper_host/src/secrun.rs:89:49: replace * with / in cell_bytes
+crates/sniper_host/src/secrun.rs:92:28: replace + with - in cell_bytes
+crates/sniper_host/src/secrun.rs:92:28: replace + with * in cell_bytes
+crates/sniper_host/src/secrun.rs:95:15: replace * with + in cell_bytes
+crates/sniper_host/src/secrun.rs:95:15: replace * with / in cell_bytes
+crates/sniper_host/src/secrun.rs:96:16: replace + with - in cell_bytes
+crates/sniper_host/src/secrun.rs:96:16: replace + with * in cell_bytes
+crates/sniper_host/src/secrun.rs:96:20: replace * with + in cell_bytes
+crates/sniper_host/src/secrun.rs:96:20: replace * with / in cell_bytes
+crates/sniper_host/src/secrun.rs:97:16: replace + with - in cell_bytes
+crates/sniper_host/src/secrun.rs:97:16: replace + with * in cell_bytes
+crates/sniper_host/src/secrun.rs:97:20: replace * with / in cell_bytes
+crates/sniper_host/src/secrun.rs:98:16: replace + with - in cell_bytes
+crates/sniper_host/src/secrun.rs:98:16: replace + with * in cell_bytes
+crates/sniper_host/src/secrun.rs:98:20: replace * with + in cell_bytes
+crates/sniper_host/src/secrun.rs:98:20: replace * with / in cell_bytes
+crates/sniper_host/src/secrun.rs:105:5: replace read_cells -> Result<(), String> with Ok(())
+crates/sniper_host/src/secrun.rs:127:9: replace NCells::get -> Option<Cell> with None
+crates/sniper_host/src/secrun.rs:127:9: replace NCells::get -> Option<Cell> with Some(Default::default())
+crates/sniper_host/src/secrun.rs:127:26: replace * with + in NCells::get
+crates/sniper_host/src/secrun.rs:127:26: replace * with / in NCells::get
+crates/sniper_host/src/secrun.rs:127:44: replace * with + in NCells::get
+crates/sniper_host/src/secrun.rs:127:44: replace * with / in NCells::get
+crates/sniper_host/src/secrun.rs:127:39: replace + with - in NCells::get
+crates/sniper_host/src/secrun.rs:127:39: replace + with * in NCells::get
+crates/sniper_host/src/secrun.rs:133:5: replace signal_exit -> Option<(i64, bool)> with None
+crates/sniper_host/src/secrun.rs:133:5: replace signal_exit -> Option<(i64, bool)> with Some((0, true))
+crates/sniper_host/src/secrun.rs:133:5: replace signal_exit -> Option<(i64, bool)> with Some((0, false))
+crates/sniper_host/src/secrun.rs:133:5: replace signal_exit -> Option<(i64, bool)> with Some((1, true))
+crates/sniper_host/src/secrun.rs:133:5: replace signal_exit -> Option<(i64, bool)> with Some((1, false))
+crates/sniper_host/src/secrun.rs:133:5: replace signal_exit -> Option<(i64, bool)> with Some((-1, true))
+crates/sniper_host/src/secrun.rs:133:5: replace signal_exit -> Option<(i64, bool)> with Some((-1, false))
+crates/sniper_host/src/secrun.rs:137:13: delete match arm ExitKind::Supertrend(p, f) | ExitKind::SupertrendOrClock(p, f, _) in signal_exit
+crates/sniper_host/src/secrun.rs:142:13: delete match arm ExitKind::Ema(p) in signal_exit
+crates/sniper_host/src/secrun.rs:138:56: replace == with != in signal_exit
+crates/sniper_host/src/secrun.rs:140:24: replace != with == in signal_exit
+crates/sniper_host/src/secrun.rs:140:20: replace & with | in signal_exit
+crates/sniper_host/src/secrun.rs:140:20: replace & with ^ in signal_exit
+crates/sniper_host/src/secrun.rs:140:53: replace != with == in signal_exit
+crates/sniper_host/src/secrun.rs:140:47: replace != with == in signal_exit
+crates/sniper_host/src/secrun.rs:140:43: replace & with | in signal_exit
+crates/sniper_host/src/secrun.rs:140:43: replace & with ^ in signal_exit
+crates/sniper_host/src/secrun.rs:143:57: replace == with != in signal_exit
+crates/sniper_host/src/secrun.rs:145:21: delete match arm 0 in signal_exit
+crates/sniper_host/src/secrun.rs:146:21: delete match arm 1 in signal_exit
+crates/sniper_host/src/secrun.rs:147:21: delete match arm 2 in signal_exit
+crates/sniper_host/src/secrun.rs:146:31: delete ! in signal_exit
+crates/sniper_host/src/secrun.rs:154:101: replace && with || in signal_exit
+crates/sniper_host/src/secrun.rs:154:115: replace == with != in signal_exit
+crates/sniper_host/src/secrun.rs:155:19: replace + with - in signal_exit
+crates/sniper_host/src/secrun.rs:155:19: replace + with * in signal_exit
+crates/sniper_host/src/secrun.rs:157:19: replace != with == in signal_exit
+crates/sniper_host/src/secrun.rs:160:22: replace || with && in signal_exit
+crates/sniper_host/src/secrun.rs:160:36: replace == with != in signal_exit
+crates/sniper_host/src/secrun.rs:163:11: replace += with -= in signal_exit
+crates/sniper_host/src/secrun.rs:163:11: replace += with *= in signal_exit
+crates/sniper_host/src/secrun.rs:170:5: replace xe_with -> bool with true
+crates/sniper_host/src/secrun.rs:170:5: replace xe_with -> bool with false
+crates/sniper_host/src/secrun.rs:170:51: replace == with != in xe_with
+crates/sniper_host/src/secrun.rs:172:9: delete match arm 1 in xe_with
+crates/sniper_host/src/secrun.rs:173:9: delete match arm 2 in xe_with
+crates/sniper_host/src/secrun.rs:173:14: delete ! in xe_with
+crates/sniper_host/src/secrun.rs:181:40: replace match guard anchor >= sq with true in plan_of
+crates/sniper_host/src/secrun.rs:181:40: replace match guard anchor >= sq with false in plan_of
+crates/sniper_host/src/secrun.rs:181:47: replace >= with < in plan_of
+crates/sniper_host/src/secrun.rs:185:163: replace * with + in plan_of
+crates/sniper_host/src/secrun.rs:185:163: replace * with / in plan_of
+crates/sniper_host/src/secrun.rs:191:39: replace match guard end * US_S < sq with true in plan_of
+crates/sniper_host/src/secrun.rs:191:39: replace match guard end * US_S < sq with false in plan_of
+crates/sniper_host/src/secrun.rs:191:50: replace < with == in plan_of
+crates/sniper_host/src/secrun.rs:191:50: replace < with > in plan_of
+crates/sniper_host/src/secrun.rs:191:50: replace < with <= in plan_of
+crates/sniper_host/src/secrun.rs:191:43: replace * with + in plan_of
+crates/sniper_host/src/secrun.rs:191:43: replace * with / in plan_of
+crates/sniper_host/src/secrun.rs:191:98: replace * with + in plan_of
+crates/sniper_host/src/secrun.rs:191:98: replace * with / in plan_of
+crates/sniper_host/src/secrun.rs:195:67: replace != with == in plan_of
+crates/sniper_host/src/secrun.rs:196:60: replace / with % in plan_of
+crates/sniper_host/src/secrun.rs:196:60: replace / with * in plan_of
+crates/sniper_host/src/secrun.rs:196:54: replace / with % in plan_of
+crates/sniper_host/src/secrun.rs:196:54: replace / with * in plan_of
+crates/sniper_host/src/secrun.rs:196:38: replace * with + in plan_of
+crates/sniper_host/src/secrun.rs:196:38: replace * with / in plan_of
+crates/sniper_host/src/secrun.rs:232:27: delete ! in price_row
+crates/sniper_host/src/secrun.rs:239:42: replace * with + in price_row
+crates/sniper_host/src/secrun.rs:239:42: replace * with / in price_row
+crates/sniper_host/src/secrun.rs:251:9: delete match arm ExitKind::Ema(p) in price_sec
+crates/sniper_host/src/secrun.rs:257:24: replace match guard r.0 == f.sess with true in price_sec
+crates/sniper_host/src/secrun.rs:257:24: replace match guard r.0 == f.sess with false in price_sec
+crates/sniper_host/src/secrun.rs:257:28: replace == with != in price_sec
+crates/sniper_host/src/secrun.rs:257:49: replace + with - in price_sec
+crates/sniper_host/src/secrun.rs:257:49: replace + with * in price_sec
+crates/sniper_host/src/secrun.rs:258:44: replace + with - in price_sec
+crates/sniper_host/src/secrun.rs:312:100: replace += with -= in price_sec
+crates/sniper_host/src/secrun.rs:312:100: replace += with *= in price_sec
+crates/sniper_host/src/secrun.rs:319:19: replace > with == in price_sec
+crates/sniper_host/src/secrun.rs:319:19: replace > with < in price_sec
+crates/sniper_host/src/secrun.rs:319:19: replace > with >= in price_sec
+crates/sniper_host/src/secrun.rs:324:22: replace += with -= in price_sec
+crates/sniper_host/src/secrun.rs:324:22: replace += with *= in price_sec
+crates/sniper_host/src/secrun.rs:333:20: replace |= with &= in price_sec
+crates/sniper_host/src/secrun.rs:333:45: replace != with == in price_sec
+crates/sniper_host/src/secrun.rs:333:27: replace & with | in price_sec
+crates/sniper_host/src/secrun.rs:333:27: replace & with ^ in price_sec
+crates/sniper_host/src/secrun.rs:334:20: replace |= with &= in price_sec
+crates/sniper_host/src/secrun.rs:334:43: replace != with == in price_sec
+crates/sniper_host/src/secrun.rs:334:27: replace & with | in price_sec
+crates/sniper_host/src/secrun.rs:334:27: replace & with ^ in price_sec
+crates/sniper_host/src/secrun.rs:336:25: replace += with -= in price_sec
+crates/sniper_host/src/secrun.rs:336:25: replace += with *= in price_sec
+crates/sniper_host/src/secrun.rs:337:25: replace += with -= in price_sec
+crates/sniper_host/src/secrun.rs:337:25: replace += with *= in price_sec
+crates/sniper_host/src/secrun.rs:338:23: replace += with -= in price_sec
+crates/sniper_host/src/secrun.rs:338:23: replace += with *= in price_sec
+crates/sniper_host/src/secrun.rs:340:56: replace / with % in price_sec
+crates/sniper_host/src/secrun.rs:340:56: replace / with * in price_sec
+crates/sniper_host/src/secrun.rs:361:5: replace reprice -> Result<BTreeMap<usize, LevelQv>, String> with Ok(BTreeMap::new())
+crates/sniper_host/src/secrun.rs:361:5: replace reprice -> Result<BTreeMap<usize, LevelQv>, String> with Ok(BTreeMap::from_iter([(0, Default::default())]))
+crates/sniper_host/src/secrun.rs:361:5: replace reprice -> Result<BTreeMap<usize, LevelQv>, String> with Ok(BTreeMap::from_iter([(1, Default::default())]))
+crates/sniper_host/src/secrun.rs:362:9: delete match arm ExitKind::Ema(p) in reprice
+crates/sniper_host/src/secrun.rs:399:62: replace + with - in reprice
+crates/sniper_host/src/secrun.rs:399:62: replace + with * in reprice
+crates/sniper_host/src/secrun.rs:399:55: replace * with + in reprice
+crates/sniper_host/src/secrun.rs:399:55: replace * with / in reprice
+crates/sniper_host/src/secrun.rs:400:105: replace || with && in reprice
+crates/sniper_host/src/secrun.rs:400:71: replace || with && in reprice
+crates/sniper_host/src/secrun.rs:400:43: replace || with && in reprice
+crates/sniper_host/src/secrun.rs:400:29: replace != with == in reprice
+crates/sniper_host/src/secrun.rs:400:58: replace != with == in reprice
+crates/sniper_host/src/secrun.rs:400:89: replace != with == in reprice
+crates/sniper_host/src/secrun.rs:400:120: replace != with == in reprice
+crates/sniper_host/src/secrun.rs:403:38: replace + with - in reprice
+crates/sniper_host/src/secrun.rs:403:38: replace + with * in reprice
+crates/sniper_host/src/secrun.rs:403:31: replace * with + in reprice
+crates/sniper_host/src/secrun.rs:403:31: replace * with / in reprice
+crates/sniper_host/src/secrun.rs:422:5: replace run_family_sec -> Result<Vec<String>, String> with Ok(vec![])
+crates/sniper_host/src/secrun.rs:422:5: replace run_family_sec -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/sniper_host/src/secrun.rs:422:5: replace run_family_sec -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/sniper_host/src/secrun.rs:426:8: delete ! in run_family_sec
+crates/sniper_host/src/secrun.rs:441:8: delete ! in run_family_sec
+crates/sniper_host/src/secrun.rs:445:101: replace && with || in run_family_sec
+crates/sniper_host/src/secrun.rs:445:69: replace && with || in run_family_sec
+crates/sniper_host/src/secrun.rs:447:60: replace != with == in run_family_sec
+crates/sniper_host/src/secrun.rs:454:9: replace && with || in run_family_sec
+crates/sniper_host/src/secrun.rs:454:115: replace && with || in run_family_sec
+crates/sniper_host/src/secrun.rs:454:83: replace && with || in run_family_sec
+crates/sniper_host/src/secrun.rs:491:78: replace >> with << in run_family_sec
+crates/sniper_host/src/secrun.rs:503:15: replace > with == in run_family_sec
+crates/sniper_host/src/secrun.rs:503:15: replace > with < in run_family_sec
+crates/sniper_host/src/secrun.rs:503:15: replace > with >= in run_family_sec
+crates/sniper_host/src/secrun.rs:509:48: replace - with + in run_family_sec
+crates/sniper_host/src/secrun.rs:509:48: replace - with / in run_family_sec
+crates/sniper_host/src/secrun.rs:509:16: replace + with - in run_family_sec
+crates/sniper_host/src/secrun.rs:509:16: replace + with * in run_family_sec
+crates/sniper_host/src/secrun.rs:509:11: replace * with + in run_family_sec
+crates/sniper_host/src/secrun.rs:509:11: replace * with / in run_family_sec
+crates/sniper_host/src/secrun.rs:528:57: replace / with % in run_family_sec
+crates/sniper_host/src/secrun.rs:528:57: replace / with * in run_family_sec
+crates/sniper_host/src/secrun.rs:538:34: replace * with + in run_family_sec
+crates/sniper_host/src/secrun.rs:538:34: replace * with / in run_family_sec
+crates/sniper_host/src/secrun.rs:550:56: replace == with != in run_family_sec
+crates/sniper_host/src/secrun.rs:553:118: replace >> with << in run_family_sec
+crates/sniper_host/src/secrun.rs:553:33: replace * with + in run_family_sec
+crates/sniper_host/src/secrun.rs:553:33: replace * with / in run_family_sec
+crates/sniper_host/src/secrun.rs:553:83: replace + with - in run_family_sec
+crates/sniper_host/src/secrun.rs:553:83: replace + with * in run_family_sec
+crates/sniper_host/src/secrun.rs:553:93: replace * with + in run_family_sec
+crates/sniper_host/src/secrun.rs:553:93: replace * with / in run_family_sec
+crates/sniper_host/src/secrun.rs:554:95: replace + with - in run_family_sec
+crates/sniper_host/src/secrun.rs:554:95: replace + with * in run_family_sec
+crates/sniper_host/src/secrun.rs:556:22: replace || with && in run_family_sec
+crates/sniper_host/src/secrun.rs:556:16: delete ! in run_family_sec
+crates/sniper_host/src/secrun.rs:556:39: replace > with == in run_family_sec
+crates/sniper_host/src/secrun.rs:556:39: replace > with < in run_family_sec
+crates/sniper_host/src/secrun.rs:556:39: replace > with >= in run_family_sec
+crates/sniper_host/src/secrun.rs:556:32: replace + with - in run_family_sec
+crates/sniper_host/src/secrun.rs:556:32: replace + with * in run_family_sec
+crates/sniper_host/src/secrun.rs:568:28: replace += with *= in run_family_sec
+crates/sniper_host/src/secrun.rs:569:29: replace += with -= in run_family_sec
+crates/sniper_host/src/secrun.rs:569:29: replace += with *= in run_family_sec
+crates/sniper_host/src/secrun.rs:570:29: replace += with -= in run_family_sec
+crates/sniper_host/src/secrun.rs:570:29: replace += with *= in run_family_sec
+crates/sniper_host/src/secrun.rs:571:24: replace += with -= in run_family_sec
+crates/sniper_host/src/secrun.rs:571:24: replace += with *= in run_family_sec
+crates/sniper_host/src/secrun.rs:572:30: replace += with -= in run_family_sec
+crates/sniper_host/src/secrun.rs:572:30: replace += with *= in run_family_sec
+crates/sniper_host/src/secrun.rs:576:22: replace += with -= in run_family_sec
+crates/sniper_host/src/secrun.rs:576:22: replace += with *= in run_family_sec
+crates/sniper_host/src/secrun.rs:577:46: replace / with % in run_family_sec
+crates/sniper_host/src/secrun.rs:577:46: replace / with * in run_family_sec
+crates/sniper_host/src/secrun.rs:578:28: replace * with + in run_family_sec
+crates/sniper_host/src/secrun.rs:578:28: replace * with / in run_family_sec
+crates/sniper_host/src/secrun.rs:628:5: replace projected_mb -> u64 with 0
+crates/sniper_host/src/secrun.rs:628:5: replace projected_mb -> u64 with 1
+crates/sniper_host/src/secrun.rs:630:18: replace * with + in projected_mb
+crates/sniper_host/src/secrun.rs:630:18: replace * with / in projected_mb
+crates/sniper_host/src/secrun.rs:630:31: replace + with - in projected_mb
+crates/sniper_host/src/secrun.rs:630:31: replace + with * in projected_mb
+crates/sniper_host/src/secrun.rs:630:27: replace + with - in projected_mb
+crates/sniper_host/src/secrun.rs:630:27: replace + with * in projected_mb
+crates/sniper_host/src/secrun.rs:630:23: replace + with - in projected_mb
+crates/sniper_host/src/secrun.rs:630:23: replace + with * in projected_mb
+crates/sniper_host/src/secrun.rs:631:59: replace + with - in projected_mb
+crates/sniper_host/src/secrun.rs:631:59: replace + with * in projected_mb
+crates/sniper_host/src/secrun.rs:631:19: replace * with + in projected_mb
+crates/sniper_host/src/secrun.rs:631:19: replace * with / in projected_mb
+crates/sniper_host/src/secrun.rs:631:76: replace * with + in projected_mb
+crates/sniper_host/src/secrun.rs:631:76: replace * with / in projected_mb
+crates/sniper_host/src/secrun.rs:631:85: replace + with - in projected_mb
+crates/sniper_host/src/secrun.rs:631:85: replace + with * in projected_mb

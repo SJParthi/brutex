@@ -1,0 +1,4 @@
+crates/sniper_host/src/secrun.rs:121:9: replace NCells::load -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/secrun.rs:180:5: replace plan_of -> Result<Plan, &'static str> with Ok(Default::default())
+crates/sniper_host/src/secrun.rs:231:5: replace price_row -> Result<crate::search::RowOut, String> with Ok(Default::default())
+crates/sniper_host/src/secrun.rs:250:5: replace price_sec -> Result<Priced2, String> with Ok(Default::default())

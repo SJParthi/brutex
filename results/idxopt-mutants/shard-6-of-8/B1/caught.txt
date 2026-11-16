@@ -1,1 +1,4 @@
 crates/sniper_host/src/sec.rs:1309:5: replace sec_eq -> (u64, usize, Vec<String>) with (1, 1, vec![String::new()])
+crates/sniper_host/src/secrun.rs:97:20: replace * with + in cell_bytes
+crates/sniper_host/src/secrun.rs:258:44: replace + with * in price_sec
+crates/sniper_host/src/secrun.rs:568:28: replace += with -= in run_family_sec

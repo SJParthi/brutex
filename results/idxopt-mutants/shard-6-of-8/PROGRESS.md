@@ -1,1 +1,2 @@
 - 2026-11-16 16:14:09 UTC BOX 2026-11-16 16:08:23 UTC set B1 start: shard 6/8 | A1 done | A2 done | B2 done | B1 116 of 481
+- 2026-11-16 16:26:24 UTC BOX 2026-11-16 16:08:23 UTC set B1 start: shard 6/8 | A1 done | A2 done | B2 done | B1 400 of 481
