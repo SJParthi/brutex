@@ -9,3 +9,4 @@ crates/spikefade/src/side17.rs:149:294: replace + with - in idx_words
 crates/spikefade/src/side17.rs:149:294: replace + with * in idx_words
 crates/spikefade/src/side17.rs:539:79: replace + with - in cmd_combine
 crates/spikefade/src/side17.rs:539:79: replace + with * in cmd_combine
+crates/spikefade/src/split18.rs:689:9: replace Ser18::boxed -> Option<Box<Self>> with Some(Box::new(Default::default()))

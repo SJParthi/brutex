@@ -416,3 +416,38 @@ crates/spikefade/src/side17.rs:533:21: replace || with && in cmd_combine
 crates/spikefade/src/side17.rs:533:16: replace != with == in cmd_combine
 crates/spikefade/src/side17.rs:533:32: replace != with == in cmd_combine
 crates/spikefade/src/split18.rs:105:33: replace != with == in SCal::from_days
+crates/spikefade/src/split18.rs:131:118: replace && with || in SCal::set_segments
+crates/spikefade/src/split18.rs:131:114: replace > with >= in SCal::set_segments
+crates/spikefade/src/split18.rs:131:123: replace < with <= in SCal::set_segments
+crates/spikefade/src/split18.rs:134:29: replace != with == in SCal::set_segments
+crates/spikefade/src/split18.rs:138:27: replace - with + in SCal::set_segments
+crates/spikefade/src/split18.rs:138:27: replace - with / in SCal::set_segments
+crates/spikefade/src/split18.rs:178:9: replace SCal::month_name -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:178:9: replace SCal::month_name -> String with String::new()
+crates/spikefade/src/split18.rs:184:9: replace SCal::day_name -> String with String::new()
+crates/spikefade/src/split18.rs:184:9: replace SCal::day_name -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:190:9: replace SCal::wp_name -> String with String::new()
+crates/spikefade/src/split18.rs:190:9: replace SCal::wp_name -> String with "xyzzy".into()
+crates/spikefade/src/split18.rs:191:13: delete match arm (Some(&a), Some(&b)) in SCal::wp_name
+crates/spikefade/src/split18.rs:286:9: replace MSeries::boxed -> Option<Box<Self>> with None
+crates/spikefade/src/split18.rs:306:27: replace > with >= in MSeries::seal_day
+crates/spikefade/src/split18.rs:309:27: replace < with <= in MSeries::seal_day
+crates/spikefade/src/split18.rs:328:28: replace > with >= in MSeries::seal_wp
+crates/spikefade/src/split18.rs:331:28: replace < with <= in MSeries::seal_wp
+crates/spikefade/src/split18.rs:380:30: replace || with && in MSeries::group_end
+crates/spikefade/src/split18.rs:400:9: replace MSeries::cash with ()
+crates/spikefade/src/split18.rs:486:95: replace - with + in SSeries::seg_of_mo
+crates/spikefade/src/split18.rs:486:95: replace - with / in SSeries::seg_of_mo
+crates/spikefade/src/split18.rs:497:27: replace > with >= in SSeries::seal_day
+crates/spikefade/src/split18.rs:500:27: replace < with <= in SSeries::seal_day
+crates/spikefade/src/split18.rs:518:28: replace > with >= in SSeries::seal_wp
+crates/spikefade/src/split18.rs:521:28: replace < with <= in SSeries::seal_wp
+crates/spikefade/src/split18.rs:551:27: replace < with <= in SSeries::seal_month
+crates/spikefade/src/split18.rs:581:91: replace == with != in SSeries::close
+crates/spikefade/src/split18.rs:643:41: replace < with <= in SSeries::figs
+crates/spikefade/src/split18.rs:643:84: replace < with == in SSeries::figs
+crates/spikefade/src/split18.rs:643:84: replace < with > in SSeries::figs
+crates/spikefade/src/split18.rs:643:84: replace < with <= in SSeries::figs
+crates/spikefade/src/split18.rs:719:9: replace Ser18::cash with ()
+crates/spikefade/src/split18.rs:759:5: replace min_at -> (i64, u16) with (0, 0)
+crates/spikefade/src/split18.rs:759:5: replace min_at -> (i64, u16) with (0, 1)
