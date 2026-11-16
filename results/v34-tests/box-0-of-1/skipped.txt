@@ -1,0 +1,10 @@
+menu::tests::sf3_menu_and_sets_load_with_the_signed_counts
+menu::tests::sf3_menu_fail_closed
+menu::tests::sf3_distance_floor_counted
+menu::tests::sf3_tp_floor_not_armed_at_or_above_entry
+menu::tests::sf3_tp_theta_level_and_absence
+tests3::sf3_ttp_replaces_tp_close
+tests33s::v33_search1d_sets_load_and_count
+tests34i::v34i_f3_real_rows_spot
+tests34i::v34i_f7_rules_tables_load_dated_and_minrange
+tests34i::v34i_f7_opr_file_is_next_session_and_columns

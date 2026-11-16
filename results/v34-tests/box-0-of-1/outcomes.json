@@ -1,0 +1,1738 @@
+[
+  {
+    "name": "acct::tests::r1_one_open_position_per_underlying_side_expiry",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "acct::tests::r4_margin_in_use_never_passes_20_lakh",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "csvgz::tests::parse_vectors",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "margin::tests::proxy_vectors",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "menu::tests::sf3_distance_floor_counted",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-3.log: FAILED as expected without its data: menu_head: missing"
+  },
+  {
+    "name": "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-1.log: FAILED as expected without its data: menu_head: missing"
+  },
+  {
+    "name": "menu::tests::sf3_menu_fail_closed",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-2.log: FAILED as expected without its data: menu_head: missing"
+  },
+  {
+    "name": "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-4.log: FAILED as expected without its data: menu_head: missing"
+  },
+  {
+    "name": "menu::tests::sf3_tp_theta_level_and_absence",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-5.log: FAILED as expected without its data: menu_head: missing"
+  },
+  {
+    "name": "read::tests::sf3_liquidity_dial_counts_and_gaps_before_t_only",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "read::tests::sf3_sl_atr1_reads_only_bars_ended_by_t",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "read::tests::sf3_sl_atr5_range_only_last_completed_candle",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "read::tests::sf3_sl_vol300_needs_30_seconds",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "read::tests::sf3_tp_theta_needs_time_value_and_the_dated_calendar",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "rules::tests::weekdays_and_holiday_shifted_expiries",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "screen::tests::r2_rank_lists_keep_the_best_strike_per_underlying_side",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "screen::tests::r3_stock_expiry_day_lists_the_next_expiry_or_refuses",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "screen::tests::windows_never_pass_1530_and_follow_the_0915_grid",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "screen::tests::zero_volume_window_skipped_and_listed_midday_uses_first_open",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "side17::tests::v32b_idx_und_own_account",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "side17::tests::v32b_side_mtm_from_each_segment",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "side17::tests::v32b_side_one_account_rules_and_cap",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "side17::tests::v32rb_side_combine_file_roundtrip_equals_in_run",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "side17::tests::v32rb_side_combine_marks_each_segment_and_test_months",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_choice_reads_learning_months_only",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_cost_97_months",
+    "mac": "ignored",
+    "linux": "ignored",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_definitions",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_fresh_start_test_matches_wf",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_off_is_inert",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_order_months_weeks_days_dd_net",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_passed_rule",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_whole_window_equals_account",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32b_split_windows_exact",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32rb_seg_equals_month_windows",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32rb_seg_memory_bound",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32rb_split_o1_gates",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "split18::tests::v32rb_stats_and_picks_equal_month_path",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "stress::tests::v31_stress_reprices_against_the_trader",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_d1_drops_rows_outside_the_picks",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_d3_leaves_nothing_pending",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_d3_rewalk_equals_fresh_walk",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_day_index_over_255_sessions",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_dd_grouped_same_second_closes",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_exact_margin_sizes_lots_and_refuses",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_headline_gate_small_stop_share_25_stress_positive",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_margin_rule_v2_sizing_addon",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_missing_day_falls_back_and_corrupt_table_refused",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_mtm_check_refuses_with_running_loss",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_never_closed_counted_per_account",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_never_closed_empty_window_never_zero",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_never_closed_valued_from_exit_decision",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_orders_end_1530_no_fill_after",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_own_squareoff_orders_and_fee",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_resend_stop_buyback_fills",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_snapshot_strictly_before_t",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_square_off_still_1510",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_stress_table_drawdown_grouped",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests31::v31_tie_rule_design52",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_a10_orders_in_charges_and_gate",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_ban_day_refused",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_dte_counts_sessions",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_expiry_pick_dial",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_freeze_dated_lookup",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_freeze_slices_counted_in_the_trip",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_gain_measure_prev_close",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_greeks_app_conversions",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_headline_needs_zero_unfilled_exits",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_host_margin_v3_stock",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_liq_entry_gate_covers_whole_order",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_month_verdict_2_lakh_inclusive",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_portfolio_shared_cap",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_prev_close_from_previous_session",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_topk_by_volume_5_10_20",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32::v32_wanted_picks_x_and_twins",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_a19_order_and_worst_dates",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_charges_dated_only",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_dte_theta_independent_of_loaded_days",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_exit_why_held_rule_level_trigger",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_expiry_dial_never_substitutes",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_headline_excludes_liquidity_off",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_kernel_piece_counters",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_ngrid_per_segment",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_o1_decision_at_n100_and_sampled_steps",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_o1_margin_lookup_ns",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_o1_range_max_and_first_reach",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_percent_round_half_up",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_portfolio_cap_counts_mtm",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_stage_b_dedup_equals_plain",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_table_w_passed_needs_a19",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_weeks_against_run_weeks",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32r::v32r_wf_choice_a19_order",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32rb::v32rb_ckpt_split_state_roundtrip",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32rb::v32rb_cube_merge_exact",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests32rb::v32rb_margin_extra_rows_appended",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_achunk_same_sequence_whole_contracts",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_batch_order_permutation_and_fingerprint",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_c1_compact_layout_bijective",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_c2_append_cfg_lists_offsets",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_c3_derived_lists_equal",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_c3_flagged_lists_derived",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_d2_class_key_has_tf",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_d2_replay_equals_walk",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_d2_rstar_needed",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_hoist_buffer_equals_walk_day",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_largest_first_is_a_permutation",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_prefetch_slot_is_its_day",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_switches_default_off_v33_all",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33::v33_tablel_online_equals_events",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::v33f_cap_minutes_base_and_exclusion",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::v33f_causal_levels_ignore_later_days",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::v33f_day_major_step_sampled",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::v33f_sebi_half_dated",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::v33f_split_words_segment_grid",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::v33f_stamp_unverified_labelled",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::v33f_vendor_from_manifest",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33f::xm_unfilled_exit_rearms_stop",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33g::oob_checklist_rows_follow_evidence",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33g::oob_lot_equals_traded_quantum_on_adjusted_series",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33g::v33f_gst_on_sebi_from_20220718",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33g::v33f_idx_exposure_dated_conservative",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33g::v33f_item12_partial_when_undated",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33g::v33g_win_sliding_candidates_bounded_exact",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33g::xm_mtm_mark_is_minute_high",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests33s::v33_search1d_sets_load_and_count",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-7.log: FAILED as expected without its data: menu /root/v34t/crates/spikefade/data/EXITS-DYN-MENU-v1.tsv: No such file or directory (os error 2)"
+  },
+  {
+    "name": "tests34::v34_ban_counted_once_per_event",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_band_lock_zero_share",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_cap20_ghost_replay_carries_count",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_cap20_kernel_counts_every_minute_equal_reference",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_cap20_splits_learning_refused_test_failed",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_cap20_state_sizes_unchanged",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_cap20_views_windows_candidates",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_carry_walk_measured_and_bounded",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_ckpt_durable_falls_back_to_prev",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_cube_day_high_vs_bhavcopy_high",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_elm_pre_header_words_name_the_table_rule",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_event_day_dial",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_exit_why_tt_is_time_armed_breakeven",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_expiry_day_dials",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_halt_segments_2020_03_13_and_23",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_intraday_mtm_drawdown",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_lot0_resolved_or_named",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_lots_capped_by_risk_budget",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_memory_guard_stops_above_gate",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_next_session_stress_and_stress_set",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_respike_best_move_and_stop_hunt",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_run_id_unique_and_folder_exclusive",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_same_side_book_cap",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_stale_file_strict_rescan",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_stamp_dated_table",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_stock_elm_pre_ael_rule",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_switches_default_off_fix34_all",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34::v34_tail_gate_worst_trade",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_cap_counts_survive_checkpoint_and_merge",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f3_exact_session_rows",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f3_header_fields_checked",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f3_kind_and_alias_counters_distinct_contract_days",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f3_none_in_range_refused_counted",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f3_real_rows_spot",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-8.log: FAILED as expected without its data: /Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/state/spikefade-20261114/v34/tables/STOCK-FREEZE-DATED.tsv: data:F3's table is needed for this named test"
+  },
+  {
+    "name": "tests34i::v34i_f3_switch_off_p0",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_band_after_flex_known_level",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_band_clip_only_when_known",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_band_lock_mixed_second_keeps_volume",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_entry_strict_r5",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_lpp_ref_bounds_for_buy",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_mpp_nse_cap",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_nofile_bound_from_settle",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_opr_file_is_next_session_and_columns",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-10.log: FAILED as expected without its data: assertion failed: crate::f7::is_manifest(&p)"
+  },
+  {
+    "name": "tests34i::v34i_f7_resend_cut_1523",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-9.log: FAILED as expected without its data: called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }"
+  },
+  {
+    "name": "tests34i::v34i_f7_switches_off_byte_identical",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_f7_worst_of_readings_books_dearest",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_xm_band_lock_zero_share",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34i::v34i_xm_resend_limit_inside_nse_lpp_band",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::args_digest_ignores_runtime_and_paths",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::batch_plan_target_independent",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::bck_refuses_unknown_tag_and_shape",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::bck_roundtrip_canonical",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::bck_write_never_overwrites",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::fingerprint_has_list_digest",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::ist_label_offset",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::kit_flags_refusals",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::merge_equals_sequential_synthetic",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::merge_refusals",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::plan_roundtrip_and_refusals",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::portable_sha256_in_process",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::proc_readers_parse_linux_text",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::read_dir_sorted",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::root_digest_same_for_every_form",
+    "mac": "ok",
+    "linux": "FAILED",
+    "alone": "FAILED",
+    "class": "KNOWN-ZSTD-PATH",
+    "note": "alone/1.log: called `Result::unwrap()` on an `Err` value: \"zstd (/opt/homebrew/bin/zstd) [\\\"-3\\\", \\\"-q\\\", \\\"-c\\\"]: No such file or directory (os error 2)\" | diag/zstd-1.log with the Mac path present: ok"
+  },
+  {
+    "name": "tests34s::sfz_roundtrip_all_rows",
+    "mac": "ok",
+    "linux": "FAILED",
+    "alone": "FAILED",
+    "class": "KNOWN-ZSTD-PATH",
+    "note": "alone/2.log: called `Result::unwrap()` on an `Err` value: \"zstd (/opt/homebrew/bin/zstd) [\\\"-3\\\", \\\"-q\\\", \\\"-c\\\"]: No such file or directory (os error 2)\" | diag/zstd-2.log with the Mac path present: ok"
+  },
+  {
+    "name": "tests34s::sha256_fips_vectors",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::shard_walks_assigned_batches",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::slice_equals_full_for_segment",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::strict_bhav_fatal",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::synthetic_is_reproducible",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests34s::tools_from_env",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_chunk_kernel_equals_walk_account",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_day_major_equals_whole",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_event_skip_exact",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_first_hit_min_anchor_and_tie_order",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_gapped_stop_pays_block_worst",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_gapped_target_buys_back_at_block_worst",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_held_anchor_cancels_unfilled_sale",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_setting_dedup_exact",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_trail_fires_inside_1508_1510_is_held",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "tests3::sf3_ttp_replaces_tp_close",
+    "mac": "ok",
+    "linux": "SKIPPED-DATA",
+    "alone": "-",
+    "class": "SKIPPED-DATA",
+    "note": "diag/skip-6.log: FAILED as expected without its data: called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }"
+  },
+  {
+    "name": "trade::tests::after_cut_refused",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "trade::tests::fa1_prev_prints_first_print_and_zero_volume_rows",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "trade::tests::fa1_sparse_sale_counts_no_volume_from_the_signal_candle",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "trade::tests::gapped_stop_pays_block_worst",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "trade::tests::missing_seconds_inside_fill_blocks_are_jumped",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "trade::tests::premium_005_sale_respects_protection_floor",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "trade::tests::r1_side_key_is_underlying_side_expiry_not_strike",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "trade::tests::stock_expiry_day_refused",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "wf::tests::compose_is_exact_on_concatenation",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "wf::tests::rows_are_the_signed_21",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  },
+  {
+    "name": "wf::tests::sf3_window_compose_equals_fresh_walk",
+    "mac": "ok",
+    "linux": "ok",
+    "alone": "-",
+    "class": "SAME",
+    "note": "-"
+  }
+]

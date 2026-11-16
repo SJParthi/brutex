@@ -1,0 +1,2 @@
+tests34s::root_digest_same_for_every_form
+tests34s::sfz_roundtrip_all_rows

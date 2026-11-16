@@ -1,0 +1,430 @@
+warning: unused imports: `VIEW_LETTERS` and `VIEW_NAMES`
+  --> crates/spikefade/src/report3.rs:21:42
+   |
+21 | use crate::acct::{NVIEW, SEv, Sum, Tops, VIEW_LETTERS, VIEW_NAMES};
+   |                                          ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DayEvents` and `Ent`
+  --> crates/spikefade/src/report3.rs:30:27
+   |
+30 | use crate::screen::{self, DayEvents, Ent, Levels, NCFG, TFS, cfg_parts};
+   |                           ^^^^^^^^^  ^^^
+
+warning: unused imports: `out_of`, `record_base`, and `size_event`
+  --> crates/spikefade/src/stage.rs:23:72
+   |
+23 | use crate::trade::{BASE_S, BaseErr, EvT, NL, Out, Paths, Refuse, Trip, out_of, record_base, size_event, trip, truncate};
+   |                                                                        ^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused variable: `u`
+   --> crates/spikefade/src/screen.rs:521:74
+    |
+521 |         c.unds.iter().enumerate().filter(|(_, u)| u.kind == 0).map(|(ui, u)| {
+    |                                                                          ^ help: if this is intentional, prefix it with an underscore: `_u`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `group` is never read
+   --> crates/spikefade/src/kern.rs:367:13
+    |
+367 |             group = None;
+    |             ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+397 |         group = Some((be, q.piece));
+    |         --------------------------- `group` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/side17.rs:423:9
+    |
+423 |     let mut log_rows = |acct: &str, mem: &[(u8, usize)], r: &crate::v32::WalkRes, tr: &[Vec<STrade>], tsv: &mut String| {
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/tests32r.rs:404:9
+    |
+404 |     let mut q = |len: i64| -> Vec<u64> {
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: method `nviews` is never used
+   --> crates/spikefade/src/acct.rs:609:12
+    |
+570 | impl Tops {
+    | --------- method in this implementation
+...
+609 |     pub fn nviews(&self) -> usize {
+    |            ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `charged` is never used
+   --> crates/spikefade/src/charges.rs:132:15
+    |
+132 | pub(crate) fn charged(rd: &Rates, rt: &Rates, t: &Trip) -> (i64, i64, i64, bool) {
+    |               ^^^^^^^
+
+warning: field `rows_1s_cr` is never read
+  --> crates/spikefade/src/cube.rs:78:9
+   |
+53 | pub struct Stats {
+   |            ----- field in this struct
+...
+78 |     pub rows_1s_cr: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `Stats` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `bod` is never read
+  --> crates/spikefade/src/mtable.rs:29:9
+   |
+23 | pub struct SnapMeta {
+   |            -------- field in this struct
+...
+29 |     pub bod: bool,
+   |         ^^^
+   |
+   = note: `SnapMeta` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `day` is never read
+   --> crates/spikefade/src/mtable.rs:151:9
+    |
+150 | pub struct DayM {
+    |            ---- field in this struct
+151 |     pub day: i64,
+    |         ^^^
+    |
+    = note: `DayM` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `ulist_of` is never read
+  --> crates/spikefade/src/report.rs:78:5
+   |
+67 | struct SegRun {
+   |        ------ field in this struct
+...
+78 |     ulist_of: Vec<u32>,
+   |     ^^^^^^^^
+
+warning: fields `kind` and `expiry` are never read
+   --> crates/spikefade/src/report.rs:642:5
+    |
+611 | struct TradeRow {
+    |        -------- fields in this struct
+...
+642 |     kind: u8,
+    |     ^^^^
+643 |     expiry: u32,
+    |     ^^^^^^
+    |
+    = note: `TradeRow` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `round2` is never used
+   --> crates/spikefade/src/screen.rs:349:4
+    |
+349 | fn round2(x: u64) -> u64 {
+    |    ^^^^^^
+
+warning: function `quant` is never used
+   --> crates/spikefade/src/screen.rs:360:4
+    |
+360 | fn quant(v: &mut [u64], q: u64) -> u64 {
+    |    ^^^^^
+
+warning: function `measure` is never used
+   --> crates/spikefade/src/screen.rs:371:8
+    |
+371 | pub fn measure(cubes: &[Cube], seg: u8) -> Levels {
+    |        ^^^^^^^
+
+warning: field `flag2` is never read
+   --> crates/spikefade/src/trade.rs:283:9
+    |
+273 | pub struct Out {
+    |            --- field in this struct
+...
+283 |     pub flag2: u8,
+    |         ^^^^^
+    |
+    = note: `Out` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `cand_kind` is never used
+   --> crates/spikefade/src/trade.rs:505:14
+    |
+505 | pub const fn cand_kind(c: usize) -> Kind {
+    |              ^^^^^^^^^
+
+warning: fields `sale_secs`, `sale_one_price_secs`, and `sale_past_limit` are never read
+   --> crates/spikefade/src/trade.rs:535:9
+    |
+525 | pub struct Trip {
+    |            ---- fields in this struct
+...
+535 |     pub sale_secs: u32,
+    |         ^^^^^^^^^
+536 |     pub sale_one_price_secs: u32,
+    |         ^^^^^^^^^^^^^^^^^^^
+537 |     pub sale_past_limit: u32,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `Trip` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `charges_of` is never used
+   --> crates/spikefade/src/trade.rs:898:8
+    |
+898 | pub fn charges_of(day: i64, units: u64, buy_value: i64, sell_value: i64, own_exit: bool, broker: bool) -> Result<(i64, i64, i64, bo...
+    |        ^^^^^^^^^^
+
+warning: fields `label` and `blk` are never read
+  --> crates/spikefade/src/v2.rs:23:9
+   |
+22 | pub struct Eval {
+   |            ---- fields in this struct
+23 |     pub label: String,
+   |         ^^^^^
+24 |     pub rules: &'static str,
+25 |     pub blk: i64,
+   |         ^^^
+   |
+   = note: `Eval` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `store` is never read
+   --> crates/spikefade/src/v2.rs:115:9
+    |
+112 | pub struct Full {
+    |            ---- field in this struct
+...
+115 |     pub store: Vec<Out>,
+    |         ^^^^^
+
+warning: field `di` is never read
+   --> crates/spikefade/src/v2.rs:302:9
+    |
+299 | pub struct EvIn<'a> {
+    |            ---- field in this struct
+...
+302 |     pub di: u16,
+    |         ^^
+
+warning: function `write_new` is never used
+   --> crates/spikefade/src/v2.rs:546:8
+    |
+546 | pub fn write_new(p: &Path, content: &str) -> Result<(), String> {
+    |        ^^^^^^^^^
+
+warning: field `labels` is never read
+   --> crates/spikefade/src/kern.rs:105:9
+    |
+ 86 | pub struct Acc {
+    |            --- field in this struct
+...
+105 |     pub labels: [u32; 9],
+    |         ^^^^^^
+    |
+    = note: `Acc` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: constant `CAP` is never used
+   --> crates/spikefade/src/kern.rs:962:11
+    |
+962 | pub const CAP: [usize; 4] = [5, 10, 20, 40];
+    |           ^^^
+
+warning: fields `win`, `margin_in_use`, and `nopen` are never read
+    --> crates/spikefade/src/kern.rs:1044:9
+     |
+1040 | pub struct Dec3 {
+     |            ---- fields in this struct
+...
+1044 |     pub win: Option<usize>,
+     |         ^^^
+1045 |     pub margin_in_use: i64,
+     |         ^^^^^^^^^^^^^
+1046 |     pub nopen: usize,
+     |         ^^^^^
+     |
+     = note: `Dec3` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_empty` is never used
+   --> crates/spikefade/src/menu.rs:282:12
+    |
+181 | impl Menu {
+    | --------- method in this implementation
+...
+282 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: constant `MAXR` is never used
+   --> crates/spikefade/src/menu.rs:288:11
+    |
+288 | pub const MAXR: usize = 7;
+    |           ^^^^
+
+warning: field `run` is never read
+  --> crates/spikefade/src/read.rs:55:5
+   |
+45 | pub struct Prep {
+   |            ---- field in this struct
+...
+55 |     run: Vec<u16>,
+   |     ^^^
+   |
+   = note: `Prep` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `mfallback` is never read
+   --> crates/spikefade/src/report3.rs:107:9
+    |
+ 68 | pub struct Seg3 {
+    |            ---- field in this struct
+...
+107 |     pub mfallback: Vec<Option<i64>>,
+    |         ^^^^^^^^^
+
+warning: fields `day` and `sha` are never read
+  --> crates/spikefade/src/bhav.rs:26:9
+   |
+25 | pub struct BhavDay {
+   |            ------- fields in this struct
+26 |     pub day: i64,
+   |         ^^^
+27 |     pub file: String,
+28 |     pub sha: String,
+   |         ^^^
+   |
+   = note: `BhavDay` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `month_of` is never used
+   --> crates/spikefade/src/expiry.rs:303:8
+    |
+303 | pub fn month_of(d: i64) -> String {
+    |        ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/spikefade/src/side17.rs:176:9
+    |
+175 | pub struct SideRes {
+    |            ------- fields in this struct
+176 |     pub net: i64,
+    |         ^^^
+177 |     pub trades: u32,
+178 |     pub by_seg: [u32; 2],
+    |         ^^^^^^
+...
+184 |     pub dd: i64,
+    |         ^^
+185 |     pub mo: BTreeMap<i64, i64>,
+    |         ^^
+186 |     /// (entry us, known us, margin) of the trades taken (the utilization reads them).
+187 |     pub taken: Vec<(i64, i64, i64)>,
+    |         ^^^^^
+188 |     /// The largest margin in use + running MTM loss seen at a sale instant (after the sale).
+189 |     pub peak_mtm: i64,
+    |         ^^^^^^^^
+190 |     /// v3.2 round B: every member trade's outcome in the walk's order (member, trade index, outcome word).
+191 |     pub log: Vec<(usize, usize, &'static str)>,
+    |         ^^^
+    |
+    = note: `SideRes` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `loss_at` is never used
+   --> crates/spikefade/src/side17.rs:197:8
+    |
+197 | pub fn loss_at(marks: &[i32], mark1: u32, units: u32, sold: i64, sod: u32) -> i64 {
+    |        ^^^^^^^
+
+warning: field `source` is never read
+   --> crates/spikefade/src/fix34.rs:484:9
+    |
+479 | pub struct HaltRow {
+    |            ------- field in this struct
+...
+484 |     pub source: String,
+    |         ^^^^^^
+    |
+    = note: `HaltRow` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `last` is never read
+   --> crates/spikefade/src/fix34.rs:725:9
+    |
+722 | pub struct ElmTable {
+    |            -------- field in this struct
+...
+725 |     pub last: u32,
+    |         ^^^^
+    |
+    = note: `ElmTable` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `ident` is never used
+   --> crates/spikefade/src/ckmerge.rs:430:8
+    |
+430 | pub fn ident(s: &Sum) -> (u32, u16, u8) {
+    |        ^^^^^
+
+warning: function `strict_reset` is never used
+   --> crates/spikefade/src/kit.rs:613:8
+    |
+613 | pub fn strict_reset() {
+    |        ^^^^^^^^^^^^
+
+warning: field `src` is never read
+   --> crates/spikefade/src/f7.rs:216:9
+    |
+213 | pub struct DayBand {
+    |            ------- field in this struct
+...
+216 |     pub src: String,
+    |         ^^^
+    |
+    = note: `DayBand` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: constant `INT34_ALL` is never used
+  --> crates/spikefade/src/int34.rs:35:11
+   |
+35 | pub const INT34_ALL: [Ix; N] = [F3D, PROT, LPP, CUT];
+   |           ^^^^^^^^^
+
+warning: `spikefade` (bin "spikefade" test) generated 42 warnings (run `cargo fix --bin "spikefade" -p spikefade --tests` to apply 6 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+     Running unittests src/main.rs (target/release/deps/spikefade-5a56206091529248)
+
+running 1 test
+test menu::tests::sf3_menu_fail_closed ... FAILED
+
+failures:
+
+---- menu::tests::sf3_menu_fail_closed stdout ----
+
+thread 'menu::tests::sf3_menu_fail_closed' (2376) panicked at crates/spikefade/src/menu.rs:765:55:
+menu_head: missing
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: spikefade::menu::tests::sf3_menu_fail_closed::{closure#0}
+             at ./src/menu.rs:765:55
+   3: <core::result::Result<spikefade::menu::Menu, alloc::string::String>>::unwrap_or_else::<spikefade::menu::tests::sf3_menu_fail_closed::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: spikefade::menu::tests::sf3_menu_fail_closed
+             at ./src/menu.rs:765:36
+   5: spikefade::menu::tests::sf3_menu_fail_closed::{closure#0}
+             at ./src/menu.rs:763:30
+   6: <spikefade::menu::tests::sf3_menu_fail_closed::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    menu::tests::sf3_menu_fail_closed
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 216 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p spikefade --bin spikefade`

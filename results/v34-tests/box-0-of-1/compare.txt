@@ -1,0 +1,13 @@
+# one row per test: name, Mac status (t11.log), Linux status, Linux status alone, class, note
+menu::tests::sf3_distance_floor_counted	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-3.log: FAILED as expected without its data: menu_head: missing
+menu::tests::sf3_menu_and_sets_load_with_the_signed_counts	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-1.log: FAILED as expected without its data: menu_head: missing
+menu::tests::sf3_menu_fail_closed	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-2.log: FAILED as expected without its data: menu_head: missing
+menu::tests::sf3_tp_floor_not_armed_at_or_above_entry	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-4.log: FAILED as expected without its data: menu_head: missing
+menu::tests::sf3_tp_theta_level_and_absence	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-5.log: FAILED as expected without its data: menu_head: missing
+tests33s::v33_search1d_sets_load_and_count	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-7.log: FAILED as expected without its data: menu /root/v34t/crates/spikefade/data/EXITS-DYN-MENU-v1.tsv: No such file or directory (os error 2)
+tests34i::v34i_f3_real_rows_spot	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-8.log: FAILED as expected without its data: /Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/state/spikefade-20261114/v34/tables/STOCK-FREEZE-DATED.tsv: data:F3's table is needed for this named test
+tests34i::v34i_f7_opr_file_is_next_session_and_columns	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-10.log: FAILED as expected without its data: assertion failed: crate::f7::is_manifest(&p)
+tests34i::v34i_f7_rules_tables_load_dated_and_minrange	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-9.log: FAILED as expected without its data: called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+tests34s::root_digest_same_for_every_form	ok	FAILED	FAILED	KNOWN-ZSTD-PATH	alone/1.log: called `Result::unwrap()` on an `Err` value: "zstd (/opt/homebrew/bin/zstd) [\"-3\", \"-q\", \"-c\"]: No such file or directory (os error 2)" | diag/zstd-1.log with the Mac path present: ok
+tests34s::sfz_roundtrip_all_rows	ok	FAILED	FAILED	KNOWN-ZSTD-PATH	alone/2.log: called `Result::unwrap()` on an `Err` value: "zstd (/opt/homebrew/bin/zstd) [\"-3\", \"-q\", \"-c\"]: No such file or directory (os error 2)" | diag/zstd-2.log with the Mac path present: ok
+tests3::sf3_ttp_replaces_tp_close	ok	SKIPPED-DATA	-	SKIPPED-DATA	diag/skip-6.log: FAILED as expected without its data: called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }

@@ -15,3 +15,4 @@ tool shasum: /usr/bin/shasum
 tool date: /usr/bin/date
 tool jq: /usr/bin/jq
 user: uid 0
+memory.peak: n/a

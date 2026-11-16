@@ -1,0 +1,660 @@
+warning: unused imports: `VIEW_LETTERS` and `VIEW_NAMES`
+  --> crates/spikefade/src/report3.rs:21:42
+   |
+21 | use crate::acct::{NVIEW, SEv, Sum, Tops, VIEW_LETTERS, VIEW_NAMES};
+   |                                          ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DayEvents` and `Ent`
+  --> crates/spikefade/src/report3.rs:30:27
+   |
+30 | use crate::screen::{self, DayEvents, Ent, Levels, NCFG, TFS, cfg_parts};
+   |                           ^^^^^^^^^  ^^^
+
+warning: unused imports: `out_of`, `record_base`, and `size_event`
+  --> crates/spikefade/src/stage.rs:23:72
+   |
+23 | use crate::trade::{BASE_S, BaseErr, EvT, NL, Out, Paths, Refuse, Trip, out_of, record_base, size_event, trip, truncate};
+   |                                                                        ^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused variable: `u`
+   --> crates/spikefade/src/screen.rs:521:74
+    |
+521 |         c.unds.iter().enumerate().filter(|(_, u)| u.kind == 0).map(|(ui, u)| {
+    |                                                                          ^ help: if this is intentional, prefix it with an underscore: `_u`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `group` is never read
+   --> crates/spikefade/src/kern.rs:367:13
+    |
+367 |             group = None;
+    |             ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+397 |         group = Some((be, q.piece));
+    |         --------------------------- `group` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/side17.rs:423:9
+    |
+423 |     let mut log_rows = |acct: &str, mem: &[(u8, usize)], r: &crate::v32::WalkRes, tr: &[Vec<STrade>], tsv: &mut String| {
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/tests32r.rs:404:9
+    |
+404 |     let mut q = |len: i64| -> Vec<u64> {
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: method `nviews` is never used
+   --> crates/spikefade/src/acct.rs:609:12
+    |
+570 | impl Tops {
+    | --------- method in this implementation
+...
+609 |     pub fn nviews(&self) -> usize {
+    |            ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `charged` is never used
+   --> crates/spikefade/src/charges.rs:132:15
+    |
+132 | pub(crate) fn charged(rd: &Rates, rt: &Rates, t: &Trip) -> (i64, i64, i64, bool) {
+    |               ^^^^^^^
+
+warning: field `rows_1s_cr` is never read
+  --> crates/spikefade/src/cube.rs:78:9
+   |
+53 | pub struct Stats {
+   |            ----- field in this struct
+...
+78 |     pub rows_1s_cr: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `Stats` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `bod` is never read
+  --> crates/spikefade/src/mtable.rs:29:9
+   |
+23 | pub struct SnapMeta {
+   |            -------- field in this struct
+...
+29 |     pub bod: bool,
+   |         ^^^
+   |
+   = note: `SnapMeta` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `day` is never read
+   --> crates/spikefade/src/mtable.rs:151:9
+    |
+150 | pub struct DayM {
+    |            ---- field in this struct
+151 |     pub day: i64,
+    |         ^^^
+    |
+    = note: `DayM` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `ulist_of` is never read
+  --> crates/spikefade/src/report.rs:78:5
+   |
+67 | struct SegRun {
+   |        ------ field in this struct
+...
+78 |     ulist_of: Vec<u32>,
+   |     ^^^^^^^^
+
+warning: fields `kind` and `expiry` are never read
+   --> crates/spikefade/src/report.rs:642:5
+    |
+611 | struct TradeRow {
+    |        -------- fields in this struct
+...
+642 |     kind: u8,
+    |     ^^^^
+643 |     expiry: u32,
+    |     ^^^^^^
+    |
+    = note: `TradeRow` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `round2` is never used
+   --> crates/spikefade/src/screen.rs:349:4
+    |
+349 | fn round2(x: u64) -> u64 {
+    |    ^^^^^^
+
+warning: function `quant` is never used
+   --> crates/spikefade/src/screen.rs:360:4
+    |
+360 | fn quant(v: &mut [u64], q: u64) -> u64 {
+    |    ^^^^^
+
+warning: function `measure` is never used
+   --> crates/spikefade/src/screen.rs:371:8
+    |
+371 | pub fn measure(cubes: &[Cube], seg: u8) -> Levels {
+    |        ^^^^^^^
+
+warning: field `flag2` is never read
+   --> crates/spikefade/src/trade.rs:283:9
+    |
+273 | pub struct Out {
+    |            --- field in this struct
+...
+283 |     pub flag2: u8,
+    |         ^^^^^
+    |
+    = note: `Out` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `cand_kind` is never used
+   --> crates/spikefade/src/trade.rs:505:14
+    |
+505 | pub const fn cand_kind(c: usize) -> Kind {
+    |              ^^^^^^^^^
+
+warning: fields `sale_secs`, `sale_one_price_secs`, and `sale_past_limit` are never read
+   --> crates/spikefade/src/trade.rs:535:9
+    |
+525 | pub struct Trip {
+    |            ---- fields in this struct
+...
+535 |     pub sale_secs: u32,
+    |         ^^^^^^^^^
+536 |     pub sale_one_price_secs: u32,
+    |         ^^^^^^^^^^^^^^^^^^^
+537 |     pub sale_past_limit: u32,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `Trip` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `charges_of` is never used
+   --> crates/spikefade/src/trade.rs:898:8
+    |
+898 | pub fn charges_of(day: i64, units: u64, buy_value: i64, sell_value: i64, own_exit: bool, broker: bool) -> Result<(i64, i64, i64, bo...
+    |        ^^^^^^^^^^
+
+warning: fields `label` and `blk` are never read
+  --> crates/spikefade/src/v2.rs:23:9
+   |
+22 | pub struct Eval {
+   |            ---- fields in this struct
+23 |     pub label: String,
+   |         ^^^^^
+24 |     pub rules: &'static str,
+25 |     pub blk: i64,
+   |         ^^^
+   |
+   = note: `Eval` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `store` is never read
+   --> crates/spikefade/src/v2.rs:115:9
+    |
+112 | pub struct Full {
+    |            ---- field in this struct
+...
+115 |     pub store: Vec<Out>,
+    |         ^^^^^
+
+warning: field `di` is never read
+   --> crates/spikefade/src/v2.rs:302:9
+    |
+299 | pub struct EvIn<'a> {
+    |            ---- field in this struct
+...
+302 |     pub di: u16,
+    |         ^^
+
+warning: function `write_new` is never used
+   --> crates/spikefade/src/v2.rs:546:8
+    |
+546 | pub fn write_new(p: &Path, content: &str) -> Result<(), String> {
+    |        ^^^^^^^^^
+
+warning: field `labels` is never read
+   --> crates/spikefade/src/kern.rs:105:9
+    |
+ 86 | pub struct Acc {
+    |            --- field in this struct
+...
+105 |     pub labels: [u32; 9],
+    |         ^^^^^^
+    |
+    = note: `Acc` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: constant `CAP` is never used
+   --> crates/spikefade/src/kern.rs:962:11
+    |
+962 | pub const CAP: [usize; 4] = [5, 10, 20, 40];
+    |           ^^^
+
+warning: fields `win`, `margin_in_use`, and `nopen` are never read
+    --> crates/spikefade/src/kern.rs:1044:9
+     |
+1040 | pub struct Dec3 {
+     |            ---- fields in this struct
+...
+1044 |     pub win: Option<usize>,
+     |         ^^^
+1045 |     pub margin_in_use: i64,
+     |         ^^^^^^^^^^^^^
+1046 |     pub nopen: usize,
+     |         ^^^^^
+     |
+     = note: `Dec3` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_empty` is never used
+   --> crates/spikefade/src/menu.rs:282:12
+    |
+181 | impl Menu {
+    | --------- method in this implementation
+...
+282 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: constant `MAXR` is never used
+   --> crates/spikefade/src/menu.rs:288:11
+    |
+288 | pub const MAXR: usize = 7;
+    |           ^^^^
+
+warning: field `run` is never read
+  --> crates/spikefade/src/read.rs:55:5
+   |
+45 | pub struct Prep {
+   |            ---- field in this struct
+...
+55 |     run: Vec<u16>,
+   |     ^^^
+   |
+   = note: `Prep` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `mfallback` is never read
+   --> crates/spikefade/src/report3.rs:107:9
+    |
+ 68 | pub struct Seg3 {
+    |            ---- field in this struct
+...
+107 |     pub mfallback: Vec<Option<i64>>,
+    |         ^^^^^^^^^
+
+warning: fields `day` and `sha` are never read
+  --> crates/spikefade/src/bhav.rs:26:9
+   |
+25 | pub struct BhavDay {
+   |            ------- fields in this struct
+26 |     pub day: i64,
+   |         ^^^
+27 |     pub file: String,
+28 |     pub sha: String,
+   |         ^^^
+   |
+   = note: `BhavDay` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `month_of` is never used
+   --> crates/spikefade/src/expiry.rs:303:8
+    |
+303 | pub fn month_of(d: i64) -> String {
+    |        ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/spikefade/src/side17.rs:176:9
+    |
+175 | pub struct SideRes {
+    |            ------- fields in this struct
+176 |     pub net: i64,
+    |         ^^^
+177 |     pub trades: u32,
+178 |     pub by_seg: [u32; 2],
+    |         ^^^^^^
+...
+184 |     pub dd: i64,
+    |         ^^
+185 |     pub mo: BTreeMap<i64, i64>,
+    |         ^^
+186 |     /// (entry us, known us, margin) of the trades taken (the utilization reads them).
+187 |     pub taken: Vec<(i64, i64, i64)>,
+    |         ^^^^^
+188 |     /// The largest margin in use + running MTM loss seen at a sale instant (after the sale).
+189 |     pub peak_mtm: i64,
+    |         ^^^^^^^^
+190 |     /// v3.2 round B: every member trade's outcome in the walk's order (member, trade index, outcome word).
+191 |     pub log: Vec<(usize, usize, &'static str)>,
+    |         ^^^
+    |
+    = note: `SideRes` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `loss_at` is never used
+   --> crates/spikefade/src/side17.rs:197:8
+    |
+197 | pub fn loss_at(marks: &[i32], mark1: u32, units: u32, sold: i64, sod: u32) -> i64 {
+    |        ^^^^^^^
+
+warning: field `source` is never read
+   --> crates/spikefade/src/fix34.rs:484:9
+    |
+479 | pub struct HaltRow {
+    |            ------- field in this struct
+...
+484 |     pub source: String,
+    |         ^^^^^^
+    |
+    = note: `HaltRow` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `last` is never read
+   --> crates/spikefade/src/fix34.rs:725:9
+    |
+722 | pub struct ElmTable {
+    |            -------- field in this struct
+...
+725 |     pub last: u32,
+    |         ^^^^
+    |
+    = note: `ElmTable` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `ident` is never used
+   --> crates/spikefade/src/ckmerge.rs:430:8
+    |
+430 | pub fn ident(s: &Sum) -> (u32, u16, u8) {
+    |        ^^^^^
+
+warning: function `strict_reset` is never used
+   --> crates/spikefade/src/kit.rs:613:8
+    |
+613 | pub fn strict_reset() {
+    |        ^^^^^^^^^^^^
+
+warning: field `src` is never read
+   --> crates/spikefade/src/f7.rs:216:9
+    |
+213 | pub struct DayBand {
+    |            ------- field in this struct
+...
+216 |     pub src: String,
+    |         ^^^
+    |
+    = note: `DayBand` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: constant `INT34_ALL` is never used
+  --> crates/spikefade/src/int34.rs:35:11
+   |
+35 | pub const INT34_ALL: [Ix; N] = [F3D, PROT, LPP, CUT];
+   |           ^^^^^^^^^
+
+warning: `spikefade` (bin "spikefade" test) generated 42 warnings (run `cargo fix --bin "spikefade" -p spikefade --tests` to apply 6 suggestions)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+     Running unittests src/main.rs (target/release/deps/spikefade-5a56206091529248)
+
+running 207 tests
+test margin::tests::proxy_vectors ... ok
+test acct::tests::r1_one_open_position_per_underlying_side_expiry ... ok
+test csvgz::tests::parse_vectors ... ok
+test acct::tests::r4_margin_in_use_never_passes_20_lakh ... ok
+test read::tests::sf3_sl_vol300_needs_30_seconds ... ok
+test read::tests::sf3_sl_atr5_range_only_last_completed_candle ... ok
+test read::tests::sf3_tp_theta_needs_time_value_and_the_dated_calendar ... ok
+test rules::tests::weekdays_and_holiday_shifted_expiries ... ok
+test read::tests::sf3_sl_atr1_reads_only_bars_ended_by_t ... ok
+test screen::tests::windows_never_pass_1530_and_follow_the_0915_grid ... ok
+test screen::tests::zero_volume_window_skipped_and_listed_midday_uses_first_open ... ok
+test side17::tests::v32b_idx_und_own_account ... ok
+test side17::tests::v32b_side_mtm_from_each_segment ... ok
+test side17::tests::v32b_side_one_account_rules_and_cap ... ok
+test side17::tests::v32rb_side_combine_file_roundtrip_equals_in_run ... ok
+test side17::tests::v32rb_side_combine_marks_each_segment_and_test_months ... ok
+test screen::tests::r3_stock_expiry_day_lists_the_next_expiry_or_refuses ... ok
+test split18::tests::v32b_split_cost_97_months ... ignored, a measurement, run explicitly
+test split18::tests::v32b_split_definitions ... ok
+test split18::tests::v32b_split_fresh_start_test_matches_wf ... ok
+test split18::tests::v32b_split_off_is_inert ... ok
+test split18::tests::v32b_split_order_months_weeks_days_dd_net ... ok
+test split18::tests::v32b_split_passed_rule ... ok
+test split18::tests::v32b_split_whole_window_equals_account ... ok
+test split18::tests::v32b_split_choice_reads_learning_months_only ... ok
+test screen::tests::r2_rank_lists_keep_the_best_strike_per_underlying_side ... ok
+test split18::tests::v32rb_seg_memory_bound ... ok
+test split18::tests::v32rb_seg_equals_month_windows ... ok
+test split18::tests::v32rb_stats_and_picks_equal_month_path ... ok
+test stress::tests::v31_stress_reprices_against_the_trader ... ok
+test tests31::v31_d1_drops_rows_outside_the_picks ... ok
+test tests31::v31_d3_leaves_nothing_pending ... ok
+test tests31::v31_d3_rewalk_equals_fresh_walk ... ok
+test tests31::v31_day_index_over_255_sessions ... ok
+test tests31::v31_dd_grouped_same_second_closes ... ok
+test tests31::v31_exact_margin_sizes_lots_and_refuses ... ok
+test tests31::v31_headline_gate_small_stop_share_25_stress_positive ... ok
+test tests31::v31_margin_rule_v2_sizing_addon ... ok
+test tests31::v31_missing_day_falls_back_and_corrupt_table_refused ... ok
+test tests31::v31_mtm_check_refuses_with_running_loss ... ok
+test tests31::v31_never_closed_counted_per_account ... ok
+test tests31::v31_never_closed_empty_window_never_zero ... ok
+test tests31::v31_never_closed_valued_from_exit_decision ... ok
+test tests31::v31_orders_end_1530_no_fill_after ... ok
+test tests31::v31_own_squareoff_orders_and_fee ... ok
+test tests31::v31_resend_stop_buyback_fills ... ok
+test tests31::v31_snapshot_strictly_before_t ... ok
+test tests31::v31_square_off_still_1510 ... ok
+test tests31::v31_stress_table_drawdown_grouped ... ok
+test tests31::v31_tie_rule_design52 ... ok
+test tests32::v32_a10_orders_in_charges_and_gate ... ok
+test tests32::v32_ban_day_refused ... ok
+test tests32::v32_dte_counts_sessions ... ok
+test tests32::v32_expiry_pick_dial ... ok
+test split18::tests::v32rb_split_o1_gates ... ok
+test tests32::v32_freeze_slices_counted_in_the_trip ... ok
+test tests32::v32_gain_measure_prev_close ... ok
+test tests32::v32_greeks_app_conversions ... ok
+test tests32::v32_headline_needs_zero_unfilled_exits ... ok
+test tests32::v32_host_margin_v3_stock ... ok
+test tests32::v32_liq_entry_gate_covers_whole_order ... ok
+test tests32::v32_month_verdict_2_lakh_inclusive ... ok
+test tests32::v32_portfolio_shared_cap ... ok
+test tests32::v32_prev_close_from_previous_session ... ok
+test tests32::v32_topk_by_volume_5_10_20 ... ok
+test tests32::v32_wanted_picks_x_and_twins ... ok
+test tests32r::v32r_a19_order_and_worst_dates ... ok
+test tests32r::v32r_charges_dated_only ... ok
+test tests32r::v32r_dte_theta_independent_of_loaded_days ... ok
+test tests32r::v32r_exit_why_held_rule_level_trigger ... ok
+test tests32r::v32r_expiry_dial_never_substitutes ... ok
+test tests32r::v32r_headline_excludes_liquidity_off ... ok
+test tests32r::v32r_kernel_piece_counters ... ok
+test tests32r::v32r_ngrid_per_segment ... ok
+test tests32r::v32r_o1_decision_at_n100_and_sampled_steps ... ok
+test tests32::v32_freeze_dated_lookup ... ok
+test tests32r::v32r_o1_range_max_and_first_reach ... ok
+test tests32r::v32r_percent_round_half_up ... ok
+test tests32r::v32r_portfolio_cap_counts_mtm ... ok
+test tests32r::v32r_stage_b_dedup_equals_plain ... ok
+test tests32r::v32r_table_w_passed_needs_a19 ... ok
+test tests32r::v32r_weeks_against_run_weeks ... ok
+test tests32r::v32r_wf_choice_a19_order ... ok
+test tests32rb::v32rb_ckpt_split_state_roundtrip ... ok
+test tests32rb::v32rb_cube_merge_exact ... ok
+test tests32rb::v32rb_margin_extra_rows_appended ... ok
+test tests33::v33_achunk_same_sequence_whole_contracts ... ok
+test tests33::v33_batch_order_permutation_and_fingerprint ... ok
+test tests33::v33_c1_compact_layout_bijective ... ok
+test tests33::v33_c2_append_cfg_lists_offsets ... ok
+test tests33::v33_c3_derived_lists_equal ... ok
+test tests33::v33_c3_flagged_lists_derived ... ok
+test tests33::v33_d2_class_key_has_tf ... ok
+test tests32r::v32r_o1_margin_lookup_ns ... ok
+test tests33::v33_d2_rstar_needed ... ok
+test tests33::v33_hoist_buffer_equals_walk_day ... ok
+test tests33::v33_largest_first_is_a_permutation ... ok
+test tests33::v33_prefetch_slot_is_its_day ... ok
+test tests33::v33_switches_default_off_v33_all ... ok
+test tests33::v33_tablel_online_equals_events ... ok
+test read::tests::sf3_liquidity_dial_counts_and_gaps_before_t_only ... ok
+test tests33f::v33f_cap_minutes_base_and_exclusion ... ok
+test tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed ... ok
+test tests33::v33_d2_replay_equals_walk ... ok
+test tests33f::v33f_sebi_half_dated ... ok
+test tests33f::v33f_split_words_segment_grid ... ok
+test tests33f::v33f_stamp_unverified_labelled ... ok
+test tests33f::v33f_vendor_from_manifest ... ok
+test tests33f::xm_unfilled_exit_rearms_stop ... ok
+test tests33g::oob_checklist_rows_follow_evidence ... ok
+test tests33g::oob_lot_equals_traded_quantum_on_adjusted_series ... ok
+test tests33g::v33f_gst_on_sebi_from_20220718 ... ok
+test tests33g::v33f_idx_exposure_dated_conservative ... ok
+test tests33g::v33f_item12_partial_when_undated ... ok
+test tests33g::v33g_win_sliding_candidates_bounded_exact ... ok
+test tests33g::xm_mtm_mark_is_minute_high ... ok
+test tests34::v34_ban_counted_once_per_event ... ok
+test tests34::v34_band_lock_zero_share ... ok
+test tests34::v34_cap20_ghost_replay_carries_count ... ok
+test tests34::v34_cap20_kernel_counts_every_minute_equal_reference ... ok
+test tests34::v34_cap20_splits_learning_refused_test_failed ... ok
+test tests34::v34_cap20_state_sizes_unchanged ... ok
+test tests34::v34_cap20_views_windows_candidates ... ok
+test tests34::v34_carry_walk_measured_and_bounded ... ok
+test tests33f::v33f_day_major_step_sampled ... ok
+test tests34::v34_cube_day_high_vs_bhavcopy_high ... ok
+test tests34::v34_elm_pre_header_words_name_the_table_rule ... ok
+test tests34::v34_event_day_dial ... ok
+test tests34::v34_exit_why_tt_is_time_armed_breakeven ... ok
+test tests34::v34_expiry_day_dials ... ok
+test tests34::v34_halt_segments_2020_03_13_and_23 ... ok
+test tests34::v34_intraday_mtm_drawdown ... ok
+test tests34::v34_lot0_resolved_or_named ... ok
+test tests34::v34_lots_capped_by_risk_budget ... ok
+test tests34::v34_ckpt_durable_falls_back_to_prev ... ok
+test tests34::v34_next_session_stress_and_stress_set ... ok
+test tests34::v34_respike_best_move_and_stop_hunt ... ok
+test tests34::v34_run_id_unique_and_folder_exclusive ... ok
+test tests34::v34_same_side_book_cap ... ok
+test tests34::v34_stale_file_strict_rescan ... ok
+test tests34::v34_stamp_dated_table ... ok
+test tests34::v34_stock_elm_pre_ael_rule ... ok
+test tests34::v34_memory_guard_stops_above_gate ... ok
+test tests34::v34_tail_gate_worst_trade ... ok
+test tests34i::v34i_cap_counts_survive_checkpoint_and_merge ... ok
+test tests34i::v34i_f3_exact_session_rows ... ok
+test tests34i::v34i_f3_header_fields_checked ... ok
+test tests34i::v34i_f3_kind_and_alias_counters_distinct_contract_days ... ok
+test tests34i::v34i_f3_none_in_range_refused_counted ... ok
+test tests34i::v34i_f3_switch_off_p0 ... ok
+test tests34i::v34i_f7_band_after_flex_known_level ... ok
+test tests34i::v34i_f7_band_clip_only_when_known ... ok
+test tests34i::v34i_f7_band_lock_mixed_second_keeps_volume ... ok
+test tests34i::v34i_f7_entry_strict_r5 ... ok
+test tests34i::v34i_f7_lpp_ref_bounds_for_buy ... ok
+test tests34i::v34i_f7_mpp_nse_cap ... ok
+test tests34i::v34i_f7_nofile_bound_from_settle ... ok
+test tests34i::v34i_f7_resend_cut_1523 ... ok
+test tests34i::v34i_f7_switches_off_byte_identical ... ok
+test tests34i::v34i_f7_worst_of_readings_books_dearest ... ok
+test tests34i::v34i_xm_band_lock_zero_share ... ok
+test tests34i::v34i_xm_resend_limit_inside_nse_lpp_band ... ok
+test tests34s::args_digest_ignores_runtime_and_paths ... ok
+test tests34s::batch_plan_target_independent ... ok
+test tests34s::bck_refuses_unknown_tag_and_shape ... ok
+test tests34s::bck_roundtrip_canonical ... ok
+test tests34s::bck_write_never_overwrites ... ok
+test tests34s::fingerprint_has_list_digest ... ok
+test tests34s::ist_label_offset ... ok
+test tests34s::kit_flags_refusals ... ok
+test split18::tests::v32b_split_windows_exact ... ok
+test tests34s::merge_refusals ... ok
+test tests34s::plan_roundtrip_and_refusals ... ok
+test tests34s::portable_sha256_in_process ... ok
+test tests34s::proc_readers_parse_linux_text ... ok
+test tests34s::read_dir_sorted ... ok
+test tests34::v34_switches_default_off_fix34_all ... ok
+test tests34s::merge_equals_sequential_synthetic ... ok
+test tests34s::sha256_fips_vectors ... ok
+test tests34s::shard_walks_assigned_batches ... ok
+test tests34s::slice_equals_full_for_segment ... ok
+test tests34s::strict_bhav_fatal ... ok
+test tests34s::synthetic_is_reproducible ... ok
+test tests34s::tools_from_env ... ok
+test tests3::sf3_chunk_kernel_equals_walk_account ... ok
+test tests3::sf3_day_major_equals_whole ... ok
+test tests3::sf3_event_skip_exact ... ok
+test tests3::sf3_first_hit_min_anchor_and_tie_order ... ok
+test tests3::sf3_gapped_stop_pays_block_worst ... ok
+test tests3::sf3_gapped_target_buys_back_at_block_worst ... ok
+test tests3::sf3_held_anchor_cancels_unfilled_sale ... ok
+test tests3::sf3_setting_dedup_exact ... ok
+test tests3::sf3_trail_fires_inside_1508_1510_is_held ... ok
+test trade::tests::after_cut_refused ... ok
+test trade::tests::fa1_prev_prints_first_print_and_zero_volume_rows ... ok
+test trade::tests::fa1_sparse_sale_counts_no_volume_from_the_signal_candle ... ok
+test trade::tests::gapped_stop_pays_block_worst ... ok
+test trade::tests::missing_seconds_inside_fill_blocks_are_jumped ... ok
+test trade::tests::premium_005_sale_respects_protection_floor ... ok
+test trade::tests::r1_side_key_is_underlying_side_expiry_not_strike ... ok
+test trade::tests::stock_expiry_day_refused ... ok
+test wf::tests::compose_is_exact_on_concatenation ... ok
+test wf::tests::rows_are_the_signed_21 ... ok
+test wf::tests::sf3_window_compose_equals_fresh_walk ... ok
+test tests34s::sfz_roundtrip_all_rows ... FAILED
+test tests34s::root_digest_same_for_every_form ... FAILED
+test tests33f::v33f_causal_levels_ignore_later_days ... ok
+
+failures:
+
+---- tests34s::sfz_roundtrip_all_rows stdout ----
+
+thread 'tests34s::sfz_roundtrip_all_rows' (2249) panicked at crates/spikefade/src/tests34s.rs:632:60:
+called `Result::unwrap()` on an `Err` value: "zstd (/opt/homebrew/bin/zstd) [\"-3\", \"-q\", \"-c\"]: No such file or directory (os error 2)"
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1867:5
+   3: <core::result::Result<alloc::vec::Vec<u8>, alloc::string::String>>::unwrap
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1233:23
+   4: spikefade::tests34s::sfz_roundtrip_all_rows
+             at ./src/tests34s.rs:632:60
+   5: spikefade::tests34s::sfz_roundtrip_all_rows::{closure#0}
+             at ./src/tests34s.rs:626:28
+   6: <spikefade::tests34s::sfz_roundtrip_all_rows::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- tests34s::root_digest_same_for_every_form stdout ----
+
+thread 'tests34s::root_digest_same_for_every_form' (2248) panicked at crates/spikefade/src/tests34s.rs:667:52:
+called `Result::unwrap()` on an `Err` value: "zstd (/opt/homebrew/bin/zstd) [\"-3\", \"-q\", \"-c\"]: No such file or directory (os error 2)"
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1867:5
+   3: <core::result::Result<alloc::string::String, alloc::string::String>>::unwrap
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1233:23
+   4: spikefade::tests34s::root_digest_same_for_every_form
+             at ./src/tests34s.rs:667:52
+   5: spikefade::tests34s::root_digest_same_for_every_form::{closure#0}
+             at ./src/tests34s.rs:655:37
+   6: <spikefade::tests34s::root_digest_same_for_every_form::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    tests34s::root_digest_same_for_every_form
+    tests34s::sfz_roundtrip_all_rows
+
+test result: FAILED. 204 passed; 2 failed; 1 ignored; 0 measured; 10 filtered out; finished in 0.66s
+
+error: test failed, to rerun pass `-p spikefade --bin spikefade`
