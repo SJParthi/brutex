@@ -1,0 +1,32 @@
+crates/spikefade/src/v32.rs:363:27: delete field mo from struct WalkRes expression in port_walk
+crates/spikefade/src/v32.rs:511:11: replace > with >= in v19_miss_words
+crates/spikefade/src/v32.rs:552:51: replace > with >= in pick_tables_m
+crates/spikefade/src/v32.rs:553:53: replace < with > in pick_tables_m
+crates/spikefade/src/v32.rs:677:21: replace -= with /= in portfolio
+crates/spikefade/src/v32.rs:819:5: replace share -> String with "xyzzy".into()
+crates/spikefade/src/ckpt.rs:209:24: delete field win from struct Ckpt expression in load
+crates/spikefade/src/ckpt.rs:271:13: delete match arm "WL" | "WT" in load
+crates/spikefade/src/ckpt.rs:287:18: replace match guard t.starts_with("S18") with false in load
+crates/spikefade/src/side17.rs:103:5: replace note_day with ()
+crates/spikefade/src/side17.rs:198:5: replace loss_at -> i64 with -1
+crates/spikefade/src/side17.rs:198:14: replace == with != in loss_at
+crates/spikefade/src/side17.rs:201:51: replace / with % in loss_at
+crates/spikefade/src/side17.rs:296:29: delete field seg from struct Self expression in CandSet::of_run
+crates/spikefade/src/side17.rs:296:34: delete field days from struct Self expression in CandSet::of_run
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (0, 0, 0, 0, 0, 0, -1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (0, 0, 0, 1, 0, 1, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (0, 1, 1, 1, 0, 1, -1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 0, 0, 0, 0, 0)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 0, 0, 1, 0, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 1, 0, 0, 0, 0)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 1, 0, 1, 0, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 0, 1, 0, 1, 1, 1)
+crates/spikefade/src/side17.rs:379:5: replace a19_of -> (usize, usize, usize, usize, usize, usize, i64) with (1, 1, 1, 1, 1, 1, 1)
+crates/spikefade/src/side17.rs:415:117: delete field seg from struct STrade expression in combined
+crates/spikefade/src/side17.rs:497:60: replace == with != in combined
+crates/spikefade/src/split18.rs:91:28: delete field days from struct Self expression in SCal::from_days
+crates/spikefade/src/split18.rs:144:18: replace > with >= in SCal::set_segments
+crates/spikefade/src/split18.rs:1111:28: delete field dst from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:49: delete field items from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:68: delete field pre from struct Self expression in Sel18::merge
+crates/spikefade/src/split18.rs:1111:85: delete field suf from struct Self expression in Sel18::merge
