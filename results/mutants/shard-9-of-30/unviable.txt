@@ -1,0 +1,1 @@
+crates/spikefade/src/report.rs:1189:25: replace && with || in write_results
