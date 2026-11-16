@@ -1,0 +1,8 @@
+crates/spikefade/src/mtable.rs:297:25: delete field elm from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:297:30: delete field nse_only from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:297:40: delete field exact from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:297:47: delete field rate_h from struct Parts expression in idx_dated
+crates/spikefade/src/mtable.rs:619:13: delete field span from struct Parts expression in strict_span
+crates/spikefade/src/mtable.rs:619:19: delete field premium from struct Parts expression in strict_span
+crates/spikefade/src/mtable.rs:619:28: delete field nse_only from struct Parts expression in strict_span
+crates/spikefade/src/mtable.rs:619:38: delete field exact from struct Parts expression in strict_span
