@@ -1,1 +1,15 @@
 crates/spikefade/src/report3.rs:5434:27: replace && with || in table_w_a19
+crates/spikefade/src/report3.rs:5564:9: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5570:9: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5579:9: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5589:13: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5619:13: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5624:13: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5629:13: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5634:13: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5639:13: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5644:13: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5655:9: replace && with || in v32_checklist
+crates/spikefade/src/report3.rs:5662:9: replace && with || in v32_checklist
+crates/spikefade/src/stage.rs:32:34: replace - with +
+crates/spikefade/src/stage.rs:86:5: replace key_of -> XKey with Default::default()
