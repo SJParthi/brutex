@@ -1,0 +1,2 @@
+crates/wf_sweep/src/acc.rs:721:9: replace SweepAcc<'a>::facts -> Learn with Default::default()
+crates/wf_sweep/src/acc.rs:766:13: replace && with || in SweepAcc<'a>::learn_fast

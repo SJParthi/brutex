@@ -1,0 +1,114 @@
+crates/sniper_host/src/sec.rs:97:13: delete match arm "GE" in Pat::of_cmp
+crates/sniper_host/src/sec.rs:106:9: replace Pat::pass -> bool with true
+crates/sniper_host/src/sec.rs:98:13: delete match arm "LE" | "LT" in Pat::of_cmp
+crates/sniper_host/src/sec.rs:106:9: replace Pat::pass -> bool with false
+crates/sniper_host/src/sec.rs:107:32: replace < with == in Pat::pass
+crates/sniper_host/src/sec.rs:107:32: replace < with > in Pat::pass
+crates/sniper_host/src/sec.rs:107:32: replace < with <= in Pat::pass
+crates/sniper_host/src/sec.rs:108:32: replace >= with < in Pat::pass
+crates/sniper_host/src/sec.rs:116:5: replace enc -> Result<u8, String> with Ok(0)
+crates/sniper_host/src/sec.rs:116:5: replace enc -> Result<u8, String> with Ok(1)
+crates/sniper_host/src/sec.rs:125:48: delete ! in enc
+crates/sniper_host/src/sec.rs:126:43: delete ! in enc
+crates/sniper_host/src/sec.rs:138:52: replace && with || in enc
+crates/sniper_host/src/sec.rs:138:43: replace && with || in enc
+crates/sniper_host/src/sec.rs:138:48: replace > with == in enc
+crates/sniper_host/src/sec.rs:138:48: replace > with < in enc
+crates/sniper_host/src/sec.rs:138:48: replace > with >= in enc
+crates/sniper_host/src/sec.rs:138:59: replace == with != in enc
+crates/sniper_host/src/sec.rs:138:78: replace - with + in enc
+crates/sniper_host/src/sec.rs:138:78: replace - with / in enc
+crates/sniper_host/src/sec.rs:151:9: replace Terms::of -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/sec.rs:153:48: replace >= with < in Terms::of
+crates/sniper_host/src/sec.rs:156:25: replace > with == in Terms::of
+crates/sniper_host/src/sec.rs:156:25: replace > with < in Terms::of
+crates/sniper_host/src/sec.rs:156:25: replace > with >= in Terms::of
+crates/sniper_host/src/sec.rs:165:9: replace Terms::n -> usize with 0
+crates/sniper_host/src/sec.rs:165:9: replace Terms::n -> usize with 1
+crates/sniper_host/src/sec.rs:268:9: replace RowLayout::with_ctx -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/sec.rs:268:64: replace && with || in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:268:58: replace == with != in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:274:49: replace * with + in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:274:49: replace * with / in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:276:20: replace += with -= in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:276:20: replace += with *= in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:280:12: replace += with -= in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:280:12: replace += with *= in RowLayout::with_ctx
+crates/sniper_host/src/sec.rs:292:9: replace RowLayout::compress_ctx -> Result<(), String> with Ok(())
+crates/sniper_host/src/sec.rs:296:76: replace == with != in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:299:44: replace + with - in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:299:44: replace + with * in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:299:36: replace + with - in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:299:36: replace + with * in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:299:40: replace * with + in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:299:40: replace * with / in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:303:78: replace | with & in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:303:78: replace | with ^ in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:304:101: replace | with & in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:304:101: replace | with ^ in RowLayout::compress_ctx
+crates/sniper_host/src/sec.rs:325:5: replace zone_code -> u8 with 0
+crates/sniper_host/src/sec.rs:325:5: replace zone_code -> u8 with 1
+crates/sniper_host/src/sec.rs:339:5: replace cpr_code -> u8 with 0
+crates/sniper_host/src/sec.rs:339:5: replace cpr_code -> u8 with 1
+crates/sniper_host/src/sec.rs:350:5: replace htf_pack -> Result<(), String> with Ok(())
+crates/sniper_host/src/sec.rs:366:24: replace << with >> in htf_pack
+crates/sniper_host/src/sec.rs:368:14: replace > with == in htf_pack
+crates/sniper_host/src/sec.rs:368:14: replace > with < in htf_pack
+crates/sniper_host/src/sec.rs:368:14: replace > with >= in htf_pack
+crates/sniper_host/src/sec.rs:371:11: replace |= with &= in htf_pack
+crates/sniper_host/src/sec.rs:371:27: replace << with >> in htf_pack
+crates/sniper_host/src/sec.rs:371:33: replace * with + in htf_pack
+crates/sniper_host/src/sec.rs:371:33: replace * with / in htf_pack
+crates/sniper_host/src/sec.rs:374:14: replace > with == in htf_pack
+crates/sniper_host/src/sec.rs:374:14: replace > with < in htf_pack
+crates/sniper_host/src/sec.rs:374:14: replace > with >= in htf_pack
+crates/sniper_host/src/sec.rs:377:11: replace |= with &= in htf_pack
+crates/sniper_host/src/sec.rs:377:27: replace << with >> in htf_pack
+crates/sniper_host/src/sec.rs:377:34: replace + with - in htf_pack
+crates/sniper_host/src/sec.rs:377:34: replace + with * in htf_pack
+crates/sniper_host/src/sec.rs:377:38: replace * with + in htf_pack
+crates/sniper_host/src/sec.rs:377:38: replace * with / in htf_pack
+crates/sniper_host/src/sec.rs:387:5: replace htf_unpack -> Option<HtfRead> with None
+crates/sniper_host/src/sec.rs:387:5: replace htf_unpack -> Option<HtfRead> with Some(Default::default())
+crates/sniper_host/src/sec.rs:389:16: replace == with != in htf_unpack
+crates/sniper_host/src/sec.rs:389:10: replace >> with << in htf_unpack
+crates/sniper_host/src/sec.rs:392:27: delete field rsi from struct HtfRead expression in htf_unpack
+crates/sniper_host/src/sec.rs:392:68: delete field wr from struct HtfRead expression in htf_unpack
+crates/sniper_host/src/sec.rs:392:108: delete field bb from struct HtfRead expression in htf_unpack
+crates/sniper_host/src/sec.rs:392:186: delete field cci from struct HtfRead expression in htf_unpack
+crates/sniper_host/src/sec.rs:394:42: replace & with | in htf_unpack
+crates/sniper_host/src/sec.rs:394:42: replace & with ^ in htf_unpack
+crates/sniper_host/src/sec.rs:394:30: replace >> with << in htf_unpack
+crates/sniper_host/src/sec.rs:394:36: replace * with + in htf_unpack
+crates/sniper_host/src/sec.rs:394:36: replace * with / in htf_unpack
+crates/sniper_host/src/sec.rs:397:47: replace & with | in htf_unpack
+crates/sniper_host/src/sec.rs:397:47: replace & with ^ in htf_unpack
+crates/sniper_host/src/sec.rs:397:30: replace >> with << in htf_unpack
+crates/sniper_host/src/sec.rs:397:37: replace + with - in htf_unpack
+crates/sniper_host/src/sec.rs:397:37: replace + with * in htf_unpack
+crates/sniper_host/src/sec.rs:397:41: replace * with + in htf_unpack
+crates/sniper_host/src/sec.rs:397:41: replace * with / in htf_unpack
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with None
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((0, 0))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((0, 1))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((0, -1))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((1, 0))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((1, 1))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((1, -1))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((-1, 0))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((-1, 1))
+crates/sniper_host/src/sec.rs:404:5: replace row_reading -> Option<(i128, i128)> with Some((-1, -1))
+crates/sniper_host/src/sec.rs:406:9: delete match arm "C-BODY" in row_reading
+crates/sniper_host/src/sec.rs:407:9: delete match arm "C-UW" in row_reading
+crates/sniper_host/src/sec.rs:408:9: delete match arm "C-LW" in row_reading
+crates/sniper_host/src/sec.rs:409:9: delete match arm "C-RNG" in row_reading
+crates/sniper_host/src/sec.rs:410:9: delete match arm "V-RVOL" in row_reading
+crates/sniper_host/src/sec.rs:411:9: delete match arm "P-CHG" in row_reading
+crates/sniper_host/src/sec.rs:412:9: delete match arm "G-PDH" in row_reading
+crates/sniper_host/src/sec.rs:419:9: delete match arm "G-PDL" in row_reading
+crates/sniper_host/src/sec.rs:416:81: delete - in row_reading
+crates/sniper_host/src/sec.rs:423:81: delete - in row_reading
+crates/sniper_host/src/sec.rs:432:5: replace sess_pass -> bool with true
+crates/sniper_host/src/sec.rs:432:5: replace sess_pass -> bool with false
+crates/sniper_host/src/sec.rs:433:9: delete match arm "C-GAP" in sess_pass
+crates/sniper_host/src/sec.rs:434:9: delete match arm "L-CPRW" in sess_pass

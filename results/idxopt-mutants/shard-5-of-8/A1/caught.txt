@@ -1,0 +1,146 @@
+crates/opt_pos/src/pos.rs:417:9: replace Book::series_of -> Option<&SeriesRow> with None
+crates/opt_pos/src/pos.rs:417:9: replace Book::series_of -> Option<&SeriesRow> with Some(Box::leak(Box::new(Default::default())))
+crates/opt_pos/src/pos.rs:417:98: replace && with || in Book::series_of
+crates/opt_pos/src/pos.rs:417:84: replace && with || in Book::series_of
+crates/opt_pos/src/pos.rs:417:75: replace == with != in Book::series_of
+crates/opt_pos/src/pos.rs:417:90: replace <= with > in Book::series_of
+crates/opt_pos/src/pos.rs:417:106: replace <= with > in Book::series_of
+crates/opt_pos/src/pos.rs:424:9: replace Book::alias_in -> Option<Day> with None
+crates/opt_pos/src/pos.rs:424:9: replace Book::alias_in -> Option<Day> with Some(Default::default())
+crates/opt_pos/src/pos.rs:479:9: replace SlotRule::slot -> i64 with 0
+crates/opt_pos/src/pos.rs:479:9: replace SlotRule::slot -> i64 with 1
+crates/opt_pos/src/pos.rs:479:9: replace SlotRule::slot -> i64 with -1
+crates/opt_pos/src/pos.rs:481:36: replace / with % in SlotRule::slot
+crates/opt_pos/src/pos.rs:481:36: replace / with * in SlotRule::slot
+crates/opt_pos/src/pos.rs:482:67: replace / with % in SlotRule::slot
+crates/opt_pos/src/pos.rs:482:67: replace / with * in SlotRule::slot
+crates/opt_pos/src/pos.rs:482:41: replace + with - in SlotRule::slot
+crates/opt_pos/src/pos.rs:482:41: replace + with * in SlotRule::slot
+crates/opt_pos/src/pos.rs:489:9: replace SlotRule::name -> &'static str with ""
+crates/opt_pos/src/pos.rs:489:9: replace SlotRule::name -> &'static str with "xyzzy"
+crates/opt_pos/src/pos.rs:719:9: replace Ledger::realised -> i64 with 0
+crates/opt_pos/src/pos.rs:719:9: replace Ledger::realised -> i64 with 1
+crates/opt_pos/src/pos.rs:719:9: replace Ledger::realised -> i64 with -1
+crates/opt_pos/src/pos.rs:719:43: replace <= with > in Ledger::realised
+crates/opt_pos/src/pos.rs:723:9: replace Ledger::free -> i64 with 0
+crates/opt_pos/src/pos.rs:723:9: replace Ledger::free -> i64 with 1
+crates/opt_pos/src/pos.rs:723:9: replace Ledger::free -> i64 with -1
+crates/opt_pos/src/pos.rs:724:83: replace < with == in Ledger::free
+crates/opt_pos/src/pos.rs:724:83: replace < with > in Ledger::free
+crates/opt_pos/src/pos.rs:724:83: replace < with <= in Ledger::free
+crates/opt_pos/src/pos.rs:724:132: replace <= with > in Ledger::free
+crates/opt_pos/src/pos.rs:734:42: replace - with / in Ledger::free
+crates/opt_pos/src/pos.rs:734:35: replace - with + in Ledger::free
+crates/opt_pos/src/pos.rs:734:35: replace - with / in Ledger::free
+crates/opt_pos/src/pos.rs:734:17: replace + with * in Ledger::free
+crates/opt_pos/src/pos.rs:739:5: replace seg_of -> Result<Vec<Seg>, String> with Ok(vec![Default::default()])
+crates/opt_pos/src/pos.rs:739:35: replace + with * in seg_of
+crates/opt_pos/src/pos.rs:750:5: replace walk_order -> Result<(common_fill::std70::LevelFill, Vec<FillRow>), String> with Ok((Default::default(), vec![]))
+crates/opt_pos/src/pos.rs:750:5: replace walk_order -> Result<(common_fill::std70::LevelFill, Vec<FillRow>), String> with Ok((Default::default(), vec![Default::default()]))
+crates/opt_pos/src/pos.rs:753:32: replace == with != in walk_order
+crates/opt_pos/src/pos.rs:770:5: replace spot_before -> Option<i64> with None
+crates/opt_pos/src/pos.rs:770:5: replace spot_before -> Option<i64> with Some(0)
+crates/opt_pos/src/pos.rs:770:5: replace spot_before -> Option<i64> with Some(1)
+crates/opt_pos/src/pos.rs:770:5: replace spot_before -> Option<i64> with Some(-1)
+crates/opt_pos/src/pos.rs:770:122: replace < with == in spot_before
+crates/opt_pos/src/pos.rs:770:122: replace < with > in spot_before
+crates/opt_pos/src/pos.rs:770:122: replace < with <= in spot_before
+crates/opt_pos/src/pos.rs:777:5: replace rows_before -> Vec<Sec> with vec![]
+crates/opt_pos/src/pos.rs:777:5: replace rows_before -> Vec<Sec> with vec![Default::default()]
+crates/opt_pos/src/pos.rs:777:19: replace && with || in rows_before
+crates/opt_pos/src/pos.rs:777:72: replace && with || in rows_before
+crates/opt_pos/src/pos.rs:780:37: replace < with == in rows_before
+crates/opt_pos/src/pos.rs:780:37: replace < with > in rows_before
+crates/opt_pos/src/pos.rs:780:37: replace < with <= in rows_before
+crates/opt_pos/src/pos.rs:792:75: replace < with == in pick
+crates/opt_pos/src/pos.rs:792:75: replace < with > in pick
+crates/opt_pos/src/pos.rs:792:93: replace > with == in pick
+crates/opt_pos/src/pos.rs:792:93: replace > with < in pick
+crates/opt_pos/src/pos.rs:802:28: replace < with == in pick
+crates/opt_pos/src/pos.rs:802:28: replace < with > in pick
+crates/opt_pos/src/pos.rs:805:61: replace || with && in pick
+crates/opt_pos/src/pos.rs:813:50: replace + with * in pick
+crates/opt_pos/src/pos.rs:827:5: replace last_close_before -> Option<i64> with None
+crates/opt_pos/src/pos.rs:827:5: replace last_close_before -> Option<i64> with Some(0)
+crates/opt_pos/src/pos.rs:827:5: replace last_close_before -> Option<i64> with Some(1)
+crates/opt_pos/src/pos.rs:827:5: replace last_close_before -> Option<i64> with Some(-1)
+crates/opt_pos/src/pos.rs:827:43: replace < with == in last_close_before
+crates/opt_pos/src/pos.rs:827:43: replace < with > in last_close_before
+crates/opt_pos/src/pos.rs:827:43: replace < with <= in last_close_before
+crates/opt_pos/src/pos.rs:837:5: replace roll_day -> Option<Day> with None
+crates/opt_pos/src/pos.rs:837:5: replace roll_day -> Option<Day> with Some(Default::default())
+crates/opt_pos/src/pos.rs:839:49: replace >= with < in roll_day
+crates/opt_pos/src/pos.rs:845:64: replace && with || in roll_day
+crates/opt_pos/src/pos.rs:845:52: replace == with != in roll_day
+crates/opt_pos/src/pos.rs:862:10: replace > with == in guard
+crates/opt_pos/src/pos.rs:862:10: replace > with < in guard
+crates/opt_pos/src/pos.rs:862:10: replace > with >= in guard
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((0, 0))
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((0, 1))
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((0, -1))
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((-1, 0))
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((-1, 1))
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((-1, -1))
+crates/opt_pos/src/pos.rs:878:23: replace += with -= in est_charges
+crates/opt_pos/src/pos.rs:882:22: replace += with *= in est_charges
+crates/opt_pos/src/pos.rs:888:27: replace += with -= in est_charges
+crates/opt_pos/src/pos.rs:896:15: replace += with *= in est_charges
+crates/opt_pos/src/pos.rs:897:15: replace += with *= in est_charges
+crates/opt_pos/src/pos.rs:912:23: replace += with -= in leg_charges
+crates/opt_pos/src/pos.rs:922:27: replace += with -= in leg_charges
+crates/opt_pos/src/pos.rs:939:5: replace close_trip -> Result<(), String> with Ok(())
+crates/opt_pos/src/pos.rs:940:21: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:940:21: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:945:26: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:958:64: replace && with || in close_trip
+crates/opt_pos/src/pos.rs:958:23: delete ! in close_trip
+crates/opt_pos/src/pos.rs:958:91: replace == with != in close_trip
+crates/opt_pos/src/pos.rs:964:62: replace && with || in close_trip
+crates/opt_pos/src/pos.rs:964:56: replace >= with < in close_trip
+crates/opt_pos/src/pos.rs:964:70: replace < with == in close_trip
+crates/opt_pos/src/pos.rs:964:70: replace < with > in close_trip
+crates/opt_pos/src/pos.rs:973:39: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:973:34: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:973:34: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:974:38: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:974:33: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:974:33: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:983:29: replace <= with > in close_trip
+crates/opt_pos/src/pos.rs:1008:5: replace value_at_data_end -> Result<(), String> with Ok(())
+crates/opt_pos/src/pos.rs:1009:21: replace - with + in value_at_data_end
+crates/opt_pos/src/pos.rs:1009:21: replace - with / in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:55: replace && with || in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:14: delete ! in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:112: replace && with || in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:106: replace < with == in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:106: replace < with > in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:117: replace > with == in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:117: replace > with < in value_at_data_end
+crates/opt_pos/src/pos.rs:1015:54: replace && with || in value_at_data_end
+crates/opt_pos/src/pos.rs:1015:48: replace >= with < in value_at_data_end
+crates/opt_pos/src/pos.rs:1015:62: replace < with == in value_at_data_end
+crates/opt_pos/src/pos.rs:1015:62: replace < with > in value_at_data_end
+crates/opt_pos/src/pos.rs:1018:31: replace - with + in value_at_data_end
+crates/opt_pos/src/pos.rs:1018:31: replace - with / in value_at_data_end
+crates/opt_pos/src/pos.rs:1018:26: replace + with - in value_at_data_end
+crates/opt_pos/src/pos.rs:1018:26: replace + with * in value_at_data_end
+crates/opt_pos/src/pos.rs:1028:5: replace data_end_w0 -> i64 with 0
+crates/opt_pos/src/pos.rs:1028:5: replace data_end_w0 -> i64 with 1
+crates/opt_pos/src/pos.rs:1028:5: replace data_end_w0 -> i64 with -1
+crates/opt_pos/src/pos.rs:1028:35: replace + with - in data_end_w0
+crates/opt_pos/src/pos.rs:1028:28: replace * with + in data_end_w0
+crates/opt_pos/src/pos.rs:1028:35: replace + with * in data_end_w0
+crates/opt_pos/src/pos.rs:1028:28: replace * with / in data_end_w0
+crates/opt_pos/src/pos.rs:1028:40: replace * with + in data_end_w0
+crates/opt_pos/src/pos.rs:1028:40: replace * with / in data_end_w0
+crates/opt_pos/src/pos.rs:1029:70: replace == with != in data_end_w0
+crates/opt_pos/src/pos.rs:1029:8: delete ! in data_end_w0
+crates/opt_pos/src/pos.rs:1042:30: replace += with -= in bump
+crates/opt_pos/src/pos.rs:1042:5: replace bump with ()
+crates/opt_pos/src/pos.rs:1042:30: replace += with *= in bump
+crates/opt_pos/src/pos.rs:1047:5: replace add with ()
+crates/opt_pos/src/pos.rs:1089:5: replace slot_at -> i64 with 0
+crates/opt_pos/src/pos.rs:1089:5: replace slot_at -> i64 with 1
+crates/opt_pos/src/pos.rs:1089:5: replace slot_at -> i64 with -1
+crates/opt_pos/src/pos.rs:1100:5: replace run -> Result<RunOut, String> with Ok(Default::default())
+crates/opt_pos/src/pos.rs:1100:49: replace && with || in run

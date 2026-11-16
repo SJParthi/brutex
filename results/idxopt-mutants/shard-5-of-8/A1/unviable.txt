@@ -1,0 +1,1 @@
+crates/opt_pos/src/pos.rs:788:5: replace pick -> Result<(ItmPick, PickInfo), String> with Ok((Default::default(), Default::default()))

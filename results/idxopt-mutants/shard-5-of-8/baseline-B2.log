@@ -1,0 +1,58 @@
+   Compiling common_wf v1.0.0 (/root/idxopt/sniper-host-v3-idx-w4r3/pinned/common-wf-v1-r2)
+   Compiling sniper_kernel v1.0.0 (/root/idxopt/sniper-host-v3-idx-w4r3/crates/sniper_kernel)
+   Compiling wf_sweep v1.0.0 (/root/idxopt/sniper-host-v3-idx-w4r3/crates/wf_sweep)
+    Finished `test` profile [unoptimized] target(s) in 3.10s
+     Running unittests src/lib.rs (/root/tgt-B/debug/deps/sniper_kernel-16f0801d69585803)
+
+running 7 tests
+test tests::bitsets_and_and_iterate ... ok
+test tests::law_tag_and_refusal ... ok
+test tests::ladder_buckets_are_exact_and_the_last_rung_is_open ... ok
+test tests::codes_are_mixed_radix_with_cci_least_significant ... ok
+test tests::tie_runs_are_ranges_of_consecutive_cci_levels ... ok
+test tests::line_engine_equals_brute_force_first_mode ... ok
+test tests::step_counts_identical_at_1x_10x_100x ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/root/tgt-B/debug/deps/wf_sweep-67ab85896c070442)
+
+running 15 tests
+test tests::a_run_is_split_at_the_bound ... ok
+test tests::e2_every_learning_year_part_positive ... ok
+test tests::a_test_month_trade_is_refused ... ok
+test tests::red_build_is_refused ... ok
+test tests::views_rows_parse_fail_closed ... ok
+test tests::windows_must_be_year_units_inside_the_hull ... ok
+test tests_fast::an_out_of_bound_table_stays_eager ... ok
+test tests::or_eq_runs_equal_single_offers ... ok
+test tests::key_read_steps_identical_at_1x_10x_100x ... ok
+test tests::sweep_eq_against_the_plain_recomputation ... ok
+test tests_fast::lazy_eq_eager_every_fact_key_and_step ... ok
+test tests_fast::rejects_prefix_reads_only_a_full_list ... ok
+test tests_fast::lazy_merges_never_exceed_the_charged_path ... ok
+test tests_fast::grouped_offer_all_equals_the_per_view_loop ... ok
+test tests_fast::gated_lists_equal_ungated_lists ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.34s
+
+     Running tests/new_pos.rs (/root/tgt-B/debug/deps/new_pos-bda94aaeced3173e)
+
+running 2 tests
+test b4_a_group_with_no_priced_row_keeps_no_leaf ... ok
+test b4_a_learning_month_with_no_booking_is_still_counted_by_k9 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sniper_kernel
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wf_sweep
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

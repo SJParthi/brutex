@@ -1,0 +1,3 @@
+SUMMARY idxopt-mutants shard=5/8 set=A1 mutants=283 caught=146 missed=136 timeout=0 unviable=1 wall_s=145 rc=2 commit=10dacdd629ee7052c4ca3fe2312b3af275cda172 cargo_mutants=27.1.0 rustc=1.97.1
+SUMMARY idxopt-mutants shard=5/8 set=A2 mutants=58 caught=58 missed=0 timeout=0 unviable=0 wall_s=62 rc=0 commit=10dacdd629ee7052c4ca3fe2312b3af275cda172 cargo_mutants=27.1.0 rustc=1.97.1
+SUMMARY idxopt-mutants shard=5/8 set=B2 mutants=123 caught=106 missed=15 timeout=0 unviable=2 wall_s=91 rc=2 commit=10dacdd629ee7052c4ca3fe2312b3af275cda172 cargo_mutants=27.1.0 rustc=1.97.1

@@ -1,0 +1,19 @@
+Found 123 mutants to test
+ok       Unmutated baseline in 2s build + 1s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/wf_sweep/src/acc.rs:675:20: replace += with *= in SweepAcc<'a>::reset_lazy in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:750:17: delete match arm (Some(t), None) in SweepAcc<'a>::learn in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:766:18: replace == with != in SweepAcc<'a>::learn_fast in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:795:39: replace * with / in SweepAcc<'a>::eligible in 0s build + 2s test
+MISSED   crates/wf_sweep/src/acc.rs:800:41: replace * with / in SweepAcc<'a>::eligible in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:802:43: replace == with != in SweepAcc<'a>::eligible in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:818:9: replace SweepAcc<'a>::r73_key -> Result<Key, SweepErr> with Ok(Default::default()) in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:821:29: replace >= with < in SweepAcc<'a>::r73_key in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:823:41: replace != with == in SweepAcc<'a>::r73_key in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:838:19: replace += with -= in SweepAcc<'a>::key in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:838:19: replace += with *= in SweepAcc<'a>::key in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:865:30: replace && with || in SweepAcc<'_>::view_key_gated in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:883:27: replace += with -= in SweepAcc<'_>::view_key_gated in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:883:27: replace += with *= in SweepAcc<'_>::view_key_gated in 0s build + 1s test
+MISSED   crates/wf_sweep/src/acc.rs:904:49: replace * with / in SweepAcc<'_>::view_key_gated in 0s build + 1s test
+123 mutants tested in 2m: 15 missed, 106 caught, 2 unviable

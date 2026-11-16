@@ -1,0 +1,106 @@
+crates/wf_sweep/src/acc.rs:660:18: replace != with == in SweepAcc<'a>::reset
+crates/wf_sweep/src/acc.rs:675:9: replace SweepAcc<'a>::reset_lazy -> Result<(), SweepErr> with Ok(())
+crates/wf_sweep/src/acc.rs:675:20: replace += with -= in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:661:31: delete - in SweepAcc<'a>::reset
+crates/wf_sweep/src/acc.rs:681:18: replace == with != in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:687:42: replace - with + in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:687:42: replace - with / in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:690:47: replace + with - in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:690:47: replace + with * in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:690:42: replace * with + in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:690:42: replace * with / in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:691:45: replace + with - in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:691:40: replace * with + in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:691:45: replace + with * in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:691:40: replace * with / in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:692:34: replace + with - in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:692:34: replace + with * in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:692:29: replace * with + in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:692:29: replace * with / in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:706:34: replace + with - in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:706:29: replace * with + in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:706:34: replace + with * in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:706:29: replace * with / in SweepAcc<'a>::reset_lazy
+crates/wf_sweep/src/acc.rs:741:9: replace SweepAcc<'a>::learn -> Result<(Learn, u64), SweepErr> with Ok((Default::default(), 0))
+crates/wf_sweep/src/acc.rs:726:29: replace == with != in SweepAcc<'a>::facts
+crates/wf_sweep/src/acc.rs:744:89: replace + with - in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:741:9: replace SweepAcc<'a>::learn -> Result<(Learn, u64), SweepErr> with Ok((Default::default(), 1))
+crates/wf_sweep/src/acc.rs:744:89: replace + with * in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:744:84: replace * with + in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:744:84: replace * with / in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:749:17: delete match arm (Some(t), Some(d)) in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:55: replace + with - in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:55: replace + with * in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:50: replace * with + in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:85: replace + with - in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:50: replace * with / in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:80: replace * with + in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:85: replace + with * in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:754:19: replace += with -= in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:754:19: replace += with *= in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:748:80: replace * with / in SweepAcc<'a>::learn
+crates/wf_sweep/src/acc.rs:762:9: replace SweepAcc<'a>::learn_fast -> Result<(Learn, u64), SweepErr> with Ok((Default::default(), 0))
+crates/wf_sweep/src/acc.rs:762:9: replace SweepAcc<'a>::learn_fast -> Result<(Learn, u64), SweepErr> with Ok((Default::default(), 1))
+crates/wf_sweep/src/acc.rs:764:27: replace + with - in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:764:27: replace + with * in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:764:22: replace * with + in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:764:22: replace * with / in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:74: replace + with - in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:74: replace + with * in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:69: replace * with + in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:69: replace * with / in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:108: replace + with - in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:108: replace + with * in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:103: replace * with + in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:773:103: replace * with / in SweepAcc<'a>::learn_fast
+crates/wf_sweep/src/acc.rs:795:44: replace + with - in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:792:9: replace SweepAcc<'a>::eligible -> Result<(), NotEligible> with Ok(())
+crates/wf_sweep/src/acc.rs:795:44: replace + with * in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:795:39: replace * with + in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:796:19: replace == with != in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:800:46: replace + with - in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:800:46: replace + with * in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:800:41: replace * with + in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:801:50: replace + with - in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:801:50: replace + with * in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:801:45: replace * with + in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:801:45: replace * with / in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:802:38: replace && with || in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:806:18: replace < with == in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:806:18: replace < with > in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:806:18: replace < with <= in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:807:33: replace == with != in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:809:20: replace <= with > in SweepAcc<'a>::eligible
+crates/wf_sweep/src/acc.rs:832:9: replace SweepAcc<'a>::key -> Result<(Result<Key, NotEligible>, Learn, u64), SweepErr> with Ok((Ok(Default::default()), Default::default(), 0))
+crates/wf_sweep/src/acc.rs:832:9: replace SweepAcc<'a>::key -> Result<(Result<Key, NotEligible>, Learn, u64), SweepErr> with Ok((Ok(Default::default()), Default::default(), 1))
+crates/wf_sweep/src/acc.rs:832:24: replace += with -= in SweepAcc<'a>::key
+crates/wf_sweep/src/acc.rs:832:24: replace += with *= in SweepAcc<'a>::key
+crates/wf_sweep/src/acc.rs:841:29: replace + with - in SweepAcc<'a>::key
+crates/wf_sweep/src/acc.rs:853:9: replace SweepAcc<'_>::view_key -> Result<(Result<Key, NotEligible>, u64), SweepErr> with Ok((Ok(Default::default()), 0))
+crates/wf_sweep/src/acc.rs:841:29: replace + with * in SweepAcc<'a>::key
+crates/wf_sweep/src/acc.rs:853:9: replace SweepAcc<'_>::view_key -> Result<(Result<Key, NotEligible>, u64), SweepErr> with Ok((Ok(Default::default()), 1))
+crates/wf_sweep/src/acc.rs:865:9: replace SweepAcc<'_>::view_key_gated -> Result<(Result<Option<Key>, NotEligible>, u64), SweepErr> with Ok((Ok(None), 1))
+crates/wf_sweep/src/acc.rs:865:9: replace SweepAcc<'_>::view_key_gated -> Result<(Result<Option<Key>, NotEligible>, u64), SweepErr> with Ok((Ok(None), 0))
+crates/wf_sweep/src/acc.rs:865:9: replace SweepAcc<'_>::view_key_gated -> Result<(Result<Option<Key>, NotEligible>, u64), SweepErr> with Ok((Ok(Some(Default::default())), 0))
+crates/wf_sweep/src/acc.rs:865:9: replace SweepAcc<'_>::view_key_gated -> Result<(Result<Option<Key>, NotEligible>, u64), SweepErr> with Ok((Ok(Some(Default::default())), 1))
+crates/wf_sweep/src/acc.rs:865:33: delete ! in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:869:32: replace += with *= in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:869:32: replace += with -= in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:876:53: replace + with * in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:876:53: replace + with - in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:876:48: replace * with + in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:876:48: replace * with / in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:878:100: replace + with - in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:878:100: replace + with * in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:888:67: replace + with - in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:888:67: replace + with * in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:891:32: replace += with -= in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:891:32: replace += with *= in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:896:42: replace + with - in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:896:71: replace == with != in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:896:42: replace + with * in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:896:37: replace * with + in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:904:54: replace + with - in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:896:37: replace * with / in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:904:54: replace + with * in SweepAcc<'_>::view_key_gated
+crates/wf_sweep/src/acc.rs:904:49: replace * with + in SweepAcc<'_>::view_key_gated

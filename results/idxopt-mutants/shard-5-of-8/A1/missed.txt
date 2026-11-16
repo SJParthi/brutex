@@ -1,0 +1,136 @@
+crates/opt_pos/src/pos.rs:405:89: replace < with > in Book::spot_rows
+crates/opt_pos/src/pos.rs:405:89: replace < with <= in Book::spot_rows
+crates/opt_pos/src/pos.rs:427:29: replace + with - in Book::alias_in
+crates/opt_pos/src/pos.rs:427:29: replace + with * in Book::alias_in
+crates/opt_pos/src/pos.rs:498:9: replace SlotRule::tag -> &'static str with ""
+crates/opt_pos/src/pos.rs:498:9: replace SlotRule::tag -> &'static str with "xyzzy"
+crates/opt_pos/src/pos.rs:723:63: replace <= with > in Ledger::free
+crates/opt_pos/src/pos.rs:728:37: replace && with || in Ledger::free
+crates/opt_pos/src/pos.rs:728:32: replace <= with > in Ledger::free
+crates/opt_pos/src/pos.rs:728:42: replace < with == in Ledger::free
+crates/opt_pos/src/pos.rs:728:42: replace < with > in Ledger::free
+crates/opt_pos/src/pos.rs:728:42: replace < with <= in Ledger::free
+crates/opt_pos/src/pos.rs:730:62: replace <= with > in Ledger::free
+crates/opt_pos/src/pos.rs:734:42: replace - with + in Ledger::free
+crates/opt_pos/src/pos.rs:734:17: replace + with - in Ledger::free
+crates/opt_pos/src/pos.rs:739:5: replace seg_of -> Result<Vec<Seg>, String> with Ok(vec![])
+crates/opt_pos/src/pos.rs:739:35: replace + with - in seg_of
+crates/opt_pos/src/pos.rs:739:28: replace * with + in seg_of
+crates/opt_pos/src/pos.rs:739:28: replace * with / in seg_of
+crates/opt_pos/src/pos.rs:739:40: replace * with + in seg_of
+crates/opt_pos/src/pos.rs:739:40: replace * with / in seg_of
+crates/opt_pos/src/pos.rs:753:24: replace || with && in walk_order
+crates/opt_pos/src/pos.rs:754:61: replace && with || in walk_order
+crates/opt_pos/src/pos.rs:754:54: replace < with == in walk_order
+crates/opt_pos/src/pos.rs:754:54: replace < with > in walk_order
+crates/opt_pos/src/pos.rs:754:54: replace < with <= in walk_order
+crates/opt_pos/src/pos.rs:754:66: replace > with == in walk_order
+crates/opt_pos/src/pos.rs:754:66: replace > with < in walk_order
+crates/opt_pos/src/pos.rs:754:66: replace > with >= in walk_order
+crates/opt_pos/src/pos.rs:755:52: delete field rest_at_stop from struct common_fill::std70::LevelFill expression in walk_order
+crates/opt_pos/src/pos.rs:755:72: delete field hole_span from struct common_fill::std70::LevelFill expression in walk_order
+crates/opt_pos/src/pos.rs:757:35: replace + with - in walk_order
+crates/opt_pos/src/pos.rs:757:35: replace + with * in walk_order
+crates/opt_pos/src/pos.rs:757:28: replace * with + in walk_order
+crates/opt_pos/src/pos.rs:757:28: replace * with / in walk_order
+crates/opt_pos/src/pos.rs:757:40: replace * with + in walk_order
+crates/opt_pos/src/pos.rs:757:40: replace * with / in walk_order
+crates/opt_pos/src/pos.rs:762:24: replace == with != in walk_order
+crates/opt_pos/src/pos.rs:770:77: replace <= with > in spot_before
+crates/opt_pos/src/pos.rs:777:57: replace || with && in rows_before
+crates/opt_pos/src/pos.rs:777:61: delete ! in rows_before
+crates/opt_pos/src/pos.rs:778:37: replace <= with > in rows_before
+crates/opt_pos/src/pos.rs:792:75: replace < with <= in pick
+crates/opt_pos/src/pos.rs:792:93: replace > with >= in pick
+crates/opt_pos/src/pos.rs:802:28: replace < with <= in pick
+crates/opt_pos/src/pos.rs:818:23: replace match guard loaded.len() >= itm.len() with true in pick
+crates/opt_pos/src/pos.rs:818:23: replace match guard loaded.len() >= itm.len() with false in pick
+crates/opt_pos/src/pos.rs:813:50: replace + with - in pick
+crates/opt_pos/src/pos.rs:818:36: replace >= with < in pick
+crates/opt_pos/src/pos.rs:819:25: replace *= with += in pick
+crates/opt_pos/src/pos.rs:819:25: replace *= with /= in pick
+crates/opt_pos/src/pos.rs:841:15: replace == with != in roll_day
+crates/opt_pos/src/pos.rs:843:21: replace == with != in roll_day
+crates/opt_pos/src/pos.rs:862:5: replace guard -> Result<(), String> with Ok(())
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((1, 0))
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((1, 1))
+crates/opt_pos/src/pos.rs:871:5: replace est_charges -> Result<(i64, i64), String> with Ok((1, -1))
+crates/opt_pos/src/pos.rs:873:22: delete field qty from struct Trip expression in est_charges
+crates/opt_pos/src/pos.rs:873:27: delete field buy_value from struct Trip expression in est_charges
+crates/opt_pos/src/pos.rs:873:50: delete field entry_orders from struct Trip expression in est_charges
+crates/opt_pos/src/pos.rs:876:50: delete field qty from struct Trip expression in est_charges
+crates/opt_pos/src/pos.rs:877:22: replace += with -= in est_charges
+crates/opt_pos/src/pos.rs:877:22: replace += with *= in est_charges
+crates/opt_pos/src/pos.rs:878:23: replace += with *= in est_charges
+crates/opt_pos/src/pos.rs:881:50: delete field qty from struct Trip expression in est_charges
+crates/opt_pos/src/pos.rs:882:22: replace += with -= in est_charges
+crates/opt_pos/src/pos.rs:888:27: replace += with *= in est_charges
+crates/opt_pos/src/pos.rs:896:15: replace += with -= in est_charges
+crates/opt_pos/src/pos.rs:897:15: replace += with -= in est_charges
+crates/opt_pos/src/pos.rs:905:5: replace leg_charges -> Result<i64, String> with Ok(0)
+crates/opt_pos/src/pos.rs:905:5: replace leg_charges -> Result<i64, String> with Ok(1)
+crates/opt_pos/src/pos.rs:905:5: replace leg_charges -> Result<i64, String> with Ok(-1)
+crates/opt_pos/src/pos.rs:907:22: delete field qty from struct Trip expression in leg_charges
+crates/opt_pos/src/pos.rs:907:27: delete field buy_value from struct Trip expression in leg_charges
+crates/opt_pos/src/pos.rs:907:50: delete field entry_orders from struct Trip expression in leg_charges
+crates/opt_pos/src/pos.rs:910:50: delete field qty from struct Trip expression in leg_charges
+crates/opt_pos/src/pos.rs:911:22: replace += with -= in leg_charges
+crates/opt_pos/src/pos.rs:911:22: replace += with *= in leg_charges
+crates/opt_pos/src/pos.rs:912:23: replace += with *= in leg_charges
+crates/opt_pos/src/pos.rs:915:50: delete field qty from struct Trip expression in leg_charges
+crates/opt_pos/src/pos.rs:916:22: replace += with -= in leg_charges
+crates/opt_pos/src/pos.rs:916:22: replace += with *= in leg_charges
+crates/opt_pos/src/pos.rs:922:27: replace += with *= in leg_charges
+crates/opt_pos/src/pos.rs:931:15: replace += with -= in leg_charges
+crates/opt_pos/src/pos.rs:931:15: replace += with *= in leg_charges
+crates/opt_pos/src/pos.rs:932:15: replace += with -= in leg_charges
+crates/opt_pos/src/pos.rs:932:15: replace += with *= in leg_charges
+crates/opt_pos/src/pos.rs:945:26: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:946:32: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:946:32: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:947:34: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:947:34: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:964:70: replace < with <= in close_trip
+crates/opt_pos/src/pos.rs:973:39: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:974:38: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:979:73: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:979:73: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:979:68: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:979:68: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:979:89: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:979:89: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:979:84: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:979:84: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:984:87: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:984:87: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:984:82: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:984:82: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:985:43: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:985:43: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:985:38: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:985:38: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:987:88: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:987:88: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:987:83: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:987:83: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:988:43: replace - with + in close_trip
+crates/opt_pos/src/pos.rs:988:43: replace - with / in close_trip
+crates/opt_pos/src/pos.rs:988:38: replace + with - in close_trip
+crates/opt_pos/src/pos.rs:988:38: replace + with * in close_trip
+crates/opt_pos/src/pos.rs:1013:106: replace < with <= in value_at_data_end
+crates/opt_pos/src/pos.rs:1013:117: replace > with >= in value_at_data_end
+crates/opt_pos/src/pos.rs:1015:62: replace < with <= in value_at_data_end
+crates/opt_pos/src/pos.rs:1019:88: replace - with + in value_at_data_end
+crates/opt_pos/src/pos.rs:1019:88: replace - with / in value_at_data_end
+crates/opt_pos/src/pos.rs:1019:83: replace + with - in value_at_data_end
+crates/opt_pos/src/pos.rs:1019:83: replace + with * in value_at_data_end
+crates/opt_pos/src/pos.rs:1020:31: replace - with + in value_at_data_end
+crates/opt_pos/src/pos.rs:1020:31: replace - with / in value_at_data_end
+crates/opt_pos/src/pos.rs:1020:26: replace + with - in value_at_data_end
+crates/opt_pos/src/pos.rs:1020:26: replace + with * in value_at_data_end
+crates/opt_pos/src/pos.rs:1029:45: replace && with || in data_end_w0
+crates/opt_pos/src/pos.rs:1052:5: replace ts_of -> String with String::new()
+crates/opt_pos/src/pos.rs:1052:5: replace ts_of -> String with "xyzzy".into()
+crates/opt_pos/src/pos.rs:1100:87: replace == with != in run
+crates/opt_pos/src/pos.rs:1105:24: replace == with != in run
+crates/opt_pos/src/pos.rs:1108:67: replace + with - in run
