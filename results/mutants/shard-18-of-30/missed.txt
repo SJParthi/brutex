@@ -69,3 +69,15 @@ crates/spikefade/src/fixg.rs:127:26: replace == with != in from_args
 crates/spikefade/src/fixg.rs:135:41: replace == with != in from_args
 crates/spikefade/src/fixg.rs:135:78: replace + with - in from_args
 crates/spikefade/src/fixg.rs:135:78: replace + with * in from_args
+crates/spikefade/src/fixg.rs:166:23: replace || with && in quanta
+crates/spikefade/src/fixg.rs:171:22: replace > with >= in quanta
+crates/spikefade/src/fixg.rs:193:16: replace > with >= in lot_mark
+crates/spikefade/src/fixg.rs:193:25: replace > with >= in lot_mark
+crates/spikefade/src/fixg.rs:223:71: replace == with != in lot_line
+crates/spikefade/src/fixg.rs:225:60: replace == with != in lot_line
+crates/spikefade/src/fixg.rs:278:70: replace && with || in IdxElm::parse
+crates/spikefade/src/fixg.rs:290:61: replace || with && in IdxElm::parse
+crates/spikefade/src/fixg.rs:290:26: replace || with && in IdxElm::parse
+crates/spikefade/src/fixg.rs:290:21: replace > with >= in IdxElm::parse
+crates/spikefade/src/fixg.rs:318:52: replace < with <= in IdxElm::at
+crates/spikefade/src/fixg.rs:353:13: replace += with *= in idx_cover
