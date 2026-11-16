@@ -1,0 +1,10 @@
+crates/spikefade/src/trade.rs:685:5: replace record_base -> Result<Paths, BaseErr> with Ok(Default::default())
+crates/spikefade/src/trade.rs:698:17: replace && with || in record_base
+crates/spikefade/src/trade.rs:989:9: replace && with || in size_event_mx
+crates/spikefade/src/trade.rs:1022:13: replace && with || in size_event_mx
+crates/spikefade/src/trade.rs:1074:17: replace && with || in price_event
+crates/spikefade/src/trade.rs:1073:17: replace && with || in price_event
+crates/spikefade/src/trade.rs:1126:13: replace && with || in trade_once
+crates/spikefade/src/trade.rs:1180:5: replace evidence -> Result<Option<Evid>, String> with Ok(Some(Default::default()))
+crates/spikefade/src/v2.rs:125:5: replace eval_entries_full -> Result<Full, String> with Ok(Default::default())
+crates/spikefade/src/v2.rs:226:13: replace && with || in why_words
