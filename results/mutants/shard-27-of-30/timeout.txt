@@ -1,0 +1,10 @@
+crates/spikefade/src/fix33.rs:170:14: replace < with <= in kth_union
+crates/spikefade/src/fix33.rs:171:22: replace + with * in kth_union
+crates/spikefade/src/fix33.rs:171:34: replace / with % in kth_union
+crates/spikefade/src/fix33.rs:171:28: replace - with + in kth_union
+crates/spikefade/src/fix33.rs:171:28: replace - with / in kth_union
+crates/spikefade/src/fix33.rs:176:22: replace + with - in kth_union
+crates/spikefade/src/fix33.rs:176:22: replace + with * in kth_union
+crates/spikefade/src/fix33.rs:354:15: replace += with *= in cap_minutes
+crates/spikefade/src/fix33.rs:437:31: replace << with >>
+crates/spikefade/src/fix33.rs:449:33: replace > with < in StepAcc::merge
