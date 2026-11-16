@@ -157,3 +157,141 @@ crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u
 crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 1, 1, 0, 0, false)
 crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 1, 1, 0, 1, true)
 crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 1, 1, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 1, 1, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 1, 1, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 1, 1, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (0, 1, 1, 1, 1, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 0, 1, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 0, 1, 1, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 0, 1, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 0, 1, 1, 1, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 0, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 0, 1, 1, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 0, 1, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 0, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 0, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 0, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 0, 1, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 1, 0, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 1, 0, false)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 1, 1, true)
+crates/spikefade/src/trade.rs:232:5: replace gap_facts -> (u32, u32, u64, u64, u64, u64, bool) with (1, 1, 1, 1, 1, 1, false)
+crates/spikefade/src/trade.rs:239:47: replace == with != in gap_facts
+crates/spikefade/src/trade.rs:240:16: replace += with *= in gap_facts
+crates/spikefade/src/trade.rs:241:19: replace += with -= in gap_facts
+crates/spikefade/src/trade.rs:241:19: replace += with *= in gap_facts
+crates/spikefade/src/trade.rs:242:17: replace += with -= in gap_facts
+crates/spikefade/src/trade.rs:242:17: replace += with *= in gap_facts
+crates/spikefade/src/trade.rs:243:20: replace += with -= in gap_facts
+crates/spikefade/src/trade.rs:243:20: replace += with *= in gap_facts
+crates/spikefade/src/trade.rs:244:52: replace < with == in gap_facts
+crates/spikefade/src/trade.rs:244:52: replace < with > in gap_facts
+crates/spikefade/src/trade.rs:244:52: replace < with <= in gap_facts
+crates/spikefade/src/trade.rs:245:106: replace && with || in gap_facts
+crates/spikefade/src/trade.rs:245:93: replace < with == in gap_facts
+crates/spikefade/src/trade.rs:245:93: replace < with > in gap_facts
+crates/spikefade/src/trade.rs:245:93: replace < with <= in gap_facts
+crates/spikefade/src/trade.rs:245:115: replace > with == in gap_facts
+crates/spikefade/src/trade.rs:245:115: replace > with < in gap_facts
+crates/spikefade/src/trade.rs:245:115: replace > with >= in gap_facts
+crates/spikefade/src/trade.rs:245:153: replace + with - in gap_facts
+crates/spikefade/src/trade.rs:245:153: replace + with * in gap_facts
+crates/spikefade/src/trade.rs:245:182: replace - with + in gap_facts
+crates/spikefade/src/trade.rs:245:182: replace - with / in gap_facts
+crates/spikefade/src/trade.rs:247:27: replace > with == in gap_facts
+crates/spikefade/src/trade.rs:247:27: replace > with < in gap_facts
+crates/spikefade/src/trade.rs:247:27: replace > with >= in gap_facts
+crates/spikefade/src/trade.rs:247:23: replace - with + in gap_facts
+crates/spikefade/src/trade.rs:247:23: replace - with / in gap_facts
+crates/spikefade/src/trade.rs:247:33: replace * with + in gap_facts
+crates/spikefade/src/trade.rs:247:33: replace * with / in gap_facts
+crates/spikefade/src/trade.rs:249:20: replace += with -= in gap_facts
+crates/spikefade/src/trade.rs:249:20: replace += with *= in gap_facts
+crates/spikefade/src/trade.rs:250:23: replace += with -= in gap_facts
+crates/spikefade/src/trade.rs:250:23: replace += with *= in gap_facts
+crates/spikefade/src/trade.rs:251:41: replace && with || in gap_facts
+crates/spikefade/src/trade.rs:251:27: replace && with || in gap_facts
+crates/spikefade/src/trade.rs:251:22: replace == with != in gap_facts
+crates/spikefade/src/trade.rs:251:54: replace < with == in gap_facts
+crates/spikefade/src/trade.rs:251:54: replace < with > in gap_facts
+crates/spikefade/src/trade.rs:251:54: replace < with <= in gap_facts
+crates/spikefade/src/trade.rs:255:18: replace == with != in gap_facts
+crates/spikefade/src/trade.rs:375:67: replace | with ^ in side_key
+crates/spikefade/src/trade.rs:375:55: replace & with ^ in side_key
+crates/spikefade/src/trade.rs:460:61: replace + with * in EvT::idx
+crates/spikefade/src/trade.rs:460:27: replace + with - in EvT::idx
+crates/spikefade/src/trade.rs:460:53: replace * with + in EvT::idx
+crates/spikefade/src/trade.rs:460:53: replace * with / in EvT::idx
+crates/spikefade/src/trade.rs:460:48: replace + with - in EvT::idx
+crates/spikefade/src/trade.rs:460:48: replace + with * in EvT::idx
+crates/spikefade/src/trade.rs:460:32: replace * with + in EvT::idx
+crates/spikefade/src/trade.rs:460:32: replace * with / in EvT::idx
+crates/spikefade/src/trade.rs:465:9: replace EvT::aidx -> usize with 0
+crates/spikefade/src/trade.rs:465:9: replace EvT::aidx -> usize with 1
+crates/spikefade/src/trade.rs:465:48: replace + with - in EvT::aidx
+crates/spikefade/src/trade.rs:465:48: replace + with * in EvT::aidx
+crates/spikefade/src/trade.rs:465:28: replace + with - in EvT::aidx
+crates/spikefade/src/trade.rs:465:28: replace + with * in EvT::aidx
+crates/spikefade/src/trade.rs:465:32: replace * with + in EvT::aidx
+crates/spikefade/src/trade.rs:465:32: replace * with / in EvT::aidx
+crates/spikefade/src/trade.rs:481:20: replace < with == in cand_of
+crates/spikefade/src/trade.rs:481:20: replace < with > in cand_of
+crates/spikefade/src/trade.rs:481:20: replace < with <= in cand_of
+crates/spikefade/src/trade.rs:481:36: replace + with - in cand_of
+crates/spikefade/src/trade.rs:481:36: replace + with * in cand_of
+crates/spikefade/src/trade.rs:482:20: replace < with == in cand_of
+crates/spikefade/src/trade.rs:482:20: replace < with > in cand_of
+crates/spikefade/src/trade.rs:482:20: replace < with <= in cand_of
+crates/spikefade/src/trade.rs:482:36: replace + with - in cand_of
+crates/spikefade/src/trade.rs:482:36: replace + with * in cand_of
+crates/spikefade/src/trade.rs:484:19: replace || with && in cand_of
+crates/spikefade/src/trade.rs:489:19: replace == with != in cand_of
+crates/spikefade/src/trade.rs:490:11: replace + with - in cand_of
+crates/spikefade/src/trade.rs:490:11: replace + with * in cand_of
+crates/spikefade/src/trade.rs:492:11: replace + with - in cand_of
+crates/spikefade/src/trade.rs:492:11: replace + with * in cand_of

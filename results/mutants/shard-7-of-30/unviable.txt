@@ -2,3 +2,5 @@ crates/spikefade/src/trade.rs:85:5: replace cap_mode_of -> CapMode with Default:
 crates/spikefade/src/trade.rs:168:9: replace DayTape::with_reading -> Result<Self, String> with Ok(Default::default())
 crates/spikefade/src/trade.rs:192:9: replace DayTape::tape -> Result<Tape<'_>, String> with Ok(Default::default())
 crates/spikefade/src/trade.rs:198:9: replace DayTape::mode -> CapMode with Default::default()
+crates/spikefade/src/trade.rs:247:17: replace && with || in gap_facts
+crates/spikefade/src/trade.rs:268:5: replace dial -> Result<Dial, String> with Ok(Default::default())
