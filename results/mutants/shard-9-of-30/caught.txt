@@ -346,3 +346,52 @@ crates/spikefade/src/kern.rs:1392:19: replace += with -= in walk_accs
 crates/spikefade/src/kern.rs:1392:19: replace += with *= in walk_accs
 crates/spikefade/src/kern.rs:1395:94: replace + with - in walk_accs
 crates/spikefade/src/kern.rs:1395:94: replace + with * in walk_accs
+crates/spikefade/src/kern.rs:1397:40: replace && with || in walk_accs
+crates/spikefade/src/kern.rs:1397:21: replace && with || in walk_accs
+crates/spikefade/src/kern.rs:1397:33: replace >= with < in walk_accs
+crates/spikefade/src/kern.rs:1397:56: replace != with == in walk_accs
+crates/spikefade/src/kern.rs:1405:22: replace > with == in walk_accs
+crates/spikefade/src/kern.rs:1405:22: replace > with < in walk_accs
+crates/spikefade/src/kern.rs:1407:88: replace - with + in walk_accs
+crates/spikefade/src/kern.rs:1407:88: replace - with / in walk_accs
+crates/spikefade/src/kern.rs:1416:45: replace + with - in walk_accs
+crates/spikefade/src/kern.rs:1416:45: replace + with * in walk_accs
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (0, 0, 0)
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (0, 0, 1)
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (0, 1, 0)
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (0, 1, 1)
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (1, 0, 0)
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (1, 0, 1)
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (1, 1, 0)
+crates/spikefade/src/kern.rs:1436:5: replace step_weighted -> (u64, u64, usize) with (1, 1, 1)
+crates/spikefade/src/kern.rs:1436:63: replace > with == in step_weighted
+crates/spikefade/src/kern.rs:1436:63: replace > with < in step_weighted
+crates/spikefade/src/kern.rs:1436:110: replace / with % in step_weighted
+crates/spikefade/src/kern.rs:1446:15: replace += with -= in step_weighted
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![], 0, 0)
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![], 0, 1)
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![], 1, 0)
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![], 1, 1)
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![(Default::default(), Default::default())], 0, 0)
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![(Default::default(), Default::default())], 0, 1)
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![(Default::default(), Default::default())], 1, 0)
+crates/spikefade/src/kern.rs:1466:5: replace walk_dedup -> (Vec<(Sum, Pieces)>, u64, u64) with (vec![(Default::default(), Default::default())], 1, 1)
+crates/spikefade/src/kern.rs:1466:20: replace * with + in walk_dedup
+crates/spikefade/src/kern.rs:1466:20: replace * with / in walk_dedup
+crates/spikefade/src/kern.rs:1467:25: replace * with + in walk_dedup
+crates/spikefade/src/kern.rs:1467:25: replace * with / in walk_dedup
+crates/spikefade/src/kern.rs:1479:32: replace - with + in walk_dedup
+crates/spikefade/src/kern.rs:1479:32: replace - with / in walk_dedup
+crates/spikefade/src/kern.rs:1481:69: replace + with - in walk_dedup
+crates/spikefade/src/kern.rs:1481:69: replace + with * in walk_dedup
+crates/spikefade/src/kern.rs:1481:65: replace * with + in walk_dedup
+crates/spikefade/src/kern.rs:1481:65: replace * with / in walk_dedup
+crates/spikefade/src/kern.rs:1481:60: replace + with - in walk_dedup
+crates/spikefade/src/kern.rs:1481:60: replace + with * in walk_dedup
+crates/spikefade/src/kern.rs:1481:53: replace * with + in walk_dedup
+crates/spikefade/src/kern.rs:1481:53: replace * with / in walk_dedup
+crates/spikefade/src/menu.rs:207:16: delete ! in Menu::parse
+crates/spikefade/src/menu.rs:271:9: replace Menu::of_ident -> Option<usize> with Some(0)
+crates/spikefade/src/menu.rs:346:9: delete match arm "BE" in slot_rule
+crates/spikefade/src/menu.rs:352:9: delete match arm "TS" in slot_rule
+crates/spikefade/src/menu.rs:339:17: delete match arm "S" in slot_rule

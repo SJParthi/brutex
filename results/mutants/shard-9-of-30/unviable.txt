@@ -20,3 +20,5 @@ crates/spikefade/src/kern.rs:1266:25: replace - with + in decision_code
 crates/spikefade/src/kern.rs:1272:37: replace - with + in decision_code
 crates/spikefade/src/kern.rs:1278:61: replace - with + in decision_code
 crates/spikefade/src/kern.rs:1289:201: replace - with + in dedup_groups
+crates/spikefade/src/kern.rs:1405:13: replace && with || in walk_accs
+crates/spikefade/src/kern.rs:1418:17: replace && with || in walk_accs
