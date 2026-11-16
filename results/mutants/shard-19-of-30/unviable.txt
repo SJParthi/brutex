@@ -1,0 +1,2 @@
+crates/spikefade/src/fix34.rs:1131:9: replace && with || in sync_dir
+crates/spikefade/src/fix34.rs:1279:17: replace && with || in wick_mark

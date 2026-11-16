@@ -367,3 +367,23 @@ crates/spikefade/src/fix34.rs:925:19: replace < with > in BandTable::parse
 crates/spikefade/src/fix34.rs:925:19: replace < with <= in BandTable::parse
 crates/spikefade/src/fix34.rs:925:29: replace <= with > in BandTable::parse
 crates/spikefade/src/fix34.rs:938:9: replace BandTable::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/fix34.rs:1004:5: replace band_words -> String with String::new()
+crates/spikefade/src/fix34.rs:1004:5: replace band_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:1019:15: replace ^= with |= in argv_hash
+crates/spikefade/src/fix34.rs:1085:30: replace ^ with | in sha256_hex
+crates/spikefade/src/fix34.rs:1088:40: replace ^ with | in sha256_hex
+crates/spikefade/src/fix34.rs:1088:30: replace ^ with | in sha256_hex
+crates/spikefade/src/fix34.rs:1113:8: delete ! in write_atomic
+crates/spikefade/src/fix34.rs:1130:5: replace sync_dir with ()
+crates/spikefade/src/fix34.rs:1161:5: replace mem_now -> (u64, u64) with (1, 0)
+crates/spikefade/src/fix34.rs:1161:5: replace mem_now -> (u64, u64) with (1, 1)
+crates/spikefade/src/fix34.rs:1188:89: replace - with + in carry_stats
+crates/spikefade/src/fix34.rs:1188:89: replace - with / in carry_stats
+crates/spikefade/src/fix34.rs:1195:5: replace carry_words -> String with "xyzzy".into()
+crates/spikefade/src/fix34.rs:1218:9: replace EventCal::load -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/fix34.rs:1219:70: replace && with || in EventCal::load
+crates/spikefade/src/fix34.rs:1219:49: delete ! in EventCal::load
+crates/spikefade/src/fix34.rs:1219:73: delete ! in EventCal::load
+crates/spikefade/src/fix34.rs:1221:12: delete ! in EventCal::load
+crates/spikefade/src/fix34.rs:1263:5: replace wick_mark with ()
+crates/spikefade/src/fix34.rs:1263:8: delete ! in wick_mark
