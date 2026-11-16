@@ -217,3 +217,31 @@ crates/spikefade/src/kit.rs:1169:36: replace match guard i == 0 with true in Bck
 crates/spikefade/src/kit.rs:1323:22: replace match guard cfg!(feature = "m_kit_merge_ignores_unknown") with false in Bck::parse
 crates/spikefade/src/kit.rs:1182:52: replace || with && in Bck::parse
 crates/spikefade/src/kit.rs:1182:36: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1262:36: replace == with != in Bck::parse
+crates/spikefade/src/kit.rs:1273:56: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1332:65: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1332:46: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1332:22: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1338:17: delete match arm (None, None, None) in Bck::parse
+crates/spikefade/src/kit.rs:1405:5: replace exe_sha -> String with String::new()
+crates/spikefade/src/kit.rs:1405:5: replace exe_sha -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1411:5: replace host -> String with String::new()
+crates/spikefade/src/kit.rs:1411:5: replace host -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1412:154: delete ! in host
+crates/spikefade/src/kit.rs:1418:5: replace source_sha -> &'static str with ""
+crates/spikefade/src/kit.rs:1418:5: replace source_sha -> &'static str with "xyzzy"
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![(String::new(), String::new())]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![(String::new(), "xyzzy".into())]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![("xyzzy".into(), String::new())]
+crates/spikefade/src/kit.rs:1424:5: replace provenance -> Vec<(String, String)> with vec![("xyzzy".into(), "xyzzy".into())]
+crates/spikefade/src/slice.rs:61:5: replace magic_of -> &[u8] with Vec::leak(Vec::new())
+crates/spikefade/src/slice.rs:61:5: replace magic_of -> &[u8] with Vec::leak(vec![0])
+crates/spikefade/src/slice.rs:61:5: replace magic_of -> &[u8] with Vec::leak(vec![1])
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(None)
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![], vec![])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![], vec![0])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![], vec![1])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![0], vec![])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![0], vec![0])))
+crates/spikefade/src/slice.rs:70:5: replace slice_bytes -> Result<Option<(Vec<u8>, Vec<u8>)>, String> with Ok(Some((vec![0], vec![1])))
