@@ -295,3 +295,35 @@ crates/spikefade/src/trade.rs:490:11: replace + with - in cand_of
 crates/spikefade/src/trade.rs:490:11: replace + with * in cand_of
 crates/spikefade/src/trade.rs:492:11: replace + with - in cand_of
 crates/spikefade/src/trade.rs:492:11: replace + with * in cand_of
+crates/spikefade/src/trade.rs:499:21: replace < with <= in cand_anchor
+crates/spikefade/src/trade.rs:500:19: replace || with && in cand_anchor
+crates/spikefade/src/trade.rs:507:9: delete match arm 0..= 4 in cand_kind
+crates/spikefade/src/trade.rs:508:9: delete match arm 5..= 8 in cand_kind
+crates/spikefade/src/trade.rs:509:9: delete match arm 9..= 12 in cand_kind
+crates/spikefade/src/trade.rs:517:46: replace + with - in rules_of
+crates/spikefade/src/trade.rs:518:47: replace / with % in rules_of
+crates/spikefade/src/trade.rs:518:47: replace / with * in rules_of
+crates/spikefade/src/trade.rs:518:43: replace * with + in rules_of
+crates/spikefade/src/trade.rs:518:43: replace * with / in rules_of
+crates/spikefade/src/trade.rs:519:63: replace * with + in rules_of
+crates/spikefade/src/trade.rs:590:47: replace > with == in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:47: replace > with < in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:47: replace > with >= in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:82: replace + with - in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:82: replace + with * in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:77: replace > with == in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:77: replace > with < in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:77: replace > with >= in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:108: replace > with == in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:108: replace > with < in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:108: replace > with >= in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:138: replace > with == in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:138: replace > with < in Trip::orders_a10
+crates/spikefade/src/trade.rs:590:138: replace > with >= in Trip::orders_a10
+crates/spikefade/src/trade.rs:593:34: replace + with - in Trip::orders_a10
+crates/spikefade/src/trade.rs:594:37: replace + with * in Trip::orders_a10
+crates/spikefade/src/trade.rs:606:39: delete field qty from struct crate::charges::Trip expression in charges_orders_n
+crates/spikefade/src/trade.rs:606:154: delete field broker_orders from struct crate::charges::Trip expression in charges_orders_n
+crates/spikefade/src/trade.rs:631:39: delete field qty from struct crate::charges::Trip expression in charges_dearer_of
+crates/spikefade/src/trade.rs:631:149: delete field broker_orders from struct crate::charges::Trip expression in charges_dearer_of
+crates/spikefade/src/trade.rs:665:29: replace > with < in buy_orders
