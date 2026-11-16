@@ -110,3 +110,68 @@ crates/spikefade/src/read.rs:355:22: replace & with ^ in Cal3::add_specials
 crates/spikefade/src/read.rs:361:18: replace <= with > in Cal3::add_specials
 crates/spikefade/src/read.rs:365:72: replace - with / in Cal3::add_specials
 crates/spikefade/src/read.rs:365:72: replace - with + in Cal3::add_specials
+crates/spikefade/src/read.rs:394:24: replace || with && in Cal3::dated_check
+crates/spikefade/src/read.rs:417:74: replace / with % in Cal3::minutes
+crates/spikefade/src/read.rs:417:74: replace / with * in Cal3::minutes
+crates/spikefade/src/read.rs:417:62: replace - with + in Cal3::minutes
+crates/spikefade/src/read.rs:417:62: replace - with / in Cal3::minutes
+crates/spikefade/src/read.rs:417:21: replace + with - in Cal3::minutes
+crates/spikefade/src/read.rs:417:21: replace + with * in Cal3::minutes
+crates/spikefade/src/read.rs:417:26: replace * with + in Cal3::minutes
+crates/spikefade/src/read.rs:417:26: replace * with / in Cal3::minutes
+crates/spikefade/src/read.rs:417:44: replace + with - in Cal3::minutes
+crates/spikefade/src/read.rs:417:44: replace + with * in Cal3::minutes
+crates/spikefade/src/read.rs:438:5: replace base_reading -> Rd with Default::default()
+crates/spikefade/src/read.rs:438:29: replace - with + in base_reading
+crates/spikefade/src/read.rs:438:29: replace - with / in base_reading
+crates/spikefade/src/read.rs:439:23: replace >= with < in base_reading
+crates/spikefade/src/read.rs:440:42: replace / with % in base_reading
+crates/spikefade/src/read.rs:440:42: replace / with * in base_reading
+crates/spikefade/src/read.rs:440:32: replace - with + in base_reading
+crates/spikefade/src/read.rs:440:32: replace - with / in base_reading
+crates/spikefade/src/read.rs:448:55: replace - with + in theta_at
+crates/spikefade/src/read.rs:449:15: replace || with && in theta_at
+crates/spikefade/src/read.rs:448:55: replace - with / in theta_at
+crates/spikefade/src/read.rs:452:80: replace - with + in theta_at
+crates/spikefade/src/read.rs:452:80: replace - with / in theta_at
+crates/spikefade/src/read.rs:469:5: replace window_reading -> (i64, i64) with (0, -1)
+crates/spikefade/src/read.rs:469:5: replace window_reading -> (i64, i64) with (1, 0)
+crates/spikefade/src/read.rs:469:5: replace window_reading -> (i64, i64) with (1, 1)
+crates/spikefade/src/read.rs:469:5: replace window_reading -> (i64, i64) with (1, -1)
+crates/spikefade/src/read.rs:469:5: replace window_reading -> (i64, i64) with (-1, 0)
+crates/spikefade/src/read.rs:469:5: replace window_reading -> (i64, i64) with (-1, 1)
+crates/spikefade/src/read.rs:469:5: replace window_reading -> (i64, i64) with (-1, -1)
+crates/spikefade/src/read.rs:470:42: replace / with * in window_reading
+crates/spikefade/src/read.rs:470:32: replace - with + in window_reading
+crates/spikefade/src/read.rs:470:32: replace - with / in window_reading
+crates/spikefade/src/read.rs:471:19: replace == with != in window_reading
+crates/spikefade/src/read.rs:475:50: replace == with != in window_reading
+crates/spikefade/src/read.rs:475:46: replace & with | in window_reading
+crates/spikefade/src/read.rs:479:54: replace == with != in window_reading
+crates/spikefade/src/read.rs:479:90: replace - with + in window_reading
+crates/spikefade/src/read.rs:479:90: replace - with / in window_reading
+crates/spikefade/src/report3.rs:47:5: replace now_ist -> String with String::new()
+crates/spikefade/src/report3.rs:47:5: replace now_ist -> String with "xyzzy".into()
+crates/spikefade/src/report3.rs:54:5: replace arg -> Option<&'a str> with None
+crates/spikefade/src/report3.rs:54:5: replace arg -> Option<&'a str> with Some("")
+crates/spikefade/src/report3.rs:54:5: replace arg -> Option<&'a str> with Some("xyzzy")
+crates/spikefade/src/report3.rs:54:29: replace == with != in arg
+crates/spikefade/src/report3.rs:54:56: replace + with - in arg
+crates/spikefade/src/report3.rs:54:56: replace + with * in arg
+crates/spikefade/src/report3.rs:58:5: replace pct -> u64 with 0
+crates/spikefade/src/report3.rs:58:5: replace pct -> u64 with 1
+crates/spikefade/src/report3.rs:62:58: replace / with % in pct
+crates/spikefade/src/report3.rs:62:58: replace / with * in pct
+crates/spikefade/src/report3.rs:62:54: replace * with + in pct
+crates/spikefade/src/report3.rs:62:54: replace * with / in pct
+crates/spikefade/src/report3.rs:62:36: replace - with + in pct
+crates/spikefade/src/report3.rs:158:9: replace Seg3::lv_at -> &Levels with Box::leak(Box::new(Default::default()))
+crates/spikefade/src/report3.rs:187:98: replace + with * in Seg3::ul
+crates/spikefade/src/report3.rs:187:98: replace + with - in Seg3::ul
+crates/spikefade/src/report3.rs:199:49: replace * with + in Seg3::ul_day
+crates/spikefade/src/report3.rs:197:9: replace Seg3::ul_day with ()
+crates/spikefade/src/report3.rs:199:49: replace * with / in Seg3::ul_day
+crates/spikefade/src/report3.rs:204:98: replace + with - in Seg3::ul_day
+crates/spikefade/src/report3.rs:204:98: replace + with * in Seg3::ul_day
+crates/spikefade/src/report3.rs:206:57: replace < with <= in Seg3::ul_day
+crates/spikefade/src/report3.rs:206:94: replace < with <= in Seg3::ul_day

@@ -1,3 +1,9 @@
 crates/spikefade/src/p3.rs:28:5: replace to_v21 -> Option<Rule> with Some(Default::default())
 crates/spikefade/src/p3.rs:166:49: replace && with || in cmd_p3
 crates/spikefade/src/p3.rs:181:49: replace && with || in cmd_p3
+crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::Cow<'_, [u32]>> with Some(Cow::Borrowed(Vec::leak(Vec::new())))
+crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::Cow<'_, [u32]>> with Some(Cow::Owned(Vec::leak(Vec::new()).to_owned()))
+crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::Cow<'_, [u32]>> with Some(Cow::Borrowed(Vec::leak(vec![0])))
+crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::Cow<'_, [u32]>> with Some(Cow::Owned(Vec::leak(vec![0]).to_owned()))
+crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::Cow<'_, [u32]>> with Some(Cow::Borrowed(Vec::leak(vec![1])))
+crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::Cow<'_, [u32]>> with Some(Cow::Owned(Vec::leak(vec![1]).to_owned()))
