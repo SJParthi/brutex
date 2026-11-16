@@ -239,3 +239,60 @@ crates/spikefade/src/v32.rs:99:47: replace - with / in loss_at
 crates/spikefade/src/v32.rs:99:11: replace * with + in loss_at
 crates/spikefade/src/v32.rs:99:11: replace * with / in loss_at
 crates/spikefade/src/v32.rs:114:20: replace match guard x < 0.40 with false in delta_band
+crates/spikefade/src/v32.rs:125:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:136:5: replace gain_words -> String with String::new()
+crates/spikefade/src/v32.rs:136:5: replace gain_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:136:13: replace <= with > in gain_words
+crates/spikefade/src/v32.rs:136:24: replace <= with > in gain_words
+crates/spikefade/src/v32.rs:139:35: replace / with % in gain_words
+crates/spikefade/src/v32.rs:139:35: replace / with * in gain_words
+crates/spikefade/src/v32.rs:139:26: replace * with + in gain_words
+crates/spikefade/src/v32.rs:139:26: replace * with / in gain_words
+crates/spikefade/src/v32.rs:139:18: replace - with + in gain_words
+crates/spikefade/src/v32.rs:139:18: replace - with / in gain_words
+crates/spikefade/src/v32.rs:146:5: replace bp_round -> i64 with 0
+crates/spikefade/src/v32.rs:146:5: replace bp_round -> i64 with 1
+crates/spikefade/src/v32.rs:146:5: replace bp_round -> i64 with -1
+crates/spikefade/src/v32.rs:146:12: replace == with != in bp_round
+crates/spikefade/src/v32.rs:153:29: replace * with + in bp_round
+crates/spikefade/src/v32.rs:153:29: replace * with / in bp_round
+crates/spikefade/src/v32.rs:155:37: replace / with % in bp_round
+crates/spikefade/src/v32.rs:155:37: replace / with * in bp_round
+crates/spikefade/src/v32.rs:155:26: replace + with - in bp_round
+crates/spikefade/src/v32.rs:155:26: replace + with * in bp_round
+crates/spikefade/src/v32.rs:155:16: replace * with + in bp_round
+crates/spikefade/src/v32.rs:155:16: replace * with / in bp_round
+crates/spikefade/src/v32.rs:155:42: replace * with + in bp_round
+crates/spikefade/src/v32.rs:155:42: replace * with / in bp_round
+crates/spikefade/src/v32.rs:156:30: replace != with == in bp_round
+crates/spikefade/src/v32.rs:156:25: replace < with == in bp_round
+crates/spikefade/src/v32.rs:156:25: replace < with > in bp_round
+crates/spikefade/src/v32.rs:156:36: replace < with > in bp_round
+crates/spikefade/src/v32.rs:156:43: delete - in bp_round
+crates/spikefade/src/v32.rs:162:5: replace gain_words_r -> String with String::new()
+crates/spikefade/src/v32.rs:162:5: replace gain_words_r -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:162:13: replace <= with > in gain_words_r
+crates/spikefade/src/v32.rs:162:24: replace <= with > in gain_words_r
+crates/spikefade/src/v32.rs:165:26: replace - with + in gain_words_r
+crates/spikefade/src/v32.rs:165:26: replace - with / in gain_words_r
+crates/spikefade/src/v32.rs:174:5: replace level_words -> String with String::new()
+crates/spikefade/src/v32.rs:174:5: replace level_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:203:5: replace week_of -> i64 with 0
+crates/spikefade/src/v32.rs:203:5: replace week_of -> i64 with 1
+crates/spikefade/src/v32.rs:203:5: replace week_of -> i64 with -1
+crates/spikefade/src/v32.rs:203:8: replace - with + in week_of
+crates/spikefade/src/v32.rs:203:8: replace - with / in week_of
+crates/spikefade/src/v32.rs:209:5: replace month_id -> i64 with 0
+crates/spikefade/src/v32.rs:209:5: replace month_id -> i64 with 1
+crates/spikefade/src/v32.rs:209:5: replace month_id -> i64 with -1
+crates/spikefade/src/v32.rs:210:16: replace - with + in month_id
+crates/spikefade/src/v32.rs:210:16: replace - with / in month_id
+crates/spikefade/src/v32.rs:210:12: replace + with - in month_id
+crates/spikefade/src/v32.rs:210:12: replace + with * in month_id
+crates/spikefade/src/v32.rs:210:7: replace * with + in month_id
+crates/spikefade/src/v32.rs:210:7: replace * with / in month_id
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, 1)
