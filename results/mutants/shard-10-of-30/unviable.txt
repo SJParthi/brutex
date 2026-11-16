@@ -9,3 +9,8 @@ crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::C
 crates/spikefade/src/report3.rs:183:9: replace Seg3::ul -> Option<std::borrow::Cow<'_, [u32]>> with Some(Cow::Owned(Vec::leak(vec![1]).to_owned()))
 crates/spikefade/src/report3.rs:419:13: replace && with || in Store::sample_rss
 crates/spikefade/src/report3.rs:464:13: replace && with || in Store::put
+crates/spikefade/src/report3.rs:828:25: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:841:29: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:876:25: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:875:25: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:1228:18: replace && with || in prepare_day

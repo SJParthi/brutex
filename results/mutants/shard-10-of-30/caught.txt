@@ -299,3 +299,17 @@ crates/spikefade/src/report3.rs:499:23: replace += with *= in offer_windows
 crates/spikefade/src/report3.rs:505:23: replace += with -= in offer_windows
 crates/spikefade/src/report3.rs:505:23: replace += with *= in offer_windows
 crates/spikefade/src/report3.rs:509:22: replace == with != in offer_windows
+crates/spikefade/src/report3.rs:585:16: delete ! in cmd_run3
+crates/spikefade/src/report3.rs:600:53: replace == with != in cmd_run3
+crates/spikefade/src/report3.rs:647:39: replace == with != in cmd_run3
+crates/spikefade/src/report3.rs:762:32: replace == with != in cmd_run3
+crates/spikefade/src/report3.rs:969:54: replace + with - in cmd_run3
+crates/spikefade/src/report3.rs:990:54: replace * with / in cmd_run3
+crates/spikefade/src/report3.rs:999:87: replace + with - in cmd_run3
+crates/spikefade/src/report3.rs:999:87: replace + with * in cmd_run3
+crates/spikefade/src/report3.rs:1002:58: replace * with + in cmd_run3
+crates/spikefade/src/report3.rs:1071:52: replace && with || in cmd_run3
+crates/spikefade/src/report3.rs:1075:76: delete ! in cmd_run3
+crates/spikefade/src/report3.rs:1096:31: replace == with != in cmd_run3
+crates/spikefade/src/report3.rs:1186:129: replace == with != in prepare_day
+crates/spikefade/src/report3.rs:1256:5: replace prepare_segment -> Result<Seg3, String> with Ok(Default::default())
