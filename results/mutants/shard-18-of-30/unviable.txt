@@ -1,0 +1,7 @@
+crates/spikefade/src/report3.rs:3481:5: replace trade_row -> Result<Option<PickRow>, String> with Ok(Some(Default::default()))
+crates/spikefade/src/report3.rs:3576:13: replace && with || in trade_row
+crates/spikefade/src/report3.rs:4083:17: replace && with || in write3
+crates/spikefade/src/report3.rs:4096:13: replace && with || in write3
+crates/spikefade/src/report3.rs:4095:16: replace && with || in write3
+crates/spikefade/src/report3.rs:4156:17: replace && with || in write3
+crates/spikefade/src/report3.rs:4170:17: replace && with || in write3
