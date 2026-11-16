@@ -1,0 +1,6 @@
+crates/spikefade/src/report3.rs:1822:27: replace && with || in stage_a_events_c
+crates/spikefade/src/report3.rs:1969:29: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1968:37: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1975:29: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1974:80: replace && with || in stage_b_whole
+crates/spikefade/src/report3.rs:1974:36: replace && with || in stage_b_whole
