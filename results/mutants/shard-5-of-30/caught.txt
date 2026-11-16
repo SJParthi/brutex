@@ -109,3 +109,8 @@ crates/spikefade/src/report.rs:737:54: replace * with / in pick_detail
 crates/spikefade/src/report.rs:853:5: replace peak_margin -> i64 with 1
 crates/spikefade/src/report.rs:925:43: replace == with != in write_results
 crates/spikefade/src/report.rs:929:51: replace - with + in write_results
+crates/spikefade/src/report.rs:1066:160: replace + with * in write_results
+crates/spikefade/src/report.rs:1115:32: replace && with || in write_results
+crates/spikefade/src/report.rs:1199:170: replace && with || in write_results
+crates/spikefade/src/report.rs:1199:176: replace == with != in write_results
+crates/spikefade/src/report.rs:1306:165: replace == with != in write_results

@@ -1,0 +1,28 @@
+crates/spikefade/src/mtable.rs:307:30: delete field fallback from struct MarginAt expression in exact_at
+crates/spikefade/src/mtable.rs:421:34: replace == with != in cmd_margincheck
+crates/spikefade/src/mtable.rs:449:33: replace match guard (Some(p.exact), Some(p.span), Some(p.premium), Some(p.elm), Some(p.nse_only), label.clone()) == want with false in cmd_margincheck
+crates/spikefade/src/mtable.rs:473:5: replace cmd_margincheck2 -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/mtable.rs:473:5: replace cmd_margincheck2 -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/mtable.rs:496:11: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:503:78: replace * with / in cmd_margincheck2
+crates/spikefade/src/mtable.rs:522:158: replace == with != in cmd_margincheck2
+crates/spikefade/src/mtable.rs:526:16: replace += with *= in cmd_margincheck2
+crates/spikefade/src/mtable.rs:527:29: replace < with == in cmd_margincheck2
+crates/spikefade/src/mtable.rs:540:12: replace += with -= in cmd_margincheck2
+crates/spikefade/src/stress.rs:68:98: replace / with % in adverse_bp
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 1, 1)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 0, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (1, -1, 1, 0)
+crates/spikefade/src/stress.rs:78:61: replace / with % in dist
+crates/spikefade/src/stress.rs:78:57: replace * with / in dist
+crates/spikefade/src/sw.rs:192:8: delete ! in words32
+crates/spikefade/src/sw.rs:298:26: replace == with != in from_args
+crates/spikefade/src/sw.rs:311:20: replace && with || in from_args
+crates/spikefade/src/sw.rs:376:48: replace == with != in from_args
+crates/spikefade/src/report.rs:117:46: replace == with != in cmd_run
+crates/spikefade/src/report.rs:132:91: replace + with - in cmd_run
+crates/spikefade/src/report.rs:249:32: replace += with -= in cmd_run
+crates/spikefade/src/report.rs:338:29: replace += with *= in cmd_run
+crates/spikefade/src/report.rs:443:164: replace + with * in cmd_run
+crates/spikefade/src/report.rs:444:41: replace += with *= in cmd_run
+crates/spikefade/src/report.rs:445:47: replace > with >= in cmd_run
