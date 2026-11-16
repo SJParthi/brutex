@@ -1,0 +1,9 @@
+crates/spikefade/src/kern.rs:621:9: replace && with || in close_day_p
+crates/spikefade/src/kern.rs:630:13: replace && with || in close_day_p
+crates/spikefade/src/kern.rs:629:13: replace && with || in close_day_p
+crates/spikefade/src/kern.rs:639:13: replace && with || in close_day_p
+crates/spikefade/src/kern.rs:638:13: replace && with || in close_day_p
+crates/spikefade/src/kern.rs:655:9: replace && with || in finish_pieces
+crates/spikefade/src/kern.rs:654:9: replace && with || in finish_pieces
+crates/spikefade/src/kern.rs:661:9: replace && with || in finish_pieces
+crates/spikefade/src/kern.rs:660:9: replace && with || in finish_pieces
