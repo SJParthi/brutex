@@ -1,0 +1,55 @@
+crates/spikefade/src/report.rs:1400:20: replace ^ with | in twin
+crates/spikefade/src/report.rs:1413:111: replace < with <= in twin
+crates/spikefade/src/report.rs:1447:5: replace manifest_stats -> (f64, BTreeMap<String, u64>) with (-1.0, BTreeMap::from_iter([("xyzzy".into(), 1)]))
+crates/spikefade/src/report.rs:1762:41: replace < with > in v2_top
+crates/spikefade/src/report.rs:1775:27: delete field list from struct Sum expression in v2_top
+crates/spikefade/src/report.rs:1775:36: delete field x from struct Sum expression in v2_top
+crates/spikefade/src/report.rs:1775:72: delete field n from struct Sum expression in v2_top
+crates/spikefade/src/report.rs:1970:27: delete field trades from struct GapStat expression in gap_stat
+crates/spikefade/src/report.rs:1982:78: replace * with + in gap_stat
+crates/spikefade/src/report.rs:1988:19: replace += with -= in gap_stat
+crates/spikefade/src/report.rs:1998:5: replace pct1 -> String with String::new()
+crates/spikefade/src/report.rs:2003:5: replace why_alpha -> String with "xyzzy".into()
+crates/spikefade/src/report.rs:2009:5: replace checker_rows -> HashMap<(String, String), Vec<String>> with HashMap::from_iter([((String::new(), String::new()), vec![String::new()])])
+crates/spikefade/src/report.rs:2096:240: replace && with || in v21_top
+crates/spikefade/src/report.rs:2096:118: replace && with || in v21_top
+crates/spikefade/src/report.rs:2096:126: replace == with != in v21_top
+crates/spikefade/src/report.rs:2116:33: replace == with != in v21_top
+crates/spikefade/src/report.rs:2177:57: replace == with != in v21_top
+crates/spikefade/src/report.rs:2348:26: delete field nb from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:30: delete field ng from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:34: delete field ua from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:38: delete field ug from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:42: delete field rv from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:46: delete field uv from struct RowGap expression in row_gap
+crates/spikefade/src/report.rs:2348:50: delete field first_before_t from struct RowGap expression in row_gap
+crates/spikefade/src/screen.rs:37:40: replace * with /
+crates/spikefade/src/screen.rs:37:36: replace * with /
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 0, 0, 0, 1)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 0, 0, 1, 1)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 0, 1, 1, 1)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 1, 0, 0, 1)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 1, 0, 1, 0, 0)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 1, 0, 1, 1, 1)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 0, 0, 0, 0, 0)
+crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 1, 0, 0, 0, 0)
+crates/spikefade/src/screen.rs:119:88: replace && with || in lists_all
+crates/spikefade/src/screen.rs:171:17: replace && with || in lists_all
+crates/spikefade/src/screen.rs:296:127: replace > with >= in prev_closes
+crates/spikefade/src/screen.rs:316:33: replace / with * in member_prev
+crates/spikefade/src/screen.rs:350:10: replace < with > in round2
+crates/spikefade/src/screen.rs:355:11: replace *= with /= in round2
+crates/spikefade/src/screen.rs:474:12: replace ^ with & in splitmix
+crates/spikefade/src/screen.rs:476:7: replace ^ with & in splitmix
+crates/spikefade/src/screen.rs:482:5: replace path_after -> (i32, i32) with (1, 1)
+crates/spikefade/src/screen.rs:503:30: delete field lists from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:503:61: delete field raw_n from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:503:88: delete field raw_tiny from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:503:118: delete field first_open_ref from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:503:154: delete field after_cut from struct DayEvents expression in generate
+crates/spikefade/src/screen.rs:566:64: replace >= with < in generate
+crates/spikefade/src/screen.rs:585:60: replace > with == in generate
+crates/spikefade/src/screen.rs:673:50: replace >= with < in generate
+crates/spikefade/src/screen.rs:694:71: replace > with == in generate
+crates/spikefade/src/screen.rs:701:116: replace / with % in generate
+crates/spikefade/src/screen.rs:710:93: replace % with + in generate

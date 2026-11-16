@@ -1,0 +1,5613 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 17.881275254,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.317466507,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1400:20: replace ^ with | in twin",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "twin",
+            "return_type": "-> Result<(Vec<(i64, u32)>, String), String>",
+            "span": {
+              "start": {
+                "line": 1378,
+                "column": 1
+              },
+              "end": {
+                "line": 1443,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1400,
+              "column": 20
+            },
+            "end": {
+              "line": 1400,
+              "column": 21
+            }
+          },
+          "replacement": "|",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1400_col_20.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1400_col_20.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.112401613,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.724688784,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1413:111: replace < with <= in twin",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "twin",
+            "return_type": "-> Result<(Vec<(i64, u32)>, String), String>",
+            "span": {
+              "start": {
+                "line": 1378,
+                "column": 1
+              },
+              "end": {
+                "line": 1443,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1413,
+              "column": 111
+            },
+            "end": {
+              "line": 1413,
+              "column": 112
+            }
+          },
+          "replacement": "<=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1413_col_111.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1413_col_111.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.259320073,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.967272418,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1447:5: replace manifest_stats -> (f64, BTreeMap<String, u64>) with (-1.0, BTreeMap::from_iter([(\"xyzzy\".into(), 1)]))",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "manifest_stats",
+            "return_type": "-> (f64, BTreeMap<String, u64>)",
+            "span": {
+              "start": {
+                "line": 1445,
+                "column": 1
+              },
+              "end": {
+                "line": 1464,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1447,
+              "column": 5
+            },
+            "end": {
+              "line": 1463,
+              "column": 16
+            }
+          },
+          "replacement": "(-1.0, BTreeMap::from_iter([(\"xyzzy\".into(), 1)]))",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1447_col_5.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1447_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.359184864,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.170842376,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1762:41: replace < with > in v2_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v2_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 1611,
+                "column": 1
+              },
+              "end": {
+                "line": 1859,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1762,
+              "column": 41
+            },
+            "end": {
+              "line": 1762,
+              "column": 42
+            }
+          },
+          "replacement": ">",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1762_col_41.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1762_col_41.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.308492648,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.119254207,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1775:27: delete field list from struct Sum expression in v2_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v2_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 1611,
+                "column": 1
+              },
+              "end": {
+                "line": 1859,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1775,
+              "column": 27
+            },
+            "end": {
+              "line": 1775,
+              "column": 35
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1775_col_27.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1775_col_27.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.262363939,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 6.222519022,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1775:36: delete field x from struct Sum expression in v2_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v2_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 1611,
+                "column": 1
+              },
+              "end": {
+                "line": 1859,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1775,
+              "column": 36
+            },
+            "end": {
+              "line": 1775,
+              "column": 71
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1775_col_36.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1775_col_36.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.360024714,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.519963739,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1775:72: delete field n from struct Sum expression in v2_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v2_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 1611,
+                "column": 1
+              },
+              "end": {
+                "line": 1859,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1775,
+              "column": 72
+            },
+            "end": {
+              "line": 1775,
+              "column": 106
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1775_col_72.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1775_col_72.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.112369771,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.368191092,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1970:27: delete field trades from struct GapStat expression in gap_stat",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "gap_stat",
+            "return_type": "-> Result<GapStat, String>",
+            "span": {
+              "start": {
+                "line": 1966,
+                "column": 1
+              },
+              "end": {
+                "line": 1995,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1970,
+              "column": 27
+            },
+            "end": {
+              "line": 1970,
+              "column": 48
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1970_col_27.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1970_col_27.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.413253623,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.620554523,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1982:78: replace * with + in gap_stat",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "gap_stat",
+            "return_type": "-> Result<GapStat, String>",
+            "span": {
+              "start": {
+                "line": 1966,
+                "column": 1
+              },
+              "end": {
+                "line": 1995,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1982,
+              "column": 78
+            },
+            "end": {
+              "line": 1982,
+              "column": 79
+            }
+          },
+          "replacement": "+",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1982_col_78.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1982_col_78.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.211644027,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.272183586,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1988:19: replace += with -= in gap_stat",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "gap_stat",
+            "return_type": "-> Result<GapStat, String>",
+            "span": {
+              "start": {
+                "line": 1966,
+                "column": 1
+              },
+              "end": {
+                "line": 1995,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1988,
+              "column": 19
+            },
+            "end": {
+              "line": 1988,
+              "column": 21
+            }
+          },
+          "replacement": "-=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1988_col_19.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1988_col_19.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.008195312,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 6.172359806,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:1998:5: replace pct1 -> String with String::new()",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "pct1",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 1997,
+                "column": 1
+              },
+              "end": {
+                "line": 1999,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1998,
+              "column": 5
+            },
+            "end": {
+              "line": 1998,
+              "column": 89
+            }
+          },
+          "replacement": "String::new()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_1998_col_5.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_1998_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.321527996,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 6.222632965,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2003:5: replace why_alpha -> String with \"xyzzy\".into()",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "why_alpha",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 2001,
+                "column": 1
+              },
+              "end": {
+                "line": 2005,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2003,
+              "column": 5
+            },
+            "end": {
+              "line": 2004,
+              "column": 64
+            }
+          },
+          "replacement": "\"xyzzy\".into()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2003_col_5.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2003_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.509981471,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 6.584032136,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2009:5: replace checker_rows -> HashMap<(String, String), Vec<String>> with HashMap::from_iter([((String::new(), String::new()), vec![String::new()])])",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "checker_rows",
+            "return_type": "-> HashMap<(String, String), Vec<String>>",
+            "span": {
+              "start": {
+                "line": 2007,
+                "column": 1
+              },
+              "end": {
+                "line": 2019,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2009,
+              "column": 5
+            },
+            "end": {
+              "line": 2018,
+              "column": 6
+            }
+          },
+          "replacement": "HashMap::from_iter([((String::new(), String::new()), vec![String::new()])])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2009_col_5.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2009_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.46133247,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.517581209,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2096:240: replace && with || in v21_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v21_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 2039,
+                "column": 1
+              },
+              "end": {
+                "line": 2322,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2096,
+              "column": 240
+            },
+            "end": {
+              "line": 2096,
+              "column": 242
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2096_col_240.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2096_col_240.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.359460898,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.523059409,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2096:118: replace && with || in v21_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v21_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 2039,
+                "column": 1
+              },
+              "end": {
+                "line": 2322,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2096,
+              "column": 118
+            },
+            "end": {
+              "line": 2096,
+              "column": 120
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2096_col_118.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2096_col_118.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.161763684,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.317217742,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2096:126: replace == with != in v21_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v21_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 2039,
+                "column": 1
+              },
+              "end": {
+                "line": 2322,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2096,
+              "column": 126
+            },
+            "end": {
+              "line": 2096,
+              "column": 128
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2096_col_126.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2096_col_126.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.017210788,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.823779898,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2116:33: replace == with != in v21_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v21_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 2039,
+                "column": 1
+              },
+              "end": {
+                "line": 2322,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2116,
+              "column": 33
+            },
+            "end": {
+              "line": 2116,
+              "column": 35
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2116_col_33.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2116_col_33.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.165128427,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.470965986,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2177:57: replace == with != in v21_top",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "v21_top",
+            "return_type": "-> Result<String, String>",
+            "span": {
+              "start": {
+                "line": 2039,
+                "column": 1
+              },
+              "end": {
+                "line": 2322,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2177,
+              "column": 57
+            },
+            "end": {
+              "line": 2177,
+              "column": 59
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2177_col_57.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2177_col_57.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.310459386,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.422158373,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2348:26: delete field nb from struct RowGap expression in row_gap",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "row_gap",
+            "return_type": "-> Result<RowGap, String>",
+            "span": {
+              "start": {
+                "line": 2339,
+                "column": 1
+              },
+              "end": {
+                "line": 2361,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2348,
+              "column": 26
+            },
+            "end": {
+              "line": 2348,
+              "column": 29
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2348_col_26.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2348_col_26.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.2602660439999998,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.829247545,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2348:30: delete field ng from struct RowGap expression in row_gap",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "row_gap",
+            "return_type": "-> Result<RowGap, String>",
+            "span": {
+              "start": {
+                "line": 2339,
+                "column": 1
+              },
+              "end": {
+                "line": 2361,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2348,
+              "column": 30
+            },
+            "end": {
+              "line": 2348,
+              "column": 33
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2348_col_30.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2348_col_30.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.412447067,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.719493268,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2348:34: delete field ua from struct RowGap expression in row_gap",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "row_gap",
+            "return_type": "-> Result<RowGap, String>",
+            "span": {
+              "start": {
+                "line": 2339,
+                "column": 1
+              },
+              "end": {
+                "line": 2361,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2348,
+              "column": 34
+            },
+            "end": {
+              "line": 2348,
+              "column": 37
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2348_col_34.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2348_col_34.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.109221999,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.118440975,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2348:38: delete field ug from struct RowGap expression in row_gap",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "row_gap",
+            "return_type": "-> Result<RowGap, String>",
+            "span": {
+              "start": {
+                "line": 2339,
+                "column": 1
+              },
+              "end": {
+                "line": 2361,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2348,
+              "column": 38
+            },
+            "end": {
+              "line": 2348,
+              "column": 41
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2348_col_38.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2348_col_38.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.159179208,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.621438575,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2348:42: delete field rv from struct RowGap expression in row_gap",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "row_gap",
+            "return_type": "-> Result<RowGap, String>",
+            "span": {
+              "start": {
+                "line": 2339,
+                "column": 1
+              },
+              "end": {
+                "line": 2361,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2348,
+              "column": 42
+            },
+            "end": {
+              "line": 2348,
+              "column": 45
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2348_col_42.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2348_col_42.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.112093834,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.5179509509999995,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2348:46: delete field uv from struct RowGap expression in row_gap",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "row_gap",
+            "return_type": "-> Result<RowGap, String>",
+            "span": {
+              "start": {
+                "line": 2339,
+                "column": 1
+              },
+              "end": {
+                "line": 2361,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2348,
+              "column": 46
+            },
+            "end": {
+              "line": 2348,
+              "column": 49
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2348_col_46.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2348_col_46.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.008295688,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.521235033,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/report.rs:2348:50: delete field first_before_t from struct RowGap expression in row_gap",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/report.rs",
+          "function": {
+            "function_name": "row_gap",
+            "return_type": "-> Result<RowGap, String>",
+            "span": {
+              "start": {
+                "line": 2339,
+                "column": 1
+              },
+              "end": {
+                "line": 2361,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2348,
+              "column": 50
+            },
+            "end": {
+              "line": 2348,
+              "column": 69
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__report.rs_line_2348_col_50.log",
+      "diff_path": "diff/crates__spikefade__src__report.rs_line_2348_col_50.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.363301249,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.826052709,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:37:40: replace * with /",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": null,
+          "span": {
+            "start": {
+              "line": 37,
+              "column": 40
+            },
+            "end": {
+              "line": 37,
+              "column": 41
+            }
+          },
+          "replacement": "/",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_37_col_40.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_37_col_40.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.513245902,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.975130417,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:37:36: replace * with /",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": null,
+          "span": {
+            "start": {
+              "line": 37,
+              "column": 36
+            },
+            "end": {
+              "line": 37,
+              "column": 37
+            }
+          },
+          "replacement": "/",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_37_col_36.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_37_col_36.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.06382303,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 6.16966577,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 0, 0, 0, 1)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 0, 0, 0, 0, 1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 3.070270773,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.623445152,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 0, 0, 1, 1)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 0, 0, 0, 1, 1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5_001.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.058005269,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.5248628239999995,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 0, 1, 1, 1)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 0, 0, 1, 1, 1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5_002.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.857185066,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.216099944,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 0, 1, 0, 0, 1)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 0, 1, 0, 0, 1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5_003.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5_003.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.959630814,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.913627885,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 1, 0, 1, 0, 0)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 1, 0, 1, 0, 0)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5_004.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5_004.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.908165575,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.170503872,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (0, 1, 0, 1, 1, 1)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(0, 1, 0, 1, 1, 1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5_005.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5_005.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.90764742,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.672528219,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 0, 0, 0, 0, 0)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 0, 0, 0, 0, 0)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5_006.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5_006.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.016306726,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.366949589,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:48:5: replace cfg_parts -> (usize, usize, usize, usize, usize, usize) with (1, 1, 0, 0, 0, 0)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "cfg_parts",
+            "return_type": "-> (usize, usize, usize, usize, usize, usize)",
+            "span": {
+              "start": {
+                "line": 45,
+                "column": 1
+              },
+              "end": {
+                "line": 58,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 48,
+              "column": 5
+            },
+            "end": {
+              "line": 57,
+              "column": 35
+            }
+          },
+          "replacement": "(1, 1, 0, 0, 0, 0)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_48_col_5_007.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_48_col_5_007.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.909512328,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.516741958,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:119:88: replace && with || in lists_all",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "lists_all",
+            "return_type": "-> Vec<(u32, Vec<u32>)>",
+            "span": {
+              "start": {
+                "line": 109,
+                "column": 1
+              },
+              "end": {
+                "line": 213,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 119,
+              "column": 88
+            },
+            "end": {
+              "line": 119,
+              "column": 90
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_119_col_88.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_119_col_88.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.610439779,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.520759941,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:171:17: replace && with || in lists_all",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "lists_all",
+            "return_type": "-> Vec<(u32, Vec<u32>)>",
+            "span": {
+              "start": {
+                "line": 109,
+                "column": 1
+              },
+              "end": {
+                "line": 213,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 171,
+              "column": 17
+            },
+            "end": {
+              "line": 171,
+              "column": 19
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_171_col_17.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_171_col_17.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.909785047,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.722480992,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:296:127: replace > with >= in prev_closes",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "prev_closes",
+            "return_type": "-> std::sync::Arc<Vec<i32>>",
+            "span": {
+              "start": {
+                "line": 284,
+                "column": 1
+              },
+              "end": {
+                "line": 303,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 296,
+              "column": 127
+            },
+            "end": {
+              "line": 296,
+              "column": 128
+            }
+          },
+          "replacement": ">=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_296_col_127.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_296_col_127.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.807322782,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.87615596,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:316:33: replace / with * in member_prev",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "member_prev",
+            "return_type": "-> Option<Member>",
+            "span": {
+              "start": {
+                "line": 305,
+                "column": 1
+              },
+              "end": {
+                "line": 326,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 316,
+              "column": 33
+            },
+            "end": {
+              "line": 316,
+              "column": 34
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_316_col_33.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_316_col_33.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.80714595,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.014457623,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:350:10: replace < with > in round2",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "round2",
+            "return_type": "-> u64",
+            "span": {
+              "start": {
+                "line": 349,
+                "column": 1
+              },
+              "end": {
+                "line": 358,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 350,
+              "column": 10
+            },
+            "end": {
+              "line": 350,
+              "column": 11
+            }
+          },
+          "replacement": ">",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_350_col_10.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_350_col_10.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.9074853410000001,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.223683639,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:355:11: replace *= with /= in round2",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "round2",
+            "return_type": "-> u64",
+            "span": {
+              "start": {
+                "line": 349,
+                "column": 1
+              },
+              "end": {
+                "line": 358,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 355,
+              "column": 11
+            },
+            "end": {
+              "line": 355,
+              "column": 13
+            }
+          },
+          "replacement": "/=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_355_col_11.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_355_col_11.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.8569397410000001,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.124303436,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:474:12: replace ^ with & in splitmix",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "splitmix",
+            "return_type": "-> u64",
+            "span": {
+              "start": {
+                "line": 471,
+                "column": 1
+              },
+              "end": {
+                "line": 477,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 474,
+              "column": 12
+            },
+            "end": {
+              "line": 474,
+              "column": 13
+            }
+          },
+          "replacement": "&",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_474_col_12.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_474_col_12.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.009649817,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.518605747,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:476:7: replace ^ with & in splitmix",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "splitmix",
+            "return_type": "-> u64",
+            "span": {
+              "start": {
+                "line": 471,
+                "column": 1
+              },
+              "end": {
+                "line": 477,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 476,
+              "column": 7
+            },
+            "end": {
+              "line": 476,
+              "column": 8
+            }
+          },
+          "replacement": "&",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_476_col_7.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_476_col_7.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.063045094,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.366989322,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:482:5: replace path_after -> (i32, i32) with (1, 1)",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "path_after",
+            "return_type": "-> (i32, i32)",
+            "span": {
+              "start": {
+                "line": 479,
+                "column": 1
+              },
+              "end": {
+                "line": 495,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 482,
+              "column": 5
+            },
+            "end": {
+              "line": 494,
+              "column": 13
+            }
+          },
+          "replacement": "(1, 1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_482_col_5.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_482_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.411619678,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 6.374516405,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:503:30: delete field lists from struct DayEvents expression in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 503,
+              "column": 30
+            },
+            "end": {
+              "line": 503,
+              "column": 60
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_503_col_30.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_503_col_30.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 3.685340869,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.121735096,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:503:61: delete field raw_n from struct DayEvents expression in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 503,
+              "column": 61
+            },
+            "end": {
+              "line": 503,
+              "column": 87
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_503_col_61.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_503_col_61.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 3.065473354,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.537623623,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:503:88: delete field raw_tiny from struct DayEvents expression in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 503,
+              "column": 88
+            },
+            "end": {
+              "line": 503,
+              "column": 117
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_503_col_88.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_503_col_88.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.362200084,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.585023712,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:503:118: delete field first_open_ref from struct DayEvents expression in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 503,
+              "column": 118
+            },
+            "end": {
+              "line": 503,
+              "column": 153
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_503_col_118.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_503_col_118.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.010282511,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.417255893,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:503:154: delete field after_cut from struct DayEvents expression in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 503,
+              "column": 154
+            },
+            "end": {
+              "line": 503,
+              "column": 184
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_503_col_154.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_503_col_154.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.009593357,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.483791892,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:566:64: replace >= with < in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 566,
+              "column": 64
+            },
+            "end": {
+              "line": 566,
+              "column": 66
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_566_col_64.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_566_col_64.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.309986109,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.119087606,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:585:60: replace > with == in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 585,
+              "column": 60
+            },
+            "end": {
+              "line": 585,
+              "column": 61
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_585_col_60.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_585_col_60.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.9580976300000001,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.518792043,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:673:50: replace >= with < in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 673,
+              "column": 50
+            },
+            "end": {
+              "line": 673,
+              "column": 52
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_673_col_50.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_673_col_50.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.163818136,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.3224476339999995,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:694:71: replace > with == in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 694,
+              "column": 71
+            },
+            "end": {
+              "line": 694,
+              "column": 72
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_694_col_71.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_694_col_71.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.161251356,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.970395684,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:701:116: replace / with % in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 701,
+              "column": 116
+            },
+            "end": {
+              "line": 701,
+              "column": 117
+            }
+          },
+          "replacement": "%",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_701_col_116.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_701_col_116.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.957478665,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.12037184,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/spikefade/src/screen.rs:710:93: replace % with + in generate",
+          "package": "spikefade",
+          "file": "crates/spikefade/src/screen.rs",
+          "function": {
+            "function_name": "generate",
+            "return_type": "-> DayEvents",
+            "span": {
+              "start": {
+                "line": 497,
+                "column": 1
+              },
+              "end": {
+                "line": 761,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 710,
+              "column": 93
+            },
+            "end": {
+              "line": 710,
+              "column": 94
+            }
+          },
+          "replacement": "+",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__spikefade__src__screen.rs_line_710_col_93.log",
+      "diff_path": "diff/crates__spikefade__src__screen.rs_line_710_col_93.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.058711412,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 5.466916058,
+          "process_status": "Success",
+          "argv": [
+            "/root/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=spikefade@0.1.0",
+            "--locked",
+            "--",
+            "--exact",
+            "--skip",
+            "menu::tests::sf3_menu_and_sets_load_with_the_signed_counts",
+            "--skip",
+            "menu::tests::sf3_menu_fail_closed",
+            "--skip",
+            "menu::tests::sf3_tp_floor_not_armed_at_or_above_entry",
+            "--skip",
+            "menu::tests::sf3_distance_floor_counted",
+            "--skip",
+            "menu::tests::sf3_tp_theta_level_and_absence",
+            "--skip",
+            "tests33s::v33_search1d_sets_load_and_count",
+            "--skip",
+            "tests3::sf3_ttp_replaces_tp_close",
+            "--skip",
+            "tests34s::root_digest_same_for_every_form",
+            "--skip",
+            "tests34s::sfz_roundtrip_all_rows",
+            "--skip",
+            "every_declared_cost_invariant_reaches_a_bench",
+            "--skip",
+            "the_document_declares_the_five_operations_rule_4_names",
+            "--skip",
+            "every_measured_cost_invariant_is_declared",
+            "--skip",
+            "every_crate_carries_a_ratio_bench",
+            "--skip",
+            "the_reconciliation_is_reading_something",
+            "--skip",
+            "tests34i::v34i_f3_real_rows_spot",
+            "--skip",
+            "tests34i::v34i_f7_rules_tables_load_dated_and_minrange",
+            "--skip",
+            "tests34i::v34i_f7_opr_file_is_next_session_and_columns"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 55,
+  "missed": 54,
+  "caught": 1,
+  "timeout": 0,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-11-16T17:03:53.605287486Z",
+  "end_time": "2026-11-16T17:11:20.676705565Z",
+  "cargo_mutants_version": "27.1.0"
+}
