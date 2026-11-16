@@ -62,3 +62,118 @@ crates/sniper_host/src/secrun.rs:1150:23: replace == with != in context
 crates/sniper_host/src/secrun.rs:1160:45: replace && with || in context
 crates/sniper_host/src/secrun.rs:1160:27: replace == with != in context
 crates/sniper_host/src/secrun.rs:1165:62: delete - in context
+crates/sniper_host/src/secrun.rs:1172:42: replace != with == in context
+crates/sniper_host/src/secrun.rs:1175:99: replace + with - in context
+crates/sniper_host/src/secrun.rs:1175:99: replace + with * in context
+crates/sniper_host/src/secrun.rs:1175:92: replace * with + in context
+crates/sniper_host/src/secrun.rs:1175:92: replace * with / in context
+crates/sniper_host/src/secrun.rs:1175:70: replace == with != in context
+crates/sniper_host/src/secrun.rs:1189:32: replace != with == in context
+crates/sniper_host/src/secrun.rs:1230:57: replace == with != in context
+crates/sniper_host/src/secrun.rs:1231:83: replace + with - in context
+crates/sniper_host/src/secrun.rs:1231:83: replace + with * in context
+crates/sniper_host/src/secrun.rs:1231:76: replace * with + in context
+crates/sniper_host/src/secrun.rs:1231:76: replace * with / in context
+crates/sniper_host/src/secrun.rs:1233:55: delete field twin from struct common_wf::report::LuckCtx expression in context
+crates/sniper_host/src/secrun.rs:1236:16: delete ! in context
+crates/sniper_host/src/secrun.rs:1236:43: replace && with || in context
+crates/sniper_host/src/secrun.rs:1236:25: replace == with != in context
+crates/sniper_host/src/secrun.rs:1241:41: replace && with || in context
+crates/sniper_host/src/secrun.rs:1241:23: replace == with != in context
+crates/sniper_host/src/secrun.rs:1244:21: delete match arm Verdict::Passed{..} in context
+crates/sniper_host/src/secrun.rs:1245:21: delete match arm Verdict::NotRun(common_wf::verdict::NotRun::ChosenRule{run}) in context
+crates/sniper_host/src/secrun.rs:1249:79: delete - in context
+crates/sniper_host/src/secrun.rs:1270:32: replace != with == in context
+crates/sniper_host/src/secrun.rs:1278:33: replace match guard sz.capped with true in context
+crates/sniper_host/src/secrun.rs:1278:33: replace match guard sz.capped with false in context
+crates/sniper_host/src/secrun.rs:1338:22: replace += with -= in context
+crates/sniper_host/src/secrun.rs:1338:22: replace += with *= in context
+crates/sniper_host/src/secrun.rs:1339:22: replace += with -= in context
+crates/sniper_host/src/secrun.rs:1339:22: replace += with *= in context
+crates/sniper_host/src/secrun.rs:1340:17: replace += with -= in context
+crates/sniper_host/src/secrun.rs:1340:17: replace += with *= in context
+crates/sniper_host/src/secrun.rs:1340:35: replace && with || in context
+crates/sniper_host/src/secrun.rs:1361:5: replace sec_build -> Result<Vec<String>, String> with Ok(vec![])
+crates/sniper_host/src/secrun.rs:1361:5: replace sec_build -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/sniper_host/src/secrun.rs:1361:5: replace sec_build -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/sniper_host/src/secrun.rs:1367:97: replace != with == in sec_build
+crates/sniper_host/src/secrun.rs:1402:5: replace sec_dump -> Result<Vec<String>, String> with Ok(vec![])
+crates/sniper_host/src/secrun.rs:1402:5: replace sec_dump -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/sniper_host/src/secrun.rs:1402:5: replace sec_dump -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/sniper_host/src/secrun.rs:1409:81: replace && with || in sec_dump
+crates/sniper_host/src/secrun.rs:1409:73: replace >= with < in sec_dump
+crates/sniper_host/src/secrun.rs:1409:90: replace <= with > in sec_dump
+crates/sniper_host/src/secrun.rs:1411:14: replace += with -= in sec_dump
+crates/sniper_host/src/secrun.rs:1411:14: replace += with *= in sec_dump
+crates/sniper_host/src/secrun.rs:1412:27: replace > with == in sec_dump
+crates/sniper_host/src/secrun.rs:1412:27: replace > with < in sec_dump
+crates/sniper_host/src/secrun.rs:1412:27: replace > with >= in sec_dump
+crates/sniper_host/src/secrun.rs:1413:21: replace += with -= in sec_dump
+crates/sniper_host/src/secrun.rs:1413:21: replace += with *= in sec_dump
+crates/sniper_host/src/secrun.rs:1441:5: replace sec_eq_run -> Result<Vec<String>, String> with Ok(vec![])
+crates/sniper_host/src/secrun.rs:1441:5: replace sec_eq_run -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/sniper_host/src/secrun.rs:1441:5: replace sec_eq_run -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/sniper_host/src/secrun.rs:1452:5: replace sec_eq_run_ctx -> Result<Vec<String>, String> with Ok(vec![])
+crates/sniper_host/src/secrun.rs:1452:5: replace sec_eq_run_ctx -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/sniper_host/src/secrun.rs:1452:5: replace sec_eq_run_ctx -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/sniper_host/src/secrun.rs:1461:63: replace != with == in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1465:100: replace && with || in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1465:85: replace && with || in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1465:77: replace >= with < in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1465:94: replace <= with > in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1465:109: replace >= with < in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1496:24: replace < with == in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1496:24: replace < with > in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1496:24: replace < with <= in sec_eq_run_ctx
+crates/sniper_host/src/secrun.rs:1503:97: replace != with == in sec_eq_run_ctx
+crates/sniper_host/src/sha.rs:42:30: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:45:41: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:45:31: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:103:26: replace ^ with | in block
+crates/sniper_host/src/sha.rs:106:37: replace ^ with | in block
+crates/sniper_host/src/sha.rs:106:27: replace ^ with | in block
+crates/sniper_host/src/sha.rs:179:5: replace sha256_file -> Result<[u8; 32], String> with Ok([0; 32])
+crates/sniper_host/src/sha.rs:179:5: replace sha256_file -> Result<[u8; 32], String> with Ok([1; 32])
+crates/sniper_host/src/sha.rs:185:14: replace == with != in sha256_file
+crates/sniper_host/src/size.rs:43:9: replace QtyRule::id -> &'static str with ""
+crates/sniper_host/src/size.rs:43:9: replace QtyRule::id -> &'static str with "xyzzy"
+crates/sniper_host/src/size.rs:74:50: replace >= with < in closest_units
+crates/sniper_host/src/size.rs:74:46: replace * with + in closest_units
+crates/sniper_host/src/size.rs:74:46: replace * with / in closest_units
+crates/sniper_host/src/size.rs:84:18: replace || with && in fit_units
+crates/sniper_host/src/size.rs:89:64: replace * with / in fit_units
+crates/sniper_host/src/size.rs:89:60: replace * with / in fit_units
+crates/sniper_host/src/size.rs:133:27: replace > with >= in account_walk
+crates/sniper_host/src/sweep.rs:115:43: replace + with * in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:115:69: replace * with + in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:115:90: replace + with * in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:115:116: replace * with + in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:152:22: replace || with && in run_with
+crates/sniper_host/src/sweep.rs:152:34: replace > with == in run_with
+crates/sniper_host/src/sweep.rs:152:34: replace > with >= in run_with
+crates/sniper_host/src/sweep.rs:251:5: replace bounded_lists -> Vec<Lists> with vec![]
+crates/sniper_host/src/sweep.rs:286:26: replace >= with < in Fan<'_, '_>::push
+crates/sniper_host/src/sweep.rs:306:9: replace <impl Sink for Fan<'_, '_>>::reset with ()
+crates/sniper_host/src/sweep.rs:309:9: replace <impl Sink for Fan<'_, '_>>::insert -> Result<(), SweepErr> with Ok(())
+crates/sniper_host/src/sweep.rs:313:9: replace <impl Sink for Fan<'_, '_>>::remove -> Result<(), SweepErr> with Ok(())
+crates/sniper_host/src/sweep.rs:378:22: replace || with && in run_all_kept
+crates/sniper_host/src/sweep.rs:378:34: replace > with == in run_all_kept
+crates/sniper_host/src/sweep.rs:378:34: replace > with >= in run_all_kept
+crates/sniper_host/src/sweep.rs:509:52: delete field out from struct Ctx expression in run_all_kept
+crates/sniper_host/src/sweep.rs:508:27: delete ! in run_all_kept
+crates/sniper_host/src/twin.rs:25:5: replace key -> u64 with 0
+crates/sniper_host/src/twin.rs:25:5: replace key -> u64 with 1
+crates/sniper_host/src/twin.rs:25:56: replace ^ with | in key
+crates/sniper_host/src/twin.rs:25:56: replace ^ with & in key
+crates/sniper_host/src/twin.rs:25:28: replace ^ with | in key
+crates/sniper_host/src/twin.rs:25:28: replace ^ with & in key
+crates/sniper_host/src/twin.rs:25:48: replace << with >> in key
+crates/sniper_host/src/twin.rs:40:23: replace + with * in draws
+crates/sniper_host/src/twin.rs:40:51: replace % with / in draws
+crates/sniper_host/src/twin.rs:40:51: replace % with + in draws
+crates/sniper_host/src/wfio.rs:38:27: delete ! in calendar
+crates/sniper_host/src/wfio.rs:40:43: replace || with && in calendar
+crates/sniper_host/src/wfio.rs:40:23: delete ! in calendar
+crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![]
+crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![(String::new(), String::new())]
+crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![(String::new(), "xyzzy".into())]

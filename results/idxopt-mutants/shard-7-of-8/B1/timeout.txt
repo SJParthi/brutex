@@ -1,0 +1,2 @@
+crates/sniper_host/src/sha.rs:20:21: replace % with + in sha256
+crates/sniper_host/src/sha.rs:157:26: replace % with + in Sha256::finish

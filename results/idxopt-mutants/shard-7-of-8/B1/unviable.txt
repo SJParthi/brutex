@@ -1,0 +1,10 @@
+crates/sniper_host/src/size.rs:33:9: replace QtyRule::parse -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/sweep.rs:140:5: replace run -> Result<Out, String> with Ok(Default::default())
+crates/sniper_host/src/sweep.rs:152:5: replace run_with -> Result<Out, String> with Ok(Default::default())
+crates/sniper_host/src/sweep.rs:251:5: replace bounded_lists -> Vec<Lists> with vec![Default::default()]
+crates/sniper_host/src/sweep.rs:270:28: replace << with >>
+crates/sniper_host/src/sweep.rs:294:17: replace && with || in Fan<'_, '_>::flush
+crates/sniper_host/src/sweep.rs:359:5: replace run_all -> Result<Vec<Out>, String> with Ok(vec![Default::default()])
+crates/sniper_host/src/sweep.rs:367:5: replace run_all_with -> Result<Vec<Out>, String> with Ok(vec![Default::default()])
+crates/sniper_host/src/sweep.rs:378:5: replace run_all_kept -> Result<Vec<Out>, String> with Ok(vec![Default::default()])
+crates/sniper_host/src/wfio.rs:35:5: replace calendar -> Result<Calendar, String> with Ok(Default::default())

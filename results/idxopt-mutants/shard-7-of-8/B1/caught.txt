@@ -1,0 +1,253 @@
+crates/sniper_host/src/sha.rs:16:5: replace sha256 -> [u8; 32] with [0; 32]
+crates/sniper_host/src/sha.rs:16:5: replace sha256 -> [u8; 32] with [1; 32]
+crates/sniper_host/src/sha.rs:20:26: replace != with == in sha256
+crates/sniper_host/src/sha.rs:20:21: replace % with / in sha256
+crates/sniper_host/src/sha.rs:27:33: replace * with + in sha256
+crates/sniper_host/src/sha.rs:27:33: replace * with / in sha256
+crates/sniper_host/src/sha.rs:27:44: replace + with - in sha256
+crates/sniper_host/src/sha.rs:27:44: replace + with * in sha256
+crates/sniper_host/src/sha.rs:27:40: replace * with + in sha256
+crates/sniper_host/src/sha.rs:27:40: replace * with / in sha256
+crates/sniper_host/src/sha.rs:32:77: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:32:77: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:32:48: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:32:48: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:32:26: replace - with + in sha256
+crates/sniper_host/src/sha.rs:32:26: replace - with / in sha256
+crates/sniper_host/src/sha.rs:32:54: replace - with + in sha256
+crates/sniper_host/src/sha.rs:32:54: replace - with / in sha256
+crates/sniper_host/src/sha.rs:32:90: replace >> with << in sha256
+crates/sniper_host/src/sha.rs:32:84: replace - with + in sha256
+crates/sniper_host/src/sha.rs:32:84: replace - with / in sha256
+crates/sniper_host/src/sha.rs:33:76: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:33:76: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:33:48: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:33:48: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:33:26: replace - with + in sha256
+crates/sniper_host/src/sha.rs:33:26: replace - with / in sha256
+crates/sniper_host/src/sha.rs:33:54: replace - with + in sha256
+crates/sniper_host/src/sha.rs:33:54: replace - with / in sha256
+crates/sniper_host/src/sha.rs:33:88: replace >> with << in sha256
+crates/sniper_host/src/sha.rs:33:83: replace - with + in sha256
+crates/sniper_host/src/sha.rs:33:83: replace - with / in sha256
+crates/sniper_host/src/sha.rs:34:25: replace - with + in sha256
+crates/sniper_host/src/sha.rs:34:25: replace - with / in sha256
+crates/sniper_host/src/sha.rs:34:65: replace - with + in sha256
+crates/sniper_host/src/sha.rs:34:65: replace - with / in sha256
+crates/sniper_host/src/sha.rs:41:61: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:41:61: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:41:40: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:41:40: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:42:30: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:42:25: replace & with | in sha256
+crates/sniper_host/src/sha.rs:42:25: replace & with ^ in sha256
+crates/sniper_host/src/sha.rs:42:36: replace & with | in sha256
+crates/sniper_host/src/sha.rs:42:36: replace & with ^ in sha256
+crates/sniper_host/src/sha.rs:42:33: delete ! in sha256
+crates/sniper_host/src/sha.rs:44:61: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:44:61: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:44:40: replace ^ with | in sha256
+crates/sniper_host/src/sha.rs:44:40: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:45:41: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:45:31: replace ^ with & in sha256
+crates/sniper_host/src/sha.rs:45:26: replace & with | in sha256
+crates/sniper_host/src/sha.rs:45:26: replace & with ^ in sha256
+crates/sniper_host/src/sha.rs:45:36: replace & with | in sha256
+crates/sniper_host/src/sha.rs:45:36: replace & with ^ in sha256
+crates/sniper_host/src/sha.rs:45:46: replace & with | in sha256
+crates/sniper_host/src/sha.rs:45:46: replace & with ^ in sha256
+crates/sniper_host/src/sha.rs:62:40: replace * with + in sha256
+crates/sniper_host/src/sha.rs:62:40: replace * with / in sha256
+crates/sniper_host/src/sha.rs:62:51: replace + with - in sha256
+crates/sniper_host/src/sha.rs:62:51: replace + with * in sha256
+crates/sniper_host/src/sha.rs:62:47: replace * with + in sha256
+crates/sniper_host/src/sha.rs:62:47: replace * with / in sha256
+crates/sniper_host/src/sha.rs:86:5: replace block with ()
+crates/sniper_host/src/sha.rs:88:29: replace * with + in block
+crates/sniper_host/src/sha.rs:88:29: replace * with / in block
+crates/sniper_host/src/sha.rs:88:40: replace + with - in block
+crates/sniper_host/src/sha.rs:88:40: replace + with * in block
+crates/sniper_host/src/sha.rs:88:36: replace * with + in block
+crates/sniper_host/src/sha.rs:88:36: replace * with / in block
+crates/sniper_host/src/sha.rs:93:73: replace ^ with | in block
+crates/sniper_host/src/sha.rs:93:73: replace ^ with & in block
+crates/sniper_host/src/sha.rs:93:44: replace ^ with | in block
+crates/sniper_host/src/sha.rs:93:44: replace ^ with & in block
+crates/sniper_host/src/sha.rs:93:22: replace - with + in block
+crates/sniper_host/src/sha.rs:93:22: replace - with / in block
+crates/sniper_host/src/sha.rs:93:50: replace - with + in block
+crates/sniper_host/src/sha.rs:93:50: replace - with / in block
+crates/sniper_host/src/sha.rs:93:86: replace >> with << in block
+crates/sniper_host/src/sha.rs:93:80: replace - with + in block
+crates/sniper_host/src/sha.rs:93:80: replace - with / in block
+crates/sniper_host/src/sha.rs:94:72: replace ^ with | in block
+crates/sniper_host/src/sha.rs:94:72: replace ^ with & in block
+crates/sniper_host/src/sha.rs:94:44: replace ^ with | in block
+crates/sniper_host/src/sha.rs:94:44: replace ^ with & in block
+crates/sniper_host/src/sha.rs:94:22: replace - with + in block
+crates/sniper_host/src/sha.rs:94:22: replace - with / in block
+crates/sniper_host/src/sha.rs:94:50: replace - with + in block
+crates/sniper_host/src/sha.rs:94:50: replace - with / in block
+crates/sniper_host/src/sha.rs:94:84: replace >> with << in block
+crates/sniper_host/src/sha.rs:94:79: replace - with + in block
+crates/sniper_host/src/sha.rs:94:79: replace - with / in block
+crates/sniper_host/src/sha.rs:95:21: replace - with + in block
+crates/sniper_host/src/sha.rs:95:21: replace - with / in block
+crates/sniper_host/src/sha.rs:95:61: replace - with + in block
+crates/sniper_host/src/sha.rs:95:61: replace - with / in block
+crates/sniper_host/src/sha.rs:102:57: replace ^ with | in block
+crates/sniper_host/src/sha.rs:102:57: replace ^ with & in block
+crates/sniper_host/src/sha.rs:102:36: replace ^ with | in block
+crates/sniper_host/src/sha.rs:102:36: replace ^ with & in block
+crates/sniper_host/src/sha.rs:103:26: replace ^ with & in block
+crates/sniper_host/src/sha.rs:103:21: replace & with | in block
+crates/sniper_host/src/sha.rs:103:21: replace & with ^ in block
+crates/sniper_host/src/sha.rs:103:32: replace & with | in block
+crates/sniper_host/src/sha.rs:103:32: replace & with ^ in block
+crates/sniper_host/src/sha.rs:103:29: delete ! in block
+crates/sniper_host/src/sha.rs:105:57: replace ^ with | in block
+crates/sniper_host/src/sha.rs:105:57: replace ^ with & in block
+crates/sniper_host/src/sha.rs:105:36: replace ^ with | in block
+crates/sniper_host/src/sha.rs:105:36: replace ^ with & in block
+crates/sniper_host/src/sha.rs:106:37: replace ^ with & in block
+crates/sniper_host/src/sha.rs:106:27: replace ^ with & in block
+crates/sniper_host/src/sha.rs:106:22: replace & with | in block
+crates/sniper_host/src/sha.rs:106:22: replace & with ^ in block
+crates/sniper_host/src/sha.rs:106:32: replace & with | in block
+crates/sniper_host/src/sha.rs:106:32: replace & with ^ in block
+crates/sniper_host/src/sha.rs:106:42: replace & with | in block
+crates/sniper_host/src/sha.rs:106:42: replace & with ^ in block
+crates/sniper_host/src/sha.rs:131:9: replace Sha256::update with ()
+crates/sniper_host/src/sha.rs:132:12: delete ! in Sha256::update
+crates/sniper_host/src/sha.rs:133:27: replace - with + in Sha256::update
+crates/sniper_host/src/sha.rs:133:27: replace - with / in Sha256::update
+crates/sniper_host/src/sha.rs:137:31: replace == with != in Sha256::update
+crates/sniper_host/src/sha.rs:154:9: replace Sha256::finish -> [u8; 32] with [0; 32]
+crates/sniper_host/src/sha.rs:154:9: replace Sha256::finish -> [u8; 32] with [1; 32]
+crates/sniper_host/src/sha.rs:157:31: replace != with == in Sha256::finish
+crates/sniper_host/src/sha.rs:157:26: replace % with / in Sha256::finish
+crates/sniper_host/src/sha.rs:166:44: replace * with + in Sha256::finish
+crates/sniper_host/src/sha.rs:166:44: replace * with / in Sha256::finish
+crates/sniper_host/src/sha.rs:166:55: replace + with - in Sha256::finish
+crates/sniper_host/src/sha.rs:166:55: replace + with * in Sha256::finish
+crates/sniper_host/src/sha.rs:166:51: replace * with + in Sha256::finish
+crates/sniper_host/src/sha.rs:166:51: replace * with / in Sha256::finish
+crates/sniper_host/src/sha.rs:196:5: replace hex -> String with String::new()
+crates/sniper_host/src/sha.rs:196:5: replace hex -> String with "xyzzy".into()
+crates/sniper_host/src/size.rs:52:9: replace QtyRule::label -> &'static str with ""
+crates/sniper_host/src/size.rs:52:9: replace QtyRule::label -> &'static str with "xyzzy"
+crates/sniper_host/src/size.rs:63:5: replace closest_units -> Units with Default::default()
+crates/sniper_host/src/size.rs:64:32: replace || with && in closest_units
+crates/sniper_host/src/size.rs:64:19: replace || with && in closest_units
+crates/sniper_host/src/size.rs:64:14: replace <= with > in closest_units
+crates/sniper_host/src/size.rs:64:27: replace <= with > in closest_units
+crates/sniper_host/src/size.rs:64:43: replace == with != in closest_units
+crates/sniper_host/src/size.rs:68:30: replace * with + in closest_units
+crates/sniper_host/src/size.rs:68:30: replace * with / in closest_units
+crates/sniper_host/src/size.rs:69:53: replace * with + in closest_units
+crates/sniper_host/src/size.rs:69:53: replace * with / in closest_units
+crates/sniper_host/src/size.rs:69:31: replace * with + in closest_units
+crates/sniper_host/src/size.rs:69:31: replace * with / in closest_units
+crates/sniper_host/src/size.rs:70:15: replace / with % in closest_units
+crates/sniper_host/src/size.rs:70:15: replace / with * in closest_units
+crates/sniper_host/src/size.rs:71:15: replace - with + in closest_units
+crates/sniper_host/src/size.rs:71:15: replace - with / in closest_units
+crates/sniper_host/src/size.rs:71:19: replace * with + in closest_units
+crates/sniper_host/src/size.rs:71:19: replace * with / in closest_units
+crates/sniper_host/src/size.rs:74:70: replace > with == in closest_units
+crates/sniper_host/src/size.rs:74:70: replace > with < in closest_units
+crates/sniper_host/src/size.rs:74:70: replace > with >= in closest_units
+crates/sniper_host/src/size.rs:74:66: replace * with + in closest_units
+crates/sniper_host/src/size.rs:74:66: replace * with / in closest_units
+crates/sniper_host/src/size.rs:75:26: replace + with - in closest_units
+crates/sniper_host/src/size.rs:75:26: replace + with * in closest_units
+crates/sniper_host/src/size.rs:83:5: replace fit_units -> Units with Default::default()
+crates/sniper_host/src/size.rs:84:13: replace <= with > in fit_units
+crates/sniper_host/src/size.rs:84:27: replace <= with > in fit_units
+crates/sniper_host/src/size.rs:88:29: replace == with != in fit_units
+crates/sniper_host/src/size.rs:89:39: replace / with % in fit_units
+crates/sniper_host/src/size.rs:89:39: replace / with * in fit_units
+crates/sniper_host/src/size.rs:89:34: replace * with + in fit_units
+crates/sniper_host/src/size.rs:89:34: replace * with / in fit_units
+crates/sniper_host/src/size.rs:89:64: replace * with + in fit_units
+crates/sniper_host/src/size.rs:89:60: replace * with + in fit_units
+crates/sniper_host/src/size.rs:96:5: replace money_in -> Paisa with Default::default()
+crates/sniper_host/src/size.rs:96:29: replace * with + in money_in
+crates/sniper_host/src/size.rs:96:29: replace * with / in money_in
+crates/sniper_host/src/size.rs:114:5: replace size -> Sized with Default::default()
+crates/sniper_host/src/size.rs:120:23: replace && with || in size
+crates/sniper_host/src/size.rs:120:17: replace > with == in size
+crates/sniper_host/src/size.rs:120:17: replace > with < in size
+crates/sniper_host/src/size.rs:120:26: delete ! in size
+crates/sniper_host/src/size.rs:128:5: replace account_walk -> Vec<(Paisa, Paisa, Option<Units>)> with vec![]
+crates/sniper_host/src/size.rs:120:17: replace > with >= in size
+crates/sniper_host/src/size.rs:128:5: replace account_walk -> Vec<(Paisa, Paisa, Option<Units>)> with vec![(Default::default(), Default::default(), None)]
+crates/sniper_host/src/size.rs:128:5: replace account_walk -> Vec<(Paisa, Paisa, Option<Units>)> with vec![(Default::default(), Default::default(), Some(Default::default()))]
+crates/sniper_host/src/size.rs:133:34: replace && with || in account_walk
+crates/sniper_host/src/size.rs:133:27: replace > with == in account_walk
+crates/sniper_host/src/size.rs:133:27: replace > with < in account_walk
+crates/sniper_host/src/size.rs:133:37: delete ! in account_walk
+crates/sniper_host/src/sweep.rs:69:5: replace base_code -> Option<Code> with None
+crates/sniper_host/src/sweep.rs:69:5: replace base_code -> Option<Code> with Some(Default::default())
+crates/sniper_host/src/sweep.rs:102:9: replace <impl Sink for HostSink<'_>>::reset with ()
+crates/sniper_host/src/sweep.rs:77:37: replace == with != in base_code
+crates/sniper_host/src/sweep.rs:105:9: replace <impl Sink for HostSink<'_>>::insert -> Result<(), SweepErr> with Ok(())
+crates/sniper_host/src/sweep.rs:110:9: replace <impl Sink for HostSink<'_>>::remove -> Result<(), SweepErr> with Ok(())
+crates/sniper_host/src/sweep.rs:115:43: replace + with - in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:115:9: replace <impl Sink for HostSink<'_>>::offer -> Result<(), SweepErr> with Ok(())
+crates/sniper_host/src/sweep.rs:115:69: replace * with / in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:115:90: replace + with - in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:115:116: replace * with / in <impl Sink for HostSink<'_>>::offer
+crates/sniper_host/src/sweep.rs:152:17: replace == with != in run_with
+crates/sniper_host/src/sweep.rs:152:34: replace > with < in run_with
+crates/sniper_host/src/sweep.rs:156:30: replace + with - in run_with
+crates/sniper_host/src/sweep.rs:156:30: replace + with * in run_with
+crates/sniper_host/src/sweep.rs:179:26: replace >= with < in run_with
+crates/sniper_host/src/sweep.rs:182:34: replace == with != in run_with
+crates/sniper_host/src/sweep.rs:182:68: replace - with + in run_with
+crates/sniper_host/src/sweep.rs:182:68: replace - with / in run_with
+crates/sniper_host/src/sweep.rs:184:34: replace += with -= in run_with
+crates/sniper_host/src/sweep.rs:184:34: replace += with *= in run_with
+crates/sniper_host/src/sweep.rs:194:51: replace - with + in run_with
+crates/sniper_host/src/sweep.rs:194:51: replace - with / in run_with
+crates/sniper_host/src/sweep.rs:203:31: replace += with -= in run_with
+crates/sniper_host/src/sweep.rs:203:31: replace += with *= in run_with
+crates/sniper_host/src/sweep.rs:240:16: replace += with -= in run_with
+crates/sniper_host/src/sweep.rs:240:16: replace += with *= in run_with
+crates/sniper_host/src/sweep.rs:242:27: replace += with -= in run_with
+crates/sniper_host/src/sweep.rs:242:27: replace += with *= in run_with
+crates/sniper_host/src/sweep.rs:243:26: replace += with -= in run_with
+crates/sniper_host/src/sweep.rs:243:26: replace += with *= in run_with
+crates/sniper_host/src/sweep.rs:285:9: replace Fan<'_, '_>::push with ()
+crates/sniper_host/src/sweep.rs:292:9: replace Fan<'_, '_>::flush with ()
+crates/sniper_host/src/sweep.rs:317:9: replace <impl Sink for Fan<'_, '_>>::offer -> Result<(), SweepErr> with Ok(())
+crates/sniper_host/src/sweep.rs:326:5: replace replay -> Result<(), SweepErr> with Ok(())
+crates/sniper_host/src/sweep.rs:359:5: replace run_all -> Result<Vec<Out>, String> with Ok(vec![])
+crates/sniper_host/src/sweep.rs:367:5: replace run_all_with -> Result<Vec<Out>, String> with Ok(vec![])
+crates/sniper_host/src/sweep.rs:378:5: replace run_all_kept -> Result<Vec<Out>, String> with Ok(vec![])
+crates/sniper_host/src/sweep.rs:378:17: replace == with != in run_all_kept
+crates/sniper_host/src/sweep.rs:378:34: replace > with < in run_all_kept
+crates/sniper_host/src/sweep.rs:382:30: replace + with - in run_all_kept
+crates/sniper_host/src/sweep.rs:382:30: replace + with * in run_all_kept
+crates/sniper_host/src/sweep.rs:410:26: replace >= with < in run_all_kept
+crates/sniper_host/src/sweep.rs:413:34: replace == with != in run_all_kept
+crates/sniper_host/src/sweep.rs:413:68: replace - with + in run_all_kept
+crates/sniper_host/src/sweep.rs:413:68: replace - with / in run_all_kept
+crates/sniper_host/src/sweep.rs:415:34: replace += with -= in run_all_kept
+crates/sniper_host/src/sweep.rs:415:34: replace += with *= in run_all_kept
+crates/sniper_host/src/sweep.rs:426:51: replace - with + in run_all_kept
+crates/sniper_host/src/sweep.rs:426:51: replace - with / in run_all_kept
+crates/sniper_host/src/sweep.rs:446:31: replace += with -= in run_all_kept
+crates/sniper_host/src/sweep.rs:446:31: replace += with *= in run_all_kept
+crates/sniper_host/src/sweep.rs:494:24: replace += with -= in run_all_kept
+crates/sniper_host/src/sweep.rs:497:31: replace += with -= in run_all_kept
+crates/sniper_host/src/sweep.rs:494:24: replace += with *= in run_all_kept
+crates/sniper_host/src/sweep.rs:498:30: replace += with -= in run_all_kept
+crates/sniper_host/src/sweep.rs:497:31: replace += with *= in run_all_kept
+crates/sniper_host/src/sweep.rs:498:30: replace += with *= in run_all_kept
+crates/sniper_host/src/twin.rs:31:5: replace draws -> Vec<(u32, u16)> with vec![]
+crates/sniper_host/src/twin.rs:31:5: replace draws -> Vec<(u32, u16)> with vec![(0, 0)]
+crates/sniper_host/src/twin.rs:31:5: replace draws -> Vec<(u32, u16)> with vec![(0, 1)]
+crates/sniper_host/src/twin.rs:31:5: replace draws -> Vec<(u32, u16)> with vec![(1, 0)]
+crates/sniper_host/src/twin.rs:31:5: replace draws -> Vec<(u32, u16)> with vec![(1, 1)]
+crates/sniper_host/src/twin.rs:40:23: replace + with - in draws
