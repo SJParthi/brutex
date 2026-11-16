@@ -1,0 +1,78 @@
+crates/spikefade/src/trade.rs:952:27: replace += with -= in book_dearest
+crates/spikefade/src/trade.rs:953:27: replace += with -= in book_dearest
+crates/spikefade/src/trade.rs:953:27: replace += with *= in book_dearest
+crates/spikefade/src/trade.rs:952:27: replace += with *= in book_dearest
+crates/spikefade/src/trade.rs:954:28: replace += with -= in book_dearest
+crates/spikefade/src/trade.rs:957:65: replace && with || in book_dearest
+crates/spikefade/src/trade.rs:957:59: replace == with != in book_dearest
+crates/spikefade/src/trade.rs:957:72: replace == with != in book_dearest
+crates/spikefade/src/trade.rs:978:55: replace == with != in buy_path_rd
+crates/spikefade/src/trade.rs:984:61: replace / with % in buy_path_rd
+crates/spikefade/src/trade.rs:1004:44: replace && with || in sq_path_rd
+crates/spikefade/src/trade.rs:1007:65: replace / with % in sq_path_rd
+crates/spikefade/src/trade.rs:1032:9: delete field qty from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1036:9: delete field e1 from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1041:9: delete field sale_secs from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1042:9: delete field sale_one_price_secs from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1043:9: delete field sale_past_limit from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1044:9: delete field x from struct Trip expression in trip_rd
+crates/spikefade/src/trade.rs:1078:21: replace > with == in trip_rd
+crates/spikefade/src/trade.rs:1078:21: replace > with < in trip_rd
+crates/spikefade/src/trade.rs:1078:21: replace > with >= in trip_rd
+crates/spikefade/src/trade.rs:1094:17: replace > with == in trip_rd
+crates/spikefade/src/trade.rs:1094:17: replace > with >= in trip_rd
+crates/spikefade/src/trade.rs:1099:36: replace > with == in trip_rd
+crates/spikefade/src/trade.rs:1099:36: replace > with < in trip_rd
+crates/spikefade/src/trade.rs:1099:36: replace > with >= in trip_rd
+crates/spikefade/src/trade.rs:1100:19: replace > with >= in trip_rd
+crates/spikefade/src/trade.rs:1109:26: replace > with == in trip_rd
+crates/spikefade/src/trade.rs:1109:26: replace > with < in trip_rd
+crates/spikefade/src/trade.rs:1109:26: replace > with >= in trip_rd
+crates/spikefade/src/trade.rs:1110:52: replace * with + in trip_rd
+crates/spikefade/src/trade.rs:1112:43: replace + with - in trip_rd
+crates/spikefade/src/trade.rs:1123:5: replace out_of -> Result<Out, String> with Ok(Default::default())
+crates/spikefade/src/trade.rs:1124:16: replace > with == in out_of
+crates/spikefade/src/trade.rs:1124:16: replace > with < in out_of
+crates/spikefade/src/trade.rs:1124:16: replace > with >= in out_of
+crates/spikefade/src/trade.rs:1125:12: replace |= with &= in out_of
+crates/spikefade/src/trade.rs:1127:19: replace > with == in out_of
+crates/spikefade/src/trade.rs:1127:19: replace > with < in out_of
+crates/spikefade/src/trade.rs:1127:19: replace > with >= in out_of
+crates/spikefade/src/trade.rs:1128:12: replace |= with &= in out_of
+crates/spikefade/src/trade.rs:1130:19: replace > with == in out_of
+crates/spikefade/src/trade.rs:1130:19: replace > with < in out_of
+crates/spikefade/src/trade.rs:1130:19: replace > with >= in out_of
+crates/spikefade/src/trade.rs:1131:12: replace |= with &= in out_of
+crates/spikefade/src/trade.rs:1133:19: replace > with == in out_of
+crates/spikefade/src/trade.rs:1133:19: replace > with < in out_of
+crates/spikefade/src/trade.rs:1133:19: replace > with >= in out_of
+crates/spikefade/src/trade.rs:1134:12: replace |= with &= in out_of
+crates/spikefade/src/trade.rs:1136:20: replace && with || in out_of
+crates/spikefade/src/trade.rs:1136:16: replace > with == in out_of
+crates/spikefade/src/trade.rs:1136:16: replace > with < in out_of
+crates/spikefade/src/trade.rs:1136:16: replace > with >= in out_of
+crates/spikefade/src/trade.rs:1136:31: replace < with == in out_of
+crates/spikefade/src/trade.rs:1136:31: replace < with <= in out_of
+crates/spikefade/src/trade.rs:1137:12: replace |= with &= in out_of
+crates/spikefade/src/trade.rs:1140:12: replace |= with &= in out_of
+crates/spikefade/src/trade.rs:1143:27: replace > with < in out_of
+crates/spikefade/src/trade.rs:1143:27: replace > with >= in out_of
+crates/spikefade/src/trade.rs:1143:63: replace - with + in out_of
+crates/spikefade/src/trade.rs:1144:50: replace | with & in out_of
+crates/spikefade/src/trade.rs:1144:50: replace | with ^ in out_of
+crates/spikefade/src/trade.rs:1144:78: replace << with >> in out_of
+crates/spikefade/src/trade.rs:1154:5: replace out_of31 -> Result<Out, String> with Ok(Default::default())
+crates/spikefade/src/trade.rs:1155:43: replace && with || in out_of31
+crates/spikefade/src/trade.rs:1155:54: replace > with < in out_of31
+crates/spikefade/src/trade.rs:1155:54: replace > with >= in out_of31
+crates/spikefade/src/trade.rs:1169:53: replace / with % in margin
+crates/spikefade/src/trade.rs:1169:43: replace - with / in margin
+crates/spikefade/src/trade.rs:1174:24: replace == with != in margin
+crates/spikefade/src/trade.rs:1176:56: replace == with != in margin
+crates/spikefade/src/trade.rs:1198:24: delete field q_of from struct EvT expression in size_event_mx
+crates/spikefade/src/trade.rs:1213:177: replace + with - in size_event_mx
+crates/spikefade/src/trade.rs:1213:177: replace + with * in size_event_mx
+crates/spikefade/src/trade.rs:1213:165: replace * with + in size_event_mx
+crates/spikefade/src/trade.rs:1218:44: replace && with || in size_event_mx
+crates/spikefade/src/trade.rs:1247:17: replace > with >= in size_event_mx
+crates/spikefade/src/trade.rs:1247:37: replace > with >= in size_event_mx
