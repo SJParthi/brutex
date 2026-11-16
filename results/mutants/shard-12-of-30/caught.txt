@@ -19,3 +19,11 @@ crates/spikefade/src/report3.rs:3999:26: replace - with + in dd_grouped
 crates/spikefade/src/report3.rs:3999:26: replace - with / in dd_grouped
 crates/spikefade/src/report3.rs:4123:72: replace * with + in write3
 crates/spikefade/src/report3.rs:4353:36: replace / with * in write3
+crates/spikefade/src/report3.rs:4758:65: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4762:98: replace < with <= in hand_sample
+crates/spikefade/src/report3.rs:4869:25: replace += with -= in dedup_ratio
+crates/spikefade/src/report3.rs:4869:25: replace += with *= in dedup_ratio
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 1, 0, 0, 0, 0)

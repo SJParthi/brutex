@@ -347,3 +347,196 @@ crates/spikefade/src/report3.rs:4753:54: replace == with != in hand_sample
 crates/spikefade/src/report3.rs:4758:25: delete match arm "w0" in hand_sample
 crates/spikefade/src/report3.rs:4759:25: delete match arm "w1" in hand_sample
 crates/spikefade/src/report3.rs:4760:25: delete match arm "held" in hand_sample
+crates/spikefade/src/report3.rs:4761:25: delete match arm "none" in hand_sample
+crates/spikefade/src/report3.rs:4762:25: delete match arm "gap" | "multi" in hand_sample
+crates/spikefade/src/report3.rs:4763:25: delete match arm "unclosed" in hand_sample
+crates/spikefade/src/report3.rs:4764:25: delete match arm "floor" | "trail_later" in hand_sample
+crates/spikefade/src/report3.rs:4765:25: delete match arm "w1_expiry" in hand_sample
+crates/spikefade/src/report3.rs:4758:60: replace == with != in hand_sample
+crates/spikefade/src/report3.rs:4758:97: replace < with == in hand_sample
+crates/spikefade/src/report3.rs:4758:97: replace < with > in hand_sample
+crates/spikefade/src/report3.rs:4758:97: replace < with <= in hand_sample
+crates/spikefade/src/report3.rs:4758:81: replace + with - in hand_sample
+crates/spikefade/src/report3.rs:4758:81: replace + with * in hand_sample
+crates/spikefade/src/report3.rs:4759:65: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4759:60: replace == with != in hand_sample
+crates/spikefade/src/report3.rs:4759:97: replace < with == in hand_sample
+crates/spikefade/src/report3.rs:4759:97: replace < with > in hand_sample
+crates/spikefade/src/report3.rs:4759:97: replace < with <= in hand_sample
+crates/spikefade/src/report3.rs:4759:81: replace + with - in hand_sample
+crates/spikefade/src/report3.rs:4759:81: replace + with * in hand_sample
+crates/spikefade/src/report3.rs:4760:83: replace + with - in hand_sample
+crates/spikefade/src/report3.rs:4760:83: replace + with * in hand_sample
+crates/spikefade/src/report3.rs:4762:98: replace < with == in hand_sample
+crates/spikefade/src/report3.rs:4762:98: replace < with > in hand_sample
+crates/spikefade/src/report3.rs:4762:82: replace + with - in hand_sample
+crates/spikefade/src/report3.rs:4762:82: replace + with * in hand_sample
+crates/spikefade/src/report3.rs:4764:84: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4764:79: replace == with != in hand_sample
+crates/spikefade/src/report3.rs:4764:116: replace < with == in hand_sample
+crates/spikefade/src/report3.rs:4764:116: replace < with > in hand_sample
+crates/spikefade/src/report3.rs:4764:116: replace < with <= in hand_sample
+crates/spikefade/src/report3.rs:4764:100: replace + with - in hand_sample
+crates/spikefade/src/report3.rs:4764:100: replace + with * in hand_sample
+crates/spikefade/src/report3.rs:4765:125: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4765:72: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4765:67: replace == with != in hand_sample
+crates/spikefade/src/report3.rs:4765:104: replace < with == in hand_sample
+crates/spikefade/src/report3.rs:4765:104: replace < with > in hand_sample
+crates/spikefade/src/report3.rs:4765:104: replace < with <= in hand_sample
+crates/spikefade/src/report3.rs:4765:88: replace + with - in hand_sample
+crates/spikefade/src/report3.rs:4765:88: replace + with * in hand_sample
+crates/spikefade/src/report3.rs:4765:213: replace == with != in hand_sample
+crates/spikefade/src/report3.rs:4768:24: delete ! in hand_sample
+crates/spikefade/src/report3.rs:4779:47: replace * with + in hand_sample
+crates/spikefade/src/report3.rs:4779:47: replace * with / in hand_sample
+crates/spikefade/src/report3.rs:4783:62: delete field hwin from struct Rd expression in hand_sample
+crates/spikefade/src/report3.rs:4783:71: delete field rise from struct Rd expression in hand_sample
+crates/spikefade/src/report3.rs:4791:25: delete match arm "gap" in hand_sample
+crates/spikefade/src/report3.rs:4792:25: delete match arm "multi" in hand_sample
+crates/spikefade/src/report3.rs:4793:25: delete match arm "unclosed" in hand_sample
+crates/spikefade/src/report3.rs:4794:25: delete match arm "floor" in hand_sample
+crates/spikefade/src/report3.rs:4795:25: delete match arm "trail_later" in hand_sample
+crates/spikefade/src/report3.rs:4791:88: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4791:63: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4791:80: replace > with == in hand_sample
+crates/spikefade/src/report3.rs:4791:80: replace > with < in hand_sample
+crates/spikefade/src/report3.rs:4791:80: replace > with >= in hand_sample
+crates/spikefade/src/report3.rs:4791:96: replace == with != in hand_sample
+crates/spikefade/src/report3.rs:4792:50: replace && with || in hand_sample
+crates/spikefade/src/report3.rs:4792:45: replace >= with < in hand_sample
+crates/spikefade/src/report3.rs:4792:84: replace > with == in hand_sample
+crates/spikefade/src/report3.rs:4792:84: replace > with < in hand_sample
+crates/spikefade/src/report3.rs:4792:84: replace > with >= in hand_sample
+crates/spikefade/src/report3.rs:4793:50: replace > with == in hand_sample
+crates/spikefade/src/report3.rs:4793:50: replace > with < in hand_sample
+crates/spikefade/src/report3.rs:4793:50: replace > with >= in hand_sample
+crates/spikefade/src/report3.rs:4795:51: replace >= with < in hand_sample
+crates/spikefade/src/report3.rs:4798:24: delete ! in hand_sample
+crates/spikefade/src/report3.rs:4815:27: replace += with -= in hand_sample
+crates/spikefade/src/report3.rs:4815:27: replace += with *= in hand_sample
+crates/spikefade/src/report3.rs:4821:12: delete ! in hand_sample
+crates/spikefade/src/report3.rs:4832:5: replace ma_tf -> Option<usize> with None
+crates/spikefade/src/report3.rs:4832:5: replace ma_tf -> Option<usize> with Some(0)
+crates/spikefade/src/report3.rs:4832:5: replace ma_tf -> Option<usize> with Some(1)
+crates/spikefade/src/report3.rs:4841:5: replace set_tfdep with ()
+crates/spikefade/src/report3.rs:4847:5: replace dedup_ratio with ()
+crates/spikefade/src/report3.rs:4856:31: replace * with + in dedup_ratio
+crates/spikefade/src/report3.rs:4856:31: replace * with / in dedup_ratio
+crates/spikefade/src/report3.rs:4858:64: replace == with != in dedup_ratio
+crates/spikefade/src/report3.rs:4862:33: replace += with -= in dedup_ratio
+crates/spikefade/src/report3.rs:4862:33: replace += with *= in dedup_ratio
+crates/spikefade/src/report3.rs:4863:38: replace += with -= in dedup_ratio
+crates/spikefade/src/report3.rs:4863:38: replace += with *= in dedup_ratio
+crates/spikefade/src/report3.rs:4863:96: replace == with != in dedup_ratio
+crates/spikefade/src/report3.rs:4868:25: replace += with -= in dedup_ratio
+crates/spikefade/src/report3.rs:4868:25: replace += with *= in dedup_ratio
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 0, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 0, 1, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 0, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 0, 1, 1, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 0, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 0, 1, 1, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 0, 1, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 0, 1, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (0, 0, 1, 1, 0, 1, 1, 1, 1)
