@@ -1,0 +1,17 @@
+crates/spikefade/src/charges.rs:124:82: replace + with - in charges_est
+crates/spikefade/src/charges.rs:124:68: replace + with * in charges_est
+crates/spikefade/src/charges.rs:132:5: replace charged -> (i64, i64, i64, bool) with (0, -1, -1, true)
+crates/spikefade/src/charges.rs:132:5: replace charged -> (i64, i64, i64, bool) with (1, 1, -1, false)
+crates/spikefade/src/charges.rs:132:5: replace charged -> (i64, i64, i64, bool) with (-1, 1, -1, true)
+crates/spikefade/src/charges.rs:150:48: replace + with - in charges_est_sell
+crates/spikefade/src/charges.rs:159:32: replace + with - in charges_est_sell
+crates/spikefade/src/csvgz.rs:192:16: replace < with == in ts
+crates/spikefade/src/cube.rs:238:5: replace size_mtime -> (u64, i64) with (1, 0)
+crates/spikefade/src/cube.rs:248:5: replace is_current -> (bool, String) with (false, String::new())
+crates/spikefade/src/cube.rs:250:47: replace || with && in is_current
+crates/spikefade/src/cube.rs:416:34: replace += with -= in build
+crates/spikefade/src/cube.rs:419:19: replace || with && in build
+crates/spikefade/src/cube.rs:419:26: replace % with + in build
+crates/spikefade/src/cube.rs:420:41: replace += with *= in build
+crates/spikefade/src/cube.rs:442:16: replace == with != in build
+crates/spikefade/src/cube.rs:449:32: replace += with -= in build

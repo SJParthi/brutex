@@ -1,0 +1,163 @@
+   Compiling core v0.1.0 (/root/mut/crates/core)
+   Compiling greeks v0.1.0 (/root/mut/crates/greeks)
+   Compiling common_fill v2.4.0 (/root/mut/pinned/common-fill-v24)
+error: couldn't read `crates/core/src/../../../docs/05-decisions.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:5328:25
+     |
+5328 |         let decisions = include_str!("../../../docs/05-decisions.md");
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/06-limits.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:5344:22
+     |
+5344 |         let limits = include_str!("../../../docs/06-limits.md");
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/00-charter.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6110:28
+     |
+6110 |         let charter = fold(include_str!("../../../docs/00-charter.md"));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/05-decisions.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6117:25
+     |
+6117 |         let decisions = include_str!("../../../docs/05-decisions.md");
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../CLAUDE.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6123:13
+     |
+6123 |             include_str!("../../../CLAUDE.md")
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling costs v0.1.0 (/root/mut/crates/costs)
+error: couldn't read `crates/core/tests/../../../docs/01-architecture.md`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:48:28
+   |
+48 | const ARCHITECTURE: &str = include_str!("../../../docs/01-architecture.md");
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/tests/../../api/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:59:13
+   |
+59 |     ("api", include_str!("../../api/Cargo.toml")),
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+59 -     ("api", include_str!("../../api/Cargo.toml")),
+59 +     ("api", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../cli/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:62:13
+   |
+62 |     ("cli", include_str!("../../cli/Cargo.toml")),
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+62 -     ("cli", include_str!("../../cli/Cargo.toml")),
+62 +     ("cli", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../engine/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:65:16
+   |
+65 |     ("engine", include_str!("../../engine/Cargo.toml")),
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+65 -     ("engine", include_str!("../../engine/Cargo.toml")),
+65 +     ("engine", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../indicators/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:67:20
+   |
+67 |     ("indicators", include_str!("../../indicators/Cargo.toml")),
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+67 -     ("indicators", include_str!("../../indicators/Cargo.toml")),
+67 +     ("indicators", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../lake/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:68:14
+   |
+68 |     ("lake", include_str!("../../lake/Cargo.toml")),
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+68 -     ("lake", include_str!("../../lake/Cargo.toml")),
+68 +     ("lake", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../pull/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:69:14
+   |
+69 |     ("pull", include_str!("../../pull/Cargo.toml")),
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+69 -     ("pull", include_str!("../../pull/Cargo.toml")),
+69 +     ("pull", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../runner/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:70:16
+   |
+70 |     ("runner", include_str!("../../runner/Cargo.toml")),
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+70 -     ("runner", include_str!("../../runner/Cargo.toml")),
+70 +     ("runner", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../store/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:71:15
+   |
+71 |     ("store", include_str!("../../store/Cargo.toml")),
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+71 -     ("store", include_str!("../../store/Cargo.toml")),
+71 +     ("store", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../telemetry/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:72:19
+   |
+72 |     ("telemetry", include_str!("../../telemetry/Cargo.toml")),
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+72 -     ("telemetry", include_str!("../../telemetry/Cargo.toml")),
+72 +     ("telemetry", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../vocab/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:73:15
+   |
+73 |     ("vocab", include_str!("../../vocab/Cargo.toml")),
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+73 -     ("vocab", include_str!("../../vocab/Cargo.toml")),
+73 +     ("vocab", include_str!("../Cargo.toml")),
+   |
+
+error: could not compile `core` (test "graph") due to 11 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `core` (lib test) due to 5 previous errors
