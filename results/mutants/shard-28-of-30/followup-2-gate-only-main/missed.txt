@@ -1,0 +1,21 @@
+crates/spikefade/src/ckmerge.rs:41:26: delete field batches from struct Stats expression in merge
+crates/spikefade/src/ckmerge.rs:366:5: replace cmd_ckpt_canon -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/ckmerge.rs:238:55: replace != with == in cmd_ckpt_merge
+crates/spikefade/src/ckmerge.rs:367:46: replace == with != in cmd_ckpt_canon
+crates/spikefade/src/kit.rs:238:14: replace && with || in from_args
+crates/spikefade/src/kit.rs:336:42: replace ^ with | in Sha256::block
+crates/spikefade/src/kit.rs:540:5: replace rss_kb -> Option<u64> with Some(1)
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(0.0)
+crates/spikefade/src/kit.rs:553:5: replace proc_cpu_s -> Option<f64> with Some(-1.0)
+crates/spikefade/src/kit.rs:625:29: replace != with == in probe_tools
+crates/spikefade/src/kit.rs:744:36: replace || with && in Plan::parse
+crates/spikefade/src/kit.rs:778:117: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:778:49: replace || with && in Plan::check
+crates/spikefade/src/kit.rs:835:50: replace * with + in par_digest
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec![])
+crates/spikefade/src/kit.rs:917:5: replace table_lines -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/spikefade/src/kit.rs:927:40: replace || with && in table_lines
+crates/spikefade/src/kit.rs:1258:56: replace || with && in Bck::parse
+crates/spikefade/src/kit.rs:1390:5: replace exe_sha -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1396:5: replace host -> String with "xyzzy".into()
+crates/spikefade/src/kit.rs:1409:5: replace provenance -> Vec<(String, String)> with vec![(String::new(), "xyzzy".into())]

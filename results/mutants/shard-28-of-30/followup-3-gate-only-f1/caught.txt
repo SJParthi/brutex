@@ -1,0 +1,1 @@
+crates/spikefade/src/kit.rs:707:29: delete field sha from struct Self expression in Plan::parse
