@@ -101,3 +101,212 @@ crates/sniper_host/src/esn1.rs:164:39: replace match guard end * US_S < sq with 
 crates/sniper_host/src/esn1.rs:164:39: replace match guard end * US_S < sq with false in plan_of
 crates/sniper_host/src/esn1.rs:164:50: replace < with == in plan_of
 crates/sniper_host/src/esn1.rs:164:50: replace < with > in plan_of
+crates/sniper_host/src/esn1.rs:164:50: replace < with <= in plan_of
+crates/sniper_host/src/esn1.rs:164:43: replace * with + in plan_of
+crates/sniper_host/src/esn1.rs:164:43: replace * with / in plan_of
+crates/sniper_host/src/esn1.rs:164:98: replace * with + in plan_of
+crates/sniper_host/src/esn1.rs:164:98: replace * with / in plan_of
+crates/sniper_host/src/esn1.rs:170:48: replace / with % in plan_of
+crates/sniper_host/src/esn1.rs:170:48: replace / with * in plan_of
+crates/sniper_host/src/esn1.rs:170:42: replace / with % in plan_of
+crates/sniper_host/src/esn1.rs:170:42: replace / with * in plan_of
+crates/sniper_host/src/esn1.rs:170:26: replace * with + in plan_of
+crates/sniper_host/src/esn1.rs:170:26: replace * with / in plan_of
+crates/sniper_host/src/esn1.rs:183:44: replace match guard anchor >= sq with true in <impl ClampSq for Plan>::clamp_sq
+crates/sniper_host/src/esn1.rs:183:44: replace match guard anchor >= sq with false in <impl ClampSq for Plan>::clamp_sq
+crates/sniper_host/src/esn1.rs:183:51: replace >= with < in <impl ClampSq for Plan>::clamp_sq
+crates/sniper_host/src/esn1.rs:206:8: delete ! in run_context
+crates/sniper_host/src/esn1.rs:214:47: replace == with != in run_context
+crates/sniper_host/src/esn1.rs:220:20: replace < with == in run_context
+crates/sniper_host/src/esn1.rs:220:20: replace < with > in run_context
+crates/sniper_host/src/esn1.rs:220:20: replace < with <= in run_context
+crates/sniper_host/src/esn1.rs:232:9: delete match arm ExitKind::Ema(p) in run_context
+crates/sniper_host/src/esn1.rs:235:113: replace && with || in run_context
+crates/sniper_host/src/esn1.rs:235:100: replace >= with < in run_context
+crates/sniper_host/src/esn1.rs:235:121: replace <= with > in run_context
+crates/sniper_host/src/esn1.rs:251:57: replace / with % in run_context
+crates/sniper_host/src/esn1.rs:251:57: replace / with * in run_context
+crates/sniper_host/src/esn1.rs:290:47: delete ! in run_context
+crates/sniper_host/src/esn1.rs:295:60: replace * with + in run_context
+crates/sniper_host/src/esn1.rs:295:60: replace * with / in run_context
+crates/sniper_host/src/esn1.rs:321:100: replace += with -= in run_context
+crates/sniper_host/src/esn1.rs:321:100: replace += with *= in run_context
+crates/sniper_host/src/esn1.rs:327:72: replace += with -= in run_context
+crates/sniper_host/src/esn1.rs:327:72: replace += with *= in run_context
+crates/sniper_host/src/esn1.rs:331:39: delete field sess from struct Outcome expression in run_context
+crates/sniper_host/src/esn1.rs:331:53: delete field mk from struct Outcome expression in run_context
+crates/sniper_host/src/esn1.rs:331:63: delete field id from struct Outcome expression in run_context
+crates/sniper_host/src/esn1.rs:340:25: replace += with -= in run_context
+crates/sniper_host/src/esn1.rs:340:25: replace += with *= in run_context
+crates/sniper_host/src/esn1.rs:369:48: replace - with + in run_context
+crates/sniper_host/src/esn1.rs:369:48: replace - with / in run_context
+crates/sniper_host/src/esn1.rs:369:16: replace + with - in run_context
+crates/sniper_host/src/esn1.rs:369:16: replace + with * in run_context
+crates/sniper_host/src/esn1.rs:369:11: replace * with + in run_context
+crates/sniper_host/src/esn1.rs:369:11: replace * with / in run_context
+crates/sniper_host/src/esn1.rs:375:61: replace == with != in run_context
+crates/sniper_host/src/esn1.rs:420:97: replace <= with > in run_context
+crates/sniper_host/src/esn1.rs:427:119: delete field id from struct Outcome expression in run_context
+crates/sniper_host/src/esn1.rs:435:57: replace == with != in run_context
+crates/sniper_host/src/esn1.rs:443:59: replace + with - in run_context
+crates/sniper_host/src/esn1.rs:443:59: replace + with * in run_context
+crates/sniper_host/src/esn1.rs:443:44: replace * with + in run_context
+crates/sniper_host/src/esn1.rs:443:44: replace * with / in run_context
+crates/sniper_host/src/idx.rs:67:5: replace row -> Result<&'a str, String> with Ok("")
+crates/sniper_host/src/idx.rs:67:5: replace row -> Result<&'a str, String> with Ok("xyzzy")
+crates/sniper_host/src/idx.rs:105:20: replace += with -= in IdxEnv::load
+crates/sniper_host/src/idx.rs:105:20: replace += with *= in IdxEnv::load
+crates/sniper_host/src/idx.rs:118:9: replace IdxEnv::muhurat_days -> Vec<Day> with vec![]
+crates/sniper_host/src/idx.rs:118:9: replace IdxEnv::muhurat_days -> Vec<Day> with vec![Default::default()]
+crates/sniper_host/src/idx.rs:123:9: replace IdxEnv::book_sess_end -> Option<i64> with None
+crates/sniper_host/src/idx.rs:123:9: replace IdxEnv::book_sess_end -> Option<i64> with Some(0)
+crates/sniper_host/src/idx.rs:123:9: replace IdxEnv::book_sess_end -> Option<i64> with Some(1)
+crates/sniper_host/src/idx.rs:123:9: replace IdxEnv::book_sess_end -> Option<i64> with Some(-1)
+crates/sniper_host/src/idx.rs:123:69: replace / with % in IdxEnv::book_sess_end
+crates/sniper_host/src/idx.rs:123:69: replace / with * in IdxEnv::book_sess_end
+crates/sniper_host/src/idx.rs:123:46: replace - with + in IdxEnv::book_sess_end
+crates/sniper_host/src/idx.rs:123:46: replace - with / in IdxEnv::book_sess_end
+crates/sniper_host/src/idx.rs:132:34: replace && with || in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:132:41: replace >= with < in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:132:47: replace * with + in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:132:47: replace * with / in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:135:38: replace + with - in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:135:38: replace + with * in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:183:28: delete field entry_first from struct Priced expression in as_priced
+crates/sniper_host/src/idx.rs:183:56: delete field refpx from struct Priced expression in as_priced
+crates/sniper_host/src/idx.rs:194:80: replace != with == in as_priced
+crates/sniper_host/src/idx.rs:194:42: replace & with | in as_priced
+crates/sniper_host/src/idx.rs:194:42: replace & with ^ in as_priced
+crates/sniper_host/src/idx.rs:206:63: replace < with == in as_priced
+crates/sniper_host/src/idx.rs:206:63: replace < with > in as_priced
+crates/sniper_host/src/idx.rs:206:63: replace < with <= in as_priced
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (None, true)
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (None, false)
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (Some(0), true)
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (Some(0), false)
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (Some(1), true)
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (Some(1), false)
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (Some(-1), true)
+crates/sniper_host/src/idx.rs:214:5: replace xc_flip -> (Option<i64>, bool) with (Some(-1), false)
+crates/sniper_host/src/idx.rs:215:35: replace match guard end * US_S < sq with true in xc_flip
+crates/sniper_host/src/idx.rs:215:35: replace match guard end * US_S < sq with false in xc_flip
+crates/sniper_host/src/idx.rs:215:46: replace < with == in xc_flip
+crates/sniper_host/src/idx.rs:215:46: replace < with > in xc_flip
+crates/sniper_host/src/idx.rs:215:46: replace < with <= in xc_flip
+crates/sniper_host/src/idx.rs:215:39: replace * with + in xc_flip
+crates/sniper_host/src/idx.rs:215:39: replace * with / in xc_flip
+crates/sniper_host/src/idx.rs:215:64: replace * with + in xc_flip
+crates/sniper_host/src/idx.rs:215:64: replace * with / in xc_flip
+crates/sniper_host/src/idx.rs:251:39: replace * with + in price_all_idx
+crates/sniper_host/src/idx.rs:251:39: replace * with / in price_all_idx
+crates/sniper_host/src/idx.rs:252:66: replace + with - in price_all_idx
+crates/sniper_host/src/idx.rs:252:66: replace + with * in price_all_idx
+crates/sniper_host/src/idx.rs:252:59: replace * with + in price_all_idx
+crates/sniper_host/src/idx.rs:252:59: replace * with / in price_all_idx
+crates/sniper_host/src/idx.rs:252:71: replace * with + in price_all_idx
+crates/sniper_host/src/idx.rs:252:71: replace * with / in price_all_idx
+crates/sniper_host/src/idx.rs:287:93: replace | with & in price_all_idx
+crates/sniper_host/src/idx.rs:287:93: replace | with ^ in price_all_idx
+crates/sniper_host/src/idx.rs:319:96: replace += with -= in price_all_idx
+crates/sniper_host/src/idx.rs:319:96: replace += with *= in price_all_idx
+crates/sniper_host/src/idx.rs:325:17: replace > with == in price_all_idx
+crates/sniper_host/src/idx.rs:325:17: replace > with < in price_all_idx
+crates/sniper_host/src/idx.rs:325:17: replace > with >= in price_all_idx
+crates/sniper_host/src/idx.rs:330:18: replace += with -= in price_all_idx
+crates/sniper_host/src/idx.rs:330:18: replace += with *= in price_all_idx
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![], 0, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![], 0, 1)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![], 1, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![], 1, 1)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![]], 0, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![]], 0, 1)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![]], 1, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![]], 1, 1)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![String::new()]], 0, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![String::new()]], 0, 1)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![String::new()]], 1, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec![String::new()]], 1, 1)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec!["xyzzy".into()]], 0, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec!["xyzzy".into()]], 0, 1)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec!["xyzzy".into()]], 1, 0)
+crates/sniper_host/src/idx.rs:341:5: replace facts_rows -> (Vec<Vec<String>>, u64, u64) with (vec![vec!["xyzzy".into()]], 1, 1)
+crates/sniper_host/src/idx.rs:345:106: replace && with || in facts_rows
+crates/sniper_host/src/idx.rs:345:93: replace && with || in facts_rows
+crates/sniper_host/src/idx.rs:345:77: replace && with || in facts_rows
+crates/sniper_host/src/idx.rs:345:62: replace <= with > in facts_rows
+crates/sniper_host/src/idx.rs:345:89: replace > with == in facts_rows
+crates/sniper_host/src/idx.rs:345:89: replace > with < in facts_rows
+crates/sniper_host/src/idx.rs:345:102: replace > with == in facts_rows
+crates/sniper_host/src/idx.rs:345:102: replace > with < in facts_rows
+crates/sniper_host/src/idx.rs:345:102: replace > with >= in facts_rows
+crates/sniper_host/src/idx.rs:345:126: replace == with != in facts_rows
+crates/sniper_host/src/idx.rs:345:118: replace % with / in facts_rows
+crates/sniper_host/src/idx.rs:345:118: replace % with + in facts_rows
+crates/sniper_host/src/idx.rs:347:19: replace += with -= in facts_rows
+crates/sniper_host/src/idx.rs:347:19: replace += with *= in facts_rows
+crates/sniper_host/src/idx.rs:349:21: replace += with -= in facts_rows
+crates/sniper_host/src/idx.rs:349:21: replace += with *= in facts_rows
+crates/sniper_host/src/idx.rs:351:81: replace == with != in facts_rows
+crates/sniper_host/src/idx.rs:401:5: replace outcome_zero -> Outcome with Default::default()
+crates/sniper_host/src/idx.rs:423:19: replace != with == in readings
+crates/sniper_host/src/idx.rs:430:20: replace < with == in readings
+crates/sniper_host/src/idx.rs:430:20: replace < with > in readings
+crates/sniper_host/src/idx.rs:452:101: replace && with || in readings
+crates/sniper_host/src/idx.rs:452:69: replace && with || in readings
+crates/sniper_host/src/idx.rs:457:68: replace != with == in readings
+crates/sniper_host/src/idx.rs:469:40: replace && with || in readings
+crates/sniper_host/src/idx.rs:469:114: replace && with || in readings
+crates/sniper_host/src/idx.rs:480:59: replace != with == in readings
+crates/sniper_host/src/idx.rs:481:19: replace += with -= in readings
+crates/sniper_host/src/idx.rs:481:19: replace += with *= in readings
+crates/sniper_host/src/idx.rs:499:5: replace rd_stream_ref -> feat_io::host::Stream with Default::default()
+crates/sniper_host/src/idx.rs:503:5: replace rows_list -> Result<Vec<i64>, String> with Ok(vec![])
+crates/sniper_host/src/idx.rs:503:5: replace rows_list -> Result<Vec<i64>, String> with Ok(vec![0])
+crates/sniper_host/src/idx.rs:503:5: replace rows_list -> Result<Vec<i64>, String> with Ok(vec![1])
+crates/sniper_host/src/idx.rs:503:5: replace rows_list -> Result<Vec<i64>, String> with Ok(vec![-1])
+crates/sniper_host/src/idx.rs:513:5: replace run_family_idx -> Result<Vec<String>, String> with Ok(vec![])
+crates/sniper_host/src/idx.rs:513:5: replace run_family_idx -> Result<Vec<String>, String> with Ok(vec![String::new()])
+crates/sniper_host/src/idx.rs:513:5: replace run_family_idx -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()])
+crates/sniper_host/src/idx.rs:520:23: replace == with != in run_family_idx
+crates/sniper_host/src/idx.rs:527:8: delete ! in run_family_idx
+crates/sniper_host/src/idx.rs:562:57: replace / with % in run_family_idx
+crates/sniper_host/src/idx.rs:562:57: replace / with * in run_family_idx
+crates/sniper_host/src/idx.rs:568:52: replace - with + in run_family_idx
+crates/sniper_host/src/idx.rs:568:52: replace - with / in run_family_idx
+crates/sniper_host/src/idx.rs:568:20: replace + with - in run_family_idx
+crates/sniper_host/src/idx.rs:568:20: replace + with * in run_family_idx
+crates/sniper_host/src/idx.rs:568:15: replace * with + in run_family_idx
+crates/sniper_host/src/idx.rs:568:15: replace * with / in run_family_idx
+crates/sniper_host/src/idx.rs:579:34: replace * with + in run_family_idx
+crates/sniper_host/src/idx.rs:579:34: replace * with / in run_family_idx
+crates/sniper_host/src/idx.rs:587:56: replace == with != in run_family_idx
+crates/sniper_host/src/idx.rs:588:61: replace != with == in run_family_idx
+crates/sniper_host/src/idx.rs:592:16: delete ! in run_family_idx
+crates/sniper_host/src/idx.rs:597:28: replace += with -= in run_family_idx
+crates/sniper_host/src/idx.rs:597:28: replace += with *= in run_family_idx
+crates/sniper_host/src/idx.rs:598:29: replace += with -= in run_family_idx
+crates/sniper_host/src/idx.rs:598:29: replace += with *= in run_family_idx
+crates/sniper_host/src/idx.rs:599:29: replace += with -= in run_family_idx
+crates/sniper_host/src/idx.rs:599:29: replace += with *= in run_family_idx
+crates/sniper_host/src/idx.rs:600:24: replace += with -= in run_family_idx
+crates/sniper_host/src/idx.rs:600:24: replace += with *= in run_family_idx
+crates/sniper_host/src/idx.rs:601:30: replace += with -= in run_family_idx
+crates/sniper_host/src/idx.rs:601:30: replace += with *= in run_family_idx
+crates/sniper_host/src/idx.rs:605:22: replace += with -= in run_family_idx
+crates/sniper_host/src/idx.rs:605:22: replace += with *= in run_family_idx
+crates/sniper_host/src/idx.rs:606:46: replace / with % in run_family_idx
+crates/sniper_host/src/idx.rs:606:46: replace / with * in run_family_idx
+crates/sniper_host/src/idx.rs:607:28: replace * with + in run_family_idx
+crates/sniper_host/src/idx.rs:607:28: replace * with / in run_family_idx
+crates/sniper_host/src/idxpos.rs:87:36: replace << with >>
+crates/sniper_host/src/idxpos.rs:89:42: replace << with >>
+crates/sniper_host/src/idxpos.rs:91:46: replace << with >>
+crates/sniper_host/src/idxpos.rs:93:36: replace << with >>
+crates/sniper_host/src/idxpos.rs:100:30: replace << with >>
+crates/sniper_host/src/idxpos.rs:102:36: replace << with >>
+crates/sniper_host/src/idxpos.rs:105:37: replace << with >>
+crates/sniper_host/src/idxpos.rs:109:12: replace & with | in pflag::cash_bits
+crates/sniper_host/src/idxpos.rs:132:42: replace > with >= in leftover_bits
+crates/sniper_host/src/idxpos.rs:135:42: replace > with >= in leftover_bits
+crates/sniper_host/src/idxpos.rs:138:43: replace || with && in leftover_bits
+crates/sniper_host/src/idxpos.rs:138:100: replace > with < in leftover_bits

@@ -110,3 +110,42 @@ crates/sniper_host/src/db.rs:197:22: replace != with == in Db::verify
 crates/sniper_host/src/db.rs:201:33: replace != with == in Db::verify
 crates/sniper_host/src/db.rs:205:15: replace += with -= in Db::verify
 crates/sniper_host/src/db.rs:205:15: replace += with *= in Db::verify
+crates/sniper_host/src/idx.rs:130:9: replace IdxEnv::entry_refusal -> Option<&'static str> with None
+crates/sniper_host/src/idx.rs:130:9: replace IdxEnv::entry_refusal -> Option<&'static str> with Some("")
+crates/sniper_host/src/idx.rs:130:9: replace IdxEnv::entry_refusal -> Option<&'static str> with Some("xyzzy")
+crates/sniper_host/src/idx.rs:142:119: replace && with || in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:142:96: replace && with || in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:142:87: replace == with != in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:142:102: replace <= with > in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:142:136: replace <= with > in IdxEnv::entry_refusal
+crates/sniper_host/src/idx.rs:183:5: replace as_priced -> Priced with Default::default()
+crates/sniper_host/src/idx.rs:200:60: replace != with == in as_priced
+crates/sniper_host/src/idx.rs:200:24: replace & with | in as_priced
+crates/sniper_host/src/idx.rs:200:24: replace & with ^ in as_priced
+crates/sniper_host/src/idx.rs:201:29: replace += with -= in as_priced
+crates/sniper_host/src/idx.rs:201:29: replace += with *= in as_priced
+crates/sniper_host/src/idx.rs:345:89: replace > with >= in facts_rows
+crates/sniper_host/src/idx.rs:396:5: replace outcome_width -> usize with 0
+crates/sniper_host/src/idx.rs:396:5: replace outcome_width -> usize with 1
+crates/sniper_host/src/idx.rs:430:20: replace < with <= in readings
+crates/sniper_host/src/idx.rs:469:146: replace && with || in readings
+crates/sniper_host/src/idxpos.rs:98:41: replace << with >>
+crates/sniper_host/src/idxpos.rs:109:9: replace pflag::cash_bits -> u16 with 0
+crates/sniper_host/src/idxpos.rs:109:9: replace pflag::cash_bits -> u16 with 1
+crates/sniper_host/src/idxpos.rs:109:12: replace & with ^ in pflag::cash_bits
+crates/sniper_host/src/idxpos.rs:131:5: replace leftover_bits -> u32 with 0
+crates/sniper_host/src/idxpos.rs:131:5: replace leftover_bits -> u32 with 1
+crates/sniper_host/src/idxpos.rs:132:60: replace && with || in leftover_bits
+crates/sniper_host/src/idxpos.rs:132:46: replace && with || in leftover_bits
+crates/sniper_host/src/idxpos.rs:132:42: replace > with == in leftover_bits
+crates/sniper_host/src/idxpos.rs:132:42: replace > with < in leftover_bits
+crates/sniper_host/src/idxpos.rs:132:49: delete ! in leftover_bits
+crates/sniper_host/src/idxpos.rs:132:63: delete ! in leftover_bits
+crates/sniper_host/src/idxpos.rs:133:11: replace |= with &= in leftover_bits
+crates/sniper_host/src/idxpos.rs:135:46: replace && with || in leftover_bits
+crates/sniper_host/src/idxpos.rs:135:42: replace > with == in leftover_bits
+crates/sniper_host/src/idxpos.rs:135:42: replace > with < in leftover_bits
+crates/sniper_host/src/idxpos.rs:136:11: replace |= with &= in leftover_bits
+crates/sniper_host/src/idxpos.rs:138:100: replace > with == in leftover_bits
+crates/sniper_host/src/idxpos.rs:138:100: replace > with >= in leftover_bits
+crates/sniper_host/src/idxpos.rs:139:11: replace |= with &= in leftover_bits
