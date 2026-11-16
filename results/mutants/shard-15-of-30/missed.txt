@@ -27,3 +27,49 @@ crates/spikefade/src/gk.rs:143:37: replace * with / in bar_greeks
 crates/spikefade/src/gk.rs:144:35: replace * with + in bar_greeks
 crates/spikefade/src/gk.rs:144:35: replace * with / in bar_greeks
 crates/spikefade/src/gk.rs:145:33: replace * with / in bar_greeks
+crates/spikefade/src/gk.rs:172:72: replace + with - in inputs_at
+crates/spikefade/src/gk.rs:172:72: replace + with * in inputs_at
+crates/spikefade/src/gk.rs:173:21: replace - with / in inputs_at
+crates/spikefade/src/gk.rs:183:5: replace cmd_greeks_tsv -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/gk.rs:183:5: replace cmd_greeks_tsv -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/gk.rs:189:35: replace || with && in cmd_greeks_tsv
+crates/spikefade/src/gk.rs:194:20: replace < with == in cmd_greeks_tsv
+crates/spikefade/src/gk.rs:194:20: replace < with > in cmd_greeks_tsv
+crates/spikefade/src/gk.rs:194:20: replace < with <= in cmd_greeks_tsv
+crates/spikefade/src/v32.rs:75:61: replace / with * in mark_at
+crates/spikefade/src/v32.rs:75:39: replace - with + in mark_at
+crates/spikefade/src/v32.rs:76:10: replace < with <= in mark_at
+crates/spikefade/src/v32.rs:79:31: replace - with + in mark_at
+crates/spikefade/src/v32.rs:79:68: replace - with + in mark_at
+crates/spikefade/src/v32.rs:79:68: replace - with / in mark_at
+crates/spikefade/src/v32.rs:80:30: replace - with + in mark_at
+crates/spikefade/src/v32.rs:89:57: replace - with + in mark_in_minute
+crates/spikefade/src/v32.rs:110:5: replace delta_band -> usize with 0
+crates/spikefade/src/v32.rs:110:5: replace delta_band -> usize with 1
+crates/spikefade/src/v32.rs:112:20: replace match guard x < 0.10 with true in delta_band
+crates/spikefade/src/v32.rs:112:20: replace match guard x < 0.10 with false in delta_band
+crates/spikefade/src/v32.rs:113:20: replace match guard x < 0.25 with true in delta_band
+crates/spikefade/src/v32.rs:113:20: replace match guard x < 0.25 with false in delta_band
+crates/spikefade/src/v32.rs:114:20: replace match guard x < 0.40 with true in delta_band
+crates/spikefade/src/v32.rs:115:20: replace match guard x < 0.55 with true in delta_band
+crates/spikefade/src/v32.rs:115:20: replace match guard x < 0.55 with false in delta_band
+crates/spikefade/src/v32.rs:112:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:112:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:112:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:113:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:113:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:113:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:114:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:114:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:114:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:115:22: replace < with == in delta_band
+crates/spikefade/src/v32.rs:115:22: replace < with > in delta_band
+crates/spikefade/src/v32.rs:115:22: replace < with <= in delta_band
+crates/spikefade/src/v32.rs:123:5: replace iv_band -> usize with 0
+crates/spikefade/src/v32.rs:123:5: replace iv_band -> usize with 1
+crates/spikefade/src/v32.rs:125:20: replace match guard x < 0.20 with true in iv_band
+crates/spikefade/src/v32.rs:125:20: replace match guard x < 0.20 with false in iv_band
+crates/spikefade/src/v32.rs:126:20: replace match guard x < 0.40 with true in iv_band
+crates/spikefade/src/v32.rs:126:20: replace match guard x < 0.40 with false in iv_band
+crates/spikefade/src/v32.rs:127:20: replace match guard x < 0.80 with true in iv_band
+crates/spikefade/src/v32.rs:127:20: replace match guard x < 0.80 with false in iv_band
