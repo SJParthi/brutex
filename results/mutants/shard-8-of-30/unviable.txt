@@ -1,0 +1,6 @@
+crates/spikefade/src/sw.rs:208:9: replace + with - in words32
+crates/spikefade/src/sw.rs:208:9: replace + with * in words32
+crates/spikefade/src/sw.rs:314:9: replace && with || in from_args
+crates/spikefade/src/sw.rs:313:9: replace && with || in from_args
+crates/spikefade/src/report.rs:468:33: replace && with || in cmd_run
+crates/spikefade/src/report.rs:580:5: replace bench_windows -> Bench with Default::default()

@@ -1,0 +1,59 @@
+crates/spikefade/src/stress.rs:54:22: replace - with / in stressed
+crates/spikefade/src/stress.rs:54:13: replace - with / in stressed
+crates/spikefade/src/stress.rs:54:13: replace - with + in stressed
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 0, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 0, 0)
+crates/spikefade/src/sw.rs:134:5: replace on -> bool with true
+crates/spikefade/src/sw.rs:134:5: replace on -> bool with false
+crates/spikefade/src/sw.rs:146:5: replace set with ()
+crates/spikefade/src/sw.rs:253:5: replace n_slots -> i64 with 0
+crates/spikefade/src/sw.rs:253:5: replace n_slots -> i64 with 1
+crates/spikefade/src/sw.rs:253:5: replace n_slots -> i64 with -1
+crates/spikefade/src/sw.rs:278:5: replace any32 -> bool with false
+crates/spikefade/src/sw.rs:294:43: replace == with != in from_args
+crates/spikefade/src/sw.rs:298:24: replace match guard v == yes with false in from_args
+crates/spikefade/src/sw.rs:324:77: replace + with * in from_args
+crates/spikefade/src/sw.rs:337:18: replace && with || in from_args
+crates/spikefade/src/sw.rs:341:22: replace && with || in from_args
+crates/spikefade/src/report.rs:41:5: replace pctile -> u64 with 0
+crates/spikefade/src/report.rs:41:5: replace pctile -> u64 with 1
+crates/spikefade/src/report.rs:45:58: replace / with % in pctile
+crates/spikefade/src/report.rs:45:58: replace / with * in pctile
+crates/spikefade/src/report.rs:45:54: replace * with + in pctile
+crates/spikefade/src/report.rs:45:54: replace * with / in pctile
+crates/spikefade/src/report.rs:45:36: replace - with + in pctile
+crates/spikefade/src/report.rs:45:36: replace - with / in pctile
+crates/spikefade/src/report.rs:115:5: replace cmd_run -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/report.rs:118:45: replace == with != in cmd_run
+crates/spikefade/src/report.rs:278:29: replace > with < in cmd_run
+crates/spikefade/src/report.rs:421:116: delete ! in cmd_run
+crates/spikefade/src/report.rs:443:164: replace + with * in cmd_run
+crates/spikefade/src/report.rs:465:33: replace += with *= in cmd_run
+crates/spikefade/src/report.rs:468:62: replace > with < in cmd_run
+crates/spikefade/src/report.rs:498:24: replace && with || in cmd_run
+crates/spikefade/src/report.rs:498:48: replace == with != in cmd_run
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![], vec![])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![], vec![0])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![], vec![1])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![0], vec![])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![0], vec![0])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![0], vec![1])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![1], vec![])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![1], vec![0])]
+crates/spikefade/src/report.rs:524:5: replace level_samples -> Vec<(Vec<u64>, Vec<u64>)> with vec![(vec![1], vec![1])]
+crates/spikefade/src/report.rs:547:5: replace levels_from -> Levels with Default::default()
+crates/spikefade/src/report.rs:564:5: replace r2 -> u64 with 0
+crates/spikefade/src/report.rs:564:5: replace r2 -> u64 with 1
+crates/spikefade/src/report.rs:568:13: replace / with * in r2
+crates/spikefade/src/report.rs:569:11: replace *= with /= in r2
+crates/spikefade/src/report.rs:571:8: replace / with * in r2
+crates/spikefade/src/report.rs:590:54: replace % with / in bench_windows
+crates/spikefade/src/report.rs:686:5: replace settings_words -> String with "xyzzy".into()
+crates/spikefade/src/report.rs:710:39: replace += with *= in pick_detail
+crates/spikefade/src/report.rs:724:18: replace += with -= in pick_detail
+crates/spikefade/src/report.rs:739:72: replace < with > in pick_detail
+crates/spikefade/src/report.rs:746:23: replace != with == in pick_detail
+crates/spikefade/src/report.rs:751:49: replace - with / in pick_detail
+crates/spikefade/src/report.rs:789:52: replace / with % in pick_detail
+crates/spikefade/src/report.rs:844:44: replace + with * in pick_detail
