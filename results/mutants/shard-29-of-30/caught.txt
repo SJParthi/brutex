@@ -181,3 +181,14 @@ crates/spikefade/src/f7.rs:369:5: replace band_of -> Option<(i64, i64, i64, bool
 crates/spikefade/src/f7.rs:369:5: replace band_of -> Option<(i64, i64, i64, bool)> with Some((-1, -1, 1, false))
 crates/spikefade/src/f7.rs:387:5: replace exact_band -> Option<(i64, i64, i64)> with Some((0, 1, -1))
 crates/spikefade/src/f7.rs:430:5: replace ctx_of -> Result<Option<Ctx>, String> with Ok(Some(Default::default()))
+crates/spikefade/src/f7.rs:465:9: replace Ctx::strict -> Option<common_fill::Strict> with None
+crates/spikefade/src/f7.rs:467:13: delete match arm 2 in Ctx::strict
+crates/spikefade/src/f7.rs:527:8: delete ! in result_lines
+crates/spikefade/src/f7.rs:553:5: replace item5 -> (&'static str, String) with ("", "xyzzy".into())
+crates/spikefade/src/f7.rs:558:24: delete ! in item5
+crates/spikefade/src/int34.rs:48:5: replace on -> bool with true
+crates/spikefade/src/int34.rs:48:5: replace on -> bool with false
+crates/spikefade/src/int34.rs:60:5: replace set with ()
+crates/spikefade/src/int34.rs:83:5: replace word -> String with String::new()
+crates/spikefade/src/int34.rs:95:5: replace words -> String with String::new()
+crates/spikefade/src/int34.rs:141:32: delete ! in from_args
