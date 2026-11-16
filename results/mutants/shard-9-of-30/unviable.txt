@@ -22,3 +22,9 @@ crates/spikefade/src/kern.rs:1278:61: replace - with + in decision_code
 crates/spikefade/src/kern.rs:1289:201: replace - with + in dedup_groups
 crates/spikefade/src/kern.rs:1405:13: replace && with || in walk_accs
 crates/spikefade/src/kern.rs:1418:17: replace && with || in walk_accs
+crates/spikefade/src/menu.rs:441:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:440:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:439:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:438:17: replace && with || in parse_setting
+crates/spikefade/src/menu.rs:624:5: replace rule_at -> Result<(XRule, bool), u8> with Ok((Default::default(), true))
+crates/spikefade/src/menu.rs:624:5: replace rule_at -> Result<(XRule, bool), u8> with Ok((Default::default(), false))
