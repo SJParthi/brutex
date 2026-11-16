@@ -1,0 +1,4 @@
+crates/spikefade/src/v32.rs:232:60: replace * with / in utilization
+crates/spikefade/src/v32.rs:233:88: replace * with / in utilization
+crates/spikefade/src/v32.rs:265:60: replace * with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:88: replace * with / in margin_mtm_peak

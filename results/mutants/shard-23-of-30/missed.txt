@@ -1,0 +1,202 @@
+crates/spikefade/src/v32.rs:125:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:125:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:126:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:125:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:126:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:126:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:127:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:127:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:127:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:128:22: replace < with == in iv_band
+crates/spikefade/src/v32.rs:128:22: replace < with > in iv_band
+crates/spikefade/src/v32.rs:128:22: replace < with <= in iv_band
+crates/spikefade/src/v32.rs:136:18: replace || with && in gain_words
+crates/spikefade/src/v32.rs:151:29: replace / with % in bp_round
+crates/spikefade/src/v32.rs:151:29: replace / with * in bp_round
+crates/spikefade/src/v32.rs:151:20: replace * with + in bp_round
+crates/spikefade/src/v32.rs:151:20: replace * with / in bp_round
+crates/spikefade/src/v32.rs:156:25: replace < with <= in bp_round
+crates/spikefade/src/v32.rs:156:36: replace < with == in bp_round
+crates/spikefade/src/v32.rs:156:36: replace < with <= in bp_round
+crates/spikefade/src/v32.rs:162:18: replace || with && in gain_words_r
+crates/spikefade/src/v32.rs:193:5: replace pct_bp -> String with String::new()
+crates/spikefade/src/v32.rs:193:5: replace pct_bp -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:193:10: replace == with != in pct_bp
+crates/spikefade/src/v32.rs:196:24: replace / with % in pct_bp
+crates/spikefade/src/v32.rs:196:24: replace / with * in pct_bp
+crates/spikefade/src/v32.rs:196:15: replace * with + in pct_bp
+crates/spikefade/src/v32.rs:196:15: replace * with / in pct_bp
+crates/spikefade/src/v32.rs:216:5: replace month_name -> String with String::new()
+crates/spikefade/src/v32.rs:216:5: replace month_name -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 0, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, 1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (0, -1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 0, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, 1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (1, -1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 0, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, 1, -1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 0, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 0, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 0, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, 1, -1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, 0)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, 1)
+crates/spikefade/src/v32.rs:224:5: replace utilization -> (i64, i64, i64, i64) with (-1, -1, -1, -1)
+crates/spikefade/src/v32.rs:229:23: replace || with && in utilization
+crates/spikefade/src/v32.rs:229:18: replace <= with > in utilization
+crates/spikefade/src/v32.rs:229:28: replace >= with < in utilization
+crates/spikefade/src/v32.rs:232:54: replace / with % in utilization
+crates/spikefade/src/v32.rs:232:54: replace / with * in utilization
+crates/spikefade/src/v32.rs:232:49: replace - with + in utilization
+crates/spikefade/src/v32.rs:232:49: replace - with / in utilization
+crates/spikefade/src/v32.rs:232:60: replace * with + in utilization
+crates/spikefade/src/v32.rs:233:82: replace / with % in utilization
+crates/spikefade/src/v32.rs:233:82: replace / with * in utilization
+crates/spikefade/src/v32.rs:233:77: replace - with + in utilization
+crates/spikefade/src/v32.rs:233:77: replace - with / in utilization
+crates/spikefade/src/v32.rs:233:53: replace + with - in utilization
+crates/spikefade/src/v32.rs:233:49: replace - with + in utilization
+crates/spikefade/src/v32.rs:233:49: replace - with / in utilization
+crates/spikefade/src/v32.rs:233:58: replace * with + in utilization
+crates/spikefade/src/v32.rs:233:58: replace * with / in utilization
+crates/spikefade/src/v32.rs:233:88: replace * with + in utilization
+crates/spikefade/src/v32.rs:235:20: replace += with -= in utilization
+crates/spikefade/src/v32.rs:235:20: replace += with *= in utilization
+crates/spikefade/src/v32.rs:244:59: replace > with == in utilization
+crates/spikefade/src/v32.rs:244:59: replace > with < in utilization
+crates/spikefade/src/v32.rs:244:59: replace > with >= in utilization
+crates/spikefade/src/v32.rs:244:54: replace * with + in utilization
+crates/spikefade/src/v32.rs:244:54: replace * with / in utilization
+crates/spikefade/src/v32.rs:244:83: replace * with + in utilization
+crates/spikefade/src/v32.rs:244:83: replace * with / in utilization
+crates/spikefade/src/v32.rs:245:56: replace == with != in utilization
+crates/spikefade/src/v32.rs:249:26: replace / with % in utilization
+crates/spikefade/src/v32.rs:249:26: replace / with * in utilization
+crates/spikefade/src/v32.rs:249:66: replace / with % in utilization
+crates/spikefade/src/v32.rs:249:66: replace / with * in utilization
+crates/spikefade/src/v32.rs:249:57: replace * with + in utilization
+crates/spikefade/src/v32.rs:249:57: replace * with / in utilization
+crates/spikefade/src/v32.rs:249:85: replace / with % in utilization
+crates/spikefade/src/v32.rs:249:85: replace / with * in utilization
+crates/spikefade/src/v32.rs:249:76: replace * with + in utilization
+crates/spikefade/src/v32.rs:249:76: replace * with / in utilization
+crates/spikefade/src/v32.rs:262:23: replace || with && in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:54: replace / with % in margin_mtm_peak
+crates/spikefade/src/v32.rs:265:49: replace - with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:77: replace - with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:77: replace - with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:53: replace + with - in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:58: replace * with + in margin_mtm_peak
+crates/spikefade/src/v32.rs:266:58: replace * with / in margin_mtm_peak
+crates/spikefade/src/v32.rs:272:15: replace += with -= in margin_mtm_peak
+crates/spikefade/src/v32.rs:272:15: replace += with *= in margin_mtm_peak
+crates/spikefade/src/v32.rs:273:18: replace > with == in margin_mtm_peak
+crates/spikefade/src/v32.rs:273:18: replace > with >= in margin_mtm_peak
+crates/spikefade/src/v32.rs:274:23: replace += with -= in margin_mtm_peak
+crates/spikefade/src/v32.rs:274:23: replace += with *= in margin_mtm_peak
+crates/spikefade/src/v32.rs:276:18: replace > with >= in margin_mtm_peak
+crates/spikefade/src/v32.rs:289:5: replace mtm_peak_words -> String with String::new()
+crates/spikefade/src/v32.rs:289:5: replace mtm_peak_words -> String with "xyzzy".into()
+crates/spikefade/src/v32.rs:290:13: replace == with != in mtm_peak_words
+crates/spikefade/src/v32.rs:312:30: replace + with - in portfolio_mtm
+crates/spikefade/src/v32.rs:312:30: replace + with * in portfolio_mtm
+crates/spikefade/src/v32.rs:363:27: delete field mo from struct WalkRes expression in port_walk
+crates/spikefade/src/v32.rs:370:22: replace > with >= in port_walk
+crates/spikefade/src/v32.rs:374:22: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:374:22: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:375:20: replace -= with /= in port_walk
+crates/spikefade/src/v32.rs:377:34: replace - with + in port_walk
+crates/spikefade/src/v32.rs:377:34: replace - with / in port_walk
+crates/spikefade/src/v32.rs:378:55: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:378:55: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:379:50: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:379:50: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:389:23: replace > with >= in port_walk
+crates/spikefade/src/v32.rs:396:67: replace || with && in port_walk
+crates/spikefade/src/v32.rs:397:22: replace < with <= in port_walk
+crates/spikefade/src/v32.rs:402:24: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:402:24: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:409:44: replace + with - in port_walk
+crates/spikefade/src/v32.rs:409:44: replace + with * in port_walk
+crates/spikefade/src/v32.rs:412:16: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:422:30: replace - with + in port_walk
+crates/spikefade/src/v32.rs:422:30: replace - with / in port_walk
+crates/spikefade/src/v32.rs:423:51: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:423:51: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:424:46: replace += with -= in port_walk
+crates/spikefade/src/v32.rs:424:46: replace += with *= in port_walk
+crates/spikefade/src/v32.rs:473:47: replace > with == in v19_of
+crates/spikefade/src/v32.rs:473:47: replace > with < in v19_of
+crates/spikefade/src/v32.rs:473:47: replace > with >= in v19_of
+crates/spikefade/src/v32.rs:478:49: delete ! in v19_of
+crates/spikefade/src/v32.rs:488:27: replace && with || in a19_passed
+crates/spikefade/src/v32.rs:488:23: replace > with == in a19_passed
+crates/spikefade/src/v32.rs:488:23: replace > with < in a19_passed
+crates/spikefade/src/v32.rs:488:23: replace > with >= in a19_passed
+crates/spikefade/src/v32.rs:488:44: replace == with != in a19_passed
+crates/spikefade/src/v32.rs:490:12: replace > with >= in a19_passed
+crates/spikefade/src/v32.rs:490:33: replace > with >= in a19_passed
+crates/spikefade/src/v32.rs:511:11: replace > with == in v19_miss_words
