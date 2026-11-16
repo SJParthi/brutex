@@ -1,0 +1,3295 @@
+# MUT-24 baseline record: cargo-mutants shard 24/30 (code only, no market data)
+# Source: branch cloud/spikefade-shard-20261116 @ 15fd4f4737ea11bcef398efa75db240d38128d10. The README-CLOUD.md section 4
+#   source manifest was checked on this box: 146 files, sha256 c3722928015fb27164c88ad687f64a7529c4c003dc8bc14825c82477984fbf8e.
+# Box: Linux x86_64 cloud container, 4 vCPU, 15 GiB RAM. Toolchain: rustc 1.97.1 (8bab26f4f 2026-07-14). cargo-mutants 27.1.0.
+# Nothing was added to the checkout. No tool was added to the box (zstd is not installed; no test outcome below depends on it,
+#   because the 2 tests that run zstd exec the Mac-only absolute path).
+# Counts below are EXACT. Wall times are MEASURED on this box.
+#
+# SECTION 1  the exact command 'cargo test --locked --workspace' -> rc 101 after 3 s: core's test targets do not compile.
+# SECTION 2  'cargo build --locked --workspace --tests --keep-going' -> exactly 6 test targets fail to compile, all in core,
+#            all from include_str! of app-repository files this branch does not hold (docs/*.md, CLAUDE.md, .github/*,
+#            deny.toml, crates/{api,cli,engine,indicators,lake,pull,runner,store,telemetry,vocab}/...):
+#              core lib unit tests, and integration targets banned_lists, claim_reader, decision_citations, findings, graph.
+# SECTION 3  every compilable test target, no exclusions, --no-fail-fast (3a costs+greeks+spikefade, 3b core's 4
+#            compilable integration targets, 3c core doc tests): 658 passed, 14 failed, 3 ignored.
+#            Every failure needs a file this repository (or this box) does not hold:
+#              spikefade, 7 read crates/spikefade/data/EXITS-DYN-*.tsv (absent by design, README-CLOUD.md section 5):
+#                menu::tests::sf3_menu_and_sets_load_with_the_signed_counts, menu::tests::sf3_menu_fail_closed,
+#                menu::tests::sf3_distance_floor_counted, menu::tests::sf3_tp_floor_not_armed_at_or_above_entry,
+#                menu::tests::sf3_tp_theta_level_and_absence, tests33s::v33_search1d_sets_load_and_count,
+#                tests3::sf3_ttp_replaces_tp_close
+#              spikefade, 2 exec the Mac-only absolute path /opt/homebrew/bin/zstd (kit.rs tool path with PORTABLE off):
+#                tests34::root_digest_same_for_every_form, tests34::sfz_roundtrip_all_rows
+#              core cost_invariants, 4 read docs/04-invariants.md:
+#                every_declared_cost_invariant_reaches_a_bench, the_document_declares_the_five_operations_rule_4_names,
+#                every_measured_cost_invariant_is_declared, the_reconciliation_is_reading_something
+#              core cost_invariants, 1 requires crates/spikefade/benches/ratio.rs (the app repository's every-crate-has-a-
+#                ratio-bench rule, applied to this kit's extra crate): every_crate_carries_a_ratio_bench
+# SECTION 4  the same with exactly those 14 exclusions (--exact --skip): 654 passed, 0 failed, 3 ignored, 14 filtered out
+#            (plus core's 4 doc tests, which passed in 3c).
+#            4a SHARD SCOPE, 'cargo test -p spikefade' with the skips: 158 passed, 0 failed, 1 ignored, 9 filtered out.
+#
+# Mutation command (run from the checkout root; the same 14 skips as shards 0-3):
+#   cargo mutants --workspace --shard 24/30 --jobs 2 --cargo-arg=--locked -- -- --exact \
+#     --skip menu::tests::sf3_menu_and_sets_load_with_the_signed_counts \
+#     --skip menu::tests::sf3_menu_fail_closed \
+#     --skip menu::tests::sf3_distance_floor_counted \
+#     --skip menu::tests::sf3_tp_floor_not_armed_at_or_above_entry \
+#     --skip menu::tests::sf3_tp_theta_level_and_absence \
+#     --skip tests33s::v33_search1d_sets_load_and_count \
+#     --skip tests3::sf3_ttp_replaces_tp_close \
+#     --skip tests34::root_digest_same_for_every_form \
+#     --skip tests34::sfz_roundtrip_all_rows \
+#     --skip every_declared_cost_invariant_reaches_a_bench \
+#     --skip the_document_declares_the_five_operations_rule_4_names \
+#     --skip every_measured_cost_invariant_is_declared \
+#     --skip the_reconciliation_is_reading_something \
+#     --skip every_crate_carries_a_ratio_bench
+#
+# Shard 24/30 (default --sharding slice, 522 per shard) holds mutants 12529..13050 of the workspace's 15639
+# (core 642, costs 1312, greeks 345, spikefade 13340), all in spikefade: side17.rs 369, v32.rs 115, ckpt.rs 38.
+# cargo-mutants tests each mutant with its own package's tests, so every mutant here ran against spikefade's suite only
+# (SECTION 4a's scope). cargo-mutants' own baseline: 14 s build + 4 s test, test timeout auto-set to 23 s.
+#
+# RESULT (EXACT; wall MEASURED): 522 mutants tested in 40 min 8 s (2026-11-16 11:42:10Z to 12:22:18Z), exit code 2:
+#   caught 128, missed 389, timeout 0, unviable 5. By file: side17.rs 84/283/0/2, v32.rs 35/80/0/0, ckpt.rs 9/26/0/3.
+#
+################ SECTION 1: cargo test --locked --workspace ################
+   Compiling core v0.1.0 (/root/mut/crates/core)
+   Compiling greeks v0.1.0 (/root/mut/crates/greeks)
+   Compiling common_fill v2.4.0 (/root/mut/pinned/common-fill-v24)
+error: couldn't read `crates/core/src/../../../docs/05-decisions.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:5328:25
+     |
+5328 |         let decisions = include_str!("../../../docs/05-decisions.md");
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/06-limits.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:5344:22
+     |
+5344 |         let limits = include_str!("../../../docs/06-limits.md");
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/00-charter.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6110:28
+     |
+6110 |         let charter = fold(include_str!("../../../docs/00-charter.md"));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/05-decisions.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6117:25
+     |
+6117 |         let decisions = include_str!("../../../docs/05-decisions.md");
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../CLAUDE.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6123:13
+     |
+6123 |             include_str!("../../../CLAUDE.md")
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling costs v0.1.0 (/root/mut/crates/costs)
+error: couldn't read `crates/core/tests/../../../.github/workflows/ci.yml`: No such file or directory (os error 2)
+  --> crates/core/tests/claim_reader.rs:24:24
+   |
+24 | const WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/tests/../../../.github/gates_bounds.rs`: No such file or directory (os error 2)
+  --> crates/core/tests/claim_reader.rs:25:20
+   |
+25 | const TOOL: &str = include_str!("../../../.github/gates_bounds.rs");
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `core` (test "claim_reader") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `core` (lib test) due to 5 previous errors
+### SECTION 1 rc=101 wall=3s
+
+################ SECTION 2: cargo build --locked --workspace --tests --keep-going ################
+$ cargo build --locked --workspace --tests --keep-going
+   Compiling spikefade v0.1.0 (/root/mut/crates/spikefade)
+   Compiling costs v0.1.0 (/root/mut/crates/costs)
+warning: unused imports: `VIEW_LETTERS` and `VIEW_NAMES`
+  --> crates/spikefade/src/report3.rs:21:42
+   |
+21 | use crate::acct::{NVIEW, SEv, Sum, Tops, VIEW_LETTERS, VIEW_NAMES};
+   |                                          ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DayEvents` and `Ent`
+  --> crates/spikefade/src/report3.rs:30:27
+   |
+30 | use crate::screen::{self, DayEvents, Ent, Levels, NCFG, TFS, cfg_parts};
+   |                           ^^^^^^^^^  ^^^
+
+warning: unused imports: `out_of` and `size_event`
+  --> crates/spikefade/src/stage.rs:23:72
+   |
+23 | use crate::trade::{BASE_S, BaseErr, EvT, NL, Out, Paths, Refuse, Trip, out_of, record_base, size_event, trip, truncate};
+   |                                                                        ^^^^^^               ^^^^^^^^^^
+
+   Compiling core v0.1.0 (/root/mut/crates/core)
+error: couldn't read `crates/core/tests/../../../docs/05-decisions.md`: No such file or directory (os error 2)
+  --> crates/core/tests/decision_citations.rs:68:22
+   |
+68 | const LEDGER: &str = include_str!("../../../docs/05-decisions.md");
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `core` (test "decision_citations") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: couldn't read `crates/core/tests/../../../docs/01-architecture.md`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:48:28
+   |
+48 | const ARCHITECTURE: &str = include_str!("../../../docs/01-architecture.md");
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/tests/../../api/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:59:13
+   |
+59 |     ("api", include_str!("../../api/Cargo.toml")),
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+59 -     ("api", include_str!("../../api/Cargo.toml")),
+59 +     ("api", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../cli/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:62:13
+   |
+62 |     ("cli", include_str!("../../cli/Cargo.toml")),
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+62 -     ("cli", include_str!("../../cli/Cargo.toml")),
+62 +     ("cli", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../engine/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:65:16
+   |
+65 |     ("engine", include_str!("../../engine/Cargo.toml")),
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+65 -     ("engine", include_str!("../../engine/Cargo.toml")),
+65 +     ("engine", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../indicators/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:67:20
+   |
+67 |     ("indicators", include_str!("../../indicators/Cargo.toml")),
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+67 -     ("indicators", include_str!("../../indicators/Cargo.toml")),
+67 +     ("indicators", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../lake/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:68:14
+   |
+68 |     ("lake", include_str!("../../lake/Cargo.toml")),
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+68 -     ("lake", include_str!("../../lake/Cargo.toml")),
+68 +     ("lake", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../pull/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:69:14
+   |
+69 |     ("pull", include_str!("../../pull/Cargo.toml")),
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+69 -     ("pull", include_str!("../../pull/Cargo.toml")),
+69 +     ("pull", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../runner/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:70:16
+   |
+70 |     ("runner", include_str!("../../runner/Cargo.toml")),
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+70 -     ("runner", include_str!("../../runner/Cargo.toml")),
+70 +     ("runner", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../store/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:71:15
+   |
+71 |     ("store", include_str!("../../store/Cargo.toml")),
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+71 -     ("store", include_str!("../../store/Cargo.toml")),
+71 +     ("store", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../telemetry/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:72:19
+   |
+72 |     ("telemetry", include_str!("../../telemetry/Cargo.toml")),
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+72 -     ("telemetry", include_str!("../../telemetry/Cargo.toml")),
+72 +     ("telemetry", include_str!("../Cargo.toml")),
+   |
+
+error: couldn't read `crates/core/tests/../../vocab/Cargo.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/graph.rs:73:15
+   |
+73 |     ("vocab", include_str!("../../vocab/Cargo.toml")),
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a file with the same name in a different directory
+   |
+73 -     ("vocab", include_str!("../../vocab/Cargo.toml")),
+73 +     ("vocab", include_str!("../Cargo.toml")),
+   |
+
+error: could not compile `core` (test "graph") due to 11 previous errors
+error: couldn't read `crates/core/tests/../../../.github/workflows/ci.yml`: No such file or directory (os error 2)
+  --> crates/core/tests/banned_lists.rs:26:24
+   |
+26 | const WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/tests/../../../deny.toml`: No such file or directory (os error 2)
+  --> crates/core/tests/banned_lists.rs:27:20
+   |
+27 | const DENY: &str = include_str!("../../../deny.toml");
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/tests/../../vocab/tests/workspace_is_rust.rs`: No such file or directory (os error 2)
+  --> crates/core/tests/banned_lists.rs:28:26
+   |
+28 | const VOCAB_TEST: &str = include_str!("../../vocab/tests/workspace_is_rust.rs");
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `core` (test "banned_lists") due to 3 previous errors
+error: couldn't read `crates/core/tests/../../../docs/11-findings.md`: No such file or directory (os error 2)
+  --> crates/core/tests/findings.rs:47:22
+   |
+47 | const LEDGER: &str = include_str!("../../../docs/11-findings.md");
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `core` (test "findings") due to 1 previous error
+error: couldn't read `crates/core/tests/../../../.github/workflows/ci.yml`: No such file or directory (os error 2)
+  --> crates/core/tests/claim_reader.rs:24:24
+   |
+24 | const WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/tests/../../../.github/gates_bounds.rs`: No such file or directory (os error 2)
+  --> crates/core/tests/claim_reader.rs:25:20
+   |
+25 | const TOOL: &str = include_str!("../../../.github/gates_bounds.rs");
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `core` (test "claim_reader") due to 2 previous errors
+error: couldn't read `crates/core/src/../../../docs/05-decisions.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:5328:25
+     |
+5328 |         let decisions = include_str!("../../../docs/05-decisions.md");
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/06-limits.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:5344:22
+     |
+5344 |         let limits = include_str!("../../../docs/06-limits.md");
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/00-charter.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6110:28
+     |
+6110 |         let charter = fold(include_str!("../../../docs/00-charter.md"));
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../docs/05-decisions.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6117:25
+     |
+6117 |         let decisions = include_str!("../../../docs/05-decisions.md");
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: couldn't read `crates/core/src/../../../CLAUDE.md`: No such file or directory (os error 2)
+    --> crates/core/src/universe.rs:6123:13
+     |
+6123 |             include_str!("../../../CLAUDE.md")
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling greeks v0.1.0 (/root/mut/crates/greeks)
+error: could not compile `core` (lib test) due to 5 previous errors
+warning: unused variable: `u`
+   --> crates/spikefade/src/screen.rs:521:74
+    |
+521 |         c.unds.iter().enumerate().filter(|(_, u)| u.kind == 0).map(|(ui, u)| {
+    |                                                                          ^ help: if this is intentional, prefix it with an underscore: `_u`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `group` is never read
+   --> crates/spikefade/src/kern.rs:330:13
+    |
+330 |             group = None;
+    |             ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+360 |         group = Some((be, q.piece));
+    |         --------------------------- `group` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/side17.rs:423:9
+    |
+423 |     let mut log_rows = |acct: &str, mem: &[(u8, usize)], r: &crate::v32::WalkRes, tr: &[Vec<STrade>], tsv: &mut String| {
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/tests32r.rs:404:9
+    |
+404 |     let mut q = |len: i64| -> Vec<u64> {
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: method `nviews` is never used
+   --> crates/spikefade/src/acct.rs:605:12
+    |
+566 | impl Tops {
+    | --------- method in this implementation
+...
+605 |     pub fn nviews(&self) -> usize {
+    |            ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `charged` is never used
+   --> crates/spikefade/src/charges.rs:131:15
+    |
+131 | pub(crate) fn charged(rd: &Rates, rt: &Rates, t: &Trip) -> (i64, i64, i64, bool) {
+    |               ^^^^^^^
+
+warning: field `rows_1s_cr` is never read
+  --> crates/spikefade/src/cube.rs:78:9
+   |
+53 | pub struct Stats {
+   |            ----- field in this struct
+...
+78 |     pub rows_1s_cr: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `Stats` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `bod` is never read
+  --> crates/spikefade/src/mtable.rs:29:9
+   |
+23 | pub struct SnapMeta {
+   |            -------- field in this struct
+...
+29 |     pub bod: bool,
+   |         ^^^
+   |
+   = note: `SnapMeta` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `day` is never read
+   --> crates/spikefade/src/mtable.rs:151:9
+    |
+150 | pub struct DayM {
+    |            ---- field in this struct
+151 |     pub day: i64,
+    |         ^^^
+    |
+    = note: `DayM` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `ulist_of` is never read
+  --> crates/spikefade/src/report.rs:78:5
+   |
+67 | struct SegRun {
+   |        ------ field in this struct
+...
+78 |     ulist_of: Vec<u32>,
+   |     ^^^^^^^^
+
+warning: fields `kind` and `expiry` are never read
+   --> crates/spikefade/src/report.rs:642:5
+    |
+611 | struct TradeRow {
+    |        -------- fields in this struct
+...
+642 |     kind: u8,
+    |     ^^^^
+643 |     expiry: u32,
+    |     ^^^^^^
+    |
+    = note: `TradeRow` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `round2` is never used
+   --> crates/spikefade/src/screen.rs:349:4
+    |
+349 | fn round2(x: u64) -> u64 {
+    |    ^^^^^^
+
+warning: function `quant` is never used
+   --> crates/spikefade/src/screen.rs:360:4
+    |
+360 | fn quant(v: &mut [u64], q: u64) -> u64 {
+    |    ^^^^^
+
+warning: function `measure` is never used
+   --> crates/spikefade/src/screen.rs:371:8
+    |
+371 | pub fn measure(cubes: &[Cube], seg: u8) -> Levels {
+    |        ^^^^^^^
+
+warning: field `flag2` is never read
+   --> crates/spikefade/src/trade.rs:271:9
+    |
+261 | pub struct Out {
+    |            --- field in this struct
+...
+271 |     pub flag2: u8,
+    |         ^^^^^
+    |
+    = note: `Out` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `cand_kind` is never used
+   --> crates/spikefade/src/trade.rs:470:14
+    |
+470 | pub const fn cand_kind(c: usize) -> Kind {
+    |              ^^^^^^^^^
+
+warning: fields `sale_secs`, `sale_one_price_secs`, `sale_past_limit`, and `x` are never read
+   --> crates/spikefade/src/trade.rs:500:9
+    |
+490 | pub struct Trip {
+    |            ---- fields in this struct
+...
+500 |     pub sale_secs: u32,
+    |         ^^^^^^^^^
+501 |     pub sale_one_price_secs: u32,
+    |         ^^^^^^^^^^^^^^^^^^^
+502 |     pub sale_past_limit: u32,
+    |         ^^^^^^^^^^^^^^^
+503 |     pub x: Option<i64>,
+    |         ^
+    |
+    = note: `Trip` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `charges_of` is never used
+   --> crates/spikefade/src/trade.rs:765:8
+    |
+765 | pub fn charges_of(day: i64, units: u64, buy_value: i64, sell_value: i64, own_exit: bool, broker: bool) -> Result<(i64, i64, i64, bo...
+    |        ^^^^^^^^^^
+
+warning: fields `label` and `blk` are never read
+  --> crates/spikefade/src/v2.rs:23:9
+   |
+22 | pub struct Eval {
+   |            ---- fields in this struct
+23 |     pub label: String,
+   |         ^^^^^
+24 |     pub rules: &'static str,
+25 |     pub blk: i64,
+   |         ^^^
+   |
+   = note: `Eval` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `store` is never read
+   --> crates/spikefade/src/v2.rs:115:9
+    |
+112 | pub struct Full {
+    |            ---- field in this struct
+...
+115 |     pub store: Vec<Out>,
+    |         ^^^^^
+
+warning: field `di` is never read
+   --> crates/spikefade/src/v2.rs:302:9
+    |
+299 | pub struct EvIn<'a> {
+    |            ---- field in this struct
+...
+302 |     pub di: u16,
+    |         ^^
+
+warning: function `write_new` is never used
+   --> crates/spikefade/src/v2.rs:546:8
+    |
+546 | pub fn write_new(p: &Path, content: &str) -> Result<(), String> {
+    |        ^^^^^^^^^
+
+warning: field `labels` is never read
+  --> crates/spikefade/src/kern.rs:99:9
+   |
+80 | pub struct Acc {
+   |            --- field in this struct
+...
+99 |     pub labels: [u32; 9],
+   |         ^^^^^^
+   |
+   = note: `Acc` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: constant `CAP` is never used
+   --> crates/spikefade/src/kern.rs:728:11
+    |
+728 | pub const CAP: [usize; 4] = [5, 10, 20, 40];
+    |           ^^^
+
+warning: fields `win`, `margin_in_use`, and `nopen` are never read
+   --> crates/spikefade/src/kern.rs:805:9
+    |
+801 | pub struct Dec3 {
+    |            ---- fields in this struct
+...
+805 |     pub win: Option<usize>,
+    |         ^^^
+806 |     pub margin_in_use: i64,
+    |         ^^^^^^^^^^^^^
+807 |     pub nopen: usize,
+    |         ^^^^^
+    |
+    = note: `Dec3` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_empty` is never used
+   --> crates/spikefade/src/menu.rs:282:12
+    |
+181 | impl Menu {
+    | --------- method in this implementation
+...
+282 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: constant `MAXR` is never used
+   --> crates/spikefade/src/menu.rs:288:11
+    |
+288 | pub const MAXR: usize = 7;
+    |           ^^^^
+
+warning: field `run` is never read
+  --> crates/spikefade/src/read.rs:55:5
+   |
+45 | pub struct Prep {
+   |            ---- field in this struct
+...
+55 |     run: Vec<u16>,
+   |     ^^^
+   |
+   = note: `Prep` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `mfallback` is never read
+   --> crates/spikefade/src/report3.rs:104:9
+    |
+ 68 | pub struct Seg3 {
+    |            ---- field in this struct
+...
+104 |     pub mfallback: Vec<Option<i64>>,
+    |         ^^^^^^^^^
+
+warning: fields `day` and `sha` are never read
+  --> crates/spikefade/src/bhav.rs:26:9
+   |
+25 | pub struct BhavDay {
+   |            ------- fields in this struct
+26 |     pub day: i64,
+   |         ^^^
+27 |     pub file: String,
+28 |     pub sha: String,
+   |         ^^^
+   |
+   = note: `BhavDay` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `month_of` is never used
+   --> crates/spikefade/src/expiry.rs:303:8
+    |
+303 | pub fn month_of(d: i64) -> String {
+    |        ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/spikefade/src/side17.rs:176:9
+    |
+175 | pub struct SideRes {
+    |            ------- fields in this struct
+176 |     pub net: i64,
+    |         ^^^
+177 |     pub trades: u32,
+178 |     pub by_seg: [u32; 2],
+    |         ^^^^^^
+...
+184 |     pub dd: i64,
+    |         ^^
+185 |     pub mo: BTreeMap<i64, i64>,
+    |         ^^
+186 |     /// (entry us, known us, margin) of the trades taken (the utilization reads them).
+187 |     pub taken: Vec<(i64, i64, i64)>,
+    |         ^^^^^
+188 |     /// The largest margin in use + running MTM loss seen at a sale instant (after the sale).
+189 |     pub peak_mtm: i64,
+    |         ^^^^^^^^
+190 |     /// v3.2 round B: every member trade's outcome in the walk's order (member, trade index, outcome word).
+191 |     pub log: Vec<(usize, usize, &'static str)>,
+    |         ^^^
+    |
+    = note: `SideRes` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `loss_at` is never used
+   --> crates/spikefade/src/side17.rs:197:8
+    |
+197 | pub fn loss_at(marks: &[i32], mark1: u32, units: u32, sold: i64, sod: u32) -> i64 {
+    |        ^^^^^^^
+
+warning: function `ident` is never used
+   --> crates/spikefade/src/ckmerge.rs:395:8
+    |
+395 | pub fn ident(s: &Sum) -> (u32, u16, u8) {
+    |        ^^^^^
+
+warning: function `strict_reset` is never used
+   --> crates/spikefade/src/kit.rs:613:8
+    |
+613 | pub fn strict_reset() {
+    |        ^^^^^^^^^^^^
+
+warning: `spikefade` (bin "spikefade" test) generated 38 warnings (run `cargo fix --bin "spikefade" -p spikefade --tests` to apply 6 suggestions)
+### rc=101 wall=17s
+
+################ SECTION 3a: every compilable test target, no exclusions: costs, greeks, spikefade ################
+$ cargo test --locked --no-fail-fast -p costs -p greeks -p spikefade
+warning: unused imports: `VIEW_LETTERS` and `VIEW_NAMES`
+  --> crates/spikefade/src/report3.rs:21:42
+   |
+21 | use crate::acct::{NVIEW, SEv, Sum, Tops, VIEW_LETTERS, VIEW_NAMES};
+   |                                          ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DayEvents` and `Ent`
+  --> crates/spikefade/src/report3.rs:30:27
+   |
+30 | use crate::screen::{self, DayEvents, Ent, Levels, NCFG, TFS, cfg_parts};
+   |                           ^^^^^^^^^  ^^^
+
+warning: unused imports: `out_of` and `size_event`
+  --> crates/spikefade/src/stage.rs:23:72
+   |
+23 | use crate::trade::{BASE_S, BaseErr, EvT, NL, Out, Paths, Refuse, Trip, out_of, record_base, size_event, trip, truncate};
+   |                                                                        ^^^^^^               ^^^^^^^^^^
+
+warning: unused variable: `u`
+   --> crates/spikefade/src/screen.rs:521:74
+    |
+521 |         c.unds.iter().enumerate().filter(|(_, u)| u.kind == 0).map(|(ui, u)| {
+    |                                                                          ^ help: if this is intentional, prefix it with an underscore: `_u`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `group` is never read
+   --> crates/spikefade/src/kern.rs:330:13
+    |
+330 |             group = None;
+    |             ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+360 |         group = Some((be, q.piece));
+    |         --------------------------- `group` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/side17.rs:423:9
+    |
+423 |     let mut log_rows = |acct: &str, mem: &[(u8, usize)], r: &crate::v32::WalkRes, tr: &[Vec<STrade>], tsv: &mut String| {
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/tests32r.rs:404:9
+    |
+404 |     let mut q = |len: i64| -> Vec<u64> {
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: method `nviews` is never used
+   --> crates/spikefade/src/acct.rs:605:12
+    |
+566 | impl Tops {
+    | --------- method in this implementation
+...
+605 |     pub fn nviews(&self) -> usize {
+    |            ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `charged` is never used
+   --> crates/spikefade/src/charges.rs:131:15
+    |
+131 | pub(crate) fn charged(rd: &Rates, rt: &Rates, t: &Trip) -> (i64, i64, i64, bool) {
+    |               ^^^^^^^
+
+warning: field `rows_1s_cr` is never read
+  --> crates/spikefade/src/cube.rs:78:9
+   |
+53 | pub struct Stats {
+   |            ----- field in this struct
+...
+78 |     pub rows_1s_cr: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `Stats` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `bod` is never read
+  --> crates/spikefade/src/mtable.rs:29:9
+   |
+23 | pub struct SnapMeta {
+   |            -------- field in this struct
+...
+29 |     pub bod: bool,
+   |         ^^^
+   |
+   = note: `SnapMeta` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `day` is never read
+   --> crates/spikefade/src/mtable.rs:151:9
+    |
+150 | pub struct DayM {
+    |            ---- field in this struct
+151 |     pub day: i64,
+    |         ^^^
+    |
+    = note: `DayM` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `ulist_of` is never read
+  --> crates/spikefade/src/report.rs:78:5
+   |
+67 | struct SegRun {
+   |        ------ field in this struct
+...
+78 |     ulist_of: Vec<u32>,
+   |     ^^^^^^^^
+
+warning: fields `kind` and `expiry` are never read
+   --> crates/spikefade/src/report.rs:642:5
+    |
+611 | struct TradeRow {
+    |        -------- fields in this struct
+...
+642 |     kind: u8,
+    |     ^^^^
+643 |     expiry: u32,
+    |     ^^^^^^
+    |
+    = note: `TradeRow` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `round2` is never used
+   --> crates/spikefade/src/screen.rs:349:4
+    |
+349 | fn round2(x: u64) -> u64 {
+    |    ^^^^^^
+
+warning: function `quant` is never used
+   --> crates/spikefade/src/screen.rs:360:4
+    |
+360 | fn quant(v: &mut [u64], q: u64) -> u64 {
+    |    ^^^^^
+
+warning: function `measure` is never used
+   --> crates/spikefade/src/screen.rs:371:8
+    |
+371 | pub fn measure(cubes: &[Cube], seg: u8) -> Levels {
+    |        ^^^^^^^
+
+warning: field `flag2` is never read
+   --> crates/spikefade/src/trade.rs:271:9
+    |
+261 | pub struct Out {
+    |            --- field in this struct
+...
+271 |     pub flag2: u8,
+    |         ^^^^^
+    |
+    = note: `Out` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `cand_kind` is never used
+   --> crates/spikefade/src/trade.rs:470:14
+    |
+470 | pub const fn cand_kind(c: usize) -> Kind {
+    |              ^^^^^^^^^
+
+warning: fields `sale_secs`, `sale_one_price_secs`, `sale_past_limit`, and `x` are never read
+   --> crates/spikefade/src/trade.rs:500:9
+    |
+490 | pub struct Trip {
+    |            ---- fields in this struct
+...
+500 |     pub sale_secs: u32,
+    |         ^^^^^^^^^
+501 |     pub sale_one_price_secs: u32,
+    |         ^^^^^^^^^^^^^^^^^^^
+502 |     pub sale_past_limit: u32,
+    |         ^^^^^^^^^^^^^^^
+503 |     pub x: Option<i64>,
+    |         ^
+    |
+    = note: `Trip` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `charges_of` is never used
+   --> crates/spikefade/src/trade.rs:765:8
+    |
+765 | pub fn charges_of(day: i64, units: u64, buy_value: i64, sell_value: i64, own_exit: bool, broker: bool) -> Result<(i64, i64, i64, bo...
+    |        ^^^^^^^^^^
+
+warning: fields `label` and `blk` are never read
+  --> crates/spikefade/src/v2.rs:23:9
+   |
+22 | pub struct Eval {
+   |            ---- fields in this struct
+23 |     pub label: String,
+   |         ^^^^^
+24 |     pub rules: &'static str,
+25 |     pub blk: i64,
+   |         ^^^
+   |
+   = note: `Eval` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `store` is never read
+   --> crates/spikefade/src/v2.rs:115:9
+    |
+112 | pub struct Full {
+    |            ---- field in this struct
+...
+115 |     pub store: Vec<Out>,
+    |         ^^^^^
+
+warning: field `di` is never read
+   --> crates/spikefade/src/v2.rs:302:9
+    |
+299 | pub struct EvIn<'a> {
+    |            ---- field in this struct
+...
+302 |     pub di: u16,
+    |         ^^
+
+warning: function `write_new` is never used
+   --> crates/spikefade/src/v2.rs:546:8
+    |
+546 | pub fn write_new(p: &Path, content: &str) -> Result<(), String> {
+    |        ^^^^^^^^^
+
+warning: field `labels` is never read
+  --> crates/spikefade/src/kern.rs:99:9
+   |
+80 | pub struct Acc {
+   |            --- field in this struct
+...
+99 |     pub labels: [u32; 9],
+   |         ^^^^^^
+   |
+   = note: `Acc` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: constant `CAP` is never used
+   --> crates/spikefade/src/kern.rs:728:11
+    |
+728 | pub const CAP: [usize; 4] = [5, 10, 20, 40];
+    |           ^^^
+
+warning: fields `win`, `margin_in_use`, and `nopen` are never read
+   --> crates/spikefade/src/kern.rs:805:9
+    |
+801 | pub struct Dec3 {
+    |            ---- fields in this struct
+...
+805 |     pub win: Option<usize>,
+    |         ^^^
+806 |     pub margin_in_use: i64,
+    |         ^^^^^^^^^^^^^
+807 |     pub nopen: usize,
+    |         ^^^^^
+    |
+    = note: `Dec3` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_empty` is never used
+   --> crates/spikefade/src/menu.rs:282:12
+    |
+181 | impl Menu {
+    | --------- method in this implementation
+...
+282 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: constant `MAXR` is never used
+   --> crates/spikefade/src/menu.rs:288:11
+    |
+288 | pub const MAXR: usize = 7;
+    |           ^^^^
+
+warning: field `run` is never read
+  --> crates/spikefade/src/read.rs:55:5
+   |
+45 | pub struct Prep {
+   |            ---- field in this struct
+...
+55 |     run: Vec<u16>,
+   |     ^^^
+   |
+   = note: `Prep` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `mfallback` is never read
+   --> crates/spikefade/src/report3.rs:104:9
+    |
+ 68 | pub struct Seg3 {
+    |            ---- field in this struct
+...
+104 |     pub mfallback: Vec<Option<i64>>,
+    |         ^^^^^^^^^
+
+warning: fields `day` and `sha` are never read
+  --> crates/spikefade/src/bhav.rs:26:9
+   |
+25 | pub struct BhavDay {
+   |            ------- fields in this struct
+26 |     pub day: i64,
+   |         ^^^
+27 |     pub file: String,
+28 |     pub sha: String,
+   |         ^^^
+   |
+   = note: `BhavDay` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `month_of` is never used
+   --> crates/spikefade/src/expiry.rs:303:8
+    |
+303 | pub fn month_of(d: i64) -> String {
+    |        ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/spikefade/src/side17.rs:176:9
+    |
+175 | pub struct SideRes {
+    |            ------- fields in this struct
+176 |     pub net: i64,
+    |         ^^^
+177 |     pub trades: u32,
+178 |     pub by_seg: [u32; 2],
+    |         ^^^^^^
+...
+184 |     pub dd: i64,
+    |         ^^
+185 |     pub mo: BTreeMap<i64, i64>,
+    |         ^^
+186 |     /// (entry us, known us, margin) of the trades taken (the utilization reads them).
+187 |     pub taken: Vec<(i64, i64, i64)>,
+    |         ^^^^^
+188 |     /// The largest margin in use + running MTM loss seen at a sale instant (after the sale).
+189 |     pub peak_mtm: i64,
+    |         ^^^^^^^^
+190 |     /// v3.2 round B: every member trade's outcome in the walk's order (member, trade index, outcome word).
+191 |     pub log: Vec<(usize, usize, &'static str)>,
+    |         ^^^
+    |
+    = note: `SideRes` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `loss_at` is never used
+   --> crates/spikefade/src/side17.rs:197:8
+    |
+197 | pub fn loss_at(marks: &[i32], mark1: u32, units: u32, sold: i64, sod: u32) -> i64 {
+    |        ^^^^^^^
+
+warning: function `ident` is never used
+   --> crates/spikefade/src/ckmerge.rs:395:8
+    |
+395 | pub fn ident(s: &Sum) -> (u32, u16, u8) {
+    |        ^^^^^
+
+warning: function `strict_reset` is never used
+   --> crates/spikefade/src/kit.rs:613:8
+    |
+613 | pub fn strict_reset() {
+    |        ^^^^^^^^^^^^
+
+warning: `spikefade` (bin "spikefade" test) generated 38 warnings (run `cargo fix --bin "spikefade" -p spikefade --tests` to apply 6 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (target/debug/deps/costs-17b2b1a4b09f4ad2)
+
+running 321 tests
+test charge_error::tests::a_cost_error_and_a_refusal_convert_without_losing_their_words ... ok
+test charge_error::tests::every_charge_refusal_renders_its_own_reason ... ok
+test dated::tests::a_refusal_carries_the_tables_own_subject_venue_and_remedy ... ok
+test dated::tests::a_dated_value_is_debuggable_and_comparable ... ok
+test dated::tests::a_trailing_refusal_window_has_no_end_date ... ok
+test dated::tests::every_shape_violation_is_caught_and_a_sound_table_is_not ... ok
+test dated::tests::str_eq_answers_exactly_as_the_operator_would ... ok
+test dated::tests::the_anchor_answers_every_day_no_later_row_claims ... ok
+test dated::tests::the_boundary_macro_builds_the_day_it_names_and_min_when_it_cannot ... ok
+test dated::tests::the_day_a_refusal_names_is_a_day_that_answers ... ok
+test dated::tests::has_content_sees_a_blank_citation_and_nothing_else ... ok
+test dated::tests::rows_walks_the_anchor_first_and_stops_at_the_padding ... ok
+test day::tests::an_ordinal_off_either_end_is_refused_by_name_and_never_saturated ... ok
+test day::tests::earlier_in_same_month_agrees_with_a_day_by_day_walk ... ok
+test day::tests::min_and_max_are_the_ends_of_the_representable_window ... ok
+test day::tests::ordering_and_hashing_agree_with_the_calendar ... ok
+test day::tests::plus_days_walks_the_calendar_and_refuses_to_walk_off_the_end ... ok
+test day::tests::refuses_a_year_outside_the_window_by_name ... ok
+test day::tests::refuses_an_impossible_date_rather_than_normalising_it ... ok
+test day::tests::renders_the_one_accepted_date_format ... ok
+test day::tests::the_accessors_return_what_was_put_in ... ok
+test day::tests::the_const_constructor_answers_exactly_as_the_checked_one_does ... ok
+test day::tests::the_distance_between_two_weekdays_is_inclusive_forward_and_backward ... ok
+test day::tests::the_last_day_of_its_month_is_cores_answer_and_not_a_second_leap_rule ... ok
+test day::tests::the_next_month_rolls_december_into_january_of_the_following_year ... ok
+test day::tests::the_ordinals_are_the_hand_computed_ones ... ok
+test day::tests::the_weekday_type_knows_its_index_its_name_and_whether_india_trades ... ok
+test day::tests::every_representable_day_is_one_ordinal_after_the_one_before_it ... ok
+test day::tests::the_year_window_is_cores_and_a_drift_would_be_caught ... ok
+test dated::tests::the_lookup_agrees_with_a_naive_scan_on_every_representable_day ... ok
+test dhan_calc::tests::a_one_sided_quote_has_charges_but_no_net_pnl ... ok
+test day::tests::the_weekday_walks_forward_one_day_at_a_time_across_the_whole_window ... ok
+test dhan_calc::tests::a_value_or_a_turnover_past_i64_is_refused_by_name ... ok
+test dhan_calc::tests::an_exact_line_rounds_half_up_to_the_paisa_and_to_the_rupee ... ok
+test dhan_calc::tests::display_propagates_a_writer_error_from_every_part_it_writes ... ok
+test dhan_calc::tests::every_input_the_page_shows_as_zero_or_nan_is_refused_by_name ... ok
+test dhan_calc::tests::every_page_constant_is_the_figure_the_page_uses ... ok
+test dhan_calc::tests::the_net_and_the_breakeven_follow_from_the_total ... ok
+test dhan_calc::tests::the_quote_renders_its_label_its_inputs_and_every_line ... ok
+test equity_clock::tests::a_net_that_leaves_i64_is_refused_and_every_input_refusal_passes_through ... ok
+test equity_clock::tests::each_clock_names_itself_and_reads_its_rates ... ok
+test equity_clock::tests::the_data_api_is_rs_499_and_its_gst_a_month ... ok
+test equity_clock::tests::the_headline_comes_from_whichever_clock_is_worse ... ok
+test equity_clock::tests::the_measurements_run_at_tiny_sizes_and_refuse_what_they_cannot_price ... ok
+test day::tests::from_ordinal_is_the_exact_inverse_of_ordinal_over_the_whole_window ... ok
+test equity_dated::tests::a_day_outside_the_window_is_refused_by_name ... ok
+test equity_dated::tests::a_row_covers_its_own_days_and_no_other ... ok
+test equity_dated::tests::each_rate_change_is_read_on_the_day_before_and_the_day_itself ... ok
+test equity_dated::tests::every_day_of_the_window_reads_exactly_the_row_that_covers_it ... ok
+test equity_dated::tests::every_row_shape_reads_as_one_exact_fraction ... ok
+test equity_dated::tests::every_series_is_contiguous_anchored_and_open_and_a_broken_one_is_not ... ok
+test equity_dated::tests::the_const_builders_build_what_the_rows_say ... ok
+test equity_dated::tests::the_exchange_line_adds_the_transaction_charge_and_the_ipft ... ok
+test equity_dated::tests::the_rounding_and_the_narrowing_are_the_crates ... ok
+test equity_dated::tests::the_table_is_costs_table_json_row_for_row ... ok
+test equity_dated::tests::the_table_version_is_pinned_to_its_rows ... ok
+test equity_dated::tests::the_today_clock_is_the_rows_that_serve_it ... ok
+test equity_dated::tests::the_worst_state_is_the_highest_duty_of_the_fifteen ... ok
+test equity_readings::tests::a_trade_no_contract_note_could_carry_is_refused_by_name ... ok
+test equity_readings::tests::a_trade_sums_its_orders_and_keeps_them ... ok
+test equity_readings::tests::brokerage_is_the_schedules_dhan_brokerage_at_every_size ... ok
+test equity_readings::tests::the_largest_keeps_the_first_on_a_tie ... ok
+test equity_readings::tests::the_lines_at_the_input_bounds_fit_and_add_up ... ok
+test error::tests::a_refusal_can_name_a_remedy_that_is_not_the_rate_tables ... ok
+test error::tests::a_refusal_converts_into_a_cost_error_carrying_the_same_words ... ok
+test error::tests::a_refusal_names_the_charge_the_venue_the_window_and_the_remedy ... ok
+test error::tests::an_open_ended_window_says_open_and_an_unscoped_charge_names_no_venue ... ok
+test error::tests::both_error_types_are_usable_as_std_errors ... ok
+test error::tests::display_propagates_a_writer_error_from_every_part_it_writes ... ok
+test error::tests::every_cost_error_renders_its_own_reason ... ok
+test error::tests::every_round_trip_refusal_renders_its_own_reason ... ok
+test exact::tests::a_denominator_that_is_not_positive_is_refused_by_name ... ok
+test exact::tests::a_ratio_applies_exactly_and_rounds_once_at_the_end ... ok
+test exact::tests::a_ratio_reads_a_bps_x100_rate_as_the_fraction_it_encodes ... ok
+test exact::tests::an_unrounded_line_is_exact_and_refuses_what_it_cannot_hold ... ok
+test exact::tests::every_overflow_site_in_apply_is_refused_by_name ... ok
+test exact::tests::every_shipped_rate_is_a_whole_number_of_units_per_paisa ... ok
+test exact::tests::half_up_handles_the_widest_operands_without_wrapping ... ok
+test exact::tests::half_up_is_the_nearest_integer_with_halves_going_up_densely ... ok
+test exact::tests::half_up_rounds_a_half_up_and_less_than_a_half_down_on_both_signs ... ok
+test exact::tests::rupees_render_with_two_decimals_and_a_sign_on_both_sides_of_zero ... ok
+test expiry::tests::a_boundary_into_a_refusal_before_the_expiry_is_refused_rather_than_projected ... ok
+test expiry::tests::a_boundary_on_the_old_regimes_expiry_day_is_crossed_and_one_past_it_is_not ... ok
+test expiry::tests::a_day_the_table_refuses_stays_refused_when_its_reference_day_is_verified ... ok
+test expiry::tests::a_refusal_in_the_rolled_month_is_carried_out_rather_than_guessed ... ok
+test expiry::tests::a_regime_change_inside_a_month_does_not_split_it_into_two_contracts ... ok
+test expiry::tests::a_weekly_regime_change_is_read_at_the_expiry_and_not_at_the_day_asked ... ok
+test expiry::tests::a_withdrawn_weekly_and_a_refusal_never_read_the_same ... ok
+test expiry::tests::an_expiry_past_the_end_of_the_window_is_refused_rather_than_wrapped ... ok
+test expiry::tests::every_shipped_expiry_row_is_a_trading_weekday_and_keyed_on_cores_order ... ok
+test equity_readings::tests::every_reading_has_its_label ... ok
+test expiry::tests::the_last_weekday_of_a_month_is_the_last_one_in_it ... ok
+test expiry::tests::the_monthly_regime_boundaries_are_the_source_boundaries ... ok
+test equity_readings::tests::a_trade_past_the_fill_bound_is_refused_and_one_at_it_prices ... ok
+test expiry::tests::the_next_monthly_lands_on_the_source_answers ... ok
+test expiry::tests::one_contract_month_has_one_expiry_whichever_day_it_is_asked_on ... ok
+test expiry::tests::the_next_weekly_lands_on_the_source_answers ... ok
+test expiry::tests::every_weekly_answer_is_an_expiry_by_its_own_regime_and_the_answers_never_go_backwards ... ok
+test expiry::tests::the_regime_is_re_read_for_the_rolled_month_and_not_carried_across ... ok
+test expiry::tests::the_two_underlyings_expire_on_different_days_and_that_is_the_point ... ok
+test expiry::tests::the_weekly_regime_boundaries_are_the_source_boundaries ... ok
+test fill::tests::a_bar_and_a_fill_set_are_plain_comparable_data ... ok
+test fill::tests::a_bar_whose_high_is_below_one_tick_is_refused_by_name ... ok
+test fill::tests::a_bar_whose_low_is_above_its_high_is_refused_rather_than_swapped ... ok
+test fill::tests::a_direction_names_itself_and_the_two_are_distinct ... ok
+test fill::tests::a_fill_or_a_slippage_past_i64_is_refused_by_name_and_never_wrapped ... ok
+test fill::tests::a_long_fills_the_entry_high_and_the_exit_low_each_one_tick_adverse ... ok
+test fill::tests::a_printed_extreme_sell_below_one_tick_refuses_by_name ... ok
+test fill::tests::a_short_fills_the_exit_high_and_the_entry_low_and_is_adverse_on_both_legs ... ok
+test fill::tests::an_open_below_one_tick_refuses_rather_than_being_floored_upward ... ok
+test fill::tests::an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar ... ok
+test fill::tests::an_open_outside_its_own_bar_is_not_a_bar ... ok
+test fill::tests::each_anchor_names_itself_distinctly ... ok
+test fill::tests::each_anchor_names_itself_for_the_audit ... ok
+test fill::tests::fills_at_the_adverse_extreme_is_the_worst_case_function_unchanged ... ok
+test fill::tests::on_a_flat_bar_the_two_readings_coincide_exactly ... ok
+test fill::tests::the_best_case_fills_on_the_open_and_gives_up_nothing ... ok
+test fill::tests::the_best_case_is_never_worse_than_the_worst_case_on_any_bar ... ok
+test fill::tests::the_buy_leg_needs_no_floor_because_no_legal_bar_can_reach_it ... ok
+test fill::tests::the_printed_extreme_is_the_bar_and_the_adverse_one_is_a_tick_beyond_it ... ok
+test fill::tests::the_printed_extreme_reports_no_slippage_because_it_assumes_none ... ok
+test fill::tests::the_printed_extreme_sell_refuses_a_sub_tick_low_and_keeps_a_printed_one ... ok
+test fill::tests::the_sell_fill_is_total_at_both_edges_of_the_domain ... ok
+test fill::tests::the_sell_floor_binds_at_one_tick_and_the_realized_slippage_follows_it ... ok
+test fill::tests::the_worst_case_fill_never_flatters_an_open_anchored_one ... ok
+test ledger::tests::a_calculator_day_cannot_decide_a_client_day_or_a_trade ... ok
+test ledger::tests::a_close_refuses_what_its_mode_cannot_price_by_name ... ok
+test ledger::tests::a_days_order_lines_refuse_what_the_day_cannot_hold_or_price_by_name ... ok
+test ledger::tests::a_days_orders_sum_to_its_unrounded_lines_on_every_netting ... ok
+test ledger::tests::a_ledger_closes_precise_to_exactly_what_a_client_security_day_settles ... ok
+test ledger::tests::a_part_and_an_order_that_are_not_positive_or_overflow_are_refused_by_name ... ok
+test ledger::tests::a_part_filled_order_is_one_executed_order_and_pays_brokerage_once ... ok
+test ledger::tests::an_exercise_pays_dhans_brokerage_and_its_gst_as_an_executed_order_does ... ok
+test ledger::tests::an_orders_lines_carry_dp_the_square_off_fee_and_every_kinds_taxes ... ok
+test ledger::tests::an_orders_lines_sum_to_its_days_unrounded_lines_where_the_line_is_linear ... ok
+test ledger::tests::every_line_is_reported_unrounded_and_rounded_with_the_adjustment_between ... ok
+test ledger::tests::the_winner_gate_pages_round_trip_charges_are_the_calculators_not_the_precise_stacks ... ok
+test lot::table_tests::a_lookup_is_flat_in_the_table ... ignored, a timing measurement: run with --release -- --ignored a_lookup_is_flat_in_the_table
+test lot::table_tests::a_lot_row_added_to_the_table_changes_the_next_lookup_without_a_code_change ... ok
+test lot::table_tests::a_row_is_sourced_exactly_where_a_charter_circular_turns_the_lot ... ok
+test lot::table_tests::an_underlying_without_a_sourced_lot_is_named_absent ... ok
+test lot::table_tests::every_malformed_table_is_refused_by_name ... ok
+test lot::table_tests::the_boundaries_of_a_row_are_exact ... ok
+test lot::table_tests::the_compiled_rows_move_into_the_table_unchanged ... ok
+test lot::tests::a_contracts_lot_follows_the_circulars_rule_while_two_lots_are_in_force ... ok
+test lot::tests::a_lot_count_that_is_not_a_trade_is_refused_by_name ... ok
+test lot::tests::a_lot_size_reads_renders_and_hashes_as_the_number_it_is ... ok
+test lot::tests::a_non_positive_price_or_quantity_is_refused_by_name ... ok
+test lot::tests::a_notional_past_i64_is_refused_rather_than_wrapped ... ok
+test lot::tests::a_quantity_past_i64_is_refused_rather_than_wrapped ... ok
+test lot::tests::a_revision_whose_circular_was_not_read_refuses_the_contract_lot ... ok
+test lot::tests::an_expiry_before_the_trade_day_is_refused_by_name ... ok
+test lot::tests::every_shipped_lot_row_is_positive_and_keyed_on_cores_order ... ok
+test lot::tests::every_transition_and_the_day_before_it_are_the_source_figures ... ok
+test lot::tests::outside_a_transition_the_contract_lot_is_the_trade_day_row_and_says_so ... ok
+test lot::tests::the_notional_is_the_product_of_price_and_quantity ... ok
+test expiry::tests::the_next_monthly_is_the_last_regime_weekday_of_its_own_or_the_next_month ... ok
+test lot::tests::the_quantity_is_the_product_and_nothing_else ... ok
+test lot::tests::the_two_underlyings_carry_different_lots_on_the_same_day ... ok
+test money::tests::a_composed_levy_carries_the_overflow_refusal_out_of_whichever_stage_failed ... ok
+test money::tests::a_result_past_i64_is_refused_by_name_and_never_saturated ... ok
+test money::tests::the_ceiling_is_the_least_integer_at_or_above_the_quotient ... ok
+test money::tests::the_paisa_ceiling_walks_a_pinned_table_on_both_signs ... ok
+test money::tests::the_rupee_ceiling_is_the_least_whole_rupee_at_or_above_the_amount ... ok
+test money::tests::the_rupee_ceiling_walks_a_pinned_table_on_both_signs ... ok
+test money::tests::the_scaled_product_is_exact_at_the_widest_inputs_and_never_wraps ... ok
+test money::tests::the_statutory_raw_stage_floors_where_the_levy_stage_ceils ... ok
+test money::tests::the_two_composed_levies_reproduce_the_source_worked_example ... ok
+test moneyness::tests::a_half_step_tie_goes_down_to_the_rung_at_the_money_names ... ok
+test moneyness::tests::a_moneyness_is_ordered_hashable_and_debuggable ... ok
+test moneyness::tests::a_non_positive_strike_or_spot_is_refused_by_name ... ok
+test moneyness::tests::an_offset_past_i32_is_refused_rather_than_wrapped ... ok
+test moneyness::tests::moneyness_at_zero_at_the_chain_edges_and_one_past_each ... ok
+test moneyness::tests::the_bucket_is_the_sign_of_the_moneyness_and_the_band_edge_agrees ... ok
+test moneyness::tests::the_direction_flips_the_sign_for_a_put_and_never_for_a_call ... ok
+test moneyness::tests::the_moneyness_and_the_strike_are_exact_inverses_of_each_other ... ok
+test moneyness::tests::the_offset_counts_rungs_from_the_rung_at_the_money_names ... ok
+test moneyness::tests::the_offset_matches_a_nearest_multiple_search_across_four_whole_steps ... ok
+test moneyness::tests::the_seven_locked_offset_rules_read_as_the_source_spells_them ... ok
+test moneyness::tests::the_source_offset_pins_land_on_the_source_answers ... ok
+test moneyness::tests::the_two_grids_disagree_about_the_same_strike_and_that_is_the_point ... ok
+test rate::tests::a_rate_is_ordered_hashable_and_debuggable ... ok
+test rate::tests::a_rate_renders_as_the_percentage_a_circular_quotes ... ok
+test rate::tests::brokerage_is_flat_per_order_and_both_brokers_are_priced ... ok
+test rate::tests::every_flat_rate_is_the_cited_figure ... ok
+test rate::tests::ipft_is_the_nse_figure_and_the_bse_zero_is_the_unverified_one ... ok
+test rate::tests::no_shipped_rate_is_negative_and_zero_is_the_only_zero ... ok
+test rate::tests::stamp_duty_is_charged_on_the_buy_leg_and_never_on_the_sell_leg ... ok
+test rate::tests::the_scale_reads_as_rupees_per_crore ... ok
+test lot::tests::the_pre_history_window_refuses_on_every_day_of_it_and_never_after ... ok
+test regime::tests::a_boundary_is_inclusive_on_its_own_day_across_the_whole_domain ... ok
+test regime::tests::a_mid_table_refusal_reports_its_own_window_not_the_anchors ... ok
+test regime::tests::a_refusal_window_is_derived_from_the_table_and_never_written_twice ... ok
+test regime::tests::an_unverified_row_carries_no_number_for_anything_to_reach ... ok
+test regime::tests::every_shipped_table_passes_the_validation_the_compiler_already_ran ... ok
+test regime::tests::fa73061_prices_the_days_before_2026_03_01_at_the_old_row_and_the_day_itself_at_the_new_one ... ok
+test regime::tests::stt_on_exercise_holds_on_both_sides_of_its_boundary ... ok
+test regime::tests::stt_on_options_premium_holds_on_both_sides_of_both_boundaries ... ok
+test regime::tests::the_boundary_dates_are_the_dates_they_claim_to_be ... ok
+test regime::tests::the_day_a_regime_refusal_names_is_a_day_that_answers ... ok
+test regime::tests::the_exchange_charge_prices_the_boundary_and_refuses_the_day_before_it ... ok
+test regime::tests::the_fa64232_row_is_kept_byte_for_byte_and_the_fa73061_row_is_appended_after_it ... ok
+test regime::tests::the_ipft_refusal_names_its_window_and_a_priced_trip_meets_the_exchange_refusal_first ... ok
+test expiry::tests::the_next_weekly_is_the_first_day_on_or_after_with_the_regimes_weekday ... ok
+test regime::tests::the_exchange_charge_refuses_exactly_the_pre_boundary_days_and_no_others ... ok
+test regime::tests::the_refusal_names_the_circulars_that_were_identified_and_never_retrieved ... ok
+test regime::tests::the_validation_rejects_every_way_a_table_can_be_wrong ... ok
+test schedule::tests::a_rate_without_a_source_or_with_a_bad_shape_is_not_well_shaped ... ok
+test regime::tests::the_nse_outflow_is_3553_per_crore_on_every_priced_day_on_both_sides_of_fa73061 ... ok
+test schedule::tests::bse_futures_have_no_rate_under_todays_table_and_are_refused_by_name ... ok
+test schedule::tests::dhan_brokerage_is_the_lower_of_twenty_rupees_and_three_basis_points_per_order ... ok
+test schedule::tests::every_current_rate_is_the_figure_its_source_states_per_crore ... ok
+test schedule::tests::every_rate_names_the_primary_source_the_sourced_rows_read ... ok
+test schedule::tests::the_current_option_taxes_are_the_regimes_rows_on_the_as_of_day ... ok
+test schedule::tests::the_dated_intraday_card_is_the_equity_table_on_the_days_this_stack_can_carry ... ok
+test schedule::tests::the_dated_intraday_card_refuses_bse_and_the_days_this_stack_cannot_carry ... ok
+test schedule::tests::the_dated_option_card_is_the_regime_on_the_trade_day_plus_the_ipft_on_every_day ... ok
+test schedule::tests::an_etf_and_a_commodity_are_refused_by_name_in_every_entry_point ... ok
+test schedule::tests::the_dated_option_card_refuses_the_pre_2024_window_with_the_regimes_own_refusal ... ok
+test schedule::tests::the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day ... ok
+test schedule::tests::the_dated_selector_refuses_equity_and_futures_on_every_date_and_names_the_remedy ... ok
+test schedule::tests::the_kind_names_and_the_square_off_scope_are_pinned ... ok
+test schedule::tests::the_unverified_figures_are_exactly_the_ones_the_brief_did_not_source ... ok
+test schedule::tests::todays_card_carries_the_venue_and_kind_rates_and_nothing_else ... ok
+test schedule::tests::todays_card_is_labelled_with_the_trade_day_on_every_kind_and_venue ... ok
+test scope::tests::a_segment_names_itself_and_the_three_are_distinct ... ok
+test scope::tests::only_the_option_segment_bears_the_charge_stack ... ok
+test scope::tests::the_index_future_arm_cites_the_operator_rule_not_untradeability ... ok
+test scope::tests::the_two_predicates_are_exact_complements_on_every_segment ... ok
+test stack::tests::a_client_day_refuses_another_day_venue_or_segment_and_stays_as_it_was ... ok
+test stack::tests::a_client_day_rounds_stt_and_stamp_once_across_its_securities ... ok
+test stack::tests::a_dated_option_day_before_fa73061_prices_at_the_regime_plus_ipft ... ok
+test stack::tests::a_day_opened_on_a_card_is_the_day_open_resolves ... ok
+test stack::tests::a_delivery_round_trip_is_two_days_and_the_sell_day_pays_the_dp_charge ... ok
+test stack::tests::a_net_across_two_rate_sets_or_out_of_order_days_is_refused_and_a_net_names_its_versions ... ok
+test stack::tests::a_net_figure_is_refused_wherever_the_trade_does_not_close ... ok
+test stack::tests::a_same_day_delivery_round_trip_is_netted_as_non_delivery ... ok
+test stack::tests::a_settled_day_reports_its_inputs_its_lines_and_its_label ... ok
+test stack::tests::a_stock_option_settled_by_physical_delivery_is_refused_by_name_and_changes_nothing ... ok
+test stack::tests::a_trade_is_a_win_only_if_its_net_after_every_charge_is_above_zero ... ok
+test stack::tests::an_open_intraday_day_and_a_partly_squared_delivery_day_are_refused ... ok
+test stack::tests::bse_equity_prices_at_the_unverified_all_in_rate_and_says_so ... ok
+test stack::tests::display_propagates_a_writer_error_from_every_part_it_writes ... ok
+test stack::tests::every_input_dhan_shows_as_zero_is_refused_by_name ... ok
+test stack::tests::every_new_overflow_site_is_refused_by_name ... ok
+test stack::tests::every_overflow_site_is_refused_by_name_and_a_refused_order_changes_nothing ... ok
+test stack::tests::futures_pay_sell_side_stt_and_buy_side_stamp_on_the_whole_value ... ok
+test stack::tests::options_pay_tax_on_premium_and_the_exercise_rate_on_intrinsic_value ... ok
+test stack::tests::the_broker_square_off_fee_is_a_separate_line_applied_only_when_asked ... ok
+test stack::tests::the_five_contract_note_vectors_rederive_from_the_rules ... ok
+test stack::tests::the_intraday_tax_and_stamp_round_to_the_paisa_before_the_rupee ... ok
+test stack::tests::the_intraday_tax_is_on_the_vwap_rounded_to_the_paisa_as_nse_cmtr_5588_states ... ok
+test stack::tests::the_order_of_the_orders_and_their_split_move_only_the_brokerage ... ok
+test stack::tests::the_sell_value_basis_disagrees_with_three_of_the_five_vectors ... ok
+test strike::tests::a_moneyness_that_walks_off_the_grid_is_refused_rather_than_wrapped ... ok
+test strike::tests::a_non_positive_at_the_money_rung_is_refused_before_any_arithmetic ... ok
+test strike::tests::a_spot_above_the_highest_representable_rung_is_refused_rather_than_wrapped ... ok
+test strike::tests::a_spot_below_the_lowest_rung_is_refused_rather_than_struck_at_nothing ... ok
+test strike::tests::a_spot_exactly_halfway_between_two_rungs_rounds_up ... ok
+test strike::tests::a_step_that_does_not_divide_the_spot_evenly_is_still_exact ... ok
+test strike::tests::a_strike_step_is_ordered_hashable_and_debuggable ... ok
+test strike::tests::a_zero_or_negative_spot_is_refused_by_name ... ok
+test strike::tests::plus_is_further_out_of_the_money_in_the_trade_direction ... ok
+test schedule::tests::the_rate_set_versions_are_pinned_to_the_tables_they_name ... ok
+test strike::tests::the_rung_never_moves_backwards_as_the_spot_rises ... ok
+test strike::tests::the_rung_is_the_nearest_one_for_every_spot_across_two_whole_steps ... ok
+test strike::tests::the_snap_happens_once_and_a_second_pass_changes_nothing ... ok
+test strike::tests::the_source_pins_land_on_the_source_answers ... ok
+test strike::tests::the_step_is_refused_before_the_window_the_source_verified ... ok
+test strike::tests::the_step_tables_are_keyed_on_cores_order_and_every_row_is_positive ... ok
+test strike::tests::the_two_sides_are_exact_mirrors_of_each_other_about_the_rung ... ok
+test strike::tests::the_two_swept_underlyings_carry_the_two_published_steps ... ok
+test tests::the_equity_modules_answer_from_the_crate_root ... ok
+test trip::tests::a_breakdown_renders_every_figure_it_holds ... ok
+test trip::tests::a_breakdown_that_broke_its_own_law_is_refused_rather_than_reported ... ok
+test trip::tests::a_contract_that_states_its_expiry_is_sized_by_its_own_lot ... ok
+test trip::tests::a_losing_round_trip_reports_a_negative_net_and_still_pays_every_charge ... ok
+test trip::tests::a_lot_count_is_refused_for_a_segment_the_options_lot_table_does_not_cover ... ok
+test trip::tests::a_printed_extreme_sell_below_zero_is_refused_and_does_not_overflow ... ok
+test trip::tests::a_round_trip_in_the_unverified_window_refuses_the_whole_trip_and_names_it ... ok
+test trip::tests::a_round_trip_of_no_contracts_is_refused_by_name_on_every_path ... ok
+test trip::tests::a_round_trip_reports_back_everything_it_was_built_from ... ok
+test trip::tests::a_round_trip_whose_charges_exceed_its_gross_reports_a_negative_net ... ok
+test trip::tests::a_short_profits_when_the_market_falls_and_loses_when_it_rises ... ok
+test trip::tests::a_signal_only_round_trip_guards_its_arithmetic_too ... ok
+test trip::tests::a_signal_only_segment_pays_nothing_and_its_net_is_its_gross ... ok
+test trip::tests::a_signal_only_segment_prices_inside_a_window_where_every_rate_refuses ... ok
+test trip::tests::a_straddling_trip_takes_each_legs_own_levies_and_the_larger_gst ... ok
+test trip::tests::an_exit_day_before_its_entry_day_is_refused ... ok
+test trip::tests::an_expiry_outcome_is_refused_rather_than_priced_as_a_normal_close ... ok
+test trip::tests::each_legs_charge_is_priced_at_its_own_days_regime ... ok
+test trip::tests::every_flat_levy_overflow_site_is_refused_by_name_and_never_wrapped ... ok
+test trip::tests::every_levy_overflow_site_is_refused_by_name_and_never_wrapped ... ok
+test trip::tests::every_position_overflow_site_is_refused_by_name_and_never_wrapped ... ok
+test trip::tests::no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill ... ok
+test trip::tests::the_breakdown_itemises_seven_charges_that_sum_to_its_total ... ok
+test trip::tests::the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays ... ok
+test trip::tests::the_dated_rates_carry_whichever_of_the_three_lookups_refused_first ... ok
+test trip::tests::the_entry_point_and_the_pure_core_agree_on_every_swept_combination ... ok
+test trip::tests::the_fifth_worked_example_is_not_ported_and_the_reason_is_asserted ... ok
+test trip::tests::the_first_worked_example_prices_one_nifty_lot_to_the_paisa ... ok
+test trip::tests::the_fourth_worked_example_prices_the_bse_rate_set_through_the_pure_core ... ok
+test trip::tests::the_gst_base_is_the_sum_of_all_four_service_components_with_a_plus_sign ... ok
+test trip::tests::the_gst_is_rounded_once_and_rounding_each_half_overcharges_by_a_rupee ... ok
+test trip::tests::the_internal_laws_hold_across_a_deterministic_sweep_of_the_envelope ... ok
+test trip::tests::the_lot_size_is_the_entry_days_and_a_pre_history_entry_refuses ... ok
+test trip::tests::the_rate_set_is_the_one_the_tables_hold_on_the_day ... ok
+test trip::tests::the_second_worked_example_amortises_the_flat_brokerage_over_five_lots ... ok
+test trip::tests::the_sell_leg_of_a_per_leg_levy_is_guarded_independently_of_the_buy_leg ... ok
+test trip::tests::the_stamp_duty_is_charged_on_the_buy_leg_and_exactly_once ... ok
+test trip::tests::the_statutory_rupee_ceiling_is_reachable_from_the_stack_and_refuses ... ok
+test trip::tests::the_third_worked_example_prices_one_banknifty_lot ... ok
+test trip::tests::the_transaction_tax_reads_the_sell_premium_and_nothing_else ... ok
+test venue::tests::a_slot_is_cores_own_index_and_round_trips_to_cores_own_row ... ok
+test venue::tests::an_underlying_outside_the_engine_surface_is_refused_and_never_defaulted ... ok
+test venue::tests::an_unswept_underlying_has_no_slot_either ... ok
+test venue::tests::both_swept_underlyings_resolve_to_nse ... ok
+test trip::tests::a_malformed_fill_bar_is_refused_before_anything_is_priced ... ok
+test venue::tests::the_costable_set_is_the_engine_surface_itself_and_cannot_drift_from_it ... ok
+test regime::tests::the_lookup_agrees_with_a_naive_scan_on_every_representable_day ... ok
+test expiry::tests::the_pre_history_window_refuses_on_both_tables_and_every_day_of_it ... ok
+
+test result: ok. 320 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/adversarial.rs (target/debug/deps/adversarial-9374409597176099)
+
+running 4 tests
+test a_larger_notional_is_never_charged_less_than_a_smaller_one ... ok
+test every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants ... ok
+test rounding_the_top_of_the_type_up_to_a_rupee_refuses_rather_than_wraps ... ok
+test the_zero_rate_charges_nothing_even_at_the_top_of_the_type ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dhan_calculator.rs (target/debug/deps/dhan_calculator-c2d9d9cfb3574859)
+
+running 12 tests
+test every_calculator_line_matches_the_page_on_every_golden_case ... ok
+test every_calculator_refusal_reaches_a_caller_outside_the_crate_by_name ... ok
+test every_calculator_total_is_within_one_paisa_of_the_page ... ok
+test every_golden_case_closes_in_the_day_ledger_exactly_as_both_modes_price_it ... ok
+test every_golden_case_has_a_precise_figure_or_a_named_refusal ... ok
+test every_golden_quote_reports_its_inputs_its_net_and_its_breakeven ... ok
+test every_golden_round_trip_is_netted_of_its_entire_precise_charges ... ok
+test the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases ... ok
+test the_endpoint_and_the_ui_readings_of_the_v1_inputs_agree_line_for_line ... ok
+test the_one_paisa_total_misses_are_listed_with_their_direction ... ok
+test the_precise_and_calculator_modes_differ_where_the_rules_differ_and_agree_where_they_do_not ... ok
+test the_raw_lines_of_the_fifteen_october_ui_readings_are_exact_to_the_billionth_rupee ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fa73061.rs (target/debug/deps/fa73061-1978230e464d15b8)
+
+running 12 tests
+test a_date_that_does_not_exist_cannot_reach_either_row ... ok
+test a_trade_dated_2026_02_27_is_priced_at_the_fa64232_row_and_its_50_rupee_ipft ... ok
+test bse_is_not_moved_by_an_nse_circular ... ok
+test every_boundary_around_fa73061_prices_its_own_rows_and_nothing_else_moves ... ok
+test every_captured_dhan_option_case_shows_the_exchange_line_of_the_fa73061_row ... ok
+test the_boundary_day_2026_03_01_is_priced_at_the_fa73061_row ... ok
+test the_dated_lookups_cost_the_same_on_every_row_measured ... ignored, a timing measurement; run in release with --ignored --nocapture
+test a_trip_straddling_2026_03_01_prices_each_leg_at_its_own_days_row ... ok
+test a_trade_dated_2026_03_02_is_priced_at_the_fa73061_row ... ok
+test the_dated_rows_answer_the_same_from_fourteen_threads_at_once ... ok
+test the_live_dhan_nifty_25300_call_reproduces_exchange_5_08 ... ok
+test the_fold_costs_at_most_one_paisa_a_leg_and_under_50_lakh_is_never_below_the_split ... ok
+
+test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/fno_contract_notes.rs (target/debug/deps/fno_contract_notes-5e7c2016b1c76014)
+
+running 22 tests
+test a_day_outside_the_window_is_refused_by_name_on_both_clocks ... ok
+test each_reading_alone_moves_only_its_own_lines ... ok
+test each_vector_reads_the_rows_of_its_own_day ... ok
+test every_contract_note_matches_costs_md_to_the_paisa_under_all_four_columns ... ok
+test a_trade_prices_the_same_every_time_and_in_either_order_of_its_same_side_orders ... ok
+test every_rate_change_moves_exactly_its_own_line_on_the_trading_days_either_side ... ok
+test every_state_stamp_is_priced_and_the_worst_is_no_lower_than_any_of_them ... ok
+test gst_rounding_takes_whichever_is_larger_on_the_actual_base ... ok
+test per_fill_brokerage_counts_under_the_cap_and_stops_at_it ... ok
+test for_random_trades_the_headline_is_at_least_every_clock_and_worst_at_least_official ... ok
+test per_order_rounding_is_taken_where_it_is_the_larger_and_refused_where_it_is_not ... ok
+test stt_takes_the_sell_value_when_it_is_larger_and_the_vwap_when_it_is_not ... ok
+test the_crates_golden_vectors_v1_to_v5_hold_on_the_today_clock ... ok
+test the_exact_half_paisa_vwap_rounds_up_and_stt_is_taken_at_it ... ok
+test the_exchange_line_split_in_two_is_taken_where_it_is_the_larger ... ok
+test the_new_note_and_the_crates_own_stack_agree_on_every_vector_they_both_price ... ok
+test the_quantity_tie_is_priced_both_ways ... ok
+test the_square_off_fee_is_per_broker_order_on_top_and_gst_is_its_own_line ... ok
+test the_smallest_trade_prices_to_nothing_but_the_dp_reading ... ok
+test the_headline_comes_from_the_dated_clock_until_the_rates_agree_on_every_day_of_the_window ... ok
+test for_random_trades_every_reading_set_on_every_clock_is_under_the_worst ... ok
+test the_worst_is_at_least_every_reading_set_and_the_worst_set_reproduces_it ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running unittests src/lib.rs (target/debug/deps/greeks-de4bf8f713c8b6e9)
+
+running 43 tests
+test bsm::tests::a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in ... ok
+test bsm::tests::a_non_positive_spot_strike_or_volatility_is_refused_by_name ... ok
+test bsm::tests::an_in_range_input_that_the_model_cannot_represent_is_refused_not_returned ... ok
+test bsm::tests::a_non_finite_input_is_refused_field_by_field ... ok
+test bsm::tests::every_bound_accepts_the_value_exactly_on_it ... ok
+test bsm::tests::every_bound_refuses_the_value_just_past_it_and_names_it ... ok
+test bsm::tests::every_greek_reproduces_a_central_difference_wherever_one_can_be_taken ... ok
+test bsm::tests::an_expired_contract_is_its_own_refusal_and_not_a_malformed_input ... ok
+test bsm::tests::gamma_and_vega_are_bit_identical_between_the_call_and_the_put ... ok
+test bsm::tests::put_call_parity_holds_across_the_grid ... ok
+test bsm::tests::the_kind_and_the_greeks_are_ordinary_values ... ok
+test bsm::tests::the_no_arbitrage_floor_is_the_discounted_intrinsic_value_on_both_sides ... ok
+test bsm::tests::the_price_scale_is_the_two_legs_and_it_dwarfs_the_price_they_leave ... ok
+test error::tests::the_reason_names_the_numbers_that_produced_it ... ok
+test bsm::tests::the_delta_difference_is_the_carry_discount_to_a_measured_bound ... ok
+test moneyness::tests::a_rung_beyond_the_bound_is_refused_rather_than_truncated_into_range ... ok
+test moneyness::tests::a_strike_between_two_rungs_is_refused_and_never_rounded_onto_one ... ok
+test error::tests::every_error_renders_a_distinct_reason ... ok
+test error::tests::errors_are_std_errors_and_are_copied_compared_and_printed ... ok
+test moneyness::tests::a_call_and_a_put_read_the_same_rung_from_opposite_sides ... ok
+test normal::tests::both_hart_branches_and_both_saturating_tails_are_exercised ... ok
+test moneyness::tests::each_malformed_argument_is_refused_by_its_own_name ... ok
+test moneyness::tests::the_rung_is_an_ordinary_value ... ok
+test normal::tests::a_non_finite_argument_propagates_only_when_it_is_nan ... ok
+test normal::tests::the_cdf_matches_known_values ... ok
+test normal::tests::the_distribution_is_symmetric_and_monotone ... ok
+test normal::tests::the_density_is_the_derivative_of_the_distribution ... ok
+test solver::tests::a_broken_contract_is_refused_before_the_search_starts ... ok
+test solver::tests::a_non_finite_market_price_is_refused_before_anything_is_computed ... ok
+test solver::tests::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility ... ok
+test solver::tests::a_price_at_or_below_the_discounted_intrinsic_is_refused_on_both_sides ... ok
+test solver::tests::a_price_at_or_above_the_model_supremum_is_refused_on_both_sides ... ok
+test normal::tests::hart_agrees_with_an_independent_reference ... ok
+test solver::tests::a_price_outside_the_searched_band_is_refused_rather_than_clamped_into_it ... ok
+test solver::tests::a_price_that_does_not_determine_a_volatility_is_refused_not_returned ... ok
+test solver::tests::a_volatility_round_trips_through_the_solver_and_back ... ok
+test solver::tests::the_iteration_count_is_the_work_actually_done ... ok
+test solver::tests::the_result_is_an_ordinary_value ... ok
+test solver::tests::the_seed_lands_next_to_the_answer_at_the_money ... ok
+test solver::tests::the_solver_is_idempotent_to_the_bit ... ok
+test solver::tests::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band ... ok
+test solver::tests::the_reported_cost_is_every_model_evaluation ... ok
+test solver::tests::the_iteration_count_never_exceeds_the_arithmetic_bound ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/standalone.rs (target/debug/deps/standalone-a405c4f57b46587b)
+
+running 1 test
+test the_whole_public_surface_is_reachable_with_nothing_else_in_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vendor_anchor.rs (target/debug/deps/vendor_anchor-91850e143502647f)
+
+running 11 tests
+test no_single_contract_reproduces_the_chain_and_the_shortfall_is_a_number ... ok
+test the_maturity_is_recovered_in_closed_form_from_the_deltas_and_the_volatilities ... ok
+test our_greeks_reproduce_the_captured_dhan_chain ... ok
+test the_delta_difference_is_reproduced_by_the_two_volatilities_and_says_nothing_about_the_carry ... ok
+test the_trading_day_divisor_is_excluded_and_the_calendar_one_is_not_selected ... ok
+test the_two_gammas_are_invariant_to_the_rate_and_the_maturity ... ok
+test the_two_published_volatilities_are_transposed_and_the_identity_says_so ... ok
+test vega_is_published_per_percentage_point_and_the_index_level_proves_it ... ok
+test the_carry_is_consistent_with_zero_and_the_sample_cannot_pin_it ... ok
+test the_two_sides_disagree_on_the_rate_and_the_disagreement_is_reported_not_hidden ... ok
+test the_rate_criterion_has_its_root_at_370_and_365_is_a_convention_near_it ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running unittests src/main.rs (target/debug/deps/spikefade-0d6a8ddfb8b217ef)
+
+running 168 tests
+test acct::tests::r1_one_open_position_per_underlying_side_expiry ... ok
+test acct::tests::r4_margin_in_use_never_passes_20_lakh ... ok
+test csvgz::tests::parse_vectors ... ok
+test margin::tests::proxy_vectors ... ok
+test menu::tests::sf3_distance_floor_counted ... FAILED
+test menu::tests::sf3_menu_fail_closed ... FAILED
+test menu::tests::sf3_tp_floor_not_armed_at_or_above_entry ... FAILED
+test menu::tests::sf3_tp_theta_level_and_absence ... FAILED
+test menu::tests::sf3_menu_and_sets_load_with_the_signed_counts ... FAILED
+test read::tests::sf3_sl_vol300_needs_30_seconds ... ok
+test read::tests::sf3_tp_theta_needs_time_value_and_the_dated_calendar ... ok
+test rules::tests::weekdays_and_holiday_shifted_expiries ... ok
+test read::tests::sf3_sl_atr1_reads_only_bars_ended_by_t ... ok
+test read::tests::sf3_sl_atr5_range_only_last_completed_candle ... ok
+test screen::tests::r3_stock_expiry_day_lists_the_next_expiry_or_refuses ... ok
+test screen::tests::windows_never_pass_1530_and_follow_the_0915_grid ... ok
+test side17::tests::v32b_idx_und_own_account ... ok
+test screen::tests::zero_volume_window_skipped_and_listed_midday_uses_first_open ... ok
+test side17::tests::v32b_side_mtm_from_each_segment ... ok
+test side17::tests::v32b_side_one_account_rules_and_cap ... ok
+test side17::tests::v32rb_side_combine_marks_each_segment_and_test_months ... ok
+test side17::tests::v32rb_side_combine_file_roundtrip_equals_in_run ... ok
+test split18::tests::v32b_split_cost_97_months ... ignored, a measurement, run explicitly
+test split18::tests::v32b_split_definitions ... ok
+test split18::tests::v32b_split_fresh_start_test_matches_wf ... ok
+test split18::tests::v32b_split_off_is_inert ... ok
+test split18::tests::v32b_split_order_months_weeks_days_dd_net ... ok
+test split18::tests::v32b_split_passed_rule ... ok
+test split18::tests::v32b_split_whole_window_equals_account ... ok
+test split18::tests::v32b_split_choice_reads_learning_months_only ... ok
+test split18::tests::v32rb_seg_equals_month_windows ... ok
+test split18::tests::v32rb_seg_memory_bound ... ok
+test screen::tests::r2_rank_lists_keep_the_best_strike_per_underlying_side ... ok
+test split18::tests::v32rb_stats_and_picks_equal_month_path ... ok
+test stress::tests::v31_stress_reprices_against_the_trader ... ok
+test tests31::v31_d1_drops_rows_outside_the_picks ... ok
+test tests31::v31_d3_leaves_nothing_pending ... ok
+test tests31::v31_d3_rewalk_equals_fresh_walk ... ok
+test tests31::v31_day_index_over_255_sessions ... ok
+test tests31::v31_dd_grouped_same_second_closes ... ok
+test tests31::v31_exact_margin_sizes_lots_and_refuses ... ok
+test tests31::v31_headline_gate_small_stop_share_25_stress_positive ... ok
+test tests31::v31_margin_rule_v2_sizing_addon ... ok
+test tests31::v31_missing_day_falls_back_and_corrupt_table_refused ... ok
+test tests31::v31_mtm_check_refuses_with_running_loss ... ok
+test tests31::v31_never_closed_counted_per_account ... ok
+test tests31::v31_never_closed_empty_window_never_zero ... ok
+test tests31::v31_never_closed_valued_from_exit_decision ... ok
+test tests31::v31_orders_end_1530_no_fill_after ... ok
+test tests31::v31_own_squareoff_orders_and_fee ... ok
+test tests31::v31_resend_stop_buyback_fills ... ok
+test tests31::v31_snapshot_strictly_before_t ... ok
+test tests31::v31_square_off_still_1510 ... ok
+test tests31::v31_stress_table_drawdown_grouped ... ok
+test tests31::v31_tie_rule_design52 ... ok
+test tests32::v32_a10_orders_in_charges_and_gate ... ok
+test tests32::v32_ban_day_refused ... ok
+test tests32::v32_dte_counts_sessions ... ok
+test tests32::v32_expiry_pick_dial ... ok
+test tests32::v32_freeze_dated_lookup ... ok
+test tests32::v32_freeze_slices_counted_in_the_trip ... ok
+test tests32::v32_gain_measure_prev_close ... ok
+test tests32::v32_greeks_app_conversions ... ok
+test tests32::v32_headline_needs_zero_unfilled_exits ... ok
+test tests32::v32_host_margin_v3_stock ... ok
+test tests32::v32_liq_entry_gate_covers_whole_order ... ok
+test tests32::v32_month_verdict_2_lakh_inclusive ... ok
+test tests32::v32_portfolio_shared_cap ... ok
+test tests32::v32_prev_close_from_previous_session ... ok
+test tests32::v32_topk_by_volume_5_10_20 ... ok
+test tests32::v32_wanted_picks_x_and_twins ... ok
+test tests32r::v32r_a19_order_and_worst_dates ... ok
+test tests32r::v32r_charges_dated_only ... ok
+test tests32r::v32r_dte_theta_independent_of_loaded_days ... ok
+test tests32r::v32r_exit_why_held_rule_level_trigger ... ok
+test tests32r::v32r_expiry_dial_never_substitutes ... ok
+test tests32r::v32r_headline_excludes_liquidity_off ... ok
+test tests32r::v32r_kernel_piece_counters ... ok
+test tests32r::v32r_ngrid_per_segment ... ok
+test tests32r::v32r_o1_decision_at_n100_and_sampled_steps ... ok
+test tests32r::v32r_o1_margin_lookup_ns ... ok
+test tests32r::v32r_o1_range_max_and_first_reach ... ok
+test tests32r::v32r_percent_round_half_up ... ok
+test tests32r::v32r_portfolio_cap_counts_mtm ... ok
+test tests32r::v32r_stage_b_dedup_equals_plain ... ok
+test tests32r::v32r_table_w_passed_needs_a19 ... ok
+test tests32r::v32r_weeks_against_run_weeks ... ok
+test tests32r::v32r_wf_choice_a19_order ... ok
+test tests32rb::v32rb_ckpt_split_state_roundtrip ... ok
+test tests32rb::v32rb_cube_merge_exact ... ok
+test tests32rb::v32rb_margin_extra_rows_appended ... ok
+test tests33::v33_achunk_same_sequence_whole_contracts ... ok
+test tests33::v33_batch_order_permutation_and_fingerprint ... ok
+test tests33::v33_c1_compact_layout_bijective ... ok
+test tests33::v33_c2_append_cfg_lists_offsets ... ok
+test tests33::v33_c3_derived_lists_equal ... ok
+test tests33::v33_c3_flagged_lists_derived ... ok
+test tests33::v33_d2_class_key_has_tf ... ok
+test split18::tests::v32rb_split_o1_gates ... ok
+test tests33::v33_d2_rstar_needed ... ok
+test tests33::v33_hoist_buffer_equals_walk_day ... ok
+test tests33::v33_largest_first_is_a_permutation ... ok
+test tests33::v33_prefetch_slot_is_its_day ... ok
+test tests33::v33_switches_default_off_v33_all ... ok
+test tests33::v33_tablel_online_equals_events ... ok
+test tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed ... ok
+test tests33f::v33f_cap_minutes_base_and_exclusion ... ok
+test tests33::v33_d2_replay_equals_walk ... ok
+test tests33f::v33f_day_major_step_sampled ... ok
+test tests33f::v33f_sebi_half_dated ... ok
+test tests33f::v33f_split_words_segment_grid ... ok
+test tests33f::v33f_stamp_unverified_labelled ... ok
+test tests33f::v33f_vendor_from_manifest ... ok
+test tests33f::xm_unfilled_exit_rearms_stop ... ok
+test tests33g::oob_checklist_rows_follow_evidence ... ok
+test tests33g::oob_lot_equals_traded_quantum_on_adjusted_series ... ok
+test tests33g::v33f_gst_on_sebi_from_20220718 ... ok
+test tests33g::v33f_idx_exposure_dated_conservative ... ok
+test tests33g::v33f_item12_partial_when_undated ... ok
+test tests33g::v33g_win_sliding_candidates_bounded_exact ... ok
+test tests33g::xm_mtm_mark_is_minute_high ... ok
+test tests33s::v33_search1d_sets_load_and_count ... FAILED
+test tests34::args_digest_ignores_runtime_and_paths ... ok
+test tests34::batch_plan_target_independent ... ok
+test tests34::bck_refuses_unknown_tag_and_shape ... ok
+test tests34::bck_roundtrip_canonical ... ok
+test tests34::bck_write_never_overwrites ... ok
+test tests34::fingerprint_has_list_digest ... ok
+test tests34::ist_label_offset ... ok
+test tests34::kit_flags_refusals ... ok
+test tests34::merge_equals_sequential_synthetic ... ok
+test tests34::merge_refusals ... ok
+test tests34::plan_roundtrip_and_refusals ... ok
+test tests34::portable_sha256_in_process ... ok
+test tests34::proc_readers_parse_linux_text ... ok
+test tests34::read_dir_sorted ... ok
+test tests34::root_digest_same_for_every_form ... FAILED
+test tests34::sfz_roundtrip_all_rows ... FAILED
+test tests34::sha256_fips_vectors ... ok
+test tests34::shard_walks_assigned_batches ... ok
+test tests34::slice_equals_full_for_segment ... ok
+test tests34::strict_bhav_fatal ... ok
+test read::tests::sf3_liquidity_dial_counts_and_gaps_before_t_only ... ok
+test tests34::tools_from_env ... ok
+test tests3::sf3_chunk_kernel_equals_walk_account ... ok
+test tests3::sf3_day_major_equals_whole ... ok
+test tests3::sf3_event_skip_exact ... ok
+test tests3::sf3_first_hit_min_anchor_and_tie_order ... ok
+test tests3::sf3_gapped_stop_pays_block_worst ... ok
+test tests3::sf3_gapped_target_buys_back_at_block_worst ... ok
+test tests3::sf3_held_anchor_cancels_unfilled_sale ... ok
+test tests3::sf3_setting_dedup_exact ... ok
+test tests3::sf3_trail_fires_inside_1508_1510_is_held ... ok
+test tests3::sf3_ttp_replaces_tp_close ... FAILED
+test trade::tests::after_cut_refused ... ok
+test trade::tests::fa1_prev_prints_first_print_and_zero_volume_rows ... ok
+test trade::tests::fa1_sparse_sale_counts_no_volume_from_the_signal_candle ... ok
+test trade::tests::gapped_stop_pays_block_worst ... ok
+test trade::tests::missing_seconds_inside_fill_blocks_are_jumped ... ok
+test trade::tests::premium_005_sale_respects_protection_floor ... ok
+test trade::tests::r1_side_key_is_underlying_side_expiry_not_strike ... ok
+test trade::tests::stock_expiry_day_refused ... ok
+test wf::tests::compose_is_exact_on_concatenation ... ok
+test wf::tests::rows_are_the_signed_21 ... ok
+test wf::tests::sf3_window_compose_equals_fresh_walk ... ok
+test tests34::synthetic_is_reproducible ... ok
+test split18::tests::v32b_split_windows_exact ... ok
+test tests33f::v33f_causal_levels_ignore_later_days ... ok
+
+failures:
+
+---- menu::tests::sf3_distance_floor_counted stdout ----
+
+thread 'menu::tests::sf3_distance_floor_counted' (3328) panicked at crates/spikefade/src/menu.rs:797:55:
+menu_head: missing
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: spikefade::menu::tests::sf3_distance_floor_counted::{closure#0}
+             at ./src/menu.rs:797:55
+   3: <core::result::Result<spikefade::menu::Menu, alloc::string::String>>::unwrap_or_else::<spikefade::menu::tests::sf3_distance_floor_counted::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: spikefade::menu::tests::sf3_distance_floor_counted
+             at ./src/menu.rs:797:36
+   5: spikefade::menu::tests::sf3_distance_floor_counted::{closure#0}
+             at ./src/menu.rs:795:36
+   6: <spikefade::menu::tests::sf3_distance_floor_counted::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- menu::tests::sf3_menu_fail_closed stdout ----
+
+thread 'menu::tests::sf3_menu_fail_closed' (3330) panicked at crates/spikefade/src/menu.rs:765:55:
+menu_head: missing
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: spikefade::menu::tests::sf3_menu_fail_closed::{closure#0}
+             at ./src/menu.rs:765:55
+   3: <core::result::Result<spikefade::menu::Menu, alloc::string::String>>::unwrap_or_else::<spikefade::menu::tests::sf3_menu_fail_closed::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: spikefade::menu::tests::sf3_menu_fail_closed
+             at ./src/menu.rs:765:36
+   5: spikefade::menu::tests::sf3_menu_fail_closed::{closure#0}
+             at ./src/menu.rs:763:30
+   6: <spikefade::menu::tests::sf3_menu_fail_closed::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- menu::tests::sf3_tp_floor_not_armed_at_or_above_entry stdout ----
+
+thread 'menu::tests::sf3_tp_floor_not_armed_at_or_above_entry' (3331) panicked at crates/spikefade/src/menu.rs:826:55:
+menu_head: missing
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: spikefade::menu::tests::sf3_tp_floor_not_armed_at_or_above_entry::{closure#0}
+             at ./src/menu.rs:826:55
+   3: <core::result::Result<spikefade::menu::Menu, alloc::string::String>>::unwrap_or_else::<spikefade::menu::tests::sf3_tp_floor_not_armed_at_or_above_entry::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: spikefade::menu::tests::sf3_tp_floor_not_armed_at_or_above_entry
+             at ./src/menu.rs:826:36
+   5: spikefade::menu::tests::sf3_tp_floor_not_armed_at_or_above_entry::{closure#0}
+             at ./src/menu.rs:824:50
+   6: <spikefade::menu::tests::sf3_tp_floor_not_armed_at_or_above_entry::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- menu::tests::sf3_tp_theta_level_and_absence stdout ----
+
+thread 'menu::tests::sf3_tp_theta_level_and_absence' (3332) panicked at crates/spikefade/src/menu.rs:837:55:
+menu_head: missing
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: spikefade::menu::tests::sf3_tp_theta_level_and_absence::{closure#0}
+             at ./src/menu.rs:837:55
+   3: <core::result::Result<spikefade::menu::Menu, alloc::string::String>>::unwrap_or_else::<spikefade::menu::tests::sf3_tp_theta_level_and_absence::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: spikefade::menu::tests::sf3_tp_theta_level_and_absence
+             at ./src/menu.rs:837:36
+   5: spikefade::menu::tests::sf3_tp_theta_level_and_absence::{closure#0}
+             at ./src/menu.rs:835:40
+   6: <spikefade::menu::tests::sf3_tp_theta_level_and_absence::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- menu::tests::sf3_menu_and_sets_load_with_the_signed_counts stdout ----
+
+thread 'menu::tests::sf3_menu_and_sets_load_with_the_signed_counts' (3329) panicked at crates/spikefade/src/menu.rs:743:55:
+menu_head: missing
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: spikefade::menu::tests::sf3_menu_and_sets_load_with_the_signed_counts::{closure#0}
+             at ./src/menu.rs:743:55
+   3: <core::result::Result<spikefade::menu::Menu, alloc::string::String>>::unwrap_or_else::<spikefade::menu::tests::sf3_menu_and_sets_load_with_the_signed_counts::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: spikefade::menu::tests::sf3_menu_and_sets_load_with_the_signed_counts
+             at ./src/menu.rs:743:36
+   5: spikefade::menu::tests::sf3_menu_and_sets_load_with_the_signed_counts::{closure#0}
+             at ./src/menu.rs:741:55
+   6: <spikefade::menu::tests::sf3_menu_and_sets_load_with_the_signed_counts::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- tests33s::v33_search1d_sets_load_and_count stdout ----
+
+thread 'tests33s::v33_search1d_sets_load_and_count' (3609) panicked at crates/spikefade/src/tests33s.rs:55:78:
+menu /root/mut/crates/spikefade/data/EXITS-DYN-MENU-v1.tsv: No such file or directory (os error 2)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: spikefade::tests33s::v33_search1d_sets_load_and_count::{closure#0}
+             at ./src/tests33s.rs:55:78
+   3: <core::result::Result<spikefade::menu::Menu, alloc::string::String>>::unwrap_or_else::<spikefade::tests33s::v33_search1d_sets_load_and_count::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: spikefade::tests33s::v33_search1d_sets_load_and_count
+             at ./src/tests33s.rs:55:59
+   5: spikefade::tests33s::v33_search1d_sets_load_and_count::{closure#0}
+             at ./src/tests33s.rs:54:38
+   6: <spikefade::tests33s::v33_search1d_sets_load_and_count::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- tests34::root_digest_same_for_every_form stdout ----
+
+thread 'tests34::root_digest_same_for_every_form' (3739) panicked at crates/spikefade/src/tests34.rs:664:52:
+called `Result::unwrap()` on an `Err` value: "zstd (/opt/homebrew/bin/zstd) [\"-3\", \"-q\", \"-c\"]: No such file or directory (os error 2)"
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1867:5
+   3: <core::result::Result<alloc::string::String, alloc::string::String>>::unwrap
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1233:23
+   4: spikefade::tests34::root_digest_same_for_every_form
+             at ./src/tests34.rs:664:52
+   5: spikefade::tests34::root_digest_same_for_every_form::{closure#0}
+             at ./src/tests34.rs:652:37
+   6: <spikefade::tests34::root_digest_same_for_every_form::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- tests34::sfz_roundtrip_all_rows stdout ----
+
+thread 'tests34::sfz_roundtrip_all_rows' (3821) panicked at crates/spikefade/src/tests34.rs:629:60:
+called `Result::unwrap()` on an `Err` value: "zstd (/opt/homebrew/bin/zstd) [\"-3\", \"-q\", \"-c\"]: No such file or directory (os error 2)"
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1867:5
+   3: <core::result::Result<alloc::vec::Vec<u8>, alloc::string::String>>::unwrap
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1233:23
+   4: spikefade::tests34::sfz_roundtrip_all_rows
+             at ./src/tests34.rs:629:60
+   5: spikefade::tests34::sfz_roundtrip_all_rows::{closure#0}
+             at ./src/tests34.rs:623:28
+   6: <spikefade::tests34::sfz_roundtrip_all_rows::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- tests3::sf3_ttp_replaces_tp_close stdout ----
+
+thread 'tests3::sf3_ttp_replaces_tp_close' (3976) panicked at crates/spikefade/src/tests3.rs:121:86:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1867:5
+   3: <core::result::Result<alloc::string::String, std::io::error::Error>>::unwrap
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1233:23
+   4: spikefade::tests3::sf3_ttp_replaces_tp_close
+             at ./src/tests3.rs:121:86
+   5: spikefade::tests3::sf3_ttp_replaces_tp_close::{closure#0}
+             at ./src/tests3.rs:119:31
+   6: <spikefade::tests3::sf3_ttp_replaces_tp_close::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    menu::tests::sf3_distance_floor_counted
+    menu::tests::sf3_menu_and_sets_load_with_the_signed_counts
+    menu::tests::sf3_menu_fail_closed
+    menu::tests::sf3_tp_floor_not_armed_at_or_above_entry
+    menu::tests::sf3_tp_theta_level_and_absence
+    tests33s::v33_search1d_sets_load_and_count
+    tests34::root_digest_same_for_every_form
+    tests34::sfz_roundtrip_all_rows
+    tests3::sf3_ttp_replaces_tp_close
+
+test result: FAILED. 158 passed; 9 failed; 1 ignored; 0 measured; 0 filtered out; finished in 8.41s
+
+error: test failed, to rerun pass `-p spikefade --bin spikefade`
+   Doc-tests costs
+
+running 59 tests
+test crates/costs/src/day.rs - day::TradeDay::from_ordinal (line 356) ... ok
+test crates/costs/src/equity_clock.rs - equity_clock::price_trade (line 267) ... ok
+test crates/costs/src/day.rs - day::TradeDay::new (line 221) ... ok
+test crates/costs/src/equity_dated.rs - equity_dated::StateStamp::on (line 1160) ... ok
+test crates/costs/src/dhan_calc.rs - dhan_calc::quote (line 113) ... ok
+test crates/costs/src/exact.rs - exact::round_half_up (line 332) ... ok
+test crates/costs/src/equity_dated.rs - equity_dated::worst_state_stamp (line 1202) ... ok
+test crates/costs/src/equity_dated.rs - equity_dated::rates_on (line 994) ... ok
+test crates/costs/src/exact.rs - exact::Ratio::apply (line 123) ... ok
+test crates/costs/src/expiry.rs - expiry::weekly_regime (line 273) ... ok
+test crates/costs/src/expiry.rs - expiry::next_weekly_expiry (line 330) ... ok
+test crates/costs/src/fill.rs - fill::fills_at (line 396) ... ok
+test crates/costs/src/fill.rs - fill::Bar::new (line 151) ... ok
+test crates/costs/src/expiry.rs - expiry::next_monthly_expiry (line 386) ... ok
+test crates/costs/src/ledger.rs - ledger::DayLedger::new (line 188) ... ok
+test crates/costs/src/ledger.rs - ledger::DayLedger::order_lines_unrounded (line 483) ... ok
+test crates/costs/src/fill.rs - fill::worst_case_fills (line 500) ... ok
+test crates/costs/src/fill.rs - fill::Bar::flat (line 212) ... ok
+test crates/costs/src/ledger.rs - ledger::ExecutedOrder::with_part (line 111) ... ok
+test crates/costs/src/lot.rs - lot::contract_quantity (line 541) ... ok
+test crates/costs/src/lot.rs - lot::lot_size_of (line 471) ... ok
+test crates/costs/src/ledger.rs - ledger::order_lines_unrounded (line 366) ... ok
+test crates/costs/src/lot.rs - lot::lot_size_on (line 215) ... ok
+test crates/costs/src/money.rs - money::ceil_to_paisa (line 123) ... ok
+test crates/costs/src/lot.rs - lot::notional (line 581) ... ok
+test crates/costs/src/money.rs - money::levy_ceiling (line 210) ... ok
+test crates/costs/src/money.rs - money::ceil_to_rupee (line 183) ... ok
+test crates/costs/src/money.rs - money::floor_to_paisa (line 155) ... ok
+test crates/costs/src/moneyness.rs - moneyness::atm_offset (line 242) ... ok
+test crates/costs/src/moneyness.rs - moneyness::classify (line 384) ... ok
+test crates/costs/src/money.rs - money::scaled (line 95) ... ok
+test crates/costs/src/money.rs - money::statutory_levy (line 236) ... ok
+test crates/costs/src/regime.rs - regime::exchange_charge_rate (line 654) ... ok
+test crates/costs/src/moneyness.rs - moneyness::moneyness_steps (line 323) ... ok
+test crates/costs/src/schedule.rs - schedule::RateCard::resolve (line 812) ... ok
+test crates/costs/src/regime.rs - regime::stt_options_rate (line 617) ... ok
+test crates/costs/src/regime.rs - regime::ipft_rate (line 708) ... ok
+test crates/costs/src/schedule.rs - schedule::RateBasis::rate_set (line 710) ... ok
+test crates/costs/src/schedule.rs - schedule::RateSelector::version (line 622) ... ok
+test crates/costs/src/stack.rs - stack::ClientDay::add (line 1311) ... ok
+test crates/costs/src/schedule.rs - schedule::dhan_brokerage (line 477) ... ok
+test crates/costs/src/stack.rs - stack::ClientSecurityDay::open (line 418) ... ok
+test crates/costs/src/scope.rs - scope::is_cost_free (line 92) ... ok
+test crates/costs/src/stack.rs - stack::NetTrade::of_day (line 1530) ... ok
+test crates/costs/src/stack.rs - stack::NetTrade::versions (line 1658) ... ok
+test crates/costs/src/strike.rs - strike::strike_at (line 308) ... ok
+test crates/costs/src/strike.rs - strike::strike_step_on (line 204) ... ok
+test crates/costs/src/scope.rs - scope::is_cost_bearing (line 148) ... ok
+test crates/costs/src/strike.rs - strike::at_the_money (line 245) ... ok
+test crates/costs/src/stack.rs - stack::Order::new (line 113) ... ok
+test crates/costs/src/trip.rs - trip::Charges::itemised (line 818) ... ok
+test crates/costs/src/trip.rs - trip::Rates::new (line 291) ... ok
+test crates/costs/src/trip.rs - trip::RoundTrip::in_lots (line 579) ... ok
+test crates/costs/src/trip.rs - trip::Rates::resolve (line 377) ... ok
+test crates/costs/src/trip.rs - trip::charge_stack (line 1057) ... ok
+test crates/costs/src/trip.rs - trip::RoundTrip::new (line 499) ... ok
+test crates/costs/src/venue.rs - venue::exchange_for_underlying (line 56) ... ok
+test crates/costs/src/venue.rs - venue::swept_slot (line 141) ... ok
+test crates/costs/src/trip.rs - trip::price (line 1229) ... ok
+
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+all doctests ran in 0.92s; merged doctests compilation took 0.85s
+   Doc-tests greeks
+
+running 4 tests
+test crates/greeks/src/solver.rs - solver::Contract::implied_volatility (line 242) ... ok
+test crates/greeks/src/moneyness.rs - moneyness::Moneyness::from_ladder (line 81) ... ok
+test crates/greeks/src/bsm.rs - bsm::Contract::greeks (line 298) ... ok
+test crates/greeks/src/lib.rs - (line 102) ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.30s; merged doctests compilation took 0.28s
+error: 1 target failed:
+    `-p spikefade --bin spikefade`
+### rc=101 wall=12s
+
+################ SECTION 3b: core's compilable integration targets, no exclusions ################
+$ cargo test --locked --no-fail-fast -p core --test bound_probe --test cost_invariants --test lint --test zerodha_index
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/bound_probe.rs (target/debug/deps/bound_probe-065891ec9d1feade)
+
+running 2 tests
+test an_over_long_argument_is_refused_before_it_is_hashed ... ok
+test the_guard_does_not_change_any_answer ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cost_invariants.rs (target/debug/deps/cost_invariants-2c183e193329c5bc)
+
+running 5 tests
+test every_declared_cost_invariant_reaches_a_bench ... FAILED
+test every_crate_carries_a_ratio_bench ... FAILED
+test every_measured_cost_invariant_is_declared ... FAILED
+test the_document_declares_the_five_operations_rule_4_names ... FAILED
+test the_reconciliation_is_reading_something ... FAILED
+
+failures:
+
+---- every_declared_cost_invariant_reaches_a_bench stdout ----
+
+thread 'every_declared_cost_invariant_reaches_a_bench' (4371) panicked at crates/core/tests/cost_invariants.rs:88:9:
+docs/04-invariants.md must be readable at /root/mut/docs/04-invariants.md: No such file or directory (os error 2)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: cost_invariants::invariants::{closure#0}
+             at ./tests/cost_invariants.rs:88:9
+   3: <core::result::Result<alloc::string::String, std::io::error::Error>>::unwrap_or_else::<cost_invariants::invariants::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: cost_invariants::invariants
+             at ./tests/cost_invariants.rs:87:36
+   5: cost_invariants::every_declared_cost_invariant_reaches_a_bench
+             at ./tests/cost_invariants.rs:321:15
+   6: cost_invariants::every_declared_cost_invariant_reaches_a_bench::{closure#0}
+             at ./tests/cost_invariants.rs:313:51
+   7: <cost_invariants::every_declared_cost_invariant_reaches_a_bench::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   8: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- every_crate_carries_a_ratio_bench stdout ----
+
+thread 'every_crate_carries_a_ratio_bench' (4370) panicked at crates/core/tests/cost_invariants.rs:383:5:
+these crates have a manifest and no benches/ratio.rs, so nothing measures whether their per-operation cost grows: ["spikefade"]
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: cost_invariants::every_crate_carries_a_ratio_bench
+             at ./tests/cost_invariants.rs:383:5
+   3: cost_invariants::every_crate_carries_a_ratio_bench::{closure#0}
+             at ./tests/cost_invariants.rs:366:39
+   4: <cost_invariants::every_crate_carries_a_ratio_bench::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   5: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- every_measured_cost_invariant_is_declared stdout ----
+
+thread 'every_measured_cost_invariant_is_declared' (4372) panicked at crates/core/tests/cost_invariants.rs:88:9:
+docs/04-invariants.md must be readable at /root/mut/docs/04-invariants.md: No such file or directory (os error 2)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: cost_invariants::invariants::{closure#0}
+             at ./tests/cost_invariants.rs:88:9
+   3: <core::result::Result<alloc::string::String, std::io::error::Error>>::unwrap_or_else::<cost_invariants::invariants::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: cost_invariants::invariants
+             at ./tests/cost_invariants.rs:87:36
+   5: cost_invariants::every_measured_cost_invariant_is_declared
+             at ./tests/cost_invariants.rs:297:15
+   6: cost_invariants::every_measured_cost_invariant_is_declared::{closure#0}
+             at ./tests/cost_invariants.rs:291:47
+   7: <cost_invariants::every_measured_cost_invariant_is_declared::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   8: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- the_document_declares_the_five_operations_rule_4_names stdout ----
+
+thread 'the_document_declares_the_five_operations_rule_4_names' (4373) panicked at crates/core/tests/cost_invariants.rs:88:9:
+docs/04-invariants.md must be readable at /root/mut/docs/04-invariants.md: No such file or directory (os error 2)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: cost_invariants::invariants::{closure#0}
+             at ./tests/cost_invariants.rs:88:9
+   3: <core::result::Result<alloc::string::String, std::io::error::Error>>::unwrap_or_else::<cost_invariants::invariants::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: cost_invariants::invariants
+             at ./tests/cost_invariants.rs:87:36
+   5: cost_invariants::the_document_declares_the_five_operations_rule_4_names
+             at ./tests/cost_invariants.rs:396:15
+   6: cost_invariants::the_document_declares_the_five_operations_rule_4_names::{closure#0}
+             at ./tests/cost_invariants.rs:391:60
+   7: <cost_invariants::the_document_declares_the_five_operations_rule_4_names::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   8: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- the_reconciliation_is_reading_something stdout ----
+
+thread 'the_reconciliation_is_reading_something' (4377) panicked at crates/core/tests/cost_invariants.rs:88:9:
+docs/04-invariants.md must be readable at /root/mut/docs/04-invariants.md: No such file or directory (os error 2)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: cost_invariants::invariants::{closure#0}
+             at ./tests/cost_invariants.rs:88:9
+   3: <core::result::Result<alloc::string::String, std::io::error::Error>>::unwrap_or_else::<cost_invariants::invariants::{closure#0}>
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1622:23
+   4: cost_invariants::invariants
+             at ./tests/cost_invariants.rs:87:36
+   5: cost_invariants::the_reconciliation_is_reading_something
+             at ./tests/cost_invariants.rs:343:15
+   6: cost_invariants::the_reconciliation_is_reading_something::{closure#0}
+             at ./tests/cost_invariants.rs:337:45
+   7: <cost_invariants::the_reconciliation_is_reading_something::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   8: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    every_crate_carries_a_ratio_bench
+    every_declared_cost_invariant_reaches_a_bench
+    every_measured_cost_invariant_is_declared
+    the_document_declares_the_five_operations_rule_4_names
+    the_reconciliation_is_reading_something
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `-p core --test cost_invariants`
+     Running tests/lint.rs (target/debug/deps/lint-5600b1f7a153aad2)
+
+running 2 tests
+test the_module_list_is_the_whole_crate ... ok
+test no_float_in_price ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/zerodha_index.rs (target/debug/deps/zerodha_index-b5d365590b87d183)
+
+running 5 tests
+test every_alias_round_trips_through_its_inverse ... ok
+test no_other_vendor_is_reclassified_by_a_segment_word ... ok
+test the_promotion_cannot_repair_a_row_that_is_not_an_index ... ok
+test the_swept_indices_decode_to_the_ticker_the_engine_names ... ok
+test the_swept_instruments_carry_the_exchange_name_they_were_renamed_from ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: 1 target failed:
+    `-p core --test cost_invariants`
+### rc=101 wall=0s
+
+################ SECTION 3c: core doc tests ################
+$ cargo test --locked --no-fail-fast -p core --doc
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+   Doc-tests brutex_core
+
+running 4 tests
+test crates/core/src/isin.rs - isin::Isin::new (line 73) ... ok
+test crates/core/src/price.rs - price::Paisa::from_rupee_text_half_up (line 218) ... ok
+test crates/core/src/universe.rs - universe::nse_isin (line 4190) ... ok
+test crates/core/src/price.rs - price::Paisa::from_rupees_half_up (line 95) ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.25s; merged doctests compilation took 0.23s
+### rc=0 wall=1s
+
+################ SECTION 4a: SHARD SCOPE: spikefade with the 14 exclusions (what cargo-mutants runs for a spikefade mutant) ################
+$ cargo test --locked -p spikefade -- --exact --skip menu::tests::sf3_menu_and_sets_load_with_the_signed_counts --skip menu::tests::sf3_menu_fail_closed --skip menu::tests::sf3_distance_floor_counted --skip menu::tests::sf3_tp_floor_not_armed_at_or_above_entry --skip menu::tests::sf3_tp_theta_level_and_absence --skip tests33s::v33_search1d_sets_load_and_count --skip tests3::sf3_ttp_replaces_tp_close --skip tests34::root_digest_same_for_every_form --skip tests34::sfz_roundtrip_all_rows --skip every_declared_cost_invariant_reaches_a_bench --skip the_document_declares_the_five_operations_rule_4_names --skip every_measured_cost_invariant_is_declared --skip the_reconciliation_is_reading_something --skip every_crate_carries_a_ratio_bench
+warning: unused imports: `VIEW_LETTERS` and `VIEW_NAMES`
+  --> crates/spikefade/src/report3.rs:21:42
+   |
+21 | use crate::acct::{NVIEW, SEv, Sum, Tops, VIEW_LETTERS, VIEW_NAMES};
+   |                                          ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DayEvents` and `Ent`
+  --> crates/spikefade/src/report3.rs:30:27
+   |
+30 | use crate::screen::{self, DayEvents, Ent, Levels, NCFG, TFS, cfg_parts};
+   |                           ^^^^^^^^^  ^^^
+
+warning: unused imports: `out_of` and `size_event`
+  --> crates/spikefade/src/stage.rs:23:72
+   |
+23 | use crate::trade::{BASE_S, BaseErr, EvT, NL, Out, Paths, Refuse, Trip, out_of, record_base, size_event, trip, truncate};
+   |                                                                        ^^^^^^               ^^^^^^^^^^
+
+warning: unused variable: `u`
+   --> crates/spikefade/src/screen.rs:521:74
+    |
+521 |         c.unds.iter().enumerate().filter(|(_, u)| u.kind == 0).map(|(ui, u)| {
+    |                                                                          ^ help: if this is intentional, prefix it with an underscore: `_u`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `group` is never read
+   --> crates/spikefade/src/kern.rs:330:13
+    |
+330 |             group = None;
+    |             ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+360 |         group = Some((be, q.piece));
+    |         --------------------------- `group` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/side17.rs:423:9
+    |
+423 |     let mut log_rows = |acct: &str, mem: &[(u8, usize)], r: &crate::v32::WalkRes, tr: &[Vec<STrade>], tsv: &mut String| {
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/spikefade/src/tests32r.rs:404:9
+    |
+404 |     let mut q = |len: i64| -> Vec<u64> {
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+
+warning: method `nviews` is never used
+   --> crates/spikefade/src/acct.rs:605:12
+    |
+566 | impl Tops {
+    | --------- method in this implementation
+...
+605 |     pub fn nviews(&self) -> usize {
+    |            ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `charged` is never used
+   --> crates/spikefade/src/charges.rs:131:15
+    |
+131 | pub(crate) fn charged(rd: &Rates, rt: &Rates, t: &Trip) -> (i64, i64, i64, bool) {
+    |               ^^^^^^^
+
+warning: field `rows_1s_cr` is never read
+  --> crates/spikefade/src/cube.rs:78:9
+   |
+53 | pub struct Stats {
+   |            ----- field in this struct
+...
+78 |     pub rows_1s_cr: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `Stats` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `bod` is never read
+  --> crates/spikefade/src/mtable.rs:29:9
+   |
+23 | pub struct SnapMeta {
+   |            -------- field in this struct
+...
+29 |     pub bod: bool,
+   |         ^^^
+   |
+   = note: `SnapMeta` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `day` is never read
+   --> crates/spikefade/src/mtable.rs:151:9
+    |
+150 | pub struct DayM {
+    |            ---- field in this struct
+151 |     pub day: i64,
+    |         ^^^
+    |
+    = note: `DayM` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `ulist_of` is never read
+  --> crates/spikefade/src/report.rs:78:5
+   |
+67 | struct SegRun {
+   |        ------ field in this struct
+...
+78 |     ulist_of: Vec<u32>,
+   |     ^^^^^^^^
+
+warning: fields `kind` and `expiry` are never read
+   --> crates/spikefade/src/report.rs:642:5
+    |
+611 | struct TradeRow {
+    |        -------- fields in this struct
+...
+642 |     kind: u8,
+    |     ^^^^
+643 |     expiry: u32,
+    |     ^^^^^^
+    |
+    = note: `TradeRow` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `round2` is never used
+   --> crates/spikefade/src/screen.rs:349:4
+    |
+349 | fn round2(x: u64) -> u64 {
+    |    ^^^^^^
+
+warning: function `quant` is never used
+   --> crates/spikefade/src/screen.rs:360:4
+    |
+360 | fn quant(v: &mut [u64], q: u64) -> u64 {
+    |    ^^^^^
+
+warning: function `measure` is never used
+   --> crates/spikefade/src/screen.rs:371:8
+    |
+371 | pub fn measure(cubes: &[Cube], seg: u8) -> Levels {
+    |        ^^^^^^^
+
+warning: field `flag2` is never read
+   --> crates/spikefade/src/trade.rs:271:9
+    |
+261 | pub struct Out {
+    |            --- field in this struct
+...
+271 |     pub flag2: u8,
+    |         ^^^^^
+    |
+    = note: `Out` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `cand_kind` is never used
+   --> crates/spikefade/src/trade.rs:470:14
+    |
+470 | pub const fn cand_kind(c: usize) -> Kind {
+    |              ^^^^^^^^^
+
+warning: fields `sale_secs`, `sale_one_price_secs`, `sale_past_limit`, and `x` are never read
+   --> crates/spikefade/src/trade.rs:500:9
+    |
+490 | pub struct Trip {
+    |            ---- fields in this struct
+...
+500 |     pub sale_secs: u32,
+    |         ^^^^^^^^^
+501 |     pub sale_one_price_secs: u32,
+    |         ^^^^^^^^^^^^^^^^^^^
+502 |     pub sale_past_limit: u32,
+    |         ^^^^^^^^^^^^^^^
+503 |     pub x: Option<i64>,
+    |         ^
+    |
+    = note: `Trip` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `charges_of` is never used
+   --> crates/spikefade/src/trade.rs:765:8
+    |
+765 | pub fn charges_of(day: i64, units: u64, buy_value: i64, sell_value: i64, own_exit: bool, broker: bool) -> Result<(i64, i64, i64, bo...
+    |        ^^^^^^^^^^
+
+warning: fields `label` and `blk` are never read
+  --> crates/spikefade/src/v2.rs:23:9
+   |
+22 | pub struct Eval {
+   |            ---- fields in this struct
+23 |     pub label: String,
+   |         ^^^^^
+24 |     pub rules: &'static str,
+25 |     pub blk: i64,
+   |         ^^^
+   |
+   = note: `Eval` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `store` is never read
+   --> crates/spikefade/src/v2.rs:115:9
+    |
+112 | pub struct Full {
+    |            ---- field in this struct
+...
+115 |     pub store: Vec<Out>,
+    |         ^^^^^
+
+warning: field `di` is never read
+   --> crates/spikefade/src/v2.rs:302:9
+    |
+299 | pub struct EvIn<'a> {
+    |            ---- field in this struct
+...
+302 |     pub di: u16,
+    |         ^^
+
+warning: function `write_new` is never used
+   --> crates/spikefade/src/v2.rs:546:8
+    |
+546 | pub fn write_new(p: &Path, content: &str) -> Result<(), String> {
+    |        ^^^^^^^^^
+
+warning: field `labels` is never read
+  --> crates/spikefade/src/kern.rs:99:9
+   |
+80 | pub struct Acc {
+   |            --- field in this struct
+...
+99 |     pub labels: [u32; 9],
+   |         ^^^^^^
+   |
+   = note: `Acc` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: constant `CAP` is never used
+   --> crates/spikefade/src/kern.rs:728:11
+    |
+728 | pub const CAP: [usize; 4] = [5, 10, 20, 40];
+    |           ^^^
+
+warning: fields `win`, `margin_in_use`, and `nopen` are never read
+   --> crates/spikefade/src/kern.rs:805:9
+    |
+801 | pub struct Dec3 {
+    |            ---- fields in this struct
+...
+805 |     pub win: Option<usize>,
+    |         ^^^
+806 |     pub margin_in_use: i64,
+    |         ^^^^^^^^^^^^^
+807 |     pub nopen: usize,
+    |         ^^^^^
+    |
+    = note: `Dec3` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_empty` is never used
+   --> crates/spikefade/src/menu.rs:282:12
+    |
+181 | impl Menu {
+    | --------- method in this implementation
+...
+282 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: constant `MAXR` is never used
+   --> crates/spikefade/src/menu.rs:288:11
+    |
+288 | pub const MAXR: usize = 7;
+    |           ^^^^
+
+warning: field `run` is never read
+  --> crates/spikefade/src/read.rs:55:5
+   |
+45 | pub struct Prep {
+   |            ---- field in this struct
+...
+55 |     run: Vec<u16>,
+   |     ^^^
+   |
+   = note: `Prep` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `mfallback` is never read
+   --> crates/spikefade/src/report3.rs:104:9
+    |
+ 68 | pub struct Seg3 {
+    |            ---- field in this struct
+...
+104 |     pub mfallback: Vec<Option<i64>>,
+    |         ^^^^^^^^^
+
+warning: fields `day` and `sha` are never read
+  --> crates/spikefade/src/bhav.rs:26:9
+   |
+25 | pub struct BhavDay {
+   |            ------- fields in this struct
+26 |     pub day: i64,
+   |         ^^^
+27 |     pub file: String,
+28 |     pub sha: String,
+   |         ^^^
+   |
+   = note: `BhavDay` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `month_of` is never used
+   --> crates/spikefade/src/expiry.rs:303:8
+    |
+303 | pub fn month_of(d: i64) -> String {
+    |        ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/spikefade/src/side17.rs:176:9
+    |
+175 | pub struct SideRes {
+    |            ------- fields in this struct
+176 |     pub net: i64,
+    |         ^^^
+177 |     pub trades: u32,
+178 |     pub by_seg: [u32; 2],
+    |         ^^^^^^
+...
+184 |     pub dd: i64,
+    |         ^^
+185 |     pub mo: BTreeMap<i64, i64>,
+    |         ^^
+186 |     /// (entry us, known us, margin) of the trades taken (the utilization reads them).
+187 |     pub taken: Vec<(i64, i64, i64)>,
+    |         ^^^^^
+188 |     /// The largest margin in use + running MTM loss seen at a sale instant (after the sale).
+189 |     pub peak_mtm: i64,
+    |         ^^^^^^^^
+190 |     /// v3.2 round B: every member trade's outcome in the walk's order (member, trade index, outcome word).
+191 |     pub log: Vec<(usize, usize, &'static str)>,
+    |         ^^^
+    |
+    = note: `SideRes` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `loss_at` is never used
+   --> crates/spikefade/src/side17.rs:197:8
+    |
+197 | pub fn loss_at(marks: &[i32], mark1: u32, units: u32, sold: i64, sod: u32) -> i64 {
+    |        ^^^^^^^
+
+warning: function `ident` is never used
+   --> crates/spikefade/src/ckmerge.rs:395:8
+    |
+395 | pub fn ident(s: &Sum) -> (u32, u16, u8) {
+    |        ^^^^^
+
+warning: function `strict_reset` is never used
+   --> crates/spikefade/src/kit.rs:613:8
+    |
+613 | pub fn strict_reset() {
+    |        ^^^^^^^^^^^^
+
+warning: `spikefade` (bin "spikefade" test) generated 38 warnings (run `cargo fix --bin "spikefade" -p spikefade --tests` to apply 6 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/main.rs (target/debug/deps/spikefade-0d6a8ddfb8b217ef)
+
+running 159 tests
+test margin::tests::proxy_vectors ... ok
+test acct::tests::r4_margin_in_use_never_passes_20_lakh ... ok
+test csvgz::tests::parse_vectors ... ok
+test acct::tests::r1_one_open_position_per_underlying_side_expiry ... ok
+test read::tests::sf3_sl_atr5_range_only_last_completed_candle ... ok
+test read::tests::sf3_tp_theta_needs_time_value_and_the_dated_calendar ... ok
+test rules::tests::weekdays_and_holiday_shifted_expiries ... ok
+test read::tests::sf3_sl_vol300_needs_30_seconds ... ok
+test read::tests::sf3_sl_atr1_reads_only_bars_ended_by_t ... ok
+test screen::tests::r3_stock_expiry_day_lists_the_next_expiry_or_refuses ... ok
+test screen::tests::windows_never_pass_1530_and_follow_the_0915_grid ... ok
+test screen::tests::zero_volume_window_skipped_and_listed_midday_uses_first_open ... ok
+test side17::tests::v32b_idx_und_own_account ... ok
+test side17::tests::v32b_side_mtm_from_each_segment ... ok
+test side17::tests::v32b_side_one_account_rules_and_cap ... ok
+test side17::tests::v32rb_side_combine_file_roundtrip_equals_in_run ... ok
+test side17::tests::v32rb_side_combine_marks_each_segment_and_test_months ... ok
+test split18::tests::v32b_split_cost_97_months ... ignored, a measurement, run explicitly
+test split18::tests::v32b_split_definitions ... ok
+test split18::tests::v32b_split_fresh_start_test_matches_wf ... ok
+test split18::tests::v32b_split_off_is_inert ... ok
+test split18::tests::v32b_split_order_months_weeks_days_dd_net ... ok
+test split18::tests::v32b_split_passed_rule ... ok
+test split18::tests::v32b_split_whole_window_equals_account ... ok
+test split18::tests::v32b_split_choice_reads_learning_months_only ... ok
+test split18::tests::v32rb_seg_equals_month_windows ... ok
+test split18::tests::v32rb_seg_memory_bound ... ok
+test screen::tests::r2_rank_lists_keep_the_best_strike_per_underlying_side ... ok
+test split18::tests::v32rb_stats_and_picks_equal_month_path ... ok
+test stress::tests::v31_stress_reprices_against_the_trader ... ok
+test tests31::v31_d1_drops_rows_outside_the_picks ... ok
+test tests31::v31_d3_leaves_nothing_pending ... ok
+test tests31::v31_d3_rewalk_equals_fresh_walk ... ok
+test tests31::v31_day_index_over_255_sessions ... ok
+test tests31::v31_dd_grouped_same_second_closes ... ok
+test tests31::v31_exact_margin_sizes_lots_and_refuses ... ok
+test tests31::v31_headline_gate_small_stop_share_25_stress_positive ... ok
+test tests31::v31_margin_rule_v2_sizing_addon ... ok
+test tests31::v31_missing_day_falls_back_and_corrupt_table_refused ... ok
+test tests31::v31_mtm_check_refuses_with_running_loss ... ok
+test tests31::v31_never_closed_counted_per_account ... ok
+test tests31::v31_never_closed_empty_window_never_zero ... ok
+test tests31::v31_never_closed_valued_from_exit_decision ... ok
+test tests31::v31_orders_end_1530_no_fill_after ... ok
+test tests31::v31_own_squareoff_orders_and_fee ... ok
+test tests31::v31_resend_stop_buyback_fills ... ok
+test tests31::v31_snapshot_strictly_before_t ... ok
+test tests31::v31_square_off_still_1510 ... ok
+test tests31::v31_stress_table_drawdown_grouped ... ok
+test tests31::v31_tie_rule_design52 ... ok
+test tests32::v32_a10_orders_in_charges_and_gate ... ok
+test tests32::v32_ban_day_refused ... ok
+test tests32::v32_dte_counts_sessions ... ok
+test tests32::v32_expiry_pick_dial ... ok
+test tests32::v32_freeze_dated_lookup ... ok
+test tests32::v32_freeze_slices_counted_in_the_trip ... ok
+test tests32::v32_gain_measure_prev_close ... ok
+test tests32::v32_greeks_app_conversions ... ok
+test tests32::v32_headline_needs_zero_unfilled_exits ... ok
+test tests32::v32_host_margin_v3_stock ... ok
+test tests32::v32_liq_entry_gate_covers_whole_order ... ok
+test tests32::v32_month_verdict_2_lakh_inclusive ... ok
+test tests32::v32_portfolio_shared_cap ... ok
+test tests32::v32_prev_close_from_previous_session ... ok
+test tests32::v32_topk_by_volume_5_10_20 ... ok
+test tests32::v32_wanted_picks_x_and_twins ... ok
+test tests32r::v32r_a19_order_and_worst_dates ... ok
+test tests32r::v32r_charges_dated_only ... ok
+test tests32r::v32r_dte_theta_independent_of_loaded_days ... ok
+test tests32r::v32r_exit_why_held_rule_level_trigger ... ok
+test tests32r::v32r_expiry_dial_never_substitutes ... ok
+test tests32r::v32r_headline_excludes_liquidity_off ... ok
+test tests32r::v32r_kernel_piece_counters ... ok
+test tests32r::v32r_ngrid_per_segment ... ok
+test tests32r::v32r_o1_decision_at_n100_and_sampled_steps ... ok
+test tests32r::v32r_o1_margin_lookup_ns ... ok
+test split18::tests::v32rb_split_o1_gates ... ok
+test tests32r::v32r_o1_range_max_and_first_reach ... ok
+test tests32r::v32r_portfolio_cap_counts_mtm ... ok
+test tests32r::v32r_percent_round_half_up ... ok
+test tests32r::v32r_table_w_passed_needs_a19 ... ok
+test tests32r::v32r_stage_b_dedup_equals_plain ... ok
+test tests32r::v32r_wf_choice_a19_order ... ok
+test tests32rb::v32rb_ckpt_split_state_roundtrip ... ok
+test tests32rb::v32rb_cube_merge_exact ... ok
+test tests32rb::v32rb_margin_extra_rows_appended ... ok
+test tests33::v33_achunk_same_sequence_whole_contracts ... ok
+test tests33::v33_batch_order_permutation_and_fingerprint ... ok
+test tests33::v33_c1_compact_layout_bijective ... ok
+test tests33::v33_c2_append_cfg_lists_offsets ... ok
+test tests32r::v32r_weeks_against_run_weeks ... ok
+test tests33::v33_c3_flagged_lists_derived ... ok
+test tests33::v33_d2_class_key_has_tf ... ok
+test tests33::v33_c3_derived_lists_equal ... ok
+test tests33::v33_d2_rstar_needed ... ok
+test tests33::v33_hoist_buffer_equals_walk_day ... ok
+test tests33::v33_largest_first_is_a_permutation ... ok
+test tests33::v33_prefetch_slot_is_its_day ... ok
+test tests33::v33_switches_default_off_v33_all ... ok
+test tests33::v33_tablel_online_equals_events ... ok
+test tests33f::sf31_daymajor_streamed_equals_inmemory_peak_rss_printed ... ok
+test tests33f::v33f_cap_minutes_base_and_exclusion ... ok
+test tests33::v33_d2_replay_equals_walk ... ok
+test tests33f::v33f_day_major_step_sampled ... ok
+test tests33f::v33f_sebi_half_dated ... ok
+test tests33f::v33f_split_words_segment_grid ... ok
+test tests33f::v33f_stamp_unverified_labelled ... ok
+test tests33f::v33f_vendor_from_manifest ... ok
+test tests33f::xm_unfilled_exit_rearms_stop ... ok
+test tests33g::oob_checklist_rows_follow_evidence ... ok
+test tests33g::oob_lot_equals_traded_quantum_on_adjusted_series ... ok
+test tests33g::v33f_gst_on_sebi_from_20220718 ... ok
+test tests33g::v33f_idx_exposure_dated_conservative ... ok
+test tests33g::v33f_item12_partial_when_undated ... ok
+test tests33g::v33g_win_sliding_candidates_bounded_exact ... ok
+test tests33g::xm_mtm_mark_is_minute_high ... ok
+test tests34::args_digest_ignores_runtime_and_paths ... ok
+test tests34::batch_plan_target_independent ... ok
+test tests34::bck_refuses_unknown_tag_and_shape ... ok
+test tests34::bck_roundtrip_canonical ... ok
+test tests34::bck_write_never_overwrites ... ok
+test tests34::fingerprint_has_list_digest ... ok
+test tests34::ist_label_offset ... ok
+test tests34::kit_flags_refusals ... ok
+test tests34::merge_equals_sequential_synthetic ... ok
+test tests34::merge_refusals ... ok
+test tests34::plan_roundtrip_and_refusals ... ok
+test tests34::portable_sha256_in_process ... ok
+test tests34::proc_readers_parse_linux_text ... ok
+test tests34::read_dir_sorted ... ok
+test tests34::sha256_fips_vectors ... ok
+test tests34::shard_walks_assigned_batches ... ok
+test tests34::slice_equals_full_for_segment ... ok
+test tests34::strict_bhav_fatal ... ok
+test read::tests::sf3_liquidity_dial_counts_and_gaps_before_t_only ... ok
+test tests34::tools_from_env ... ok
+test tests3::sf3_chunk_kernel_equals_walk_account ... ok
+test tests3::sf3_day_major_equals_whole ... ok
+test tests3::sf3_event_skip_exact ... ok
+test tests3::sf3_first_hit_min_anchor_and_tie_order ... ok
+test tests3::sf3_gapped_stop_pays_block_worst ... ok
+test tests3::sf3_gapped_target_buys_back_at_block_worst ... ok
+test tests3::sf3_held_anchor_cancels_unfilled_sale ... ok
+test tests3::sf3_setting_dedup_exact ... ok
+test tests3::sf3_trail_fires_inside_1508_1510_is_held ... ok
+test trade::tests::after_cut_refused ... ok
+test tests34::synthetic_is_reproducible ... ok
+test trade::tests::fa1_prev_prints_first_print_and_zero_volume_rows ... ok
+test trade::tests::fa1_sparse_sale_counts_no_volume_from_the_signal_candle ... ok
+test trade::tests::gapped_stop_pays_block_worst ... ok
+test trade::tests::missing_seconds_inside_fill_blocks_are_jumped ... ok
+test trade::tests::premium_005_sale_respects_protection_floor ... ok
+test trade::tests::r1_side_key_is_underlying_side_expiry_not_strike ... ok
+test wf::tests::compose_is_exact_on_concatenation ... ok
+test wf::tests::rows_are_the_signed_21 ... ok
+test wf::tests::sf3_window_compose_equals_fresh_walk ... ok
+test trade::tests::stock_expiry_day_refused ... ok
+test split18::tests::v32b_split_windows_exact ... ok
+test tests33f::v33f_causal_levels_ignore_later_days ... ok
+
+test result: ok. 158 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 7.90s
+
+### rc=0 wall=8s
+
+################ SECTION 4b: costs + greeks with the 14 exclusions ################
+$ cargo test --locked -p costs -p greeks -- --exact --skip menu::tests::sf3_menu_and_sets_load_with_the_signed_counts --skip menu::tests::sf3_menu_fail_closed --skip menu::tests::sf3_distance_floor_counted --skip menu::tests::sf3_tp_floor_not_armed_at_or_above_entry --skip menu::tests::sf3_tp_theta_level_and_absence --skip tests33s::v33_search1d_sets_load_and_count --skip tests3::sf3_ttp_replaces_tp_close --skip tests34::root_digest_same_for_every_form --skip tests34::sfz_roundtrip_all_rows --skip every_declared_cost_invariant_reaches_a_bench --skip the_document_declares_the_five_operations_rule_4_names --skip every_measured_cost_invariant_is_declared --skip the_reconciliation_is_reading_something --skip every_crate_carries_a_ratio_bench
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/costs-17b2b1a4b09f4ad2)
+
+running 321 tests
+test charge_error::tests::a_cost_error_and_a_refusal_convert_without_losing_their_words ... ok
+test dated::tests::a_refusal_carries_the_tables_own_subject_venue_and_remedy ... ok
+test dated::tests::a_trailing_refusal_window_has_no_end_date ... ok
+test dated::tests::every_shape_violation_is_caught_and_a_sound_table_is_not ... ok
+test dated::tests::has_content_sees_a_blank_citation_and_nothing_else ... ok
+test dated::tests::rows_walks_the_anchor_first_and_stops_at_the_padding ... ok
+test charge_error::tests::every_charge_refusal_renders_its_own_reason ... ok
+test dated::tests::a_dated_value_is_debuggable_and_comparable ... ok
+test dated::tests::str_eq_answers_exactly_as_the_operator_would ... ok
+test dated::tests::the_day_a_refusal_names_is_a_day_that_answers ... ok
+test dated::tests::the_boundary_macro_builds_the_day_it_names_and_min_when_it_cannot ... ok
+test dated::tests::the_anchor_answers_every_day_no_later_row_claims ... ok
+test day::tests::an_ordinal_off_either_end_is_refused_by_name_and_never_saturated ... ok
+test day::tests::earlier_in_same_month_agrees_with_a_day_by_day_walk ... ok
+test day::tests::every_representable_day_is_one_ordinal_after_the_one_before_it ... ok
+test day::tests::min_and_max_are_the_ends_of_the_representable_window ... ok
+test day::tests::plus_days_walks_the_calendar_and_refuses_to_walk_off_the_end ... ok
+test day::tests::ordering_and_hashing_agree_with_the_calendar ... ok
+test day::tests::from_ordinal_is_the_exact_inverse_of_ordinal_over_the_whole_window ... ok
+test day::tests::refuses_a_year_outside_the_window_by_name ... ok
+test day::tests::refuses_an_impossible_date_rather_than_normalising_it ... ok
+test day::tests::renders_the_one_accepted_date_format ... ok
+test day::tests::the_distance_between_two_weekdays_is_inclusive_forward_and_backward ... ok
+test day::tests::the_last_day_of_its_month_is_cores_answer_and_not_a_second_leap_rule ... ok
+test day::tests::the_next_month_rolls_december_into_january_of_the_following_year ... ok
+test day::tests::the_ordinals_are_the_hand_computed_ones ... ok
+test day::tests::the_weekday_type_knows_its_index_its_name_and_whether_india_trades ... ok
+test day::tests::the_const_constructor_answers_exactly_as_the_checked_one_does ... ok
+test day::tests::the_accessors_return_what_was_put_in ... ok
+test dated::tests::the_lookup_agrees_with_a_naive_scan_on_every_representable_day ... ok
+test dhan_calc::tests::a_one_sided_quote_has_charges_but_no_net_pnl ... ok
+test day::tests::the_year_window_is_cores_and_a_drift_would_be_caught ... ok
+test dhan_calc::tests::an_exact_line_rounds_half_up_to_the_paisa_and_to_the_rupee ... ok
+test day::tests::the_weekday_walks_forward_one_day_at_a_time_across_the_whole_window ... ok
+test dhan_calc::tests::a_value_or_a_turnover_past_i64_is_refused_by_name ... ok
+test dhan_calc::tests::display_propagates_a_writer_error_from_every_part_it_writes ... ok
+test dhan_calc::tests::every_page_constant_is_the_figure_the_page_uses ... ok
+test dhan_calc::tests::every_input_the_page_shows_as_zero_or_nan_is_refused_by_name ... ok
+test equity_clock::tests::each_clock_names_itself_and_reads_its_rates ... ok
+test dhan_calc::tests::the_net_and_the_breakeven_follow_from_the_total ... ok
+test dhan_calc::tests::the_quote_renders_its_label_its_inputs_and_every_line ... ok
+test equity_clock::tests::a_net_that_leaves_i64_is_refused_and_every_input_refusal_passes_through ... ok
+test equity_clock::tests::the_data_api_is_rs_499_and_its_gst_a_month ... ok
+test equity_clock::tests::the_measurements_run_at_tiny_sizes_and_refuse_what_they_cannot_price ... ok
+test equity_clock::tests::the_headline_comes_from_whichever_clock_is_worse ... ok
+test equity_dated::tests::a_day_outside_the_window_is_refused_by_name ... ok
+test equity_dated::tests::a_row_covers_its_own_days_and_no_other ... ok
+test equity_dated::tests::each_rate_change_is_read_on_the_day_before_and_the_day_itself ... ok
+test equity_dated::tests::every_row_shape_reads_as_one_exact_fraction ... ok
+test equity_dated::tests::the_const_builders_build_what_the_rows_say ... ok
+test equity_dated::tests::the_rounding_and_the_narrowing_are_the_crates ... ok
+test equity_dated::tests::every_day_of_the_window_reads_exactly_the_row_that_covers_it ... ok
+test equity_dated::tests::the_table_is_costs_table_json_row_for_row ... ok
+test equity_dated::tests::the_today_clock_is_the_rows_that_serve_it ... ok
+test equity_dated::tests::every_series_is_contiguous_anchored_and_open_and_a_broken_one_is_not ... ok
+test equity_dated::tests::the_exchange_line_adds_the_transaction_charge_and_the_ipft ... ok
+test equity_readings::tests::a_trade_no_contract_note_could_carry_is_refused_by_name ... ok
+test equity_dated::tests::the_table_version_is_pinned_to_its_rows ... ok
+test equity_dated::tests::the_worst_state_is_the_highest_duty_of_the_fifteen ... ok
+test equity_readings::tests::brokerage_is_the_schedules_dhan_brokerage_at_every_size ... ok
+test equity_readings::tests::every_reading_has_its_label ... ok
+test equity_readings::tests::the_largest_keeps_the_first_on_a_tie ... ok
+test equity_readings::tests::a_trade_sums_its_orders_and_keeps_them ... ok
+test equity_readings::tests::the_lines_at_the_input_bounds_fit_and_add_up ... ok
+test error::tests::a_refusal_names_the_charge_the_venue_the_window_and_the_remedy ... ok
+test error::tests::an_open_ended_window_says_open_and_an_unscoped_charge_names_no_venue ... ok
+test error::tests::both_error_types_are_usable_as_std_errors ... ok
+test error::tests::display_propagates_a_writer_error_from_every_part_it_writes ... ok
+test error::tests::every_cost_error_renders_its_own_reason ... ok
+test error::tests::every_round_trip_refusal_renders_its_own_reason ... ok
+test exact::tests::a_denominator_that_is_not_positive_is_refused_by_name ... ok
+test exact::tests::a_ratio_applies_exactly_and_rounds_once_at_the_end ... ok
+test exact::tests::a_ratio_reads_a_bps_x100_rate_as_the_fraction_it_encodes ... ok
+test exact::tests::an_unrounded_line_is_exact_and_refuses_what_it_cannot_hold ... ok
+test exact::tests::every_overflow_site_in_apply_is_refused_by_name ... ok
+test exact::tests::every_shipped_rate_is_a_whole_number_of_units_per_paisa ... ok
+test exact::tests::half_up_handles_the_widest_operands_without_wrapping ... ok
+test exact::tests::half_up_is_the_nearest_integer_with_halves_going_up_densely ... ok
+test exact::tests::half_up_rounds_a_half_up_and_less_than_a_half_down_on_both_signs ... ok
+test exact::tests::rupees_render_with_two_decimals_and_a_sign_on_both_sides_of_zero ... ok
+test expiry::tests::a_boundary_into_a_refusal_before_the_expiry_is_refused_rather_than_projected ... ok
+test expiry::tests::a_boundary_on_the_old_regimes_expiry_day_is_crossed_and_one_past_it_is_not ... ok
+test expiry::tests::a_day_the_table_refuses_stays_refused_when_its_reference_day_is_verified ... ok
+test expiry::tests::a_refusal_in_the_rolled_month_is_carried_out_rather_than_guessed ... ok
+test expiry::tests::a_regime_change_inside_a_month_does_not_split_it_into_two_contracts ... ok
+test expiry::tests::a_weekly_regime_change_is_read_at_the_expiry_and_not_at_the_day_asked ... ok
+test expiry::tests::a_withdrawn_weekly_and_a_refusal_never_read_the_same ... ok
+test expiry::tests::an_expiry_past_the_end_of_the_window_is_refused_rather_than_wrapped ... ok
+test expiry::tests::every_shipped_expiry_row_is_a_trading_weekday_and_keyed_on_cores_order ... ok
+test error::tests::a_refusal_can_name_a_remedy_that_is_not_the_rate_tables ... ok
+test error::tests::a_refusal_converts_into_a_cost_error_carrying_the_same_words ... ok
+test expiry::tests::the_last_weekday_of_a_month_is_the_last_one_in_it ... ok
+test expiry::tests::the_monthly_regime_boundaries_are_the_source_boundaries ... ok
+test expiry::tests::one_contract_month_has_one_expiry_whichever_day_it_is_asked_on ... ok
+test expiry::tests::the_next_monthly_lands_on_the_source_answers ... ok
+test expiry::tests::every_weekly_answer_is_an_expiry_by_its_own_regime_and_the_answers_never_go_backwards ... ok
+test expiry::tests::the_next_weekly_lands_on_the_source_answers ... ok
+test equity_readings::tests::a_trade_past_the_fill_bound_is_refused_and_one_at_it_prices ... ok
+test expiry::tests::the_regime_is_re_read_for_the_rolled_month_and_not_carried_across ... ok
+test expiry::tests::the_two_underlyings_expire_on_different_days_and_that_is_the_point ... ok
+test expiry::tests::the_weekly_regime_boundaries_are_the_source_boundaries ... ok
+test fill::tests::a_bar_and_a_fill_set_are_plain_comparable_data ... ok
+test fill::tests::a_bar_whose_high_is_below_one_tick_is_refused_by_name ... ok
+test fill::tests::a_bar_whose_low_is_above_its_high_is_refused_rather_than_swapped ... ok
+test fill::tests::a_direction_names_itself_and_the_two_are_distinct ... ok
+test fill::tests::a_fill_or_a_slippage_past_i64_is_refused_by_name_and_never_wrapped ... ok
+test fill::tests::a_long_fills_the_entry_high_and_the_exit_low_each_one_tick_adverse ... ok
+test fill::tests::a_printed_extreme_sell_below_one_tick_refuses_by_name ... ok
+test fill::tests::a_short_fills_the_exit_high_and_the_entry_low_and_is_adverse_on_both_legs ... ok
+test fill::tests::an_open_below_one_tick_refuses_rather_than_being_floored_upward ... ok
+test fill::tests::an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar ... ok
+test fill::tests::an_open_outside_its_own_bar_is_not_a_bar ... ok
+test fill::tests::each_anchor_names_itself_distinctly ... ok
+test fill::tests::each_anchor_names_itself_for_the_audit ... ok
+test fill::tests::fills_at_the_adverse_extreme_is_the_worst_case_function_unchanged ... ok
+test fill::tests::on_a_flat_bar_the_two_readings_coincide_exactly ... ok
+test fill::tests::the_best_case_fills_on_the_open_and_gives_up_nothing ... ok
+test expiry::tests::the_next_monthly_is_the_last_regime_weekday_of_its_own_or_the_next_month ... ok
+test fill::tests::the_best_case_is_never_worse_than_the_worst_case_on_any_bar ... ok
+test fill::tests::the_buy_leg_needs_no_floor_because_no_legal_bar_can_reach_it ... ok
+test fill::tests::the_printed_extreme_reports_no_slippage_because_it_assumes_none ... ok
+test fill::tests::the_printed_extreme_is_the_bar_and_the_adverse_one_is_a_tick_beyond_it ... ok
+test fill::tests::the_printed_extreme_sell_refuses_a_sub_tick_low_and_keeps_a_printed_one ... ok
+test fill::tests::the_sell_floor_binds_at_one_tick_and_the_realized_slippage_follows_it ... ok
+test fill::tests::the_worst_case_fill_never_flatters_an_open_anchored_one ... ok
+test ledger::tests::a_calculator_day_cannot_decide_a_client_day_or_a_trade ... ok
+test ledger::tests::a_close_refuses_what_its_mode_cannot_price_by_name ... ok
+test ledger::tests::a_days_order_lines_refuse_what_the_day_cannot_hold_or_price_by_name ... ok
+test ledger::tests::a_days_orders_sum_to_its_unrounded_lines_on_every_netting ... ok
+test fill::tests::the_sell_fill_is_total_at_both_edges_of_the_domain ... ok
+test ledger::tests::a_ledger_closes_precise_to_exactly_what_a_client_security_day_settles ... ok
+test ledger::tests::a_part_filled_order_is_one_executed_order_and_pays_brokerage_once ... ok
+test ledger::tests::a_part_and_an_order_that_are_not_positive_or_overflow_are_refused_by_name ... ok
+test ledger::tests::an_orders_lines_carry_dp_the_square_off_fee_and_every_kinds_taxes ... ok
+test ledger::tests::an_exercise_pays_dhans_brokerage_and_its_gst_as_an_executed_order_does ... ok
+test ledger::tests::every_line_is_reported_unrounded_and_rounded_with_the_adjustment_between ... ok
+test ledger::tests::an_orders_lines_sum_to_its_days_unrounded_lines_where_the_line_is_linear ... ok
+test lot::table_tests::a_lookup_is_flat_in_the_table ... ignored, a timing measurement: run with --release -- --ignored a_lookup_is_flat_in_the_table
+test ledger::tests::the_winner_gate_pages_round_trip_charges_are_the_calculators_not_the_precise_stacks ... ok
+test lot::table_tests::a_lot_row_added_to_the_table_changes_the_next_lookup_without_a_code_change ... ok
+test lot::table_tests::a_row_is_sourced_exactly_where_a_charter_circular_turns_the_lot ... ok
+test lot::table_tests::an_underlying_without_a_sourced_lot_is_named_absent ... ok
+test lot::table_tests::the_boundaries_of_a_row_are_exact ... ok
+test lot::table_tests::the_compiled_rows_move_into_the_table_unchanged ... ok
+test expiry::tests::the_next_weekly_is_the_first_day_on_or_after_with_the_regimes_weekday ... ok
+test lot::tests::a_contracts_lot_follows_the_circulars_rule_while_two_lots_are_in_force ... ok
+test lot::tests::a_lot_size_reads_renders_and_hashes_as_the_number_it_is ... ok
+test lot::tests::a_non_positive_price_or_quantity_is_refused_by_name ... ok
+test lot::tests::a_notional_past_i64_is_refused_rather_than_wrapped ... ok
+test lot::tests::a_quantity_past_i64_is_refused_rather_than_wrapped ... ok
+test lot::tests::a_revision_whose_circular_was_not_read_refuses_the_contract_lot ... ok
+test lot::tests::an_expiry_before_the_trade_day_is_refused_by_name ... ok
+test lot::tests::every_shipped_lot_row_is_positive_and_keyed_on_cores_order ... ok
+test lot::tests::every_transition_and_the_day_before_it_are_the_source_figures ... ok
+test lot::tests::outside_a_transition_the_contract_lot_is_the_trade_day_row_and_says_so ... ok
+test lot::tests::the_notional_is_the_product_of_price_and_quantity ... ok
+test lot::tests::a_lot_count_that_is_not_a_trade_is_refused_by_name ... ok
+test lot::tests::the_quantity_is_the_product_and_nothing_else ... ok
+test lot::tests::the_two_underlyings_carry_different_lots_on_the_same_day ... ok
+test money::tests::a_composed_levy_carries_the_overflow_refusal_out_of_whichever_stage_failed ... ok
+test money::tests::a_result_past_i64_is_refused_by_name_and_never_saturated ... ok
+test lot::table_tests::every_malformed_table_is_refused_by_name ... ok
+test money::tests::the_paisa_ceiling_walks_a_pinned_table_on_both_signs ... ok
+test money::tests::the_rupee_ceiling_is_the_least_whole_rupee_at_or_above_the_amount ... ok
+test money::tests::the_rupee_ceiling_walks_a_pinned_table_on_both_signs ... ok
+test money::tests::the_scaled_product_is_exact_at_the_widest_inputs_and_never_wraps ... ok
+test money::tests::the_statutory_raw_stage_floors_where_the_levy_stage_ceils ... ok
+test money::tests::the_ceiling_is_the_least_integer_at_or_above_the_quotient ... ok
+test money::tests::the_two_composed_levies_reproduce_the_source_worked_example ... ok
+test moneyness::tests::a_half_step_tie_goes_down_to_the_rung_at_the_money_names ... ok
+test moneyness::tests::a_non_positive_strike_or_spot_is_refused_by_name ... ok
+test moneyness::tests::a_moneyness_is_ordered_hashable_and_debuggable ... ok
+test moneyness::tests::moneyness_at_zero_at_the_chain_edges_and_one_past_each ... ok
+test moneyness::tests::an_offset_past_i32_is_refused_rather_than_wrapped ... ok
+test moneyness::tests::the_direction_flips_the_sign_for_a_put_and_never_for_a_call ... ok
+test expiry::tests::the_pre_history_window_refuses_on_both_tables_and_every_day_of_it ... ok
+test moneyness::tests::the_moneyness_and_the_strike_are_exact_inverses_of_each_other ... ok
+test moneyness::tests::the_offset_matches_a_nearest_multiple_search_across_four_whole_steps ... ok
+test moneyness::tests::the_offset_counts_rungs_from_the_rung_at_the_money_names ... ok
+test moneyness::tests::the_seven_locked_offset_rules_read_as_the_source_spells_them ... ok
+test moneyness::tests::the_two_grids_disagree_about_the_same_strike_and_that_is_the_point ... ok
+test moneyness::tests::the_source_offset_pins_land_on_the_source_answers ... ok
+test rate::tests::a_rate_is_ordered_hashable_and_debuggable ... ok
+test rate::tests::a_rate_renders_as_the_percentage_a_circular_quotes ... ok
+test rate::tests::brokerage_is_flat_per_order_and_both_brokers_are_priced ... ok
+test rate::tests::every_flat_rate_is_the_cited_figure ... ok
+test rate::tests::ipft_is_the_nse_figure_and_the_bse_zero_is_the_unverified_one ... ok
+test rate::tests::no_shipped_rate_is_negative_and_zero_is_the_only_zero ... ok
+test rate::tests::the_scale_reads_as_rupees_per_crore ... ok
+test rate::tests::stamp_duty_is_charged_on_the_buy_leg_and_never_on_the_sell_leg ... ok
+test moneyness::tests::the_bucket_is_the_sign_of_the_moneyness_and_the_band_edge_agrees ... ok
+test regime::tests::a_mid_table_refusal_reports_its_own_window_not_the_anchors ... ok
+test regime::tests::a_refusal_window_is_derived_from_the_table_and_never_written_twice ... ok
+test regime::tests::an_unverified_row_carries_no_number_for_anything_to_reach ... ok
+test regime::tests::every_shipped_table_passes_the_validation_the_compiler_already_ran ... ok
+test regime::tests::stt_on_exercise_holds_on_both_sides_of_its_boundary ... ok
+test regime::tests::fa73061_prices_the_days_before_2026_03_01_at_the_old_row_and_the_day_itself_at_the_new_one ... ok
+test regime::tests::a_boundary_is_inclusive_on_its_own_day_across_the_whole_domain ... ok
+test regime::tests::stt_on_options_premium_holds_on_both_sides_of_both_boundaries ... ok
+test regime::tests::the_boundary_dates_are_the_dates_they_claim_to_be ... ok
+test regime::tests::the_day_a_regime_refusal_names_is_a_day_that_answers ... ok
+test regime::tests::the_fa64232_row_is_kept_byte_for_byte_and_the_fa73061_row_is_appended_after_it ... ok
+test regime::tests::the_ipft_refusal_names_its_window_and_a_priced_trip_meets_the_exchange_refusal_first ... ok
+test regime::tests::the_exchange_charge_prices_the_boundary_and_refuses_the_day_before_it ... ok
+test regime::tests::the_nse_outflow_is_3553_per_crore_on_every_priced_day_on_both_sides_of_fa73061 ... ok
+test lot::tests::the_pre_history_window_refuses_on_every_day_of_it_and_never_after ... ok
+test regime::tests::the_refusal_names_the_circulars_that_were_identified_and_never_retrieved ... ok
+test schedule::tests::a_rate_without_a_source_or_with_a_bad_shape_is_not_well_shaped ... ok
+test schedule::tests::an_etf_and_a_commodity_are_refused_by_name_in_every_entry_point ... ok
+test schedule::tests::bse_futures_have_no_rate_under_todays_table_and_are_refused_by_name ... ok
+test schedule::tests::dhan_brokerage_is_the_lower_of_twenty_rupees_and_three_basis_points_per_order ... ok
+test schedule::tests::every_current_rate_is_the_figure_its_source_states_per_crore ... ok
+test schedule::tests::every_rate_names_the_primary_source_the_sourced_rows_read ... ok
+test schedule::tests::the_current_option_taxes_are_the_regimes_rows_on_the_as_of_day ... ok
+test schedule::tests::the_dated_intraday_card_is_the_equity_table_on_the_days_this_stack_can_carry ... ok
+test schedule::tests::the_dated_intraday_card_refuses_bse_and_the_days_this_stack_cannot_carry ... ok
+test schedule::tests::the_dated_option_card_is_the_regime_on_the_trade_day_plus_the_ipft_on_every_day ... ok
+test regime::tests::the_validation_rejects_every_way_a_table_can_be_wrong ... ok
+test schedule::tests::the_dated_option_card_refuses_the_pre_2024_window_with_the_regimes_own_refusal ... ok
+test schedule::tests::the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day ... ok
+test schedule::tests::the_kind_names_and_the_square_off_scope_are_pinned ... ok
+test schedule::tests::the_dated_selector_refuses_equity_and_futures_on_every_date_and_names_the_remedy ... ok
+test schedule::tests::the_unverified_figures_are_exactly_the_ones_the_brief_did_not_source ... ok
+test schedule::tests::todays_card_carries_the_venue_and_kind_rates_and_nothing_else ... ok
+test schedule::tests::todays_card_is_labelled_with_the_trade_day_on_every_kind_and_venue ... ok
+test scope::tests::a_segment_names_itself_and_the_three_are_distinct ... ok
+test scope::tests::only_the_option_segment_bears_the_charge_stack ... ok
+test scope::tests::the_index_future_arm_cites_the_operator_rule_not_untradeability ... ok
+test scope::tests::the_two_predicates_are_exact_complements_on_every_segment ... ok
+test stack::tests::a_client_day_refuses_another_day_venue_or_segment_and_stays_as_it_was ... ok
+test stack::tests::a_client_day_rounds_stt_and_stamp_once_across_its_securities ... ok
+test stack::tests::a_dated_option_day_before_fa73061_prices_at_the_regime_plus_ipft ... ok
+test stack::tests::a_day_opened_on_a_card_is_the_day_open_resolves ... ok
+test stack::tests::a_delivery_round_trip_is_two_days_and_the_sell_day_pays_the_dp_charge ... ok
+test stack::tests::a_net_across_two_rate_sets_or_out_of_order_days_is_refused_and_a_net_names_its_versions ... ok
+test stack::tests::a_net_figure_is_refused_wherever_the_trade_does_not_close ... ok
+test stack::tests::a_same_day_delivery_round_trip_is_netted_as_non_delivery ... ok
+test stack::tests::a_settled_day_reports_its_inputs_its_lines_and_its_label ... ok
+test stack::tests::a_stock_option_settled_by_physical_delivery_is_refused_by_name_and_changes_nothing ... ok
+test stack::tests::a_trade_is_a_win_only_if_its_net_after_every_charge_is_above_zero ... ok
+test stack::tests::an_open_intraday_day_and_a_partly_squared_delivery_day_are_refused ... ok
+test stack::tests::bse_equity_prices_at_the_unverified_all_in_rate_and_says_so ... ok
+test regime::tests::the_exchange_charge_refuses_exactly_the_pre_boundary_days_and_no_others ... ok
+test schedule::tests::the_rate_set_versions_are_pinned_to_the_tables_they_name ... ok
+test stack::tests::display_propagates_a_writer_error_from_every_part_it_writes ... ok
+test stack::tests::every_overflow_site_is_refused_by_name_and_a_refused_order_changes_nothing ... ok
+test stack::tests::futures_pay_sell_side_stt_and_buy_side_stamp_on_the_whole_value ... ok
+test stack::tests::options_pay_tax_on_premium_and_the_exercise_rate_on_intrinsic_value ... ok
+test stack::tests::every_input_dhan_shows_as_zero_is_refused_by_name ... ok
+test stack::tests::the_broker_square_off_fee_is_a_separate_line_applied_only_when_asked ... ok
+test stack::tests::the_intraday_tax_and_stamp_round_to_the_paisa_before_the_rupee ... ok
+test stack::tests::the_intraday_tax_is_on_the_vwap_rounded_to_the_paisa_as_nse_cmtr_5588_states ... ok
+test stack::tests::the_order_of_the_orders_and_their_split_move_only_the_brokerage ... ok
+test stack::tests::the_sell_value_basis_disagrees_with_three_of_the_five_vectors ... ok
+test strike::tests::a_moneyness_that_walks_off_the_grid_is_refused_rather_than_wrapped ... ok
+test strike::tests::a_non_positive_at_the_money_rung_is_refused_before_any_arithmetic ... ok
+test strike::tests::a_spot_above_the_highest_representable_rung_is_refused_rather_than_wrapped ... ok
+test strike::tests::a_spot_below_the_lowest_rung_is_refused_rather_than_struck_at_nothing ... ok
+test strike::tests::a_spot_exactly_halfway_between_two_rungs_rounds_up ... ok
+test strike::tests::a_step_that_does_not_divide_the_spot_evenly_is_still_exact ... ok
+test strike::tests::a_strike_step_is_ordered_hashable_and_debuggable ... ok
+test strike::tests::a_zero_or_negative_spot_is_refused_by_name ... ok
+test strike::tests::plus_is_further_out_of_the_money_in_the_trade_direction ... ok
+test strike::tests::the_rung_is_the_nearest_one_for_every_spot_across_two_whole_steps ... ok
+test strike::tests::the_rung_never_moves_backwards_as_the_spot_rises ... ok
+test strike::tests::the_snap_happens_once_and_a_second_pass_changes_nothing ... ok
+test strike::tests::the_source_pins_land_on_the_source_answers ... ok
+test strike::tests::the_step_is_refused_before_the_window_the_source_verified ... ok
+test strike::tests::the_step_tables_are_keyed_on_cores_order_and_every_row_is_positive ... ok
+test strike::tests::the_two_sides_are_exact_mirrors_of_each_other_about_the_rung ... ok
+test strike::tests::the_two_swept_underlyings_carry_the_two_published_steps ... ok
+test tests::the_equity_modules_answer_from_the_crate_root ... ok
+test trip::tests::a_breakdown_renders_every_figure_it_holds ... ok
+test trip::tests::a_breakdown_that_broke_its_own_law_is_refused_rather_than_reported ... ok
+test trip::tests::a_contract_that_states_its_expiry_is_sized_by_its_own_lot ... ok
+test trip::tests::a_losing_round_trip_reports_a_negative_net_and_still_pays_every_charge ... ok
+test trip::tests::a_lot_count_is_refused_for_a_segment_the_options_lot_table_does_not_cover ... ok
+test trip::tests::a_malformed_fill_bar_is_refused_before_anything_is_priced ... ok
+test trip::tests::a_printed_extreme_sell_below_zero_is_refused_and_does_not_overflow ... ok
+test trip::tests::a_round_trip_in_the_unverified_window_refuses_the_whole_trip_and_names_it ... ok
+test trip::tests::a_round_trip_of_no_contracts_is_refused_by_name_on_every_path ... ok
+test trip::tests::a_round_trip_reports_back_everything_it_was_built_from ... ok
+test trip::tests::a_round_trip_whose_charges_exceed_its_gross_reports_a_negative_net ... ok
+test trip::tests::a_short_profits_when_the_market_falls_and_loses_when_it_rises ... ok
+test trip::tests::a_signal_only_round_trip_guards_its_arithmetic_too ... ok
+test trip::tests::a_signal_only_segment_pays_nothing_and_its_net_is_its_gross ... ok
+test trip::tests::a_signal_only_segment_prices_inside_a_window_where_every_rate_refuses ... ok
+test trip::tests::a_straddling_trip_takes_each_legs_own_levies_and_the_larger_gst ... ok
+test trip::tests::an_exit_day_before_its_entry_day_is_refused ... ok
+test trip::tests::an_expiry_outcome_is_refused_rather_than_priced_as_a_normal_close ... ok
+test trip::tests::each_legs_charge_is_priced_at_its_own_days_regime ... ok
+test trip::tests::every_flat_levy_overflow_site_is_refused_by_name_and_never_wrapped ... ok
+test trip::tests::every_levy_overflow_site_is_refused_by_name_and_never_wrapped ... ok
+test trip::tests::every_position_overflow_site_is_refused_by_name_and_never_wrapped ... ok
+test trip::tests::no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill ... ok
+test trip::tests::the_breakdown_itemises_seven_charges_that_sum_to_its_total ... ok
+test trip::tests::the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays ... ok
+test trip::tests::the_dated_rates_carry_whichever_of_the_three_lookups_refused_first ... ok
+test trip::tests::the_entry_point_and_the_pure_core_agree_on_every_swept_combination ... ok
+test trip::tests::the_fifth_worked_example_is_not_ported_and_the_reason_is_asserted ... ok
+test trip::tests::the_first_worked_example_prices_one_nifty_lot_to_the_paisa ... ok
+test trip::tests::the_fourth_worked_example_prices_the_bse_rate_set_through_the_pure_core ... ok
+test trip::tests::the_gst_base_is_the_sum_of_all_four_service_components_with_a_plus_sign ... ok
+test trip::tests::the_gst_is_rounded_once_and_rounding_each_half_overcharges_by_a_rupee ... ok
+test trip::tests::the_internal_laws_hold_across_a_deterministic_sweep_of_the_envelope ... ok
+test trip::tests::the_lot_size_is_the_entry_days_and_a_pre_history_entry_refuses ... ok
+test trip::tests::the_rate_set_is_the_one_the_tables_hold_on_the_day ... ok
+test trip::tests::the_second_worked_example_amortises_the_flat_brokerage_over_five_lots ... ok
+test trip::tests::the_sell_leg_of_a_per_leg_levy_is_guarded_independently_of_the_buy_leg ... ok
+test trip::tests::the_stamp_duty_is_charged_on_the_buy_leg_and_exactly_once ... ok
+test trip::tests::the_statutory_rupee_ceiling_is_reachable_from_the_stack_and_refuses ... ok
+test trip::tests::the_third_worked_example_prices_one_banknifty_lot ... ok
+test trip::tests::the_transaction_tax_reads_the_sell_premium_and_nothing_else ... ok
+test venue::tests::a_slot_is_cores_own_index_and_round_trips_to_cores_own_row ... ok
+test venue::tests::an_underlying_outside_the_engine_surface_is_refused_and_never_defaulted ... ok
+test venue::tests::an_unswept_underlying_has_no_slot_either ... ok
+test venue::tests::both_swept_underlyings_resolve_to_nse ... ok
+test venue::tests::the_costable_set_is_the_engine_surface_itself_and_cannot_drift_from_it ... ok
+test stack::tests::every_new_overflow_site_is_refused_by_name ... ok
+test stack::tests::the_five_contract_note_vectors_rederive_from_the_rules ... ok
+test regime::tests::the_lookup_agrees_with_a_naive_scan_on_every_representable_day ... ok
+
+test result: ok. 320 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/adversarial.rs (target/debug/deps/adversarial-9374409597176099)
+
+running 4 tests
+test a_larger_notional_is_never_charged_less_than_a_smaller_one ... ok
+test rounding_the_top_of_the_type_up_to_a_rupee_refuses_rather_than_wraps ... ok
+test the_zero_rate_charges_nothing_even_at_the_top_of_the_type ... ok
+test every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dhan_calculator.rs (target/debug/deps/dhan_calculator-c2d9d9cfb3574859)
+
+running 12 tests
+test every_calculator_total_is_within_one_paisa_of_the_page ... ok
+test every_calculator_line_matches_the_page_on_every_golden_case ... ok
+test every_calculator_refusal_reaches_a_caller_outside_the_crate_by_name ... ok
+test every_golden_case_closes_in_the_day_ledger_exactly_as_both_modes_price_it ... ok
+test every_golden_quote_reports_its_inputs_its_net_and_its_breakeven ... ok
+test every_golden_case_has_a_precise_figure_or_a_named_refusal ... ok
+test every_golden_round_trip_is_netted_of_its_entire_precise_charges ... ok
+test the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases ... ok
+test the_precise_and_calculator_modes_differ_where_the_rules_differ_and_agree_where_they_do_not ... ok
+test the_raw_lines_of_the_fifteen_october_ui_readings_are_exact_to_the_billionth_rupee ... ok
+test the_endpoint_and_the_ui_readings_of_the_v1_inputs_agree_line_for_line ... ok
+test the_one_paisa_total_misses_are_listed_with_their_direction ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fa73061.rs (target/debug/deps/fa73061-1978230e464d15b8)
+
+running 12 tests
+test a_date_that_does_not_exist_cannot_reach_either_row ... ok
+test a_trade_dated_2026_02_27_is_priced_at_the_fa64232_row_and_its_50_rupee_ipft ... ok
+test a_trade_dated_2026_03_02_is_priced_at_the_fa73061_row ... ok
+test a_trip_straddling_2026_03_01_prices_each_leg_at_its_own_days_row ... ok
+test every_captured_dhan_option_case_shows_the_exchange_line_of_the_fa73061_row ... ok
+test the_boundary_day_2026_03_01_is_priced_at_the_fa73061_row ... ok
+test the_dated_lookups_cost_the_same_on_every_row_measured ... ignored, a timing measurement; run in release with --ignored --nocapture
+test every_boundary_around_fa73061_prices_its_own_rows_and_nothing_else_moves ... ok
+test bse_is_not_moved_by_an_nse_circular ... ok
+test the_dated_rows_answer_the_same_from_fourteen_threads_at_once ... ok
+test the_live_dhan_nifty_25300_call_reproduces_exchange_5_08 ... ok
+test the_fold_costs_at_most_one_paisa_a_leg_and_under_50_lakh_is_never_below_the_split ... ok
+
+test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/fno_contract_notes.rs (target/debug/deps/fno_contract_notes-5e7c2016b1c76014)
+
+running 22 tests
+test each_vector_reads_the_rows_of_its_own_day ... ok
+test a_trade_prices_the_same_every_time_and_in_either_order_of_its_same_side_orders ... ok
+test every_rate_change_moves_exactly_its_own_line_on_the_trading_days_either_side ... ok
+test every_contract_note_matches_costs_md_to_the_paisa_under_all_four_columns ... ok
+test each_reading_alone_moves_only_its_own_lines ... ok
+test a_day_outside_the_window_is_refused_by_name_on_both_clocks ... ok
+test every_state_stamp_is_priced_and_the_worst_is_no_lower_than_any_of_them ... ok
+test per_fill_brokerage_counts_under_the_cap_and_stops_at_it ... ok
+test gst_rounding_takes_whichever_is_larger_on_the_actual_base ... ok
+test stt_takes_the_sell_value_when_it_is_larger_and_the_vwap_when_it_is_not ... ok
+test per_order_rounding_is_taken_where_it_is_the_larger_and_refused_where_it_is_not ... ok
+test the_crates_golden_vectors_v1_to_v5_hold_on_the_today_clock ... ok
+test the_exchange_line_split_in_two_is_taken_where_it_is_the_larger ... ok
+test the_exact_half_paisa_vwap_rounds_up_and_stt_is_taken_at_it ... ok
+test for_random_trades_the_headline_is_at_least_every_clock_and_worst_at_least_official ... ok
+test the_quantity_tie_is_priced_both_ways ... ok
+test the_new_note_and_the_crates_own_stack_agree_on_every_vector_they_both_price ... ok
+test the_smallest_trade_prices_to_nothing_but_the_dp_reading ... ok
+test the_square_off_fee_is_per_broker_order_on_top_and_gst_is_its_own_line ... ok
+test the_headline_comes_from_the_dated_clock_until_the_rates_agree_on_every_day_of_the_window ... ok
+test for_random_trades_every_reading_set_on_every_clock_is_under_the_worst ... ok
+test the_worst_is_at_least_every_reading_set_and_the_worst_set_reproduces_it ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running unittests src/lib.rs (target/debug/deps/greeks-de4bf8f713c8b6e9)
+
+running 43 tests
+test bsm::tests::a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in ... ok
+test bsm::tests::a_non_finite_input_is_refused_field_by_field ... ok
+test bsm::tests::an_expired_contract_is_its_own_refusal_and_not_a_malformed_input ... ok
+test bsm::tests::an_in_range_input_that_the_model_cannot_represent_is_refused_not_returned ... ok
+test bsm::tests::every_bound_accepts_the_value_exactly_on_it ... ok
+test bsm::tests::every_bound_refuses_the_value_just_past_it_and_names_it ... ok
+test bsm::tests::every_greek_reproduces_a_central_difference_wherever_one_can_be_taken ... ok
+test bsm::tests::gamma_and_vega_are_bit_identical_between_the_call_and_the_put ... ok
+test bsm::tests::put_call_parity_holds_across_the_grid ... ok
+test bsm::tests::the_delta_difference_is_the_carry_discount_to_a_measured_bound ... ok
+test bsm::tests::the_kind_and_the_greeks_are_ordinary_values ... ok
+test bsm::tests::the_no_arbitrage_floor_is_the_discounted_intrinsic_value_on_both_sides ... ok
+test bsm::tests::the_price_scale_is_the_two_legs_and_it_dwarfs_the_price_they_leave ... ok
+test error::tests::errors_are_std_errors_and_are_copied_compared_and_printed ... ok
+test error::tests::every_error_renders_a_distinct_reason ... ok
+test error::tests::the_reason_names_the_numbers_that_produced_it ... ok
+test bsm::tests::a_non_positive_spot_strike_or_volatility_is_refused_by_name ... ok
+test moneyness::tests::a_call_and_a_put_read_the_same_rung_from_opposite_sides ... ok
+test moneyness::tests::a_rung_beyond_the_bound_is_refused_rather_than_truncated_into_range ... ok
+test moneyness::tests::a_strike_between_two_rungs_is_refused_and_never_rounded_onto_one ... ok
+test moneyness::tests::each_malformed_argument_is_refused_by_its_own_name ... ok
+test moneyness::tests::the_rung_is_an_ordinary_value ... ok
+test normal::tests::a_non_finite_argument_propagates_only_when_it_is_nan ... ok
+test normal::tests::both_hart_branches_and_both_saturating_tails_are_exercised ... ok
+test normal::tests::the_cdf_matches_known_values ... ok
+test normal::tests::the_density_is_the_derivative_of_the_distribution ... ok
+test normal::tests::the_distribution_is_symmetric_and_monotone ... ok
+test solver::tests::a_broken_contract_is_refused_before_the_search_starts ... ok
+test solver::tests::a_non_finite_market_price_is_refused_before_anything_is_computed ... ok
+test solver::tests::a_price_at_or_above_the_model_supremum_is_refused_on_both_sides ... ok
+test solver::tests::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility ... ok
+test solver::tests::a_price_outside_the_searched_band_is_refused_rather_than_clamped_into_it ... ok
+test solver::tests::a_price_at_or_below_the_discounted_intrinsic_is_refused_on_both_sides ... ok
+test normal::tests::hart_agrees_with_an_independent_reference ... ok
+test solver::tests::a_price_that_does_not_determine_a_volatility_is_refused_not_returned ... ok
+test solver::tests::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band ... ok
+test solver::tests::the_iteration_count_is_the_work_actually_done ... ok
+test solver::tests::the_reported_cost_is_every_model_evaluation ... ok
+test solver::tests::the_result_is_an_ordinary_value ... ok
+test solver::tests::the_seed_lands_next_to_the_answer_at_the_money ... ok
+test solver::tests::the_solver_is_idempotent_to_the_bit ... ok
+test solver::tests::the_iteration_count_never_exceeds_the_arithmetic_bound ... ok
+test solver::tests::a_volatility_round_trips_through_the_solver_and_back ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/standalone.rs (target/debug/deps/standalone-a405c4f57b46587b)
+
+running 1 test
+test the_whole_public_surface_is_reachable_with_nothing_else_in_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vendor_anchor.rs (target/debug/deps/vendor_anchor-91850e143502647f)
+
+running 11 tests
+test no_single_contract_reproduces_the_chain_and_the_shortfall_is_a_number ... ok
+test our_greeks_reproduce_the_captured_dhan_chain ... ok
+test the_maturity_is_recovered_in_closed_form_from_the_deltas_and_the_volatilities ... ok
+test the_delta_difference_is_reproduced_by_the_two_volatilities_and_says_nothing_about_the_carry ... ok
+test the_two_gammas_are_invariant_to_the_rate_and_the_maturity ... ok
+test the_carry_is_consistent_with_zero_and_the_sample_cannot_pin_it ... ok
+test the_trading_day_divisor_is_excluded_and_the_calendar_one_is_not_selected ... ok
+test the_two_published_volatilities_are_transposed_and_the_identity_says_so ... ok
+test vega_is_published_per_percentage_point_and_the_index_level_proves_it ... ok
+test the_two_sides_disagree_on_the_rate_and_the_disagreement_is_reported_not_hidden ... ok
+test the_rate_criterion_has_its_root_at_370_and_365_is_a_convention_near_it ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+   Doc-tests costs
+
+running 59 tests
+test crates/costs/src/day.rs - day::TradeDay::from_ordinal (line 356) ... ok
+test crates/costs/src/day.rs - day::TradeDay::new (line 221) ... ok
+test crates/costs/src/dhan_calc.rs - dhan_calc::quote (line 113) ... ok
+test crates/costs/src/equity_clock.rs - equity_clock::price_trade (line 267) ... ok
+test crates/costs/src/equity_dated.rs - equity_dated::worst_state_stamp (line 1202) ... ok
+test crates/costs/src/equity_dated.rs - equity_dated::rates_on (line 994) ... ok
+test crates/costs/src/equity_dated.rs - equity_dated::StateStamp::on (line 1160) ... ok
+test crates/costs/src/expiry.rs - expiry::next_weekly_expiry (line 330) ... ok
+test crates/costs/src/exact.rs - exact::Ratio::apply (line 123) ... ok
+test crates/costs/src/expiry.rs - expiry::next_monthly_expiry (line 386) ... ok
+test crates/costs/src/exact.rs - exact::round_half_up (line 332) ... ok
+test crates/costs/src/fill.rs - fill::Bar::new (line 151) ... ok
+test crates/costs/src/fill.rs - fill::fills_at (line 396) ... ok
+test crates/costs/src/fill.rs - fill::Bar::flat (line 212) ... ok
+test crates/costs/src/expiry.rs - expiry::weekly_regime (line 273) ... ok
+test crates/costs/src/ledger.rs - ledger::DayLedger::new (line 188) ... ok
+test crates/costs/src/ledger.rs - ledger::ExecutedOrder::with_part (line 111) ... ok
+test crates/costs/src/ledger.rs - ledger::DayLedger::order_lines_unrounded (line 483) ... ok
+test crates/costs/src/fill.rs - fill::worst_case_fills (line 500) ... ok
+test crates/costs/src/lot.rs - lot::lot_size_on (line 215) ... ok
+test crates/costs/src/ledger.rs - ledger::order_lines_unrounded (line 366) ... ok
+test crates/costs/src/lot.rs - lot::contract_quantity (line 541) ... ok
+test crates/costs/src/lot.rs - lot::lot_size_of (line 471) ... ok
+test crates/costs/src/lot.rs - lot::notional (line 581) ... ok
+test crates/costs/src/money.rs - money::ceil_to_paisa (line 123) ... ok
+test crates/costs/src/money.rs - money::ceil_to_rupee (line 183) ... ok
+test crates/costs/src/money.rs - money::floor_to_paisa (line 155) ... ok
+test crates/costs/src/moneyness.rs - moneyness::atm_offset (line 242) ... ok
+test crates/costs/src/money.rs - money::levy_ceiling (line 210) ... ok
+test crates/costs/src/money.rs - money::scaled (line 95) ... ok
+test crates/costs/src/money.rs - money::statutory_levy (line 236) ... ok
+test crates/costs/src/moneyness.rs - moneyness::moneyness_steps (line 323) ... ok
+test crates/costs/src/moneyness.rs - moneyness::classify (line 384) ... ok
+test crates/costs/src/regime.rs - regime::exchange_charge_rate (line 654) ... ok
+test crates/costs/src/regime.rs - regime::ipft_rate (line 708) ... ok
+test crates/costs/src/regime.rs - regime::stt_options_rate (line 617) ... ok
+test crates/costs/src/schedule.rs - schedule::RateBasis::rate_set (line 710) ... ok
+test crates/costs/src/schedule.rs - schedule::RateCard::resolve (line 812) ... ok
+test crates/costs/src/scope.rs - scope::is_cost_bearing (line 148) ... ok
+test crates/costs/src/schedule.rs - schedule::dhan_brokerage (line 477) ... ok
+test crates/costs/src/schedule.rs - schedule::RateSelector::version (line 622) ... ok
+test crates/costs/src/scope.rs - scope::is_cost_free (line 92) ... ok
+test crates/costs/src/stack.rs - stack::NetTrade::versions (line 1658) ... ok
+test crates/costs/src/stack.rs - stack::ClientSecurityDay::open (line 418) ... ok
+test crates/costs/src/stack.rs - stack::ClientDay::add (line 1311) ... ok
+test crates/costs/src/stack.rs - stack::NetTrade::of_day (line 1530) ... ok
+test crates/costs/src/strike.rs - strike::at_the_money (line 245) ... ok
+test crates/costs/src/stack.rs - stack::Order::new (line 113) ... ok
+test crates/costs/src/strike.rs - strike::strike_at (line 308) ... ok
+test crates/costs/src/trip.rs - trip::Charges::itemised (line 818) ... ok
+test crates/costs/src/trip.rs - trip::Rates::new (line 291) ... ok
+test crates/costs/src/strike.rs - strike::strike_step_on (line 204) ... ok
+test crates/costs/src/trip.rs - trip::Rates::resolve (line 377) ... ok
+test crates/costs/src/trip.rs - trip::charge_stack (line 1057) ... ok
+test crates/costs/src/trip.rs - trip::RoundTrip::in_lots (line 579) ... ok
+test crates/costs/src/venue.rs - venue::exchange_for_underlying (line 56) ... ok
+test crates/costs/src/trip.rs - trip::price (line 1229) ... ok
+test crates/costs/src/trip.rs - trip::RoundTrip::new (line 499) ... ok
+test crates/costs/src/venue.rs - venue::swept_slot (line 141) ... ok
+
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+all doctests ran in 0.93s; merged doctests compilation took 0.78s
+   Doc-tests greeks
+
+running 4 tests
+test crates/greeks/src/bsm.rs - bsm::Contract::greeks (line 298) ... ok
+test crates/greeks/src/moneyness.rs - moneyness::Moneyness::from_ladder (line 81) ... ok
+test crates/greeks/src/lib.rs - (line 102) ... ok
+test crates/greeks/src/solver.rs - solver::Contract::implied_volatility (line 242) ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.33s; merged doctests compilation took 0.31s
+### rc=0 wall=3s
+
+################ SECTION 4c: core's compilable targets with the 14 exclusions ################
+$ cargo test --locked -p core --test bound_probe --test cost_invariants --test lint --test zerodha_index -- --exact --skip menu::tests::sf3_menu_and_sets_load_with_the_signed_counts --skip menu::tests::sf3_menu_fail_closed --skip menu::tests::sf3_distance_floor_counted --skip menu::tests::sf3_tp_floor_not_armed_at_or_above_entry --skip menu::tests::sf3_tp_theta_level_and_absence --skip tests33s::v33_search1d_sets_load_and_count --skip tests3::sf3_ttp_replaces_tp_close --skip tests34::root_digest_same_for_every_form --skip tests34::sfz_roundtrip_all_rows --skip every_declared_cost_invariant_reaches_a_bench --skip the_document_declares_the_five_operations_rule_4_names --skip every_measured_cost_invariant_is_declared --skip the_reconciliation_is_reading_something --skip every_crate_carries_a_ratio_bench
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running tests/bound_probe.rs (target/debug/deps/bound_probe-065891ec9d1feade)
+
+running 2 tests
+test the_guard_does_not_change_any_answer ... ok
+test an_over_long_argument_is_refused_before_it_is_hashed ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cost_invariants.rs (target/debug/deps/cost_invariants-2c183e193329c5bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/lint.rs (target/debug/deps/lint-5600b1f7a153aad2)
+
+running 2 tests
+test the_module_list_is_the_whole_crate ... ok
+test no_float_in_price ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/zerodha_index.rs (target/debug/deps/zerodha_index-b5d365590b87d183)
+
+running 5 tests
+test every_alias_round_trips_through_its_inverse ... ok
+test no_other_vendor_is_reclassified_by_a_segment_word ... ok
+test the_promotion_cannot_repair_a_row_that_is_not_an_index ... ok
+test the_swept_indices_decode_to_the_ticker_the_engine_names ... ok
+test the_swept_instruments_carry_the_exchange_name_they_were_renamed_from ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+### rc=0 wall=0s
