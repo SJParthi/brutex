@@ -29,9 +29,9 @@ run; EXACT = a count; ESTIMATE = a forecast. Your first message gives you K and 
    these scripts, never add a skip or an exclude beyond STEP 3's rule.
 5. The scripts delete or stop only these, all inside the run user's own folder `~/ah`: the worker's lock
    folder; cargo-mutants copies a cut worker left in `~/ah/tmp`; the baseline export `~/ah/plain` after
-   its run; test scratch in `~/ah/tmp` untouched for 60 minutes (failing tests leave it behind, and it
-   filled earlier boxes' disks); and, on Linux only, processes of the run user that a cut worker left
-   working inside `~/ah`. Nothing else.
+   its run; the `rustup-init` the setup downloads into `~/ah/tmp`, once it has run; test scratch in
+   `~/ah/tmp` untouched for 60 minutes (failing tests leave it behind, and it filled earlier boxes' disks);
+   and, on Linux only, processes of the run user that a cut worker left working inside `~/ah`. Nothing else.
 6. Use shell, git, awk, Rust and cargo only. No other scripting language (never the six-letter one that
    starts with "Py").
 
@@ -113,10 +113,14 @@ What the worker runs, in the app commit's folder, with `TMPDIR=~/ah/tmp`, `CARGO
 dev profile overridden by environment to `CARGO_PROFILE_DEV_OPT_LEVEL=0`, `CARGO_PROFILE_DEV_INCREMENTAL=true`,
 `CARGO_PROFILE_DEV_DEBUG=0`:
 
-1. Setup: rustup 1.97.1 (`--profile minimal`, components rustfmt, clippy, llvm-tools-preview, target
+1. Setup: when the run user has no rustup, `rustup-init` from
+   `https://static.rust-lang.org/rustup/dist/<target>/rustup-init`, checked against the `.sha256` beside it
+   (not the `sh.rustup.rs` script: a Default cloud environment refuses that host, and the script only fetches
+   this same file); rustup 1.97.1 (`--profile minimal`, components rustfmt, clippy, llvm-tools-preview, target
    wasm32-unknown-unknown, as `rust-toolchain.toml` lists), `cargo install cargo-mutants --version 27.1.0
    --locked`, `cargo install cargo-nextest --version 0.9.145 --locked`, then `git fetch --depth 1` of the
-   app commit and a check that HEAD is that commit and the tree is clean. Each install has a 40-minute limit.
+   app commit and a check that HEAD is that commit and the tree is clean. Each download and install has a
+   40-minute limit.
 2. List: `cargo mutants --list -p store -p pull --cargo-arg=--locked` (whole list) and the same with
    `--shard K/N`; the shard must be exactly lines K*c+1 .. (K+1)*c of the whole list (c = ceil(total/N)),
    hold no repeated name, and equal `SHARD-LIST.txt` already on the result branch, if any.
@@ -350,7 +354,22 @@ if [ ! -e "$S/setup.done" ]; then
   say "setup: rust $AH_RUST, cargo-mutants $AH_CMV, cargo-nextest $AH_NXV, app $AH_C"
   if [ "$DRY" != 1 ]; then
     if ! command -v rustup >/dev/null 2>&1; then
-      curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$AH_RUST" >> "$S/setup.log" 2>&1 || stop "setup: rustup-init failed (setup.log)"
+      # rustup-init itself, from the Rust dist server: a limited (Default) cloud network refuses sh.rustup.rs,
+      # whose script only fetches this same file from this same server. No pipe: each step stops on its own.
+      case "$(uname -sm)" in
+        "Linux x86_64") RT=x86_64-unknown-linux-gnu;;
+        "Linux aarch64") RT=aarch64-unknown-linux-gnu;;
+        "Darwin x86_64") RT=x86_64-apple-darwin;;
+        "Darwin arm64") RT=aarch64-apple-darwin;;
+        *) stop "setup: no rustup-init target for $(uname -sm)";;
+      esac
+      RI=$AH/tmp/rustup-init; RIU=https://static.rust-lang.org/rustup/dist/$RT/rustup-init
+      $TO curl --proto '=https' --tlsv1.2 --retry 3 -sSfL -o "$RI" "$RIU" >> "$S/setup.log" 2>&1 || stop "setup: cannot download $RIU (setup.log)"
+      RIS=$($TO curl --proto '=https' --tlsv1.2 --retry 3 -sSfL "$RIU.sha256" 2>> "$S/setup.log") || stop "setup: cannot download $RIU.sha256 (setup.log)"
+      [ "${RIS%% *}" = "$(sha256sum "$RI" | awk '{print $1}')" ] || stop "setup: $RI does not match $RIU.sha256"
+      chmod +x "$RI" && $TO "$RI" -y --profile minimal --default-toolchain "$AH_RUST" >> "$S/setup.log" 2>&1 || stop "setup: rustup-init failed (setup.log)"
+      rm -f "$RI"
+      command -v rustup >/dev/null 2>&1 || stop "setup: rustup-init finished but rustup is not in $CARGO_HOME/bin"
     fi
     $TO rustup toolchain install "$AH_RUST" --profile minimal -c rustfmt -c clippy -c llvm-tools-preview -t wasm32-unknown-unknown >> "$S/setup.log" 2>&1 || stop "setup: rustup toolchain install $AH_RUST failed (setup.log)"
     if [ "$(cargo mutants --version 2>/dev/null)" != "cargo-mutants $AH_CMV" ]; then
@@ -749,6 +768,6 @@ exit 0
 ```text
 c6fb3de3a61185765a1af7a5b3775c7a93dbd30f006afa639a27e02c51a5f8e6  ah-common.sh
 0d9d57c772a0fc4f73cca118b195f50f9c2c8a1dcad60928d4410821b61c3a86  ah-esc.awk
-b2062f861dfe820f1063ff22856ce71e5f30d725476fffe0e2595225b9902ffa  ah-run.sh
+02532edc88512ce2006514bb717040eae43edde8bb86529214b7e7f75d55d00e  ah-run.sh
 eb427bd39a7401ccdd49ef477995339830838c93e33338039b1a66b4663b11f3  drive.sh
 ```
