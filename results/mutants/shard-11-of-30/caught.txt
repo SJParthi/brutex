@@ -35,3 +35,19 @@ crates/spikefade/src/report3.rs:1980:193: replace >= with < in stage_b_whole
 crates/spikefade/src/report3.rs:1993:25: replace += with *= in stage_b_whole
 crates/spikefade/src/report3.rs:2003:29: replace += with *= in stage_b_whole
 crates/spikefade/src/report3.rs:2006:25: replace += with *= in stage_b_whole
+crates/spikefade/src/report3.rs:2053:5: replace compare_skip with ()
+crates/spikefade/src/report3.rs:2081:25: replace += with -= in compare_skip
+crates/spikefade/src/report3.rs:2083:25: replace += with -= in compare_skip
+crates/spikefade/src/report3.rs:2102:54: replace / with % in stage_b_day_major
+crates/spikefade/src/report3.rs:2105:90: replace * with + in stage_b_day_major
+crates/spikefade/src/report3.rs:2137:12: delete ! in stage_b_day_major
+crates/spikefade/src/report3.rs:2186:19: replace > with == in stage_b_day_major
+crates/spikefade/src/report3.rs:2186:19: replace > with < in stage_b_day_major
+crates/spikefade/src/report3.rs:2204:14: replace < with == in stage_b_day_major
+crates/spikefade/src/report3.rs:2204:14: replace < with <= in stage_b_day_major
+crates/spikefade/src/report3.rs:2208:45: replace * with + in stage_b_day_major
+crates/spikefade/src/report3.rs:2208:45: replace * with / in stage_b_day_major
+crates/spikefade/src/report3.rs:2219:57: replace < with > in stage_b_day_major
+crates/spikefade/src/report3.rs:2241:16: replace += with -= in stage_b_day_major
+crates/spikefade/src/report3.rs:2245:109: replace * with + in stage_b_day_major
+crates/spikefade/src/report3.rs:2259:40: replace + with - in stage_b_day_major
