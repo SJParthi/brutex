@@ -1,0 +1,114 @@
+crates/opt_pos/src/price.rs:291:83: replace - with / in price_intraday_holes
+crates/opt_pos/src/price.rs:291:79: replace - with + in price_intraday_holes
+crates/opt_pos/src/price.rs:291:79: replace - with / in price_intraday_holes
+crates/opt_pos/src/price.rs:291:65: replace - with + in price_intraday_holes
+crates/opt_pos/src/price.rs:291:65: replace - with / in price_intraday_holes
+crates/opt_pos/src/price.rs:291:83: replace - with + in price_intraday_holes
+crates/opt_pos/src/price.rs:299:37: delete field entry_orders from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:299:67: delete field exit_orders from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:299:89: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:300:41: delete field entry_orders from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:300:75: delete field exit_orders from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:300:101: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:306:43: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:306:43: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:306:37: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:306:37: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:323:33: replace < with == in price_intraday_holes
+crates/opt_pos/src/price.rs:323:33: replace < with > in price_intraday_holes
+crates/opt_pos/src/price.rs:323:33: replace < with <= in price_intraday_holes
+crates/opt_pos/src/price.rs:345:25: replace < with <= in xc_plan
+crates/opt_pos/src/secs.rs:77:22: replace * with + in fno_end
+crates/opt_pos/src/secs.rs:77:22: replace * with / in fno_end
+crates/opt_pos/src/secs.rs:88:25: replace match guard s >= a && s < b with true in sq0
+crates/opt_pos/src/secs.rs:88:25: replace match guard s >= a && s < b with false in sq0
+crates/opt_pos/src/secs.rs:88:32: replace && with || in sq0
+crates/opt_pos/src/secs.rs:88:27: replace >= with < in sq0
+crates/opt_pos/src/secs.rs:88:37: replace < with == in sq0
+crates/opt_pos/src/secs.rs:88:37: replace < with > in sq0
+crates/opt_pos/src/secs.rs:88:37: replace < with <= in sq0
+crates/opt_pos/src/secs.rs:98:5: replace option_day -> Result<Option<Vec<Sec>>, String> with Ok(None)
+crates/opt_pos/src/secs.rs:98:5: replace option_day -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![]))
+crates/opt_pos/src/secs.rs:98:5: replace option_day -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![Default::default()]))
+crates/opt_pos/src/secs.rs:98:42: replace / with % in option_day
+crates/opt_pos/src/secs.rs:98:42: replace / with * in option_day
+crates/opt_pos/src/secs.rs:98:26: replace - with + in option_day
+crates/opt_pos/src/secs.rs:98:26: replace - with / in option_day
+crates/opt_pos/src/secs.rs:99:121: replace + with - in option_day
+crates/opt_pos/src/secs.rs:99:121: replace + with * in option_day
+crates/opt_pos/src/secs.rs:99:114: replace * with + in option_day
+crates/opt_pos/src/secs.rs:99:114: replace * with / in option_day
+crates/opt_pos/src/secs.rs:99:126: replace * with + in option_day
+crates/opt_pos/src/secs.rs:99:126: replace * with / in option_day
+crates/opt_pos/src/secs.rs:103:65: replace && with || in option_day
+crates/opt_pos/src/secs.rs:103:52: replace && with || in option_day
+crates/opt_pos/src/secs.rs:103:38: replace && with || in option_day
+crates/opt_pos/src/secs.rs:103:34: replace > with == in option_day
+crates/opt_pos/src/secs.rs:103:34: replace > with < in option_day
+crates/opt_pos/src/secs.rs:103:34: replace > with >= in option_day
+crates/opt_pos/src/secs.rs:103:48: replace > with == in option_day
+crates/opt_pos/src/secs.rs:103:48: replace > with < in option_day
+crates/opt_pos/src/secs.rs:103:48: replace > with >= in option_day
+crates/opt_pos/src/secs.rs:103:61: replace > with == in option_day
+crates/opt_pos/src/secs.rs:103:61: replace > with < in option_day
+crates/opt_pos/src/secs.rs:103:61: replace > with >= in option_day
+crates/opt_pos/src/secs.rs:103:75: replace >= with < in option_day
+crates/opt_pos/src/secs.rs:104:25: delete ! in option_day
+crates/opt_pos/src/secs.rs:104:66: replace && with || in option_day
+crates/opt_pos/src/secs.rs:104:61: replace >= with < in option_day
+crates/opt_pos/src/secs.rs:104:81: replace < with == in option_day
+crates/opt_pos/src/secs.rs:104:81: replace < with > in option_day
+crates/opt_pos/src/secs.rs:104:81: replace < with <= in option_day
+crates/opt_pos/src/secs.rs:115:5: replace option_window -> Result<Option<Vec<Sec>>, String> with Ok(None)
+crates/opt_pos/src/secs.rs:115:5: replace option_window -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![]))
+crates/opt_pos/src/secs.rs:115:5: replace option_window -> Result<Option<Vec<Sec>>, String> with Ok(Some(vec![Default::default()]))
+crates/opt_pos/src/secs.rs:119:65: replace && with || in option_window
+crates/opt_pos/src/secs.rs:119:52: replace && with || in option_window
+crates/opt_pos/src/secs.rs:119:38: replace && with || in option_window
+crates/opt_pos/src/secs.rs:119:34: replace > with == in option_window
+crates/opt_pos/src/secs.rs:119:34: replace > with < in option_window
+crates/opt_pos/src/secs.rs:119:34: replace > with >= in option_window
+crates/opt_pos/src/secs.rs:119:48: replace > with == in option_window
+crates/opt_pos/src/secs.rs:119:48: replace > with < in option_window
+crates/opt_pos/src/secs.rs:119:48: replace > with >= in option_window
+crates/opt_pos/src/secs.rs:119:61: replace > with == in option_window
+crates/opt_pos/src/secs.rs:119:61: replace > with < in option_window
+crates/opt_pos/src/secs.rs:119:61: replace > with >= in option_window
+crates/opt_pos/src/secs.rs:119:75: replace >= with < in option_window
+crates/opt_pos/src/secs.rs:120:25: delete ! in option_window
+crates/opt_pos/src/secs.rs:120:66: replace && with || in option_window
+crates/opt_pos/src/secs.rs:120:61: replace >= with < in option_window
+crates/opt_pos/src/secs.rs:120:81: replace < with == in option_window
+crates/opt_pos/src/secs.rs:120:81: replace < with > in option_window
+crates/opt_pos/src/secs.rs:120:81: replace < with <= in option_window
+crates/opt_pos/src/secs.rs:131:5: replace spot_day -> Result<Vec<Sec>, String> with Ok(vec![])
+crates/opt_pos/src/secs.rs:131:5: replace spot_day -> Result<Vec<Sec>, String> with Ok(vec![Default::default()])
+crates/opt_pos/src/secs.rs:131:34: replace + with - in spot_day
+crates/opt_pos/src/secs.rs:131:34: replace + with * in spot_day
+crates/opt_pos/src/secs.rs:131:24: replace + with - in spot_day
+crates/opt_pos/src/secs.rs:131:24: replace + with * in spot_day
+crates/opt_pos/src/secs.rs:131:17: replace * with + in spot_day
+crates/opt_pos/src/secs.rs:131:17: replace * with / in spot_day
+crates/opt_pos/src/secs.rs:131:29: replace * with + in spot_day
+crates/opt_pos/src/secs.rs:131:29: replace * with / in spot_day
+crates/opt_pos/src/secs.rs:131:51: replace == with != in spot_day
+crates/opt_pos/src/secs.rs:131:72: replace * with + in spot_day
+crates/opt_pos/src/secs.rs:131:72: replace * with / in spot_day
+crates/opt_pos/src/secs.rs:132:109: replace + with - in spot_day
+crates/opt_pos/src/secs.rs:132:109: replace + with * in spot_day
+crates/opt_pos/src/secs.rs:132:102: replace * with + in spot_day
+crates/opt_pos/src/secs.rs:132:102: replace * with / in spot_day
+crates/opt_pos/src/secs.rs:132:114: replace * with + in spot_day
+crates/opt_pos/src/secs.rs:132:114: replace * with / in spot_day
+crates/opt_pos/src/secs.rs:136:21: delete ! in spot_day
+crates/opt_pos/src/secs.rs:136:62: replace && with || in spot_day
+crates/opt_pos/src/secs.rs:136:57: replace >= with < in spot_day
+crates/opt_pos/src/secs.rs:136:77: replace < with == in spot_day
+crates/opt_pos/src/secs.rs:136:77: replace < with > in spot_day
+crates/opt_pos/src/secs.rs:136:77: replace < with <= in spot_day
+crates/opt_pos/src/secs.rs:144:43: replace < with <= in last_before
+crates/opt_pos/src/sess.rs:20:22: replace match guard (0..24).contains(h) && (0..60).contains(m) && (0..60).contains(s) with true in hms
+crates/opt_pos/src/sess.rs:20:65: replace && with || in hms
+crates/opt_pos/src/sess.rs:20:42: replace && with || in hms
+crates/opt_pos/src/sess.rs:154:9: replace Sessions::is_session -> bool with true
+crates/opt_pos/src/sess.rs:154:9: replace Sessions::is_session -> bool with false

@@ -1,0 +1,168 @@
+crates/opt_pos/src/price.rs:291:31: replace - with / in price_intraday_holes
+crates/opt_pos/src/price.rs:298:33: delete field sell_value from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:298:60: delete field exit_orders from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:298:88: delete field rem_kind from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:298:115: delete field settle_value from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:298:133: delete field settle_notional from struct Trip expression in price_intraday_holes
+crates/opt_pos/src/price.rs:298:54: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:298:54: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:298:48: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:298:48: replace + with * in price_intraday_holes
+crates/opt_pos/src/price.rs:299:89: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:300:101: replace + with - in price_intraday_holes
+crates/opt_pos/src/price.rs:304:23: replace <= with > in price_intraday_holes
+crates/opt_pos/src/price.rs:311:34: replace == with != in price_intraday_holes
+crates/opt_pos/src/price.rs:313:51: replace - with + in price_intraday_holes
+crates/opt_pos/src/price.rs:313:51: replace - with / in price_intraday_holes
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (None, true)
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (None, false)
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (Some(0), true)
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (Some(0), false)
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (Some(1), false)
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (Some(1), true)
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (Some(-1), false)
+crates/opt_pos/src/price.rs:335:5: replace xc_plan -> (Option<i64>, bool) with (Some(-1), true)
+crates/opt_pos/src/price.rs:335:35: replace + with - in xc_plan
+crates/opt_pos/src/price.rs:335:35: replace + with * in xc_plan
+crates/opt_pos/src/price.rs:335:28: replace * with + in xc_plan
+crates/opt_pos/src/price.rs:335:28: replace * with / in xc_plan
+crates/opt_pos/src/price.rs:335:39: replace * with + in xc_plan
+crates/opt_pos/src/price.rs:335:39: replace * with / in xc_plan
+crates/opt_pos/src/price.rs:336:11: replace == with != in xc_plan
+crates/opt_pos/src/price.rs:339:20: replace + with - in xc_plan
+crates/opt_pos/src/price.rs:339:20: replace + with * in xc_plan
+crates/opt_pos/src/price.rs:339:26: replace * with + in xc_plan
+crates/opt_pos/src/price.rs:339:26: replace * with / in xc_plan
+crates/opt_pos/src/price.rs:341:49: replace < with == in xc_plan
+crates/opt_pos/src/price.rs:341:49: replace < with > in xc_plan
+crates/opt_pos/src/price.rs:341:49: replace < with <= in xc_plan
+crates/opt_pos/src/price.rs:342:20: replace && with || in xc_plan
+crates/opt_pos/src/price.rs:342:25: replace < with == in xc_plan
+crates/opt_pos/src/price.rs:342:25: replace < with > in xc_plan
+crates/opt_pos/src/price.rs:342:25: replace < with <= in xc_plan
+crates/opt_pos/src/price.rs:345:25: replace < with == in xc_plan
+crates/opt_pos/src/price.rs:345:25: replace < with > in xc_plan
+crates/opt_pos/src/secs.rs:30:9: replace <impl Row for Sec>::ts -> i64 with 0
+crates/opt_pos/src/secs.rs:30:9: replace <impl Row for Sec>::ts -> i64 with 1
+crates/opt_pos/src/secs.rs:30:9: replace <impl Row for Sec>::ts -> i64 with -1
+crates/opt_pos/src/secs.rs:33:9: replace <impl Row for Sec>::high -> i64 with 0
+crates/opt_pos/src/secs.rs:33:9: replace <impl Row for Sec>::high -> i64 with 1
+crates/opt_pos/src/secs.rs:33:9: replace <impl Row for Sec>::high -> i64 with -1
+crates/opt_pos/src/secs.rs:36:9: replace <impl Row for Sec>::low -> i64 with 0
+crates/opt_pos/src/secs.rs:36:9: replace <impl Row for Sec>::low -> i64 with 1
+crates/opt_pos/src/secs.rs:36:9: replace <impl Row for Sec>::low -> i64 with -1
+crates/opt_pos/src/secs.rs:39:9: replace <impl Row for Sec>::vol -> u64 with 0
+crates/opt_pos/src/secs.rs:39:9: replace <impl Row for Sec>::vol -> u64 with 1
+crates/opt_pos/src/secs.rs:44:5: replace hms -> i64 with 0
+crates/opt_pos/src/secs.rs:44:5: replace hms -> i64 with 1
+crates/opt_pos/src/secs.rs:44:5: replace hms -> i64 with -1
+crates/opt_pos/src/secs.rs:45:82: replace + with - in hms
+crates/opt_pos/src/secs.rs:45:82: replace + with * in hms
+crates/opt_pos/src/secs.rs:45:44: replace + with - in hms
+crates/opt_pos/src/secs.rs:45:44: replace + with * in hms
+crates/opt_pos/src/secs.rs:45:37: replace * with + in hms
+crates/opt_pos/src/secs.rs:45:37: replace * with / in hms
+crates/opt_pos/src/secs.rs:45:77: replace * with + in hms
+crates/opt_pos/src/secs.rs:45:77: replace * with / in hms
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with None
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((0, 0))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((0, 1))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((0, -1))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((1, 0))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((1, 1))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((1, -1))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((-1, 0))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((-1, 1))
+crates/opt_pos/src/secs.rs:51:5: replace halt_der -> Option<(i64, i64)> with Some((-1, -1))
+crates/opt_pos/src/secs.rs:52:9: delete match arm "2020-03-13" in halt_der
+crates/opt_pos/src/secs.rs:53:9: delete match arm "2020-03-23" in halt_der
+crates/opt_pos/src/secs.rs:54:9: delete match arm "2021-02-24" in halt_der
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with None
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((0, 0))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((0, 1))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((0, -1))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((1, 0))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((1, 1))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((1, -1))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((-1, 0))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((-1, 1))
+crates/opt_pos/src/secs.rs:63:5: replace halt_idx -> Option<(i64, i64)> with Some((-1, -1))
+crates/opt_pos/src/secs.rs:64:9: delete match arm "2020-03-13" in halt_idx
+crates/opt_pos/src/secs.rs:65:9: delete match arm "2020-03-23" in halt_idx
+crates/opt_pos/src/secs.rs:66:9: delete match arm "2021-02-24" in halt_idx
+crates/opt_pos/src/secs.rs:76:5: replace fno_end -> i64 with 0
+crates/opt_pos/src/secs.rs:76:5: replace fno_end -> i64 with 1
+crates/opt_pos/src/secs.rs:76:5: replace fno_end -> i64 with -1
+crates/opt_pos/src/secs.rs:76:20: replace == with != in fno_end
+crates/opt_pos/src/secs.rs:86:5: replace sq0 -> i64 with 0
+crates/opt_pos/src/secs.rs:86:5: replace sq0 -> i64 with 1
+crates/opt_pos/src/secs.rs:86:5: replace sq0 -> i64 with -1
+crates/opt_pos/src/secs.rs:86:33: replace + with - in sq0
+crates/opt_pos/src/secs.rs:86:33: replace + with * in sq0
+crates/opt_pos/src/secs.rs:86:26: replace * with + in sq0
+crates/opt_pos/src/secs.rs:86:26: replace * with / in sq0
+crates/opt_pos/src/secs.rs:86:38: replace * with + in sq0
+crates/opt_pos/src/secs.rs:86:38: replace * with / in sq0
+crates/opt_pos/src/secs.rs:144:5: replace last_before -> Option<&Sec> with None
+crates/opt_pos/src/secs.rs:144:5: replace last_before -> Option<&Sec> with Some(Box::leak(Box::new(Default::default())))
+crates/opt_pos/src/secs.rs:144:43: replace < with == in last_before
+crates/opt_pos/src/secs.rs:144:43: replace < with > in last_before
+crates/opt_pos/src/sess.rs:18:5: replace hms -> Option<i64> with None
+crates/opt_pos/src/sess.rs:18:5: replace hms -> Option<i64> with Some(0)
+crates/opt_pos/src/sess.rs:18:5: replace hms -> Option<i64> with Some(1)
+crates/opt_pos/src/sess.rs:18:5: replace hms -> Option<i64> with Some(-1)
+crates/opt_pos/src/sess.rs:20:22: replace match guard (0..24).contains(h) && (0..60).contains(m) && (0..60).contains(s) with false in hms
+crates/opt_pos/src/sess.rs:20:114: replace + with - in hms
+crates/opt_pos/src/sess.rs:20:114: replace + with * in hms
+crates/opt_pos/src/sess.rs:20:105: replace + with - in hms
+crates/opt_pos/src/sess.rs:20:105: replace + with * in hms
+crates/opt_pos/src/sess.rs:20:98: replace * with + in hms
+crates/opt_pos/src/sess.rs:20:98: replace * with / in hms
+crates/opt_pos/src/sess.rs:20:109: replace * with + in hms
+crates/opt_pos/src/sess.rs:20:109: replace * with / in hms
+crates/opt_pos/src/sess.rs:45:9: replace Sessions::parse -> Result<Self, String> with Ok(Default::default())
+crates/opt_pos/src/sess.rs:47:61: replace || with && in Sessions::parse
+crates/opt_pos/src/sess.rs:58:61: replace || with && in Sessions::parse
+crates/opt_pos/src/sess.rs:47:35: replace || with && in Sessions::parse
+crates/opt_pos/src/sess.rs:58:35: replace || with && in Sessions::parse
+crates/opt_pos/src/sess.rs:82:9: replace Sessions::with_muhurat -> Result<Self, String> with Ok(Default::default())
+crates/opt_pos/src/sess.rs:83:61: replace || with && in Sessions::with_muhurat
+crates/opt_pos/src/sess.rs:83:35: replace || with && in Sessions::with_muhurat
+crates/opt_pos/src/sess.rs:87:16: delete ! in Sessions::with_muhurat
+crates/opt_pos/src/sess.rs:98:9: replace Sessions::is_muhurat -> bool with true
+crates/opt_pos/src/sess.rs:98:9: replace Sessions::is_muhurat -> bool with false
+crates/opt_pos/src/sess.rs:104:9: replace Sessions::muhurat_days -> Vec<Day> with vec![]
+crates/opt_pos/src/sess.rs:104:9: replace Sessions::muhurat_days -> Vec<Day> with vec![Default::default()]
+crates/opt_pos/src/sess.rs:112:9: replace Sessions::next_carry -> Option<Day> with None
+crates/opt_pos/src/sess.rs:112:9: replace Sessions::next_carry -> Option<Day> with Some(Default::default())
+crates/opt_pos/src/sess.rs:112:50: replace <= with > in Sessions::next_carry
+crates/opt_pos/src/sess.rs:113:68: delete ! in Sessions::next_carry
+crates/opt_pos/src/sess.rs:121:9: replace Sessions::fno_end -> Result<i64, String> with Ok(0)
+crates/opt_pos/src/sess.rs:121:9: replace Sessions::fno_end -> Result<i64, String> with Ok(1)
+crates/opt_pos/src/sess.rs:121:9: replace Sessions::fno_end -> Result<i64, String> with Ok(-1)
+crates/opt_pos/src/sess.rs:129:9: replace Sessions::index_close -> Result<i64, String> with Ok(0)
+crates/opt_pos/src/sess.rs:129:9: replace Sessions::index_close -> Result<i64, String> with Ok(1)
+crates/opt_pos/src/sess.rs:129:9: replace Sessions::index_close -> Result<i64, String> with Ok(-1)
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with None
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((0, 0))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((0, 1))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((0, -1))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((1, 0))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((1, 1))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((1, -1))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((-1, 0))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((-1, 1))
+crates/opt_pos/src/sess.rs:135:9: replace Sessions::halt_der -> Option<(i64, i64)> with Some((-1, -1))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with None
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((0, 0))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((0, 1))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((0, -1))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((1, 0))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((1, 1))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((1, -1))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((-1, 0))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((-1, 1))
+crates/opt_pos/src/sess.rs:141:9: replace Sessions::halt_idx -> Option<(i64, i64)> with Some((-1, -1))
+crates/opt_pos/src/sess.rs:147:9: replace Sessions::next -> Option<Day> with None
+crates/opt_pos/src/sess.rs:147:9: replace Sessions::next -> Option<Day> with Some(Default::default())
+crates/opt_pos/src/sess.rs:147:50: replace <= with > in Sessions::next

@@ -1,0 +1,64 @@
+crates/sniper_host/src/secrun.rs:748:20: replace + with - in context
+crates/sniper_host/src/secrun.rs:762:35: delete field sess from struct Outcome expression in context
+crates/sniper_host/src/secrun.rs:748:20: replace + with * in context
+crates/sniper_host/src/secrun.rs:762:49: delete field mk from struct Outcome expression in context
+crates/sniper_host/src/secrun.rs:762:108: delete field id from struct Outcome expression in context
+crates/sniper_host/src/secrun.rs:792:87: delete ! in context
+crates/sniper_host/src/secrun.rs:792:126: delete ! in context
+crates/sniper_host/src/secrun.rs:803:22: replace != with == in context
+crates/sniper_host/src/secrun.rs:807:12: delete ! in context
+crates/sniper_host/src/secrun.rs:815:23: replace += with -= in context
+crates/sniper_host/src/secrun.rs:815:23: replace += with *= in context
+crates/sniper_host/src/secrun.rs:835:14: replace == with != in context
+crates/sniper_host/src/secrun.rs:857:44: replace == with != in context
+crates/sniper_host/src/secrun.rs:861:88: replace <= with > in context
+crates/sniper_host/src/secrun.rs:869:119: delete field id from struct Outcome expression in context
+crates/sniper_host/src/secrun.rs:876:52: replace == with != in context
+crates/sniper_host/src/secrun.rs:891:33: replace + with - in context
+crates/sniper_host/src/secrun.rs:891:33: replace + with * in context
+crates/sniper_host/src/secrun.rs:927:76: replace != with == in context
+crates/sniper_host/src/secrun.rs:927:63: replace & with | in context
+crates/sniper_host/src/secrun.rs:927:63: replace & with ^ in context
+crates/sniper_host/src/secrun.rs:939:48: replace + with - in context
+crates/sniper_host/src/secrun.rs:939:48: replace + with * in context
+crates/sniper_host/src/secrun.rs:939:41: replace * with + in context
+crates/sniper_host/src/secrun.rs:939:41: replace * with / in context
+crates/sniper_host/src/secrun.rs:957:50: replace != with == in context
+crates/sniper_host/src/secrun.rs:983:58: replace == with != in context
+crates/sniper_host/src/secrun.rs:989:36: replace != with == in context
+crates/sniper_host/src/secrun.rs:990:24: replace += with -= in context
+crates/sniper_host/src/secrun.rs:990:24: replace += with *= in context
+crates/sniper_host/src/secrun.rs:991:37: replace < with == in context
+crates/sniper_host/src/secrun.rs:991:37: replace < with > in context
+crates/sniper_host/src/secrun.rs:991:37: replace < with <= in context
+crates/sniper_host/src/secrun.rs:1001:47: replace + with - in context
+crates/sniper_host/src/secrun.rs:1001:47: replace + with * in context
+crates/sniper_host/src/secrun.rs:1027:37: replace + with - in context
+crates/sniper_host/src/secrun.rs:1027:37: replace + with * in context
+crates/sniper_host/src/secrun.rs:1030:72: replace || with && in context
+crates/sniper_host/src/secrun.rs:1030:32: replace || with && in context
+crates/sniper_host/src/secrun.rs:1030:16: delete ! in context
+crates/sniper_host/src/secrun.rs:1030:35: delete ! in context
+crates/sniper_host/src/secrun.rs:1030:82: replace == with != in context
+crates/sniper_host/src/secrun.rs:1037:48: replace && with || in context
+crates/sniper_host/src/secrun.rs:1037:30: replace == with != in context
+crates/sniper_host/src/secrun.rs:1037:122: delete - in context
+crates/sniper_host/src/secrun.rs:1076:84: replace += with -= in context
+crates/sniper_host/src/secrun.rs:1076:84: replace += with *= in context
+crates/sniper_host/src/secrun.rs:1092:27: replace += with -= in context
+crates/sniper_host/src/secrun.rs:1092:27: replace += with *= in context
+crates/sniper_host/src/secrun.rs:1092:44: replace >= with < in context
+crates/sniper_host/src/secrun.rs:1093:27: replace += with -= in context
+crates/sniper_host/src/secrun.rs:1093:27: replace += with *= in context
+crates/sniper_host/src/secrun.rs:1105:12: delete ! in context
+crates/sniper_host/src/secrun.rs:1117:43: replace == with != in context
+crates/sniper_host/src/secrun.rs:1127:37: replace + with - in context
+crates/sniper_host/src/secrun.rs:1127:37: replace + with * in context
+crates/sniper_host/src/secrun.rs:1130:21: replace += with -= in context
+crates/sniper_host/src/secrun.rs:1130:21: replace += with *= in context
+crates/sniper_host/src/secrun.rs:1138:16: delete ! in context
+crates/sniper_host/src/secrun.rs:1141:16: delete ! in context
+crates/sniper_host/src/secrun.rs:1150:23: replace == with != in context
+crates/sniper_host/src/secrun.rs:1160:45: replace && with || in context
+crates/sniper_host/src/secrun.rs:1160:27: replace == with != in context
+crates/sniper_host/src/secrun.rs:1165:62: delete - in context

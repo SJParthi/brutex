@@ -1,0 +1,54 @@
+crates/costs/src/option_clock.rs:288:5: replace today -> i64 with 1
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (0, [0; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (0, [0; 8], false)
+crates/costs/src/option_clock.rs:288:5: replace today -> i64 with -1
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (0, [1; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (0, [1; 8], false)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (0, [-1; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (1, [0; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (0, [-1; 8], false)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (1, [0; 8], false)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (1, [1; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (1, [1; 8], false)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (1, [-1; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (1, [-1; 8], false)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (-1, [0; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (-1, [0; 8], false)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (-1, [1; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (-1, [1; 8], false)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (-1, [-1; 8], true)
+crates/costs/src/option_clock.rs:304:5: replace charged -> (i64, [i64; 8], bool) with (-1, [-1; 8], false)
+crates/costs/src/option_clock.rs:308:20: replace + with - in charged
+crates/costs/src/option_clock.rs:308:20: replace + with * in charged
+crates/costs/src/option_clock.rs:318:10: replace > with == in charged
+crates/costs/src/option_clock.rs:318:10: replace > with < in charged
+crates/costs/src/option_clock.rs:318:10: replace > with >= in charged
+crates/costs/src/option_clock.rs:325:5: replace breakeven -> i64 with 0
+crates/costs/src/option_clock.rs:325:5: replace breakeven -> i64 with 1
+crates/costs/src/option_clock.rs:325:5: replace breakeven -> i64 with -1
+crates/costs/src/option_clock.rs:325:12: replace <= with > in breakeven
+crates/costs/src/option_clock.rs:328:72: replace + with - in breakeven
+crates/costs/src/option_clock.rs:328:72: replace + with * in breakeven
+crates/costs/src/option_clock.rs:328:49: replace + with - in breakeven
+crates/costs/src/option_clock.rs:328:49: replace + with * in breakeven
+crates/costs/src/option_clock.rs:328:31: replace * with + in breakeven
+crates/costs/src/option_clock.rs:328:31: replace * with / in breakeven
+crates/costs/src/option_clock.rs:329:26: replace + with - in breakeven
+crates/costs/src/option_clock.rs:329:26: replace + with * in breakeven
+crates/costs/src/option_clock.rs:329:22: replace * with + in breakeven
+crates/costs/src/option_clock.rs:329:22: replace * with / in breakeven
+crates/costs/src/option_clock.rs:329:58: replace * with + in breakeven
+crates/costs/src/option_clock.rs:329:58: replace * with / in breakeven
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (0, 0)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (0, 1)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (0, -1)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (1, 0)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (1, 1)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (1, -1)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (-1, 0)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (-1, 1)
+crates/costs/src/option_clock.rs:339:5: replace settle -> (i64, i64) with (-1, -1)
+crates/costs/src/option_clock.rs:341:33: replace * with + in settle
+crates/costs/src/option_clock.rs:341:33: replace * with / in settle
+crates/costs/src/option_clock.rs:341:69: replace * with + in settle
+crates/costs/src/option_clock.rs:341:69: replace * with / in settle

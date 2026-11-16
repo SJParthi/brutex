@@ -1,0 +1,4 @@
+crates/wf_sweep/src/lists.rs:100:20: replace += with *= in Lists::offer_learn
+crates/wf_sweep/src/lists.rs:102:26: replace > with == in Lists::offer_learn
+crates/wf_sweep/src/lists.rs:102:26: replace > with >= in Lists::offer_learn
+crates/wf_sweep/src/lists.rs:106:41: replace - with + in Lists::offer_learn

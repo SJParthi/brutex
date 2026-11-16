@@ -1,0 +1,62 @@
+Found 123 mutants to test
+ok       Unmutated baseline in 3s build + 1s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/wf_sweep/src/lists.rs:47:19: replace >> with << in plus in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:88:13: delete match arm None in Lists::offer_learn in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:87:34: replace < with <= in Lists::offer_learn in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:99:22: replace += with *= in Lists::offer_learn in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:101:15: replace += with *= in Lists::offer_learn in 0s build + 2s test
+TIMEOUT  crates/wf_sweep/src/lists.rs:100:20: replace += with *= in Lists::offer_learn in 0s build + 20s test
+TIMEOUT  crates/wf_sweep/src/lists.rs:102:26: replace > with == in Lists::offer_learn in 0s build + 20s test
+MISSED   crates/wf_sweep/src/lists.rs:104:35: replace - with / in Lists::offer_learn in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:105:19: replace > with >= in Lists::offer_learn in 0s build + 3s test
+TIMEOUT  crates/wf_sweep/src/lists.rs:102:26: replace > with >= in Lists::offer_learn in 0s build + 20s test
+MISSED   crates/wf_sweep/src/lists.rs:111:19: replace += with -= in Lists::offer_learn in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:111:19: replace += with *= in Lists::offer_learn in 0s build + 2s test
+TIMEOUT  crates/wf_sweep/src/lists.rs:106:41: replace - with + in Lists::offer_learn in 0s build + 20s test
+MISSED   crates/wf_sweep/src/lists.rs:145:14: replace > with >= in Lists::count_rejected in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:166:9: replace Lists::entries -> impl Iterator<Item =(Key, Code, u64)>+'_ with ::std::iter::empty() in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:166:9: replace Lists::entries -> impl Iterator<Item =(Key, Code, u64)>+'_ with ::std::iter::once((Default::default(), Default::default(), 0)) in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:166:9: replace Lists::entries -> impl Iterator<Item =(Key, Code, u64)>+'_ with ::std::iter::once((Default::default(), Default::default(), 1)) in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:172:9: replace Lists::len -> u64 with 0 in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:172:9: replace Lists::len -> u64 with 1 in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:178:9: replace Lists::is_empty -> bool with true in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:178:9: replace Lists::is_empty -> bool with false in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:178:20: replace == with != in Lists::is_empty in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:186:9: replace Lists::shifted -> Option<Self> with None in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:191:116: replace + with - in Lists::shifted in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:191:116: replace + with * in Lists::shifted in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:191:70: replace + with - in Lists::shifted in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:191:70: replace + with * in Lists::shifted in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:192:38: replace & with | in Lists::shifted in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:192:38: replace & with ^ in Lists::shifted in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:193:27: replace >> with << in Lists::shifted in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:195:22: replace != with == in Lists::shifted in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:207:9: replace Lists::bound -> u64 with 0 in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:207:9: replace Lists::bound -> u64 with 1 in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:212:9: replace Lists::merge with () in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:216:28: replace + with - in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:216:28: replace + with * in Lists::merge in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:217:26: replace + with - in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:217:26: replace + with * in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:226:17: delete match arm None in Lists::merge in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:220:35: replace match guard *tk == k with true in Lists::merge in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:220:35: replace match guard *tk == k with false in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:225:34: replace match guard k < *tk with true in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:225:34: replace match guard k < *tk with false in Lists::merge in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:220:39: replace == with != in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:222:68: replace == with != in Lists::merge in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:223:55: replace + with - in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:223:55: replace + with * in Lists::merge in 0s build + 2s test
+MISSED   crates/wf_sweep/src/lists.rs:225:36: replace < with == in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:225:36: replace < with > in Lists::merge in 0s build + 1s test
+MISSED   crates/wf_sweep/src/lists.rs:225:36: replace < with <= in Lists::merge in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:35:25: replace || with && in parse in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:41:49: replace == with != in parse in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:48:13: delete match arm "N" in parse in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:49:13: delete match arm "MISS" in parse in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:59:65: replace > with == in parse in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:59:65: replace > with < in parse in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:59:65: replace > with >= in parse in 0s build + 2s test
+MISSED   crates/wf_sweep/src/views.rs:67:45: replace == with != in parse in 0s build + 1s test
+123 mutants tested in 3m: 54 missed, 61 caught, 4 unviable, 4 timeouts

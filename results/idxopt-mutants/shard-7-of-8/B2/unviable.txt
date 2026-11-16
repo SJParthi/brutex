@@ -1,0 +1,4 @@
+crates/wf_sweep/src/lists.rs:94:13: replace && with || in Lists::offer_learn
+crates/wf_sweep/src/lists.rs:93:13: replace && with || in Lists::offer_learn
+crates/wf_sweep/src/lists.rs:186:9: replace Lists::shifted -> Option<Self> with Some(Default::default())
+crates/wf_sweep/src/views.rs:32:5: replace parse -> Result<Vec<View>, SweepErr> with Ok(vec![Default::default()])
