@@ -407,3 +407,13 @@ crates/spikefade/src/menu.rs:627:148: replace - with + in rule_at
 crates/spikefade/src/menu.rs:647:48: replace + with - in rule_at
 crates/spikefade/src/menu.rs:654:36: replace * with + in rule_at
 crates/spikefade/src/menu.rs:654:31: replace * with + in rule_at
+crates/spikefade/src/menu.rs:654:26: replace * with + in rule_at
+crates/spikefade/src/menu.rs:656:35: replace / with % in rule_at
+crates/spikefade/src/menu.rs:657:31: replace < with == in rule_at
+crates/spikefade/src/menu.rs:657:25: replace * with / in rule_at
+crates/spikefade/src/menu.rs:657:21: replace * with / in rule_at
+crates/spikefade/src/menu.rs:666:68: replace && with || in rule_at
+crates/spikefade/src/menu.rs:691:27: replace && with || in rule_at
+crates/spikefade/src/menu.rs:713:5: replace isqrt -> u128 with 0
+crates/spikefade/src/menu.rs:718:13: replace < with <= in isqrt
+crates/spikefade/src/menu.rs:720:20: replace / with % in isqrt
