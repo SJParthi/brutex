@@ -1,0 +1,26 @@
+crates/spikefade/src/wf.rs:78:95: replace + with * in compose
+crates/spikefade/src/wf.rs:78:133: replace > with == in compose
+crates/spikefade/src/wf.rs:78:133: replace > with < in compose
+crates/spikefade/src/wf.rs:78:133: replace > with >= in compose
+crates/spikefade/src/wf.rs:108:78: replace + with * in learn_key
+crates/spikefade/src/wf.rs:108:46: replace + with - in learn_key
+crates/spikefade/src/wf.rs:108:46: replace + with * in learn_key
+crates/spikefade/src/wf.rs:108:68: replace * with + in learn_key
+crates/spikefade/src/wf.rs:108:68: replace * with / in learn_key
+crates/spikefade/src/wf.rs:108:100: delete - in learn_key
+crates/spikefade/src/wf.rs:110:32: delete - in learn_key
+crates/spikefade/src/ban.rs:71:15: replace += with *= in Bans::add_dir
+crates/spikefade/src/ban.rs:89:5: replace from_args -> Result<Option<String>, String> with Ok(None)
+crates/spikefade/src/ban.rs:89:5: replace from_args -> Result<Option<String>, String> with Ok(Some(String::new()))
+crates/spikefade/src/ban.rs:89:5: replace from_args -> Result<Option<String>, String> with Ok(Some("xyzzy".into()))
+crates/spikefade/src/ban.rs:89:70: replace == with != in from_args
+crates/spikefade/src/ban.rs:89:114: replace + with - in from_args
+crates/spikefade/src/ban.rs:89:114: replace + with * in from_args
+crates/spikefade/src/ban.rs:126:5: replace counts_line -> String with String::new()
+crates/spikefade/src/ban.rs:142:49: replace || with && in refuse_k
+crates/spikefade/src/ban.rs:169:5: replace counts_line34 -> String with String::new()
+crates/spikefade/src/ban.rs:169:8: delete ! in counts_line34
+crates/spikefade/src/bhav.rs:79:22: replace && with || in ymd_of
+crates/spikefade/src/bhav.rs:96:34: delete field file from struct BhavDay expression in parse
+crates/spikefade/src/bhav.rs:96:57: delete field sha from struct BhavDay expression in parse
+crates/spikefade/src/bhav.rs:113:13: delete match arm "CE" in parse

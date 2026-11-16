@@ -1,0 +1,1 @@
+crates/spikefade/src/ban.rs:65:21: replace && with || in Bans::add_dir
