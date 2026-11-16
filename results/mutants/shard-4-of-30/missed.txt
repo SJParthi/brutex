@@ -23,3 +23,49 @@ crates/spikefade/src/csvgz.rs:67:21: replace < with <= in split
 crates/spikefade/src/csvgz.rs:70:27: replace += with -= in split
 crates/spikefade/src/csvgz.rs:70:27: replace += with *= in split
 crates/spikefade/src/csvgz.rs:91:17: replace < with <= in split
+crates/spikefade/src/csvgz.rs:164:27: replace && with || in paisa
+crates/spikefade/src/csvgz.rs:192:16: replace < with == in ts
+crates/spikefade/src/csvgz.rs:202:112: replace || with && in ts
+crates/spikefade/src/csvgz.rs:202:86: replace || with && in ts
+crates/spikefade/src/csvgz.rs:202:60: replace || with && in ts
+crates/spikefade/src/csvgz.rs:202:32: replace || with && in ts
+crates/spikefade/src/csvgz.rs:207:37: replace + with - in ts
+crates/spikefade/src/cube.rs:183:9: replace Cube::allowed -> bool with true
+crates/spikefade/src/cube.rs:188:9: replace Cube::guard with ()
+crates/spikefade/src/cube.rs:201:9: replace Cube::wval -> u64 with 0
+crates/spikefade/src/cube.rs:201:9: replace Cube::wval -> u64 with 1
+crates/spikefade/src/cube.rs:222:5: replace inputs -> Vec<PathBuf> with vec![]
+crates/spikefade/src/cube.rs:222:5: replace inputs -> Vec<PathBuf> with vec![Default::default()]
+crates/spikefade/src/cube.rs:241:5: replace size_mtime -> (u64, i64) with (0, 1)
+crates/spikefade/src/cube.rs:241:5: replace size_mtime -> (u64, i64) with (1, 0)
+crates/spikefade/src/cube.rs:241:5: replace size_mtime -> (u64, i64) with (1, 1)
+crates/spikefade/src/cube.rs:251:5: replace is_current -> (bool, String) with (true, String::new())
+crates/spikefade/src/cube.rs:241:5: replace size_mtime -> (u64, i64) with (1, -1)
+crates/spikefade/src/cube.rs:251:5: replace is_current -> (bool, String) with (false, String::new())
+crates/spikefade/src/cube.rs:251:5: replace is_current -> (bool, String) with (true, "xyzzy".into())
+crates/spikefade/src/cube.rs:251:5: replace is_current -> (bool, String) with (false, "xyzzy".into())
+crates/spikefade/src/cube.rs:253:8: delete ! in is_current
+crates/spikefade/src/cube.rs:253:50: delete ! in is_current
+crates/spikefade/src/cube.rs:259:40: replace && with || in is_current
+crates/spikefade/src/cube.rs:259:22: replace == with != in is_current
+crates/spikefade/src/cube.rs:267:22: replace && with || in is_current
+crates/spikefade/src/cube.rs:259:51: replace >= with < in is_current
+crates/spikefade/src/cube.rs:267:15: replace == with != in is_current
+crates/spikefade/src/cube.rs:267:28: replace == with != in is_current
+crates/spikefade/src/cube.rs:271:15: replace != with == in is_current
+crates/spikefade/src/cube.rs:294:92: replace || with && in read_instruments
+crates/spikefade/src/cube.rs:294:51: replace || with && in read_instruments
+crates/spikefade/src/cube.rs:294:25: replace != with == in read_instruments
+crates/spikefade/src/cube.rs:294:63: replace != with == in read_instruments
+crates/spikefade/src/cube.rs:320:13: delete match arm b"NSE_EQ" in read_instruments
+crates/spikefade/src/cube.rs:304:27: replace match guard (kind == b"OPTIDX" || kind == b"OPTSTK") with true in read_instruments
+crates/spikefade/src/cube.rs:304:27: replace match guard (kind == b"OPTIDX" || kind == b"OPTSTK") with false in read_instruments
+crates/spikefade/src/cube.rs:304:46: replace || with && in read_instruments
+crates/spikefade/src/cube.rs:304:33: replace == with != in read_instruments
+crates/spikefade/src/cube.rs:304:54: replace == with != in read_instruments
+crates/spikefade/src/cube.rs:307:21: delete match arm b"CE" in read_instruments
+crates/spikefade/src/cube.rs:308:21: delete match arm b"PE" in read_instruments
+crates/spikefade/src/cube.rs:315:59: replace == with != in read_instruments
+crates/spikefade/src/cube.rs:333:27: replace != with == in check_header
+crates/spikefade/src/cube.rs:347:5: replace build -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/cube.rs:365:37: replace == with != in build

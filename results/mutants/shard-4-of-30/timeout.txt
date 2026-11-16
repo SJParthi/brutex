@@ -4,3 +4,4 @@ crates/spikefade/src/csvgz.rs:92:15: replace += with -= in split
 crates/spikefade/src/csvgz.rs:92:15: replace += with *= in split
 crates/spikefade/src/csvgz.rs:98:11: replace += with -= in split
 crates/spikefade/src/csvgz.rs:98:11: replace += with *= in split
+crates/spikefade/src/csvgz.rs:180:15: replace += with *= in paisa

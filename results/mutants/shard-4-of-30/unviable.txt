@@ -1,1 +1,2 @@
 crates/spikefade/src/csvgz.rs:21:9: replace GzLines::open -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/cube.rs:285:5: replace read_instruments -> Result<Inst, String> with Ok(Default::default())
