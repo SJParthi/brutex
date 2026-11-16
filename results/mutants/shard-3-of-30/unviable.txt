@@ -1,1 +1,3 @@
 crates/spikefade/src/acct.rs:471:5: replace detail_list -> (Vec<Dec>, Sum) with (vec![Default::default()], Default::default())
+crates/spikefade/src/charges.rs:49:5: replace trade_day -> Option<TradeDay> with Some(Default::default())
+crates/spikefade/src/charges.rs:60:5: replace rates_on -> Result<Rates, String> with Ok(Default::default())
