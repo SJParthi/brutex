@@ -1,2 +1,7 @@
 crates/sniper_host/src/idxpos.rs:148:5: replace classify -> Class with Default::default()
 crates/sniper_host/src/idxpos.rs:343:5: replace level_of -> Result<(PLevel, Class), String> with Ok((Default::default(), Default::default()))
+crates/sniper_host/src/idxpos.rs:548:5: replace price_all_pos_idx -> Result<PosTable, String> with Ok(Default::default())
+crates/sniper_host/src/idxpos.rs:774:29: delete match arm (Some(&slot), Some(&bp)) in price_fixed_beside
+crates/sniper_host/src/idxpos.rs:846:5: replace rule_of -> Result<Rule, String> with Ok(Default::default())
+crates/sniper_host/src/idxpos.rs:1006:5: replace context_pos -> Result<(CtxOut, String), String> with Ok((Default::default(), String::new()))
+crates/sniper_host/src/idxpos.rs:1006:5: replace context_pos -> Result<(CtxOut, String), String> with Ok((Default::default(), "xyzzy".into()))
