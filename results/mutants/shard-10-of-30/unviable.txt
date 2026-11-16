@@ -14,3 +14,4 @@ crates/spikefade/src/report3.rs:841:29: replace && with || in cmd_run3
 crates/spikefade/src/report3.rs:876:25: replace && with || in cmd_run3
 crates/spikefade/src/report3.rs:875:25: replace && with || in cmd_run3
 crates/spikefade/src/report3.rs:1228:18: replace && with || in prepare_day
+crates/spikefade/src/report3.rs:1373:9: replace Layout33::with_mask -> Self with Default::default()
