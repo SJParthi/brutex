@@ -236,3 +236,64 @@ crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'stat
 crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((1, true, "xyzzy", "", 1, false))
 crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "", -1, true))
 crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "xyzzy", 1, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "", "xyzzy", -1, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, true, "xyzzy", "", 0, true))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, false, "", "xyzzy", 0, false))
+crates/spikefade/src/expiry.rs:286:5: replace facts -> Option<(i64, bool, &'static str, &'static str, i64, bool)> with Some((-1, false, "", "xyzzy", -1, true))
+crates/spikefade/src/freeze.rs:83:9: replace StockDated::parse -> Result<Self, String> with Ok(Default::default())
+crates/spikefade/src/freeze.rs:85:17: replace != with == in StockDated::parse
+crates/spikefade/src/freeze.rs:88:72: delete field first from struct Self expression in StockDated::parse
+crates/spikefade/src/freeze.rs:88:89: delete field last from struct Self expression in StockDated::parse
+crates/spikefade/src/freeze.rs:94:26: delete ! in StockDated::parse
+crates/spikefade/src/freeze.rs:95:30: replace && with || in StockDated::parse
+crates/spikefade/src/freeze.rs:95:24: replace != with == in StockDated::parse
+crates/spikefade/src/freeze.rs:101:68: replace || with && in StockDated::parse
+crates/spikefade/src/freeze.rs:101:64: replace > with == in StockDated::parse
+crates/spikefade/src/freeze.rs:101:64: replace > with < in StockDated::parse
+crates/spikefade/src/freeze.rs:101:64: replace > with >= in StockDated::parse
+crates/spikefade/src/freeze.rs:101:71: delete ! in StockDated::parse
+crates/spikefade/src/freeze.rs:102:56: replace == with != in StockDated::parse
+crates/spikefade/src/freeze.rs:104:23: replace && with || in StockDated::parse
+crates/spikefade/src/freeze.rs:104:41: replace || with && in StockDated::parse
+crates/spikefade/src/freeze.rs:104:35: replace != with == in StockDated::parse
+crates/spikefade/src/freeze.rs:104:44: delete ! in StockDated::parse
+crates/spikefade/src/freeze.rs:104:82: replace || with && in StockDated::parse
+crates/spikefade/src/freeze.rs:108:23: replace && with || in StockDated::parse
+crates/spikefade/src/freeze.rs:108:42: replace || with && in StockDated::parse
+crates/spikefade/src/freeze.rs:115:91: replace != with == in StockDated::parse
+crates/spikefade/src/freeze.rs:116:85: replace && with || in StockDated::parse
+crates/spikefade/src/freeze.rs:120:20: replace += with -= in StockDated::parse
+crates/spikefade/src/freeze.rs:122:23: replace += with -= in StockDated::parse
+crates/spikefade/src/freeze.rs:126:17: replace += with -= in StockDated::parse
+crates/spikefade/src/freeze.rs:140:9: replace StockDated::lookup -> Option<Option<StockRow>> with None
+crates/spikefade/src/freeze.rs:140:9: replace StockDated::lookup -> Option<Option<StockRow>> with Some(None)
+crates/spikefade/src/freeze.rs:140:9: replace StockDated::lookup -> Option<Option<StockRow>> with Some(Some(Default::default()))
+crates/spikefade/src/freeze.rs:140:29: replace || with && in StockDated::lookup
+crates/spikefade/src/freeze.rs:140:16: replace < with == in StockDated::lookup
+crates/spikefade/src/freeze.rs:140:16: replace < with > in StockDated::lookup
+crates/spikefade/src/freeze.rs:140:16: replace < with <= in StockDated::lookup
+crates/spikefade/src/freeze.rs:140:36: replace > with == in StockDated::lookup
+crates/spikefade/src/freeze.rs:140:36: replace > with < in StockDated::lookup
+crates/spikefade/src/freeze.rs:140:36: replace > with >= in StockDated::lookup
+crates/spikefade/src/freeze.rs:149:62: delete ! in StockDated::lookup
+crates/spikefade/src/freeze.rs:149:106: replace && with || in StockDated::lookup
+crates/spikefade/src/freeze.rs:168:9: replace Freeze::add -> Result<(), String> with Ok(())
+crates/spikefade/src/freeze.rs:169:29: replace match guard parse_day(d).is_some() with true in Freeze::add
+crates/spikefade/src/freeze.rs:181:48: replace && with || in Freeze::add
+crates/spikefade/src/freeze.rs:169:29: replace match guard parse_day(d).is_some() with false in Freeze::add
+crates/spikefade/src/freeze.rs:181:56: replace == with != in Freeze::add
+crates/spikefade/src/freeze.rs:198:19: replace += with -= in Freeze::add
+crates/spikefade/src/freeze.rs:198:19: replace += with *= in Freeze::add
+crates/spikefade/src/freeze.rs:216:19: replace += with -= in Freeze::add
+crates/spikefade/src/freeze.rs:232:9: replace Freeze::units -> Option<(u64, bool)> with None
+crates/spikefade/src/freeze.rs:232:9: replace Freeze::units -> Option<(u64, bool)> with Some((0, true))
+crates/spikefade/src/freeze.rs:232:9: replace Freeze::units -> Option<(u64, bool)> with Some((0, false))
+crates/spikefade/src/freeze.rs:232:9: replace Freeze::units -> Option<(u64, bool)> with Some((1, true))
+crates/spikefade/src/freeze.rs:232:9: replace Freeze::units -> Option<(u64, bool)> with Some((1, false))
+crates/spikefade/src/freeze.rs:237:43: replace <= with > in Freeze::units
+crates/spikefade/src/freeze.rs:238:14: replace > with == in Freeze::units
+crates/spikefade/src/freeze.rs:238:14: replace > with < in Freeze::units
+crates/spikefade/src/freeze.rs:238:14: replace > with >= in Freeze::units
+crates/spikefade/src/freeze.rs:238:28: replace - with + in Freeze::units
+crates/spikefade/src/freeze.rs:238:28: replace - with / in Freeze::units
+crates/spikefade/src/freeze.rs:245:5: replace slice_of -> u64 with 0
