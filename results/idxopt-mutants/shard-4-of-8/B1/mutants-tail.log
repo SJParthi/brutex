@@ -1,0 +1,300 @@
+MISSED   crates/sniper_host/src/rows.rs:16:39: replace * with / in parse_mk in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:22:5: replace mk_text -> String with String::new() in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:22:5: replace mk_text -> String with "xyzzy".into() in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:30:31: replace || with && in tsv in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:95:9: replace RunRows::list -> Result<Vec<T>, String> with Ok(vec![]) in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:103:9: replace RunRows::hms -> Result<i64, String> with Ok(0) in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:103:9: replace RunRows::hms -> Result<i64, String> with Ok(1) in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:103:9: replace RunRows::hms -> Result<i64, String> with Ok(-1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:104:68: delete - in RunRows::hms in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:26: replace match guard (0..24).contains(h) && (0..60).contains(m) && (0..60).contains(s) with true in RunRows::hms in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:26: replace match guard (0..24).contains(h) && (0..60).contains(m) && (0..60).contains(s) with false in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:69: replace && with || in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:46: replace && with || in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:116: replace + with - in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:116: replace + with * in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:107: replace + with - in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:107: replace + with * in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:100: replace * with + in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:100: replace * with / in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:111: replace * with + in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:106:111: replace * with / in RunRows::hms in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:129:70: replace == with != in Windows::parse in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:139:9: replace Windows::hull -> (Mk, Mk) with (Default::default(), Default::default()) in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:140:64: delete - in Windows::hull in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:162:66: replace == with != in core_ladders in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:192:5: replace dial_rows -> Result<Vec<DialRow>, String> with Ok(vec![]) in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:237:28: delete ! in xc_kind in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:237:42: replace && with || in xc_kind in 2s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:239:8: delete ! in xc_kind in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:239:33: replace && with || in xc_kind in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:239:20: replace && with || in xc_kind in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:245:8: delete ! in xc_kind in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:248:8: delete ! in xc_kind in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:251:38: replace != with == in xc_kind in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:263:5: replace exit_sets -> Result<Vec<ExitSet>, String> with Ok(vec![]) in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:265:38: replace == with != in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:278:104: replace * with + in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:278:104: replace * with / in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:285:22: replace == with != in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:290:12: delete ! in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:291:18: replace += with -= in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:291:18: replace += with *= in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:293:47: replace == with != in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/rows.rs:298:13: replace != with == in exit_sets in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:87:62: replace || with && in Slice::load in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:100:9: replace Slice::has_dial -> bool with true in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:100:9: replace Slice::has_dial -> bool with false in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:100:41: replace == with != in Slice::has_dial in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:184:23: replace == with != in combo_rows in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:243:9: replace Table::push_row with () in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:244:35: delete field sess from struct Outcome expression in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:244:41: delete field mk from struct Outcome expression in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:244:45: delete field id from struct Outcome expression in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:246:62: replace + with - in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:246:62: replace + with * in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:246:58: replace * with + in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:246:58: replace * with / in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:263:39: replace * with + in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:263:39: replace * with / in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:263:51: replace + with - in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:263:51: replace + with * in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:263:47: replace * with + in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:263:47: replace * with / in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:267:22: replace += with -= in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:267:22: replace += with *= in Table::push_row in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:298:40: replace - with + in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:298:40: replace - with / in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:298:31: replace * with + in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:298:31: replace * with / in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:305:39: replace == with != in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:305:78: replace - with + in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:305:78: replace - with / in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:305:71: replace / with % in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:305:71: replace / with * in compact in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:310:22: replace != with == in compact in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:319:9: delete match arm ExitKind::Ema(p) in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:355:47: delete ! in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:360:59: replace * with + in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:360:59: replace * with / in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:397:96: replace += with -= in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:397:96: replace += with *= in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:403:17: replace > with == in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:403:17: replace > with < in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:403:17: replace > with >= in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:408:18: replace += with -= in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:408:18: replace += with *= in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:411:35: delete field sess from struct Outcome expression in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:411:49: delete field mk from struct Outcome expression in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:411:59: delete field id from struct Outcome expression in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:413:62: replace + with - in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:413:62: replace + with * in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:413:58: replace * with + in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:413:58: replace * with / in price_all in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:430:39: replace * with + in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:430:39: replace * with / in price_all in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:430:51: replace + with - in price_all in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:430:51: replace + with * in price_all in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:430:47: replace * with + in price_all in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:430:47: replace * with / in price_all in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:434:19: replace += with -= in price_all in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:434:19: replace += with *= in price_all in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (true, 0, 0) in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (true, 0, 1) in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (true, 1, 0) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (true, 1, 1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (true, -1, 0) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (true, -1, 1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (false, 0, 0) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (false, 0, 1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (false, 1, 0) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (false, 1, 1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (false, -1, 0) in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:444:5: replace test_figures -> (bool, i64, u32) with (false, -1, 1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:451:25: replace && with || in test_figures in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:451:15: replace >= with < in test_figures in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:451:31: replace <= with > in test_figures in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:454:21: replace += with -= in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:454:21: replace += with *= in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:457:15: replace += with -= in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:457:15: replace += with *= in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:460:41: replace && with || in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:460:37: replace > with == in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:460:37: replace > with < in test_figures in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:460:37: replace > with >= in test_figures in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:460:47: replace > with == in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:460:47: replace > with < in test_figures in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:460:47: replace > with >= in test_figures in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:464:5: replace pct_of -> i64 with 0 in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:464:5: replace pct_of -> i64 with 1 in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:464:5: replace pct_of -> i64 with -1 in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:467:38: replace / with % in pct_of in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:467:38: replace / with * in pct_of in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:467:27: replace * with + in pct_of in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:467:27: replace * with / in pct_of in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:467:22: replace - with + in pct_of in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:467:22: replace - with / in pct_of in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:487:5: replace run_family -> Result<Vec<String>, String> with Ok(vec![]) in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:487:5: replace run_family -> Result<Vec<String>, String> with Ok(vec![String::new()]) in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:487:5: replace run_family -> Result<Vec<String>, String> with Ok(vec!["xyzzy".into()]) in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:496:23: replace == with != in run_family in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:503:8: delete ! in run_family in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:518:20: replace < with == in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:518:20: replace < with > in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:518:20: replace < with <= in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:529:101: replace && with || in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:529:69: replace && with || in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:534:68: replace != with == in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:554:9: replace && with || in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:554:115: replace && with || in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:554:83: replace && with || in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:581:57: replace / with % in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:581:57: replace / with * in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:584:48: replace - with + in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:584:48: replace - with / in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:584:16: replace + with - in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:584:16: replace + with * in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:584:11: replace * with + in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:584:11: replace * with / in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:594:34: replace * with + in run_family in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:594:34: replace * with / in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:602:56: replace == with != in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:604:16: delete ! in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:609:28: replace += with -= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:609:28: replace += with *= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:610:29: replace += with -= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:610:29: replace += with *= in run_family in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:611:29: replace += with -= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:611:29: replace += with *= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:612:24: replace += with -= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:612:24: replace += with *= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:613:30: replace += with -= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:613:30: replace += with *= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:617:22: replace += with -= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:617:22: replace += with *= in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:618:46: replace / with % in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:618:46: replace / with * in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:619:28: replace * with + in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:619:28: replace * with / in run_family in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:708:68: replace / with % in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:708:68: replace / with * in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:708:63: replace * with + in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:708:63: replace * with / in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:719:17: replace > with == in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:719:17: replace > with < in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:719:17: replace > with >= in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:725:87: replace * with + in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:725:87: replace * with / in context in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:725:103: replace * with + in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:725:103: replace * with / in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:725:98: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:725:98: replace + with * in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:725:150: replace != with == in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:725:146: replace & with | in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:725:146: replace & with ^ in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:745:9: delete match arm ExitKind::Ema(p) in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:752:50: delete ! in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:754:61: replace == with != in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:757:41: replace != with == in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:763:22: replace + with - in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:763:22: replace + with * in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:773:20: replace + with - in context in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:773:20: replace + with * in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:794:71: delete ! in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:794:110: delete ! in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:799:50: delete ! in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:803:12: delete ! in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:811:23: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:811:23: replace += with *= in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:831:14: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:851:44: replace == with != in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:854:75: replace <= with > in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:855:73: replace <= with > in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:860:119: delete field id from struct Outcome expression in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:867:52: replace == with != in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:882:33: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:882:33: replace + with * in context in 2s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:908:34: replace + with - in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:908:34: replace + with * in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:908:27: replace * with + in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:908:27: replace * with / in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:916:73: replace != with == in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:916:60: replace & with | in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:916:60: replace & with ^ in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:933:58: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:936:48: replace + with - in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:936:48: replace + with * in context in 2s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:936:41: replace * with + in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:936:41: replace * with / in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:946:44: replace != with == in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:947:32: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:947:32: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:948:45: replace < with == in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:948:45: replace < with > in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:948:45: replace < with <= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:958:55: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:958:55: replace + with * in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:972:43: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:996:37: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:996:37: replace + with * in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:999:21: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:999:21: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1010:16: delete ! in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1013:16: delete ! in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1022:23: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1032:45: replace && with || in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1032:27: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1037:62: delete - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1047:42: replace != with == in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1050:99: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1050:99: replace + with * in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1050:92: replace * with + in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1050:92: replace * with / in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1050:70: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1064:32: replace != with == in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1080:120: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1080:120: replace + with * in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:1080:113: replace * with + in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1080:113: replace * with / in context in 1s build + 4s test
+MISSED   crates/sniper_host/src/search.rs:1105:57: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1106:83: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1106:83: replace + with * in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1106:76: replace * with + in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1106:76: replace * with / in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1108:55: delete field twin from struct common_wf::report::LuckCtx expression in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1111:43: replace && with || in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1111:25: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1116:41: replace && with || in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1116:23: replace == with != in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1119:21: delete match arm Verdict::Passed{..} in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1120:21: delete match arm Verdict::NotRun(common_wf::verdict::NotRun::ChosenRule{run}) in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1125:79: delete - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1130:84: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1130:84: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1146:27: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1146:27: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1146:44: replace >= with < in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1147:27: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1147:27: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1171:87: replace + with - in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1171:87: replace + with * in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1171:80: replace * with + in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1171:80: replace * with / in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1174:33: replace match guard sz.capped with true in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1174:33: replace match guard sz.capped with false in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1236:22: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1236:22: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1237:22: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1237:22: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1238:17: replace += with -= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1238:17: replace += with *= in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1238:35: replace && with || in context in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1257:5: replace key_text -> String with String::new() in 1s build + 3s test
+MISSED   crates/sniper_host/src/search.rs:1257:5: replace key_text -> String with "xyzzy".into() in 1s build + 3s test
+MISSED   crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with None in 1s build + 3s test
+MISSED   crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with Some(0) in 1s build + 3s test
+MISSED   crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with Some(1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with Some(-1) in 1s build + 3s test
+MISSED   crates/sniper_host/src/sec.rs:55:5: replace day_seconds -> Result<Option<DayRead>, String> with Ok(None) in 2s build + 3s test
+MISSED   crates/sniper_host/src/sec.rs:55:5: replace day_seconds -> Result<Option<DayRead>, String> with Ok(Some(Default::default())) in 2s build + 3s test
+481 mutants tested in 20m: 342 missed, 118 caught, 19 unviable, 2 timeouts

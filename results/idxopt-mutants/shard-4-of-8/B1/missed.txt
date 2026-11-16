@@ -310,3 +310,33 @@ crates/sniper_host/src/search.rs:1111:25: replace == with != in context
 crates/sniper_host/src/search.rs:1116:41: replace && with || in context
 crates/sniper_host/src/search.rs:1116:23: replace == with != in context
 crates/sniper_host/src/search.rs:1119:21: delete match arm Verdict::Passed{..} in context
+crates/sniper_host/src/search.rs:1120:21: delete match arm Verdict::NotRun(common_wf::verdict::NotRun::ChosenRule{run}) in context
+crates/sniper_host/src/search.rs:1125:79: delete - in context
+crates/sniper_host/src/search.rs:1130:84: replace += with -= in context
+crates/sniper_host/src/search.rs:1130:84: replace += with *= in context
+crates/sniper_host/src/search.rs:1146:27: replace += with -= in context
+crates/sniper_host/src/search.rs:1146:27: replace += with *= in context
+crates/sniper_host/src/search.rs:1146:44: replace >= with < in context
+crates/sniper_host/src/search.rs:1147:27: replace += with -= in context
+crates/sniper_host/src/search.rs:1147:27: replace += with *= in context
+crates/sniper_host/src/search.rs:1171:87: replace + with - in context
+crates/sniper_host/src/search.rs:1171:87: replace + with * in context
+crates/sniper_host/src/search.rs:1171:80: replace * with + in context
+crates/sniper_host/src/search.rs:1171:80: replace * with / in context
+crates/sniper_host/src/search.rs:1174:33: replace match guard sz.capped with true in context
+crates/sniper_host/src/search.rs:1174:33: replace match guard sz.capped with false in context
+crates/sniper_host/src/search.rs:1236:22: replace += with -= in context
+crates/sniper_host/src/search.rs:1236:22: replace += with *= in context
+crates/sniper_host/src/search.rs:1237:22: replace += with -= in context
+crates/sniper_host/src/search.rs:1237:22: replace += with *= in context
+crates/sniper_host/src/search.rs:1238:17: replace += with -= in context
+crates/sniper_host/src/search.rs:1238:17: replace += with *= in context
+crates/sniper_host/src/search.rs:1238:35: replace && with || in context
+crates/sniper_host/src/search.rs:1257:5: replace key_text -> String with String::new()
+crates/sniper_host/src/search.rs:1257:5: replace key_text -> String with "xyzzy".into()
+crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with None
+crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with Some(0)
+crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with Some(1)
+crates/sniper_host/src/sec.rs:41:5: replace tf_secs -> Option<i64> with Some(-1)
+crates/sniper_host/src/sec.rs:55:5: replace day_seconds -> Result<Option<DayRead>, String> with Ok(None)
+crates/sniper_host/src/sec.rs:55:5: replace day_seconds -> Result<Option<DayRead>, String> with Ok(Some(Default::default()))

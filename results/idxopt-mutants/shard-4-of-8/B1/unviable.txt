@@ -16,3 +16,4 @@ crates/sniper_host/src/search.rs:223:9: replace Table::empty -> Self with Defaul
 crates/sniper_host/src/search.rs:297:5: replace compact -> Result<RowOut, String> with Ok(Default::default())
 crates/sniper_host/src/search.rs:318:5: replace price_all -> Result<Table, String> with Ok(Default::default())
 crates/sniper_host/src/search.rs:684:5: replace context -> Result<CtxOut, String> with Ok(Default::default())
+crates/sniper_host/src/sec.rs:96:9: replace Pat::of_cmp -> Self with Default::default()
