@@ -1,0 +1,10 @@
+READY v34-mutants (MAIN e462fe4d, 16 Nov 2026)
+code_branch: cloud/spikefade-v34int-20261116
+commit: 7a5428d30bdb8a5e0fec427848178c82907de2fb
+job_file: JOB-MUTANTS.md (branch root, sha256 078206fd515aff3e6f28ba676799312a5efcffd489a48646953a73dca88a7b74)
+n: 30
+how to run your k: follow JOB-MUTANTS.md with K = your k and SHA = the commit above; that commit is "the commit of
+your first message" in its section 1b. Your result branch is cloud-results/v34-mutants-<k>-of-30, results only,
+under results/mutants/shard-<k>-of-30/.
+long runs: use the JOB's bg.sh (nohup) and wait.sh (foreground waits of at most 270 s) exactly as written; that keeps
+your turn busy and is the approved way to meet "foreground chunks of at most 9 minutes".
