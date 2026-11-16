@@ -5,3 +5,8 @@ crates/spikefade/src/csvgz.rs:92:15: replace += with *= in split
 crates/spikefade/src/csvgz.rs:98:11: replace += with -= in split
 crates/spikefade/src/csvgz.rs:98:11: replace += with *= in split
 crates/spikefade/src/csvgz.rs:180:15: replace += with *= in paisa
+crates/spikefade/src/cube.rs:684:19: replace % with / in pad
+crates/spikefade/src/cube.rs:684:19: replace % with + in pad
+crates/spikefade/src/cube.rs:880:22: replace % with / in Rd<'_>::align
+crates/spikefade/src/cube.rs:880:22: replace % with + in Rd<'_>::align
+crates/spikefade/src/cube.rs:881:20: replace += with *= in Rd<'_>::align

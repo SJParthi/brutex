@@ -1,2 +1,5 @@
 crates/spikefade/src/csvgz.rs:21:9: replace GzLines::open -> Result<Self, String> with Ok(Default::default())
 crates/spikefade/src/cube.rs:285:5: replace read_instruments -> Result<Inst, String> with Ok(Default::default())
+crates/spikefade/src/cube.rs:901:9: replace && with || in load_m
+crates/spikefade/src/cube.rs:916:9: replace && with || in load_sec_m
+crates/spikefade/src/cube.rs:1049:9: replace && with || in decode_cube

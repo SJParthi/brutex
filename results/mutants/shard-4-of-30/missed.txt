@@ -238,3 +238,20 @@ crates/spikefade/src/cube.rs:616:37: replace += with *= in build
 crates/spikefade/src/cube.rs:625:32: replace > with == in build
 crates/spikefade/src/cube.rs:625:32: replace > with < in build
 crates/spikefade/src/cube.rs:625:32: replace > with >= in build
+crates/spikefade/src/cube.rs:629:28: replace += with -= in build
+crates/spikefade/src/cube.rs:629:28: replace += with *= in build
+crates/spikefade/src/cube.rs:629:52: replace - with + in build
+crates/spikefade/src/cube.rs:629:52: replace - with / in build
+crates/spikefade/src/cube.rs:914:5: replace load_sec_m -> Result<SecTape, String> with Ok(Default::default())
+crates/spikefade/src/cube.rs:926:5: replace extra_has -> bool with false
+crates/spikefade/src/cube.rs:966:39: replace > with == in merge
+crates/spikefade/src/cube.rs:966:39: replace > with >= in merge
+crates/spikefade/src/cube.rs:1049:21: replace || with && in decode_cube
+crates/spikefade/src/cube.rs:1049:16: replace > with == in decode_cube
+crates/spikefade/src/cube.rs:1049:16: replace > with >= in decode_cube
+crates/spikefade/src/cube.rs:1184:5: replace load_sec -> Result<SecTape, String> with Ok(Default::default())
+crates/spikefade/src/margin.rs:37:5: replace hundredths -> Option<i64> with None
+crates/spikefade/src/margin.rs:37:5: replace hundredths -> Option<i64> with Some(0)
+crates/spikefade/src/margin.rs:37:5: replace hundredths -> Option<i64> with Some(1)
+crates/spikefade/src/margin.rs:37:5: replace hundredths -> Option<i64> with Some(-1)
+crates/spikefade/src/margin.rs:39:105: replace || with && in hundredths
