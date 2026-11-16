@@ -27,3 +27,5 @@ crates/spikefade/src/slice.rs:264:5: replace sections -> Result<Vec<(usize, std:
 crates/spikefade/src/slice.rs:264:5: replace sections -> Result<Vec<(usize, std::ops::Range<usize>, [u8; 32])>, String> with Ok(vec![(1, Range::from(1), [0; 32])])
 crates/spikefade/src/slice.rs:264:5: replace sections -> Result<Vec<(usize, std::ops::Range<usize>, [u8; 32])>, String> with Ok(vec![(1, Range::from(1), [1; 32])])
 crates/spikefade/src/slice.rs:265:21: replace + with - in sections
+crates/spikefade/src/synth.rs:172:17: replace && with || in day
+crates/spikefade/src/f7.rs:106:17: replace && with || in Readings::parse
