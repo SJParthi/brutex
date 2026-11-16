@@ -1,0 +1,92 @@
+crates/idx_f1/src/host_size.rs:52:9: replace QtyRule::label -> &'static str with ""
+crates/idx_f1/src/host_size.rs:52:9: replace QtyRule::label -> &'static str with "xyzzy"
+crates/idx_f1/src/host_size.rs:64:32: replace || with && in closest_units
+crates/idx_f1/src/host_size.rs:63:5: replace closest_units -> Units with Default::default()
+crates/idx_f1/src/host_size.rs:64:19: replace || with && in closest_units
+crates/idx_f1/src/host_size.rs:64:14: replace <= with > in closest_units
+crates/idx_f1/src/host_size.rs:64:27: replace <= with > in closest_units
+crates/idx_f1/src/host_size.rs:64:43: replace == with != in closest_units
+crates/idx_f1/src/host_size.rs:68:30: replace * with + in closest_units
+crates/idx_f1/src/host_size.rs:69:53: replace * with + in closest_units
+crates/idx_f1/src/host_size.rs:68:30: replace * with / in closest_units
+crates/idx_f1/src/host_size.rs:69:53: replace * with / in closest_units
+crates/idx_f1/src/host_size.rs:69:31: replace * with / in closest_units
+crates/idx_f1/src/host_size.rs:69:31: replace * with + in closest_units
+crates/idx_f1/src/host_size.rs:70:15: replace / with % in closest_units
+crates/idx_f1/src/host_size.rs:70:15: replace / with * in closest_units
+crates/idx_f1/src/host_size.rs:71:15: replace - with / in closest_units
+crates/idx_f1/src/host_size.rs:71:15: replace - with + in closest_units
+crates/idx_f1/src/host_size.rs:71:19: replace * with + in closest_units
+crates/idx_f1/src/host_size.rs:71:19: replace * with / in closest_units
+crates/idx_f1/src/host_size.rs:74:70: replace > with == in closest_units
+crates/idx_f1/src/host_size.rs:74:70: replace > with >= in closest_units
+crates/idx_f1/src/host_size.rs:74:70: replace > with < in closest_units
+crates/idx_f1/src/host_size.rs:74:66: replace * with / in closest_units
+crates/idx_f1/src/host_size.rs:74:66: replace * with + in closest_units
+crates/idx_f1/src/host_size.rs:75:26: replace + with - in closest_units
+crates/idx_f1/src/host_size.rs:75:26: replace + with * in closest_units
+crates/idx_f1/src/host_size.rs:83:5: replace fit_units -> Units with Default::default()
+crates/idx_f1/src/host_size.rs:84:13: replace <= with > in fit_units
+crates/idx_f1/src/host_size.rs:84:27: replace <= with > in fit_units
+crates/idx_f1/src/host_size.rs:88:29: replace == with != in fit_units
+crates/idx_f1/src/host_size.rs:89:39: replace / with % in fit_units
+crates/idx_f1/src/host_size.rs:89:39: replace / with * in fit_units
+crates/idx_f1/src/host_size.rs:89:34: replace * with + in fit_units
+crates/idx_f1/src/host_size.rs:89:64: replace * with + in fit_units
+crates/idx_f1/src/host_size.rs:89:34: replace * with / in fit_units
+crates/idx_f1/src/host_size.rs:89:60: replace * with + in fit_units
+crates/idx_f1/src/host_size.rs:96:5: replace money_in -> Paisa with Default::default()
+crates/idx_f1/src/host_size.rs:96:29: replace * with / in money_in
+crates/idx_f1/src/host_size.rs:96:29: replace * with + in money_in
+crates/idx_f1/src/host_size.rs:120:23: replace && with || in size
+crates/idx_f1/src/host_size.rs:114:5: replace size -> Sized with Default::default()
+crates/idx_f1/src/host_size.rs:120:17: replace > with == in size
+crates/idx_f1/src/host_size.rs:120:17: replace > with < in size
+crates/idx_f1/src/host_size.rs:120:17: replace > with >= in size
+crates/idx_f1/src/host_size.rs:128:5: replace account_walk -> Vec<(Paisa, Paisa, Option<Units>)> with vec![]
+crates/idx_f1/src/host_size.rs:120:26: delete ! in size
+crates/idx_f1/src/host_size.rs:128:5: replace account_walk -> Vec<(Paisa, Paisa, Option<Units>)> with vec![(Default::default(), Default::default(), None)]
+crates/idx_f1/src/host_size.rs:128:5: replace account_walk -> Vec<(Paisa, Paisa, Option<Units>)> with vec![(Default::default(), Default::default(), Some(Default::default()))]
+crates/idx_f1/src/host_size.rs:133:34: replace && with || in account_walk
+crates/idx_f1/src/host_size.rs:133:27: replace > with == in account_walk
+crates/idx_f1/src/host_size.rs:133:27: replace > with < in account_walk
+crates/idx_f1/src/host_size.rs:133:37: delete ! in account_walk
+crates/opt_pos/src/acct.rs:89:9: replace Booked::value_in -> i64 with 0
+crates/opt_pos/src/acct.rs:89:9: replace Booked::value_in -> i64 with -1
+crates/opt_pos/src/acct.rs:103:5: replace release_of -> i64 with 0
+crates/opt_pos/src/acct.rs:103:5: replace release_of -> i64 with 1
+crates/opt_pos/src/acct.rs:103:5: replace release_of -> i64 with -1
+crates/opt_pos/src/acct.rs:107:5: replace price_at -> Result<Priced, String> with Ok(Default::default())
+crates/opt_pos/src/acct.rs:124:20: replace <= with > in Ledger::settle
+crates/opt_pos/src/acct.rs:133:9: replace Ledger::base -> i64 with 0
+crates/opt_pos/src/acct.rs:133:9: replace Ledger::base -> i64 with 1
+crates/opt_pos/src/acct.rs:133:9: replace Ledger::base -> i64 with -1
+crates/opt_pos/src/acct.rs:133:15: replace + with * in Ledger::base
+crates/opt_pos/src/acct.rs:136:9: replace Ledger::free -> i64 with 0
+crates/opt_pos/src/acct.rs:136:9: replace Ledger::free -> i64 with 1
+crates/opt_pos/src/acct.rs:136:9: replace Ledger::free -> i64 with -1
+crates/opt_pos/src/acct.rs:136:26: replace - with + in Ledger::free
+crates/opt_pos/src/acct.rs:136:26: replace - with / in Ledger::free
+crates/opt_pos/src/acct.rs:145:5: replace enter -> Result<Booked, String> with Ok(Default::default())
+crates/opt_pos/src/acct.rs:153:59: delete field qty from struct Booked expression in enter
+crates/opt_pos/src/acct.rs:153:64: delete field cash_short from struct Booked expression in enter
+crates/opt_pos/src/acct.rs:153:80: replace < with == in enter
+crates/opt_pos/src/acct.rs:153:80: replace < with > in enter
+crates/opt_pos/src/acct.rs:153:80: replace < with <= in enter
+crates/opt_pos/src/acct.rs:153:101: replace == with != in enter
+crates/opt_pos/src/acct.rs:161:20: replace match guard s.qty == qty && s.reserve == b.reserve with false in enter
+crates/opt_pos/src/acct.rs:161:26: replace == with != in enter
+crates/opt_pos/src/acct.rs:161:46: replace == with != in enter
+crates/opt_pos/src/acct.rs:183:5: replace single -> Result<Vec<Booked>, String> with Ok(vec![])
+crates/opt_pos/src/acct.rs:183:5: replace single -> Result<Vec<Booked>, String> with Ok(vec![Default::default()])
+crates/opt_pos/src/acct.rs:201:5: replace rewalk -> Result<Vec<Booked>, String> with Ok(vec![])
+crates/opt_pos/src/acct.rs:201:5: replace rewalk -> Result<Vec<Booked>, String> with Ok(vec![Default::default()])
+crates/opt_pos/src/chain.rs:113:5: replace gcd -> i64 with 0
+crates/opt_pos/src/chain.rs:113:5: replace gcd -> i64 with 1
+crates/opt_pos/src/chain.rs:113:5: replace gcd -> i64 with -1
+crates/opt_pos/src/chain.rs:114:13: replace != with == in gcd
+crates/opt_pos/src/chain.rs:115:24: replace % with / in gcd
+crates/opt_pos/src/chain.rs:115:24: replace % with + in gcd
+crates/opt_pos/src/chain.rs:124:5: replace lot_at -> (i64, &'static str) with (0, "")
+crates/opt_pos/src/chain.rs:124:5: replace lot_at -> (i64, &'static str) with (0, "xyzzy")
+crates/opt_pos/src/chain.rs:124:5: replace lot_at -> (i64, &'static str) with (1, "")

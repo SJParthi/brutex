@@ -1,0 +1,3 @@
+crates/sniper_kernel/src/scale.rs:27:17: replace < with <= in replicate
+crates/sniper_kernel/src/scale.rs:30:52: replace == with != in replicate
+crates/sniper_kernel/src/scale.rs:31:17: replace += with *= in replicate

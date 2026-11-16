@@ -1,0 +1,65 @@
+crates/sniper_host/src/idxpos.rs:151:47: replace && with || in classify
+crates/sniper_host/src/idxpos.rs:148:46: replace == with != in classify
+crates/sniper_host/src/idxpos.rs:162:5: replace booking -> Vec<usize> with vec![]
+crates/sniper_host/src/idxpos.rs:162:5: replace booking -> Vec<usize> with vec![1]
+crates/sniper_host/src/idxpos.rs:162:5: replace booking -> Vec<usize> with vec![0]
+crates/sniper_host/src/idxpos.rs:179:5: replace record_width_pos -> usize with 0
+crates/sniper_host/src/idxpos.rs:179:5: replace record_width_pos -> usize with 1
+crates/sniper_host/src/idxpos.rs:179:39: replace * with + in record_width_pos
+crates/sniper_host/src/idxpos.rs:179:39: replace * with / in record_width_pos
+crates/sniper_host/src/idxpos.rs:179:21: replace + with - in record_width_pos
+crates/sniper_host/src/idxpos.rs:179:21: replace + with * in record_width_pos
+crates/sniper_host/src/idxpos.rs:179:16: replace * with + in record_width_pos
+crates/sniper_host/src/idxpos.rs:179:16: replace * with / in record_width_pos
+crates/sniper_host/src/idxpos.rs:179:9: replace * with + in record_width_pos
+crates/sniper_host/src/idxpos.rs:179:9: replace * with / in record_width_pos
+crates/sniper_host/src/idxpos.rs:206:5: replace encode_pos -> Result<Vec<u8>, String> with Ok(vec![])
+crates/sniper_host/src/idxpos.rs:206:5: replace encode_pos -> Result<Vec<u8>, String> with Ok(vec![0])
+crates/sniper_host/src/idxpos.rs:206:5: replace encode_pos -> Result<Vec<u8>, String> with Ok(vec![1])
+crates/sniper_host/src/idxpos.rs:218:104: replace / with * in encode_pos
+crates/sniper_host/src/idxpos.rs:218:94: replace - with / in encode_pos
+crates/sniper_host/src/idxpos.rs:227:117: replace / with * in encode_pos
+crates/sniper_host/src/idxpos.rs:236:23: replace != with == in encode_pos
+crates/sniper_host/src/idxpos.rs:265:9: replace DayMin::min_in -> Option<i64> with None
+crates/sniper_host/src/idxpos.rs:265:9: replace DayMin::min_in -> Option<i64> with Some(0)
+crates/sniper_host/src/idxpos.rs:265:9: replace DayMin::min_in -> Option<i64> with Some(1)
+crates/sniper_host/src/idxpos.rs:265:9: replace DayMin::min_in -> Option<i64> with Some(-1)
+crates/sniper_host/src/idxpos.rs:265:48: replace < with == in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:265:48: replace < with > in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:265:48: replace < with <= in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:266:48: replace < with == in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:266:48: replace < with > in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:266:48: replace < with <= in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:267:14: replace <= with > in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:270:19: replace - with + in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:270:19: replace - with / in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:271:49: replace - with + in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:271:49: replace - with / in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:271:45: replace - with + in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:271:45: replace - with / in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:273:68: replace - with + in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:273:68: replace - with / in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:273:73: replace << with >> in DayMin::min_in
+crates/sniper_host/src/idxpos.rs:288:5: replace join_rundown -> (u16, bool) with (0, true)
+crates/sniper_host/src/idxpos.rs:288:5: replace join_rundown -> (u16, bool) with (0, false)
+crates/sniper_host/src/idxpos.rs:288:5: replace join_rundown -> (u16, bool) with (1, true)
+crates/sniper_host/src/idxpos.rs:288:5: replace join_rundown -> (u16, bool) with (1, false)
+crates/sniper_host/src/idxpos.rs:293:73: replace - with + in join_rundown
+crates/sniper_host/src/idxpos.rs:293:73: replace - with / in join_rundown
+crates/sniper_host/src/idxpos.rs:293:33: replace + with - in join_rundown
+crates/sniper_host/src/idxpos.rs:293:33: replace + with * in join_rundown
+crates/sniper_host/src/idxpos.rs:293:56: replace * with + in join_rundown
+crates/sniper_host/src/idxpos.rs:293:56: replace * with / in join_rundown
+crates/sniper_host/src/idxpos.rs:296:18: replace += with -= in join_rundown
+crates/sniper_host/src/idxpos.rs:296:18: replace += with *= in join_rundown
+crates/sniper_host/src/idxpos.rs:303:39: replace / with % in join_rundown
+crates/sniper_host/src/idxpos.rs:303:39: replace / with * in join_rundown
+crates/sniper_host/src/idxpos.rs:303:30: replace * with + in join_rundown
+crates/sniper_host/src/idxpos.rs:303:30: replace * with / in join_rundown
+crates/sniper_host/src/idxpos.rs:303:15: delete - in join_rundown
+crates/sniper_host/src/idxpos.rs:349:46: replace || with && in level_of
+crates/sniper_host/src/idxpos.rs:349:91: replace && with || in level_of
+crates/sniper_host/src/idxpos.rs:349:50: delete ! in level_of
+crates/sniper_host/src/idxpos.rs:349:128: replace && with || in level_of
+crates/sniper_host/src/idxpos.rs:357:11: replace |= with &= in level_of
+crates/sniper_host/src/idxpos.rs:362:7: replace |= with &= in level_of

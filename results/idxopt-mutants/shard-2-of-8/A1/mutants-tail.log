@@ -1,0 +1,185 @@
+Found 283 mutants to test
+ok       Unmutated baseline in 9s build + 0s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/idx_cal/src/ticks.rs:237:25: replace != with == in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:237:18: replace & with ^ in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:240:33: replace & with | in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:240:33: replace & with ^ in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:242:28: replace <= with > in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:243:45: replace - with + in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:243:45: replace - with / in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:245:37: replace - with + in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:245:37: replace - with / in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:246:28: replace != with == in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:246:24: replace % with / in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:246:24: replace % with + in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:249:21: replace / with % in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:249:21: replace / with * in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:251:30: replace != with == in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:237:18: replace & with | in paisa in 7s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:251:23: replace & with | in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:251:23: replace & with ^ in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:251:37: delete - in paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:260:5: replace parse_paisa -> Option<i64> with Some(0) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:260:5: replace parse_paisa -> Option<i64> with None in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:260:5: replace parse_paisa -> Option<i64> with Some(1) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:260:5: replace parse_paisa -> Option<i64> with Some(-1) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:265:23: replace && with || in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:265:19: replace > with == in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:265:19: replace > with < in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:265:19: replace > with >= in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:268:20: replace || with && in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:268:16: replace > with == in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:268:16: replace > with < in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:268:16: replace > with >= in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:268:23: delete ! in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:271:19: replace < with == in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:271:19: replace < with > in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:271:19: replace < with <= in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:275:19: delete - in parse_paisa in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:279:5: replace sod_of -> Option<i32> with None in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:279:5: replace sod_of -> Option<i32> with Some(0) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:279:5: replace sod_of -> Option<i32> with Some(1) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:279:5: replace sod_of -> Option<i32> with Some(-1) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:282:25: replace == with != in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:282:18: replace & with | in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:282:18: replace & with ^ in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:36: replace + with - in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:36: replace + with * in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:27: replace + with - in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:27: replace + with * in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:20: replace * with + in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:20: replace * with / in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:31: replace * with + in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:293:31: replace * with / in sod_of in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:316:5: replace read_member -> Result<Option<(Vec<TickRow>, MemberInfo)>, String> with Ok(None) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:316:5: replace read_member -> Result<Option<(Vec<TickRow>, MemberInfo)>, String> with Ok(Some((vec![], Default::default()))) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:317:61: replace == with != in read_member in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:330:5: replace read_entry -> Result<(Vec<TickRow>, MemberInfo), String> with Ok((vec![], Default::default())) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:334:9: delete match arm 1 in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:350:9: delete match arm 2 in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:335:32: replace == with != in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:336:36: replace == with != in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:341:41: replace != with == in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:352:28: replace != with == in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:360:39: delete ! in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:366:22: replace += with -= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:366:22: replace += with *= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:373:53: replace == with != in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:377:86: replace == with != in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:378:13: replace == with != in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:386:22: replace > with == in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:386:22: replace > with < in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:386:22: replace > with >= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:395:58: replace || with && in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:395:42: replace != with == in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:395:73: replace != with == in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:406:27: replace += with -= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:406:27: replace += with *= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:34: replace || with && in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:18: replace || with && in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:14: replace < with == in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:14: replace < with > in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:14: replace < with <= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:29: replace != with == in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:23: replace % with / in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:23: replace % with + in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:409:41: replace <= with > in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:410:27: replace += with -= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:410:27: replace += with *= in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:413:59: replace / with % in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:413:59: replace / with * in read_entry in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:423:5: replace fold_seconds -> (Vec<Sec>, u64) with (vec![], 0) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:423:5: replace fold_seconds -> (Vec<Sec>, u64) with (vec![], 1) in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:423:40: replace - with + in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:423:40: replace - with / in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:431:18: replace < with == in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:429:31: replace != with == in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:431:18: replace < with > in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:431:18: replace < with <= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:432:26: replace += with -= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:432:26: replace += with *= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:435:29: replace || with && in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:435:18: replace < with == in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:435:18: replace < with > in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:435:18: replace < with <= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:435:38: replace >= with < in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:438:31: replace || with && in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:438:27: replace > with == in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:438:27: replace > with < in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:438:27: replace > with >= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:439:48: replace - with + in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:439:48: replace - with / in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:442:12: delete ! in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:444:26: replace += with -= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:444:26: replace += with *= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:453:26: replace += with -= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:453:26: replace += with *= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:459:18: replace > with == in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:459:18: replace > with < in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:459:18: replace > with >= in fold_seconds in 0s build + 0s test
+MISSED   crates/idx_cal/src/ticks.rs:474:5: replace day_path -> std::path::PathBuf with Default::default() in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:43:9: replace QtyRule::id -> &'static str with "" in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:43:9: replace QtyRule::id -> &'static str with "xyzzy" in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:74:46: replace * with + in closest_units in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:74:50: replace >= with < in closest_units in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:74:46: replace * with / in closest_units in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:84:18: replace || with && in fit_units in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:89:64: replace * with / in fit_units in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:89:60: replace * with / in fit_units in 0s build + 0s test
+MISSED   crates/idx_f1/src/host_size.rs:133:27: replace > with >= in account_walk in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:84:9: replace Booked::net -> i64 with 1 in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:84:9: replace Booked::net -> i64 with -1 in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:89:9: replace Booked::value_in -> i64 with 1 in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:84:9: replace Booked::net -> i64 with 0 in 4s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:122:9: replace Ledger::settle with () in 1s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:125:31: replace += with -= in Ledger::settle in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:125:31: replace += with *= in Ledger::settle in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:133:15: replace + with - in Ledger::base in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:153:26: delete field stream from struct Booked expression in enter in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:153:34: delete field no from struct Booked expression in enter in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:153:53: delete field want from struct Booked expression in enter in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:153:88: delete field refused from struct Booked expression in enter in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:153:106: replace || with && in enter in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:161:20: replace match guard s.qty == qty && s.reserve == b.reserve with true in enter in 0s build + 0s test
+MISSED   crates/opt_pos/src/acct.rs:161:33: replace && with || in enter in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:25:9: replace Folders::from_pairs -> Self with Default::default() in 1s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:33:9: replace Folders::list -> Result<Self, String> with Ok(Default::default()) in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:48:9: replace Folders::near -> Vec<Day> with vec![] in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:48:9: replace Folders::near -> Vec<Day> with vec![Default::default()] in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:48:130: replace <= with > in Folders::near in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:48:119: replace - with + in Folders::near in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:48:119: replace - with / in Folders::near in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:49:31: replace - with + in Folders::near in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:49:31: replace - with / in Folders::near in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:56:9: replace Folders::has -> bool with true in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:56:9: replace Folders::has -> bool with false in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:78:5: replace busiest_cands -> Result<Vec<Cand>, String> with Ok(vec![]) in 1s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:85:48: replace / with % in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:85:48: replace / with * in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:85:32: replace - with + in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:85:32: replace - with / in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:86:82: replace + with - in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:86:82: replace + with * in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:86:75: replace * with + in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:86:75: replace * with / in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:86:87: replace * with + in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:86:87: replace * with / in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:87:66: replace < with == in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:87:66: replace < with > in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:87:66: replace < with <= in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:88:80: replace < with == in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:88:80: replace < with > in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:88:80: replace < with <= in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:90:48: replace > with == in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:90:48: replace > with < in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:90:48: replace > with >= in busiest_cands in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:104:5: replace leader -> (Option<&Cand>, Option<&Cand>) with (None, None) in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:104:90: replace > with == in leader in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:104:90: replace > with < in leader in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:104:90: replace > with >= in leader in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:107:37: replace - with + in leader in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:107:37: replace - with / in leader in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:107:67: replace - with + in leader in 0s build + 0s test
+MISSED   crates/opt_pos/src/chain.rs:107:67: replace - with / in leader in 0s build + 0s test
+283 mutants tested in 2m: 181 missed, 92 caught, 10 unviable

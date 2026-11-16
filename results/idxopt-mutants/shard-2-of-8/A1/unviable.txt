@@ -1,0 +1,10 @@
+crates/idx_cal/src/ticks.rs:316:5: replace read_member -> Result<Option<(Vec<TickRow>, MemberInfo)>, String> with Ok(Some((vec![Default::default()], Default::default())))
+crates/idx_cal/src/ticks.rs:330:5: replace read_entry -> Result<(Vec<TickRow>, MemberInfo), String> with Ok((vec![Default::default()], Default::default()))
+crates/idx_cal/src/ticks.rs:423:5: replace fold_seconds -> (Vec<Sec>, u64) with (vec![Default::default()], 0)
+crates/idx_cal/src/ticks.rs:423:5: replace fold_seconds -> (Vec<Sec>, u64) with (vec![Default::default()], 1)
+crates/idx_cal/src/ticks.rs:460:13: replace && with || in fold_seconds
+crates/idx_f1/src/host_size.rs:33:9: replace QtyRule::parse -> Result<Self, String> with Ok(Default::default())
+crates/opt_pos/src/chain.rs:78:5: replace busiest_cands -> Result<Vec<Cand>, String> with Ok(vec![Default::default()])
+crates/opt_pos/src/chain.rs:104:5: replace leader -> (Option<&Cand>, Option<&Cand>) with (None, Some(Box::leak(Box::new(Default::default()))))
+crates/opt_pos/src/chain.rs:104:5: replace leader -> (Option<&Cand>, Option<&Cand>) with (Some(Box::leak(Box::new(Default::default()))), None)
+crates/opt_pos/src/chain.rs:104:5: replace leader -> (Option<&Cand>, Option<&Cand>) with (Some(Box::leak(Box::new(Default::default()))), Some(Box::leak(Box::new(Default::default()))))

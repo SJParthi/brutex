@@ -1,0 +1,65 @@
+crates/sniper_kernel/src/line.rs:316:41: replace && with || in LineEngine::walk
+crates/sniper_kernel/src/line.rs:316:28: replace > with >= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:316:37: replace < with <= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:336:9: replace LineEngine::changes -> bool with true
+crates/sniper_kernel/src/line.rs:343:20: replace == with != in LineEngine::changes
+crates/sniper_kernel/src/line.rs:347:47: replace > with == in LineEngine::changes
+crates/sniper_kernel/src/line.rs:347:47: replace > with < in LineEngine::changes
+crates/sniper_kernel/src/line.rs:347:47: replace > with >= in LineEngine::changes
+crates/sniper_kernel/src/line.rs:347:67: replace < with <= in LineEngine::changes
+crates/sniper_kernel/src/scale.rs:10:5: replace splitmix -> u64 with 0
+crates/sniper_kernel/src/scale.rs:10:5: replace splitmix -> u64 with 1
+crates/sniper_kernel/src/scale.rs:11:12: replace ^ with | in splitmix
+crates/sniper_kernel/src/scale.rs:11:12: replace ^ with & in splitmix
+crates/sniper_kernel/src/scale.rs:11:17: replace >> with << in splitmix
+crates/sniper_kernel/src/scale.rs:12:12: replace ^ with | in splitmix
+crates/sniper_kernel/src/scale.rs:12:12: replace ^ with & in splitmix
+crates/sniper_kernel/src/scale.rs:12:17: replace >> with << in splitmix
+crates/sniper_kernel/src/scale.rs:13:7: replace ^ with | in splitmix
+crates/sniper_kernel/src/scale.rs:13:7: replace ^ with & in splitmix
+crates/sniper_kernel/src/scale.rs:13:12: replace >> with << in splitmix
+crates/sniper_kernel/src/scale.rs:33:21: replace - with + in replicate
+crates/sniper_kernel/src/scale.rs:34:36: replace ^ with | in replicate
+crates/sniper_kernel/src/scale.rs:34:36: replace ^ with & in replicate
+crates/sniper_kernel/src/scale.rs:42:33: replace == with != in replicate
+crates/sniper_kernel/src/scale.rs:46:27: replace + with * in replicate
+crates/sniper_kernel/src/scale.rs:46:48: replace % with / in replicate
+crates/sniper_kernel/src/scale.rs:46:48: replace % with + in replicate
+crates/sniper_kernel/src/steps.rs:30:9: replace Hist::add with ()
+crates/sniper_kernel/src/steps.rs:32:16: replace += with *= in Hist::add
+crates/sniper_kernel/src/steps.rs:34:16: replace += with *= in Hist::add
+crates/sniper_kernel/src/steps.rs:40:9: replace Hist::add_n with ()
+crates/sniper_kernel/src/steps.rs:40:14: replace == with != in Hist::add_n
+crates/sniper_kernel/src/steps.rs:45:16: replace += with -= in Hist::add_n
+crates/sniper_kernel/src/steps.rs:45:16: replace += with *= in Hist::add_n
+crates/sniper_kernel/src/steps.rs:47:16: replace += with -= in Hist::add_n
+crates/sniper_kernel/src/steps.rs:47:16: replace += with *= in Hist::add_n
+crates/sniper_kernel/src/steps.rs:53:9: replace Hist::merge with ()
+crates/sniper_kernel/src/steps.rs:54:16: replace += with -= in Hist::merge
+crates/sniper_kernel/src/steps.rs:54:16: replace += with *= in Hist::merge
+crates/sniper_kernel/src/steps.rs:56:16: replace += with -= in Hist::merge
+crates/sniper_kernel/src/steps.rs:56:16: replace += with *= in Hist::merge
+crates/sniper_kernel/src/steps.rs:63:9: replace Hist::count -> u64 with 0
+crates/sniper_kernel/src/steps.rs:63:9: replace Hist::count -> u64 with 1
+crates/sniper_kernel/src/steps.rs:69:9: replace Hist::max -> u64 with 0
+crates/sniper_kernel/src/steps.rs:69:9: replace Hist::max -> u64 with 1
+crates/sniper_kernel/src/steps.rs:75:9: replace Hist::permille -> u64 with 0
+crates/sniper_kernel/src/steps.rs:75:9: replace Hist::permille -> u64 with 1
+crates/sniper_kernel/src/steps.rs:75:19: replace == with != in Hist::permille
+crates/sniper_kernel/src/steps.rs:78:28: replace * with + in Hist::permille
+crates/sniper_kernel/src/steps.rs:78:28: replace * with / in Hist::permille
+crates/sniper_kernel/src/steps.rs:81:17: replace += with *= in Hist::permille
+crates/sniper_kernel/src/steps.rs:82:20: replace >= with < in Hist::permille
+crates/sniper_kernel/src/steps.rs:83:29: replace == with != in Hist::permille
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (0, 0, 0)
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (0, 0, 1)
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (0, 1, 0)
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (0, 1, 1)
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (1, 0, 0)
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (1, 0, 1)
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (1, 1, 0)
+crates/sniper_kernel/src/steps.rs:92:9: replace Hist::summary -> (u64, u64, u64) with (1, 1, 1)
+crates/wf_sweep/src/lib.rs:48:5: replace refuse_if_red -> Result<(), SweepErr> with Ok(())
+crates/wf_sweep/src/lib.rs:78:9: replace <impl std::fmt::Display for SweepErr>::fmt -> std::fmt::Result with Ok(Default::default())
+crates/wf_sweep/src/lib.rs:112:12: replace ^ with | in mix
+crates/wf_sweep/src/lib.rs:112:12: replace ^ with & in mix

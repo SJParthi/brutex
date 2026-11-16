@@ -1,0 +1,2 @@
+crates/wf_sweep/src/lib.rs:88:5: replace overflow -> SweepErr with Default::default()
+crates/wf_sweep/src/lib.rs:94:5: replace unknown_row -> SweepErr with Default::default()

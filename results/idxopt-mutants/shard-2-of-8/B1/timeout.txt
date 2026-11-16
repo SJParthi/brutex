@@ -1,0 +1,2 @@
+crates/sniper_host/src/idxpos.rs:236:19: replace % with / in encode_pos
+crates/sniper_host/src/idxpos.rs:236:19: replace % with + in encode_pos

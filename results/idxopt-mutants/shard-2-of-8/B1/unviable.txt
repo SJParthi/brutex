@@ -1,0 +1,2 @@
+crates/sniper_host/src/idxpos.rs:148:5: replace classify -> Class with Default::default()
+crates/sniper_host/src/idxpos.rs:343:5: replace level_of -> Result<(PLevel, Class), String> with Ok((Default::default(), Default::default()))

@@ -1,0 +1,53 @@
+crates/sniper_kernel/src/line.rs:272:36: replace += with *= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:280:25: replace += with *= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:280:25: replace += with -= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:286:41: replace / with * in LineEngine::walk
+crates/sniper_kernel/src/line.rs:286:41: replace / with % in LineEngine::walk
+crates/sniper_kernel/src/line.rs:286:64: replace % with / in LineEngine::walk
+crates/sniper_kernel/src/line.rs:286:64: replace % with + in LineEngine::walk
+crates/sniper_kernel/src/line.rs:287:44: replace || with && in LineEngine::walk
+crates/sniper_kernel/src/line.rs:287:27: replace < with == in LineEngine::walk
+crates/sniper_kernel/src/line.rs:287:27: replace < with > in LineEngine::walk
+crates/sniper_kernel/src/line.rs:287:27: replace < with <= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:287:50: replace < with == in LineEngine::walk
+crates/sniper_kernel/src/line.rs:287:50: replace < with > in LineEngine::walk
+crates/sniper_kernel/src/line.rs:287:50: replace < with <= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:296:32: replace += with -= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:296:32: replace += with *= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:312:53: replace + with - in LineEngine::walk
+crates/sniper_kernel/src/line.rs:312:53: replace + with * in LineEngine::walk
+crates/sniper_kernel/src/line.rs:316:32: replace && with || in LineEngine::walk
+crates/sniper_kernel/src/line.rs:316:28: replace > with == in LineEngine::walk
+crates/sniper_kernel/src/line.rs:316:28: replace > with < in LineEngine::walk
+crates/sniper_kernel/src/line.rs:316:37: replace < with == in LineEngine::walk
+crates/sniper_kernel/src/line.rs:316:37: replace < with > in LineEngine::walk
+crates/sniper_kernel/src/line.rs:317:52: replace + with - in LineEngine::walk
+crates/sniper_kernel/src/line.rs:317:52: replace + with * in LineEngine::walk
+crates/sniper_kernel/src/line.rs:322:30: replace != with == in LineEngine::walk
+crates/sniper_kernel/src/line.rs:326:25: replace += with -= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:326:25: replace += with *= in LineEngine::walk
+crates/sniper_kernel/src/line.rs:336:9: replace LineEngine::changes -> bool with false
+crates/sniper_kernel/src/line.rs:347:67: replace < with == in LineEngine::changes
+crates/sniper_kernel/src/line.rs:347:67: replace < with > in LineEngine::changes
+crates/sniper_kernel/src/scale.rs:22:5: replace replicate -> (Vec<Row>, Vec<u32>) with (vec![], vec![])
+crates/sniper_kernel/src/scale.rs:22:5: replace replicate -> (Vec<Row>, Vec<u32>) with (vec![], vec![1])
+crates/sniper_kernel/src/scale.rs:22:5: replace replicate -> (Vec<Row>, Vec<u32>) with (vec![], vec![0])
+crates/sniper_kernel/src/scale.rs:22:5: replace replicate -> (Vec<Row>, Vec<u32>) with (vec![Default::default()], vec![])
+crates/sniper_kernel/src/scale.rs:22:5: replace replicate -> (Vec<Row>, Vec<u32>) with (vec![Default::default()], vec![0])
+crates/sniper_kernel/src/scale.rs:22:5: replace replicate -> (Vec<Row>, Vec<u32>) with (vec![Default::default()], vec![1])
+crates/sniper_kernel/src/scale.rs:27:17: replace < with == in replicate
+crates/sniper_kernel/src/scale.rs:27:17: replace < with > in replicate
+crates/sniper_kernel/src/scale.rs:31:17: replace += with -= in replicate
+crates/sniper_kernel/src/scale.rs:33:21: replace - with / in replicate
+crates/sniper_kernel/src/scale.rs:46:27: replace + with - in replicate
+crates/sniper_kernel/src/steps.rs:32:16: replace += with -= in Hist::add
+crates/sniper_kernel/src/steps.rs:34:16: replace += with -= in Hist::add
+crates/sniper_kernel/src/steps.rs:81:17: replace += with -= in Hist::permille
+crates/wf_sweep/src/lib.rs:100:5: replace add -> Result<i64, SweepErr> with Ok(0)
+crates/wf_sweep/src/lib.rs:100:5: replace add -> Result<i64, SweepErr> with Ok(-1)
+crates/wf_sweep/src/lib.rs:106:5: replace sub -> Result<i64, SweepErr> with Ok(0)
+crates/wf_sweep/src/lib.rs:100:5: replace add -> Result<i64, SweepErr> with Ok(1)
+crates/wf_sweep/src/lib.rs:106:5: replace sub -> Result<i64, SweepErr> with Ok(1)
+crates/wf_sweep/src/lib.rs:106:5: replace sub -> Result<i64, SweepErr> with Ok(-1)
+crates/wf_sweep/src/lib.rs:112:5: replace mix -> u64 with 0
+crates/wf_sweep/src/lib.rs:112:5: replace mix -> u64 with 1

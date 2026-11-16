@@ -1,0 +1,8 @@
+Found 58 mutants to test
+ok       Unmutated baseline in 5s build + 1s test
+ INFO Auto-set test timeout to 20s
+MISSED   crates/costs/src/option_clock.rs:120:17: replace - with / in civil in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:121:45: replace - with / in civil in 1s build + 1s test
+MISSED   crates/costs/src/option_clock.rs:136:10: replace * with / in ceil_div in 1s build + 2s test
+MISSED   crates/costs/src/option_clock.rs:148:51: replace >= with < in rates_on in 1s build + 2s test
+58 mutants tested in 62s: 4 missed, 52 caught, 2 unviable

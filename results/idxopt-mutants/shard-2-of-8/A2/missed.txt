@@ -1,0 +1,4 @@
+crates/costs/src/option_clock.rs:120:17: replace - with / in civil
+crates/costs/src/option_clock.rs:121:45: replace - with / in civil
+crates/costs/src/option_clock.rs:136:10: replace * with / in ceil_div
+crates/costs/src/option_clock.rs:148:51: replace >= with < in rates_on
