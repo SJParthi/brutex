@@ -15,3 +15,5 @@ BOX 2026-11-16 16:07:51 UTC set A2 DONE: rc 0, set=A2 mutants=54 caught=54 misse
 BOX 2026-11-16 16:07:51 UTC set B2 start: shard 7/8
 BOX 2026-11-16 16:10:54 UTC set B2 DONE: rc 3, set=B2 mutants=123 caught=61 missed=54 timeout=4 unviable=4
 BOX 2026-11-16 16:10:54 UTC set B1 start: shard 7/8
+BOX 2026-11-16 16:29:40 UTC set B1 DONE: rc 3, set=B1 mutants=481 caught=253 missed=214 timeout=2 unviable=12
+BOX 2026-11-16 16:29:40 UTC BOX DONE: set=ALL mutants=941 caught=536 missed=382 timeout=6 unviable=17

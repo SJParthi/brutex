@@ -8,3 +8,5 @@ crates/sniper_host/src/sweep.rs:359:5: replace run_all -> Result<Vec<Out>, Strin
 crates/sniper_host/src/sweep.rs:367:5: replace run_all_with -> Result<Vec<Out>, String> with Ok(vec![Default::default()])
 crates/sniper_host/src/sweep.rs:378:5: replace run_all_kept -> Result<Vec<Out>, String> with Ok(vec![Default::default()])
 crates/sniper_host/src/wfio.rs:35:5: replace calendar -> Result<Calendar, String> with Ok(Default::default())
+crates/sniper_host/src/wfio.rs:88:5: replace load -> Result<Wf, String> with Ok(Default::default())
+crates/sniper_host/src/wfio.rs:97:5: replace load_rules -> Result<Wf, String> with Ok(Default::default())

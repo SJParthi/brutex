@@ -177,3 +177,38 @@ crates/sniper_host/src/wfio.rs:40:23: delete ! in calendar
 crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![]
 crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![(String::new(), String::new())]
 crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![(String::new(), "xyzzy".into())]
+crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![("xyzzy".into(), String::new())]
+crates/sniper_host/src/wfio.rs:54:5: replace kv_rows -> Vec<(String, String)> with vec![("xyzzy".into(), "xyzzy".into())]
+crates/sniper_host/src/wfio.rs:55:68: replace && with || in kv_rows
+crates/sniper_host/src/wfio.rs:55:41: replace && with || in kv_rows
+crates/sniper_host/src/wfio.rs:55:21: delete ! in kv_rows
+crates/sniper_host/src/wfio.rs:55:44: delete ! in kv_rows
+crates/sniper_host/src/wfio.rs:55:71: delete ! in kv_rows
+crates/sniper_host/src/wfio.rs:67:5: replace partition_row -> Vec<String> with vec![]
+crates/sniper_host/src/wfio.rs:67:5: replace partition_row -> Vec<String> with vec![String::new()]
+crates/sniper_host/src/wfio.rs:67:5: replace partition_row -> Vec<String> with vec!["xyzzy".into()]
+crates/sniper_host/src/wfio.rs:71:19: replace == with != in partition_row
+crates/sniper_host/src/wfio.rs:74:53: replace == with != in partition_row
+crates/sniper_host/src/wfio.rs:112:44: replace == with != in load_rules
+crates/sniper_host/src/wfio.rs:113:44: replace == with != in load_rules
+crates/sniper_host/src/wfio.rs:115:57: replace && with || in load_rules
+crates/sniper_host/src/words.rs:17:9: replace Words::parse -> Result<Self, String> with Ok(Default::default())
+crates/sniper_host/src/words.rs:19:60: replace || with && in Words::parse
+crates/sniper_host/src/words.rs:19:35: replace || with && in Words::parse
+crates/sniper_host/src/words.rs:32:16: delete ! in Words::parse
+crates/sniper_host/src/words.rs:42:9: replace Words::line -> String with String::new()
+crates/sniper_host/src/words.rs:42:9: replace Words::line -> String with "xyzzy".into()
+crates/sniper_host/src/words.rs:52:9: replace Words::trade_count -> Vec<String> with vec![]
+crates/sniper_host/src/words.rs:52:9: replace Words::trade_count -> Vec<String> with vec![String::new()]
+crates/sniper_host/src/words.rs:52:9: replace Words::trade_count -> Vec<String> with vec!["xyzzy".into()]
+crates/sniper_host/src/words.rs:54:21: replace < with == in Words::trade_count
+crates/sniper_host/src/words.rs:54:21: replace < with > in Words::trade_count
+crates/sniper_host/src/words.rs:54:21: replace < with <= in Words::trade_count
+crates/sniper_host/src/words.rs:57:20: replace < with == in Words::trade_count
+crates/sniper_host/src/words.rs:57:20: replace < with > in Words::trade_count
+crates/sniper_host/src/words.rs:57:20: replace < with <= in Words::trade_count
+crates/sniper_host/src/words.rs:67:9: replace Words::standing -> Vec<String> with vec![]
+crates/sniper_host/src/words.rs:67:9: replace Words::standing -> Vec<String> with vec![String::new()]
+crates/sniper_host/src/words.rs:67:9: replace Words::standing -> Vec<String> with vec!["xyzzy".into()]
+crates/sniper_host/src/mutant_s16.rs:12:5: replace mutant_entry -> Result<u64, common_fill::FillErr> with Ok(0)
+crates/sniper_host/src/mutant_s16.rs:12:5: replace mutant_entry -> Result<u64, common_fill::FillErr> with Ok(1)
