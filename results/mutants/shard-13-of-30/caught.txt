@@ -12,3 +12,22 @@ crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u
 crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 0, 0, 0)
 crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 0, 1, 0)
 crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:4973:5: replace sum_eq_all -> bool with false
+crates/spikefade/src/report3.rs:4973:22: replace == with != in sum_eq_all
+crates/spikefade/src/report3.rs:5014:5: replace cap_views33 -> Vec<(usize, usize)> with vec![(1, 0)]
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (0, 0, 0)
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (0, 0, 1)
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (0, 1, 0)
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (0, 1, 1)
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (1, 0, 0)
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (1, 0, 1)
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (1, 1, 0)
+crates/spikefade/src/report3.rs:5029:5: replace acct_key33 -> (u32, u16, u8) with (1, 1, 1)
+crates/spikefade/src/report3.rs:5041:42: delete ! in cap_retain33
+crates/spikefade/src/report3.rs:5035:5: replace cap_retain33 with ()
+crates/spikefade/src/report3.rs:5088:5: replace kept18 -> Vec<(String, Sum)> with vec![]
+crates/spikefade/src/report3.rs:5092:75: replace == with != in kept18
+crates/spikefade/src/report3.rs:5152:33: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5253:54: replace > with >= in v32_sections
+crates/spikefade/src/report3.rs:5264:28: replace >= with < in v32_sections
+crates/spikefade/src/report3.rs:5466:24: replace >= with < in v32_portfolio_mtm

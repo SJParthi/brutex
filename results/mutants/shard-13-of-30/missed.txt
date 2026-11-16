@@ -158,3 +158,159 @@ crates/spikefade/src/report3.rs:4911:36: replace += with *= in speed_probe
 crates/spikefade/src/report3.rs:4919:32: delete ! in speed_probe
 crates/spikefade/src/report3.rs:4919:64: replace / with % in speed_probe
 crates/spikefade/src/report3.rs:4919:64: replace / with * in speed_probe
+crates/spikefade/src/report3.rs:4919:52: replace % with / in speed_probe
+crates/spikefade/src/report3.rs:4919:52: replace % with + in speed_probe
+crates/spikefade/src/report3.rs:4919:58: replace * with + in speed_probe
+crates/spikefade/src/report3.rs:4919:58: replace * with / in speed_probe
+crates/spikefade/src/report3.rs:4922:35: replace += with -= in speed_probe
+crates/spikefade/src/report3.rs:4922:35: replace += with *= in speed_probe
+crates/spikefade/src/report3.rs:4924:35: replace ^= with |= in speed_probe
+crates/spikefade/src/report3.rs:4924:35: replace ^= with &= in speed_probe
+crates/spikefade/src/report3.rs:4936:48: replace * with + in speed_probe
+crates/spikefade/src/report3.rs:4936:48: replace * with / in speed_probe
+crates/spikefade/src/report3.rs:4936:33: replace - with + in speed_probe
+crates/spikefade/src/report3.rs:4936:33: replace - with / in speed_probe
+crates/spikefade/src/report3.rs:4943:110: replace + with - in speed_probe
+crates/spikefade/src/report3.rs:4943:110: replace + with * in speed_probe
+crates/spikefade/src/report3.rs:4943:73: replace || with && in speed_probe
+crates/spikefade/src/report3.rs:4943:66: replace != with == in speed_probe
+crates/spikefade/src/report3.rs:4943:80: replace != with == in speed_probe
+crates/spikefade/src/report3.rs:4943:130: replace != with == in speed_probe
+crates/spikefade/src/report3.rs:4955:5: replace proc_cpu_s -> f64 with 0.0
+crates/spikefade/src/report3.rs:4955:5: replace proc_cpu_s -> f64 with 1.0
+crates/spikefade/src/report3.rs:4955:5: replace proc_cpu_s -> f64 with -1.0
+crates/spikefade/src/report3.rs:4963:9: delete match arm [m, s] in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:9: delete match arm [h, m, s] in proc_cpu_s
+crates/spikefade/src/report3.rs:4965:9: delete match arm [s] in proc_cpu_s
+crates/spikefade/src/report3.rs:4963:28: replace + with - in proc_cpu_s
+crates/spikefade/src/report3.rs:4963:28: replace + with * in proc_cpu_s
+crates/spikefade/src/report3.rs:4963:21: replace * with + in proc_cpu_s
+crates/spikefade/src/report3.rs:4963:21: replace * with / in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:45: replace + with - in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:45: replace + with * in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:34: replace + with - in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:34: replace + with * in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:24: replace * with + in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:24: replace * with / in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:38: replace * with + in proc_cpu_s
+crates/spikefade/src/report3.rs:4964:38: replace * with / in proc_cpu_s
+crates/spikefade/src/report3.rs:4973:5: replace sum_eq_all -> bool with true
+crates/spikefade/src/report3.rs:4979:5: replace decided_trades -> Vec<crate::v32::PTrade> with vec![]
+crates/spikefade/src/report3.rs:4979:5: replace decided_trades -> Vec<crate::v32::PTrade> with vec![Default::default()]
+crates/spikefade/src/report3.rs:4985:5: replace decided_trades_m -> Vec<(crate::v32::PTrade, crate::v32::PMark)> with vec![]
+crates/spikefade/src/report3.rs:4985:5: replace decided_trades_m -> Vec<(crate::v32::PTrade, crate::v32::PMark)> with vec![(Default::default(), Default::default())]
+crates/spikefade/src/report3.rs:4985:42: replace / with % in decided_trades_m
+crates/spikefade/src/report3.rs:4985:42: replace / with * in decided_trades_m
+crates/spikefade/src/report3.rs:4985:66: replace % with / in decided_trades_m
+crates/spikefade/src/report3.rs:4985:66: replace % with + in decided_trades_m
+crates/spikefade/src/report3.rs:4990:168: replace >= with < in decided_trades_m
+crates/spikefade/src/report3.rs:4995:63: replace == with != in decided_trades_m
+crates/spikefade/src/report3.rs:4998:28: replace == with != in decided_trades_m
+crates/spikefade/src/report3.rs:5004:54: replace << with >> in decided_trades_m
+crates/spikefade/src/report3.rs:5005:103: replace + with - in decided_trades_m
+crates/spikefade/src/report3.rs:5005:103: replace + with * in decided_trades_m
+crates/spikefade/src/report3.rs:5005:158: replace + with - in decided_trades_m
+crates/spikefade/src/report3.rs:5005:158: replace + with * in decided_trades_m
+crates/spikefade/src/report3.rs:5005:139: replace * with + in decided_trades_m
+crates/spikefade/src/report3.rs:5005:139: replace * with / in decided_trades_m
+crates/spikefade/src/report3.rs:5005:199: replace | with & in decided_trades_m
+crates/spikefade/src/report3.rs:5005:199: replace | with ^ in decided_trades_m
+crates/spikefade/src/report3.rs:5005:221: replace | with & in decided_trades_m
+crates/spikefade/src/report3.rs:5005:221: replace | with ^ in decided_trades_m
+crates/spikefade/src/report3.rs:5014:5: replace cap_views33 -> Vec<(usize, usize)> with vec![]
+crates/spikefade/src/report3.rs:5014:5: replace cap_views33 -> Vec<(usize, usize)> with vec![(0, 0)]
+crates/spikefade/src/report3.rs:5014:5: replace cap_views33 -> Vec<(usize, usize)> with vec![(0, 1)]
+crates/spikefade/src/report3.rs:5014:5: replace cap_views33 -> Vec<(usize, usize)> with vec![(1, 1)]
+crates/spikefade/src/report3.rs:5017:19: replace > with == in cap_views33
+crates/spikefade/src/report3.rs:5017:19: replace > with < in cap_views33
+crates/spikefade/src/report3.rs:5017:19: replace > with >= in cap_views33
+crates/spikefade/src/report3.rs:5052:5: replace cap_filter33 with ()
+crates/spikefade/src/report3.rs:5071:12: delete ! in cap_filter33
+crates/spikefade/src/report3.rs:5088:5: replace kept18 -> Vec<(String, Sum)> with vec![(String::new(), Default::default())]
+crates/spikefade/src/report3.rs:5088:5: replace kept18 -> Vec<(String, Sum)> with vec![("xyzzy".into(), Default::default())]
+crates/spikefade/src/report3.rs:5092:69: replace || with && in kept18
+crates/spikefade/src/report3.rs:5092:43: replace && with || in kept18
+crates/spikefade/src/report3.rs:5092:20: replace == with != in kept18
+crates/spikefade/src/report3.rs:5092:46: delete ! in kept18
+crates/spikefade/src/report3.rs:5092:80: replace && with || in kept18
+crates/spikefade/src/report3.rs:5092:86: replace != with == in kept18
+crates/spikefade/src/report3.rs:5095:55: replace == with != in kept18
+crates/spikefade/src/report3.rs:5106:5: replace v32_sections -> Result<String, String> with Ok(String::new())
+crates/spikefade/src/report3.rs:5106:5: replace v32_sections -> Result<String, String> with Ok("xyzzy".into())
+crates/spikefade/src/report3.rs:5127:30: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5152:52: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5169:60: replace * with + in v32_sections
+crates/spikefade/src/report3.rs:5169:60: replace * with / in v32_sections
+crates/spikefade/src/report3.rs:5169:54: replace * with + in v32_sections
+crates/spikefade/src/report3.rs:5169:54: replace * with / in v32_sections
+crates/spikefade/src/report3.rs:5169:32: replace * with + in v32_sections
+crates/spikefade/src/report3.rs:5169:32: replace * with / in v32_sections
+crates/spikefade/src/report3.rs:5172:68: replace / with % in v32_sections
+crates/spikefade/src/report3.rs:5172:68: replace / with * in v32_sections
+crates/spikefade/src/report3.rs:5172:64: replace * with + in v32_sections
+crates/spikefade/src/report3.rs:5172:64: replace * with / in v32_sections
+crates/spikefade/src/report3.rs:5173:34: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5208:32: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5218:47: replace % with / in v32_sections
+crates/spikefade/src/report3.rs:5218:47: replace % with + in v32_sections
+crates/spikefade/src/report3.rs:5229:43: replace % with / in v32_sections
+crates/spikefade/src/report3.rs:5229:43: replace % with + in v32_sections
+crates/spikefade/src/report3.rs:5230:36: replace < with == in v32_sections
+crates/spikefade/src/report3.rs:5230:36: replace < with > in v32_sections
+crates/spikefade/src/report3.rs:5234:75: replace += with -= in v32_sections
+crates/spikefade/src/report3.rs:5230:36: replace < with <= in v32_sections
+crates/spikefade/src/report3.rs:5234:75: replace += with *= in v32_sections
+crates/spikefade/src/report3.rs:5253:54: replace > with == in v32_sections
+crates/spikefade/src/report3.rs:5253:54: replace > with < in v32_sections
+crates/spikefade/src/report3.rs:5254:32: replace >= with < in v32_sections
+crates/spikefade/src/report3.rs:5265:177: delete - in v32_sections
+crates/spikefade/src/report3.rs:5277:37: replace >= with < in v32_sections
+crates/spikefade/src/report3.rs:5290:55: replace > with == in v32_sections
+crates/spikefade/src/report3.rs:5290:55: replace > with < in v32_sections
+crates/spikefade/src/report3.rs:5290:55: replace > with >= in v32_sections
+crates/spikefade/src/report3.rs:5295:42: replace match guard sc > cur with true in v32_sections
+crates/spikefade/src/report3.rs:5295:42: replace match guard sc > cur with false in v32_sections
+crates/spikefade/src/report3.rs:5295:45: replace > with == in v32_sections
+crates/spikefade/src/report3.rs:5295:45: replace > with < in v32_sections
+crates/spikefade/src/report3.rs:5295:45: replace > with >= in v32_sections
+crates/spikefade/src/report3.rs:5304:65: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5304:43: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5339:34: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5339:37: delete ! in v32_sections
+crates/spikefade/src/report3.rs:5340:52: delete field seg from struct crate::side17::CandSet expression in v32_sections
+crates/spikefade/src/report3.rs:5349:12: delete ! in v32_sections
+crates/spikefade/src/report3.rs:5361:5: replace cap_picks33 -> String with String::new()
+crates/spikefade/src/report3.rs:5361:5: replace cap_picks33 -> String with "xyzzy".into()
+crates/spikefade/src/report3.rs:5378:20: replace += with -= in cap_picks33
+crates/spikefade/src/report3.rs:5378:20: replace += with *= in cap_picks33
+crates/spikefade/src/report3.rs:5380:20: delete ! in cap_picks33
+crates/spikefade/src/report3.rs:5386:16: replace += with -= in cap_picks33
+crates/spikefade/src/report3.rs:5386:16: replace += with *= in cap_picks33
+crates/spikefade/src/report3.rs:5388:16: delete ! in cap_picks33
+crates/spikefade/src/report3.rs:5392:62: replace + with - in cap_picks33
+crates/spikefade/src/report3.rs:5392:62: replace + with * in cap_picks33
+crates/spikefade/src/report3.rs:5393:69: replace + with - in cap_picks33
+crates/spikefade/src/report3.rs:5393:69: replace + with * in cap_picks33
+crates/spikefade/src/report3.rs:5405:5: replace table_w_a19 with ()
+crates/spikefade/src/report3.rs:5413:39: replace + with - in table_w_a19
+crates/spikefade/src/report3.rs:5413:39: replace + with * in table_w_a19
+crates/spikefade/src/report3.rs:5419:86: replace - with + in table_w_a19
+crates/spikefade/src/report3.rs:5419:86: replace - with / in table_w_a19
+crates/spikefade/src/report3.rs:5419:138: replace && with || in table_w_a19
+crates/spikefade/src/report3.rs:5419:105: replace >= with < in table_w_a19
+crates/spikefade/src/report3.rs:5419:143: replace <= with > in table_w_a19
+crates/spikefade/src/report3.rs:5433:67: replace && with || in table_w_a19
+crates/spikefade/src/report3.rs:5433:70: delete ! in table_w_a19
+crates/spikefade/src/report3.rs:5435:28: replace += with -= in table_w_a19
+crates/spikefade/src/report3.rs:5435:28: replace += with *= in table_w_a19
+crates/spikefade/src/report3.rs:5449:40: replace > with == in table_w_a19
+crates/spikefade/src/report3.rs:5449:40: replace > with < in table_w_a19
+crates/spikefade/src/report3.rs:5449:40: replace > with >= in table_w_a19
+crates/spikefade/src/report3.rs:5462:5: replace v32_portfolio_mtm with ()
+crates/spikefade/src/report3.rs:5465:46: replace > with == in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5465:46: replace > with < in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5465:46: replace > with >= in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5476:20: replace < with == in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5476:20: replace < with > in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5476:20: replace < with <= in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5481:165: delete - in v32_portfolio_mtm
