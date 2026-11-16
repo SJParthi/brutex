@@ -1,0 +1,6 @@
+crates/spikefade/src/side17.rs:539:79: replace + with - in cmd_combine
+crates/spikefade/src/side17.rs:539:79: replace + with * in cmd_combine
+crates/spikefade/src/split18.rs:689:9: replace Ser18::boxed -> Option<Box<Self>> with Some(Box::new(Default::default()))
+crates/spikefade/src/split18.rs:860:5: replace cmp_bad -> Ordering with Default::default()
+crates/spikefade/src/split18.rs:976:5: replace splits -> Vec<Split> with vec![Default::default()]
+crates/spikefade/src/split18.rs:1121:21: replace && with || in Sel18::merge

@@ -1,0 +1,3 @@
+crates/spikefade/src/split18.rs:887:15: replace += with *= in Dst::build
+crates/spikefade/src/split18.rs:893:30: replace << with >> in Dst::build
+crates/spikefade/src/split18.rs:918:19: replace += with *= in Dst::build
