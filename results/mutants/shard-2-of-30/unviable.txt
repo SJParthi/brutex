@@ -134,3 +134,6 @@ crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32)
 crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (1.0, Default::default(), 1)
 crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (-1.0, Default::default(), 0)
 crates/greeks/src/solver.rs:364:9: replace Checked::search -> (f64, Method, u32) with (-1.0, Default::default(), 1)
+crates/spikefade/src/acct.rs:189:9: replace <impl PartialOrd for Keyed>::partial_cmp -> Option<Ordering> with Some(Default::default())
+crates/spikefade/src/acct.rs:194:9: replace <impl Ord for Keyed>::cmp -> Ordering with Default::default()
+crates/spikefade/src/acct.rs:225:13: replace && with || in Tops::push_view

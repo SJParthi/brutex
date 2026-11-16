@@ -1,0 +1,4 @@
+crates/spikefade/src/acct.rs:27:8: replace / with % in x_parts
+crates/spikefade/src/acct.rs:27:32: replace / with % in x_parts
+crates/spikefade/src/acct.rs:171:53: replace + with * in verdict_key
+crates/spikefade/src/acct.rs:237:27: delete - in Tops::offer

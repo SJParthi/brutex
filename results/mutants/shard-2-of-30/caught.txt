@@ -562,3 +562,19 @@ crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with 
 crates/spikefade/src/acct.rs:168:5: replace verdict_key -> (i64, i64, i64) with (-1, -1, -1)
 crates/spikefade/src/acct.rs:171:85: replace + with - in verdict_key
 crates/spikefade/src/acct.rs:171:53: replace + with * in verdict_key
+crates/spikefade/src/acct.rs:173:58: delete - in verdict_key
+crates/spikefade/src/acct.rs:189:9: replace <impl PartialOrd for Keyed>::partial_cmp -> Option<Ordering> with None
+crates/spikefade/src/acct.rs:198:111: replace / with % in <impl Ord for Keyed>::cmp
+crates/spikefade/src/acct.rs:198:111: replace / with * in <impl Ord for Keyed>::cmp
+crates/spikefade/src/acct.rs:198:132: replace / with % in <impl Ord for Keyed>::cmp
+crates/spikefade/src/acct.rs:198:132: replace / with * in <impl Ord for Keyed>::cmp
+crates/spikefade/src/acct.rs:198:185: replace % with + in <impl Ord for Keyed>::cmp
+crates/spikefade/src/acct.rs:198:206: replace % with + in <impl Ord for Keyed>::cmp
+crates/spikefade/src/acct.rs:219:9: replace Tops::push_view with ()
+crates/spikefade/src/acct.rs:222:20: replace < with == in Tops::push_view
+crates/spikefade/src/acct.rs:222:20: replace < with > in Tops::push_view
+crates/spikefade/src/acct.rs:225:18: replace > with == in Tops::push_view
+crates/spikefade/src/acct.rs:225:18: replace > with < in Tops::push_view
+crates/spikefade/src/acct.rs:234:9: replace Tops::offer with ()
+crates/spikefade/src/acct.rs:234:21: replace == with != in Tops::offer
+crates/spikefade/src/acct.rs:237:27: delete - in Tops::offer

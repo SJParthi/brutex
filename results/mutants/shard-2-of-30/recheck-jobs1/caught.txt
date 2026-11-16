@@ -1,0 +1,2 @@
+crates/spikefade/src/acct.rs:483:122: delete field trades from struct Sum expression in detail_list
+crates/spikefade/src/acct.rs:483:307: delete field pk_margin from struct Sum expression in detail_list
