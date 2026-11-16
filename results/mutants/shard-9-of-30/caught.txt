@@ -241,3 +241,108 @@ crates/spikefade/src/kern.rs:1104:52: replace != with == in walk_day
 crates/spikefade/src/kern.rs:1105:35: replace + with - in walk_day
 crates/spikefade/src/kern.rs:1105:35: replace + with * in walk_day
 crates/spikefade/src/kern.rs:1106:15: replace += with -= in walk_day
+crates/spikefade/src/kern.rs:1106:50: replace < with == in walk_day
+crates/spikefade/src/kern.rs:1106:50: replace < with > in walk_day
+crates/spikefade/src/kern.rs:1106:50: replace < with <= in walk_day
+crates/spikefade/src/kern.rs:1108:15: replace += with -= in walk_day
+crates/spikefade/src/kern.rs:1123:5: replace walk_day_h -> u64 with 0
+crates/spikefade/src/kern.rs:1123:5: replace walk_day_h -> u64 with 1
+crates/spikefade/src/kern.rs:1134:5: replace walk_day_core -> u64 with 0
+crates/spikefade/src/kern.rs:1134:5: replace walk_day_core -> u64 with 1
+crates/spikefade/src/kern.rs:1143:31: replace && with || in walk_day_core
+crates/spikefade/src/kern.rs:1143:48: replace != with == in walk_day_core
+crates/spikefade/src/kern.rs:1143:108: replace == with != in walk_day_core
+crates/spikefade/src/kern.rs:1147:15: replace += with -= in walk_day_core
+crates/spikefade/src/kern.rs:1147:15: replace += with *= in walk_day_core
+crates/spikefade/src/kern.rs:1150:36: replace && with || in walk_day_core
+crates/spikefade/src/kern.rs:1150:17: replace && with || in walk_day_core
+crates/spikefade/src/kern.rs:1150:29: replace >= with < in walk_day_core
+crates/spikefade/src/kern.rs:1150:52: replace != with == in walk_day_core
+crates/spikefade/src/kern.rs:1151:35: replace + with - in walk_day_core
+crates/spikefade/src/kern.rs:1151:35: replace + with * in walk_day_core
+crates/spikefade/src/kern.rs:1152:15: replace += with -= in walk_day_core
+crates/spikefade/src/kern.rs:1152:50: replace < with == in walk_day_core
+crates/spikefade/src/kern.rs:1152:50: replace < with > in walk_day_core
+crates/spikefade/src/kern.rs:1152:50: replace < with <= in walk_day_core
+crates/spikefade/src/kern.rs:1154:15: replace += with -= in walk_day_core
+crates/spikefade/src/kern.rs:1172:5: replace ghost_day with ()
+crates/spikefade/src/kern.rs:1188:5: replace replay_day -> bool with true
+crates/spikefade/src/kern.rs:1188:5: replace replay_day -> bool with false
+crates/spikefade/src/kern.rs:1188:19: replace == with != in replay_day
+crates/spikefade/src/kern.rs:1192:31: replace && with || in replay_day
+crates/spikefade/src/kern.rs:1192:20: replace < with == in replay_day
+crates/spikefade/src/kern.rs:1192:20: replace < with > in replay_day
+crates/spikefade/src/kern.rs:1192:20: replace < with <= in replay_day
+crates/spikefade/src/kern.rs:1192:34: delete ! in replay_day
+crates/spikefade/src/kern.rs:1203:25: replace <= with > in replay_day
+crates/spikefade/src/kern.rs:1209:18: replace += with -= in replay_day
+crates/spikefade/src/kern.rs:1209:18: replace += with *= in replay_day
+crates/spikefade/src/kern.rs:1210:24: replace += with -= in replay_day
+crates/spikefade/src/kern.rs:1210:24: replace += with *= in replay_day
+crates/spikefade/src/kern.rs:1213:19: replace += with -= in replay_day
+crates/spikefade/src/kern.rs:1213:19: replace += with *= in replay_day
+crates/spikefade/src/kern.rs:1214:23: replace += with -= in replay_day
+crates/spikefade/src/kern.rs:1214:23: replace += with *= in replay_day
+crates/spikefade/src/kern.rs:1218:8: delete ! in replay_day
+crates/spikefade/src/kern.rs:1219:20: replace += with -= in replay_day
+crates/spikefade/src/kern.rs:1219:20: replace += with *= in replay_day
+crates/spikefade/src/kern.rs:1222:8: delete ! in replay_day
+crates/spikefade/src/kern.rs:1223:28: replace != with == in replay_day
+crates/spikefade/src/kern.rs:1224:31: replace + with - in replay_day
+crates/spikefade/src/kern.rs:1224:31: replace + with * in replay_day
+crates/spikefade/src/kern.rs:1229:27: replace != with == in replay_day
+crates/spikefade/src/kern.rs:1232:31: replace + with - in replay_day
+crates/spikefade/src/kern.rs:1238:20: delete ! in replay_day
+crates/spikefade/src/kern.rs:1248:5: replace finish -> Sum with Default::default()
+crates/spikefade/src/kern.rs:1264:5: replace decision_code -> u32 with 0
+crates/spikefade/src/kern.rs:1264:5: replace decision_code -> u32 with 1
+crates/spikefade/src/kern.rs:1265:17: replace != with == in decision_code
+crates/spikefade/src/kern.rs:1265:73: replace == with != in decision_code
+crates/spikefade/src/kern.rs:1265:81: delete ! in decision_code
+crates/spikefade/src/kern.rs:1266:25: replace - with / in decision_code
+crates/spikefade/src/kern.rs:1289:5: replace dedup_groups -> Vec<usize> with vec![]
+crates/spikefade/src/kern.rs:1289:5: replace dedup_groups -> Vec<usize> with vec![0]
+crates/spikefade/src/kern.rs:1289:5: replace dedup_groups -> Vec<usize> with vec![1]
+crates/spikefade/src/kern.rs:1289:124: delete match arm (Some(e), Some(x)) in dedup_groups
+crates/spikefade/src/kern.rs:1296:144: replace == with != in dedup_groups
+crates/spikefade/src/kern.rs:1319:11: replace ^= with |= in fnv
+crates/spikefade/src/kern.rs:1333:5: replace walk_chunk -> (Vec<(Sum, Pieces)>, u64) with (vec![], 0)
+crates/spikefade/src/kern.rs:1333:5: replace walk_chunk -> (Vec<(Sum, Pieces)>, u64) with (vec![], 1)
+crates/spikefade/src/kern.rs:1333:5: replace walk_chunk -> (Vec<(Sum, Pieces)>, u64) with (vec![(Default::default(), Default::default())], 0)
+crates/spikefade/src/kern.rs:1333:5: replace walk_chunk -> (Vec<(Sum, Pieces)>, u64) with (vec![(Default::default(), Default::default())], 1)
+crates/spikefade/src/kern.rs:1341:5: replace walk_chunk_s -> (Vec<(Sum, Pieces)>, u64) with (vec![], 0)
+crates/spikefade/src/kern.rs:1341:5: replace walk_chunk_s -> (Vec<(Sum, Pieces)>, u64) with (vec![], 1)
+crates/spikefade/src/kern.rs:1341:5: replace walk_chunk_s -> (Vec<(Sum, Pieces)>, u64) with (vec![(Default::default(), Default::default())], 0)
+crates/spikefade/src/kern.rs:1341:5: replace walk_chunk_s -> (Vec<(Sum, Pieces)>, u64) with (vec![(Default::default(), Default::default())], 1)
+crates/spikefade/src/kern.rs:1341:20: replace * with + in walk_chunk_s
+crates/spikefade/src/kern.rs:1341:20: replace * with / in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:44: replace * with + in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:44: replace * with / in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:76: replace / with % in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:76: replace / with * in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:120: replace / with % in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:120: replace / with * in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:113: replace % with / in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:113: replace % with + in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:154: replace % with / in walk_chunk_s
+crates/spikefade/src/kern.rs:1342:154: replace % with + in walk_chunk_s
+crates/spikefade/src/kern.rs:1356:5: replace walk_accs -> (Vec<(Sum, Pieces)>, u64) with (vec![], 0)
+crates/spikefade/src/kern.rs:1356:5: replace walk_accs -> (Vec<(Sum, Pieces)>, u64) with (vec![], 1)
+crates/spikefade/src/kern.rs:1356:5: replace walk_accs -> (Vec<(Sum, Pieces)>, u64) with (vec![(Default::default(), Default::default())], 0)
+crates/spikefade/src/kern.rs:1356:5: replace walk_accs -> (Vec<(Sum, Pieces)>, u64) with (vec![(Default::default(), Default::default())], 1)
+crates/spikefade/src/kern.rs:1364:13: replace += with -= in walk_accs
+crates/spikefade/src/kern.rs:1364:13: replace += with *= in walk_accs
+crates/spikefade/src/kern.rs:1375:36: replace != with == in walk_accs
+crates/spikefade/src/kern.rs:1377:44: replace % with + in walk_accs
+crates/spikefade/src/kern.rs:1377:57: delete ! in walk_accs
+crates/spikefade/src/kern.rs:1382:16: delete ! in walk_accs
+crates/spikefade/src/kern.rs:1386:35: replace && with || in walk_accs
+crates/spikefade/src/kern.rs:1386:91: replace == with != in walk_accs
+crates/spikefade/src/kern.rs:1389:21: replace && with || in walk_accs
+crates/spikefade/src/kern.rs:1389:28: replace < with == in walk_accs
+crates/spikefade/src/kern.rs:1389:28: replace < with > in walk_accs
+crates/spikefade/src/kern.rs:1389:28: replace < with <= in walk_accs
+crates/spikefade/src/kern.rs:1392:19: replace += with -= in walk_accs
+crates/spikefade/src/kern.rs:1392:19: replace += with *= in walk_accs
+crates/spikefade/src/kern.rs:1395:94: replace + with - in walk_accs
+crates/spikefade/src/kern.rs:1395:94: replace + with * in walk_accs

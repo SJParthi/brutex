@@ -2,3 +2,11 @@ crates/spikefade/src/kern.rs:1013:15: replace += with *= in walk_account
 crates/spikefade/src/kern.rs:1013:20: replace + with - in walk_account
 crates/spikefade/src/kern.rs:1013:20: replace + with * in walk_account
 crates/spikefade/src/kern.rs:1015:15: replace += with *= in walk_account
+crates/spikefade/src/kern.rs:1106:15: replace += with *= in walk_day
+crates/spikefade/src/kern.rs:1106:20: replace + with - in walk_day
+crates/spikefade/src/kern.rs:1106:20: replace + with * in walk_day
+crates/spikefade/src/kern.rs:1108:15: replace += with *= in walk_day
+crates/spikefade/src/kern.rs:1152:15: replace += with *= in walk_day_core
+crates/spikefade/src/kern.rs:1152:20: replace + with - in walk_day_core
+crates/spikefade/src/kern.rs:1152:20: replace + with * in walk_day_core
+crates/spikefade/src/kern.rs:1154:15: replace += with *= in walk_day_core

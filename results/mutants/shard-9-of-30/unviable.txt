@@ -15,3 +15,8 @@ crates/spikefade/src/kern.rs:898:18: replace && with || in step3g
 crates/spikefade/src/kern.rs:918:18: replace && with || in step3g
 crates/spikefade/src/kern.rs:937:14: replace && with || in step3g
 crates/spikefade/src/kern.rs:1053:5: replace detail3 -> (Vec<Dec3>, Sum, Acc) with (vec![Default::default()], Default::default(), Default::default())
+crates/spikefade/src/kern.rs:1160:18: replace && with || in walk_day_core
+crates/spikefade/src/kern.rs:1266:25: replace - with + in decision_code
+crates/spikefade/src/kern.rs:1272:37: replace - with + in decision_code
+crates/spikefade/src/kern.rs:1278:61: replace - with + in decision_code
+crates/spikefade/src/kern.rs:1289:201: replace - with + in dedup_groups
