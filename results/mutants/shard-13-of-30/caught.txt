@@ -65,3 +65,52 @@ crates/spikefade/src/stage.rs:205:9: replace EvX::row -> usize with 0
 crates/spikefade/src/stage.rs:205:9: replace EvX::row -> usize with 1
 crates/spikefade/src/stage.rs:205:26: replace + with - in EvX::row
 crates/spikefade/src/stage.rs:205:26: replace + with * in EvX::row
+crates/spikefade/src/stage.rs:311:5: replace anchor_u16 -> (u16, i64) with (0, 0)
+crates/spikefade/src/stage.rs:311:5: replace anchor_u16 -> (u16, i64) with (0, 1)
+crates/spikefade/src/stage.rs:311:5: replace anchor_u16 -> (u16, i64) with (0, -1)
+crates/spikefade/src/stage.rs:311:5: replace anchor_u16 -> (u16, i64) with (1, 0)
+crates/spikefade/src/stage.rs:311:5: replace anchor_u16 -> (u16, i64) with (1, 1)
+crates/spikefade/src/stage.rs:311:5: replace anchor_u16 -> (u16, i64) with (1, -1)
+crates/spikefade/src/stage.rs:311:66: replace - with + in anchor_u16
+crates/spikefade/src/stage.rs:311:66: replace - with / in anchor_u16
+crates/spikefade/src/stage.rs:311:103: replace - with + in anchor_u16
+crates/spikefade/src/stage.rs:329:5: replace price_event3 -> Result<(EvT, EvX), String> with Ok((Default::default(), Default::default()))
+crates/spikefade/src/stage.rs:386:61: replace * with + in price_event3
+crates/spikefade/src/stage.rs:450:30: replace >= with < in price_event3
+crates/spikefade/src/stage.rs:463:32: replace += with *= in price_event3
+crates/spikefade/src/stage.rs:501:27: replace > with < in price_event3
+crates/spikefade/src/stage.rs:556:5: replace first_hit -> Option<(usize, u16)> with None
+crates/spikefade/src/stage.rs:556:5: replace first_hit -> Option<(usize, u16)> with Some((0, 0))
+crates/spikefade/src/stage.rs:556:5: replace first_hit -> Option<(usize, u16)> with Some((0, 1))
+crates/spikefade/src/stage.rs:556:5: replace first_hit -> Option<(usize, u16)> with Some((1, 0))
+crates/spikefade/src/stage.rs:556:5: replace first_hit -> Option<(usize, u16)> with Some((1, 1))
+crates/spikefade/src/stage.rs:560:99: replace < with == in first_hit
+crates/spikefade/src/stage.rs:560:99: replace < with > in first_hit
+crates/spikefade/src/stage.rs:560:99: replace < with <= in first_hit
+crates/spikefade/src/stage.rs:566:9: replace != with == in first_hit
+crates/spikefade/src/stage.rs:577:5: replace trade3_once -> Result<Option<(Trip, Option<usize>, u16, XKey, i64, i64)>, String> with Ok(None)
+crates/spikefade/src/stage.rs:587:5: replace trade3_once_s -> Result<Option<(Trip, Option<usize>, u16, XKey, i64, i64)>, String> with Ok(None)
+crates/spikefade/src/wf.rs:33:5: replace rows21 -> Vec<WinRow> with vec![]
+crates/spikefade/src/wf.rs:33:40: replace - with + in rows21
+crates/spikefade/src/wf.rs:37:74: replace + with - in rows21
+crates/spikefade/src/wf.rs:33:40: replace - with / in rows21
+crates/spikefade/src/wf.rs:37:74: replace + with * in rows21
+crates/spikefade/src/wf.rs:41:70: replace + with - in rows21
+crates/spikefade/src/wf.rs:41:70: replace + with * in rows21
+crates/spikefade/src/wf.rs:41:66: replace - with + in rows21
+crates/spikefade/src/wf.rs:41:66: replace - with / in rows21
+crates/spikefade/src/wf.rs:41:95: replace + with - in rows21
+crates/spikefade/src/wf.rs:41:95: replace + with * in rows21
+crates/spikefade/src/wf.rs:69:5: replace compose -> Fig with Default::default()
+crates/spikefade/src/wf.rs:75:53: replace - with / in compose
+crates/spikefade/src/wf.rs:75:45: replace - with + in compose
+crates/spikefade/src/wf.rs:75:45: replace - with / in compose
+crates/spikefade/src/wf.rs:76:33: replace + with - in compose
+crates/spikefade/src/wf.rs:76:33: replace + with * in compose
+crates/spikefade/src/wf.rs:77:35: replace + with - in compose
+crates/spikefade/src/wf.rs:77:35: replace + with * in compose
+crates/spikefade/src/wf.rs:78:30: replace + with - in compose
+crates/spikefade/src/wf.rs:78:30: replace + with * in compose
+crates/spikefade/src/wf.rs:78:70: replace + with - in compose
+crates/spikefade/src/wf.rs:78:70: replace + with * in compose
+crates/spikefade/src/wf.rs:78:95: replace + with - in compose
