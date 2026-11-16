@@ -42,3 +42,26 @@ crates/spikefade/src/stress.rs:54:13: replace - with / in stressed
 crates/spikefade/src/stress.rs:68:98: replace / with % in adverse_bp
 crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, 0, 1, 1)
 crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (0, -1, 0, 0)
+crates/spikefade/src/stress.rs:76:5: replace dist -> (i64, i64, i64, i64) with (1, -1, 1, 0)
+crates/spikefade/src/stress.rs:78:61: replace / with % in dist
+crates/spikefade/src/stress.rs:78:57: replace * with / in dist
+crates/spikefade/src/sw.rs:134:5: replace on -> bool with true
+crates/spikefade/src/sw.rs:134:5: replace on -> bool with false
+crates/spikefade/src/sw.rs:146:5: replace set with ()
+crates/spikefade/src/sw.rs:192:8: delete ! in words32
+crates/spikefade/src/sw.rs:253:5: replace n_slots -> i64 with 0
+crates/spikefade/src/sw.rs:253:5: replace n_slots -> i64 with 1
+crates/spikefade/src/sw.rs:253:5: replace n_slots -> i64 with -1
+crates/spikefade/src/sw.rs:298:26: replace == with != in from_args
+crates/spikefade/src/sw.rs:311:20: replace && with || in from_args
+crates/spikefade/src/sw.rs:376:48: replace == with != in from_args
+crates/spikefade/src/report.rs:41:5: replace pctile -> u64 with 0
+crates/spikefade/src/report.rs:41:5: replace pctile -> u64 with 1
+crates/spikefade/src/report.rs:45:58: replace / with % in pctile
+crates/spikefade/src/report.rs:45:58: replace / with * in pctile
+crates/spikefade/src/report.rs:45:54: replace * with + in pctile
+crates/spikefade/src/report.rs:45:54: replace * with / in pctile
+crates/spikefade/src/report.rs:45:36: replace - with + in pctile
+crates/spikefade/src/report.rs:45:36: replace - with / in pctile
+crates/spikefade/src/report.rs:117:46: replace == with != in cmd_run
+crates/spikefade/src/report.rs:132:91: replace + with - in cmd_run
