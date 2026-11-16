@@ -1,0 +1,122 @@
+crates/spikefade/src/report3.rs:1240:38: delete field refuse from struct MarginAt expression in prepare_day
+crates/spikefade/src/report3.rs:1245:44: delete field refuse from struct MarginAt expression in prepare_day
+crates/spikefade/src/report3.rs:1339:15: delete field lv from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:19: delete field evs from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:24: delete field ex from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:28: delete field lists from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:35: delete field facts from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:42: delete field tfmask from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:50: delete field rd from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:54: delete field tfw from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:59: delete field liq from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:64: delete field days from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:80: delete field cnt from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:104: delete field t_read from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:112: delete field tops from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:165: delete field piece_of_day from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:179: delete field mx from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:183: delete field mlabels from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:192: delete field mfallback from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:203: delete field mlat from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:209: delete field ngroup from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:225: delete field vol60 from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:232: delete field universe from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1339:242: delete field lvd from struct Seg3 expression in prepare_segment
+crates/spikefade/src/report3.rs:1524:15: delete field lv from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:19: delete field evs from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:24: delete field ex from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:28: delete field lists from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:35: delete field facts from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:54: delete field tfmask from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:62: delete field rd from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:66: delete field tfw from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:71: delete field liq from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:76: delete field days from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:101: delete field cnt from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:125: delete field t_read from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:133: delete field tops from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:186: delete field piece_of_day from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:200: delete field mx from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:204: delete field mlabels from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:213: delete field mfallback from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:224: delete field mlat from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:230: delete field ngroup from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:246: delete field vol60 from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:253: delete field universe from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1524:263: delete field lvd from struct Seg3 expression in prepare_segment_c2
+crates/spikefade/src/report3.rs:1886:102: delete field row from struct WinRes expression in stage_b_whole
+crates/spikefade/src/report3.rs:1886:124: delete field run from struct WinRes expression in stage_b_whole
+crates/spikefade/src/report3.rs:1906:96: delete field row from struct WinRes expression in stage_b_whole
+crates/spikefade/src/report3.rs:1906:118: delete field run from struct WinRes expression in stage_b_whole
+crates/spikefade/src/report3.rs:2123:84: delete field row from struct WinRes expression in stage_b_day_major
+crates/spikefade/src/report3.rs:2123:106: delete field run from struct WinRes expression in stage_b_day_major
+crates/spikefade/src/report3.rs:2566:84: delete field row from struct WinRes expression in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:2566:106: delete field run from struct WinRes expression in stage_b_day_major_v33
+crates/spikefade/src/report3.rs:3420:16: delete field x from struct Sum expression in twin10
+crates/spikefade/src/report3.rs:3644:46: delete field hwin from struct Rd expression in trade_row
+crates/spikefade/src/report3.rs:3644:55: delete field rise from struct Rd expression in trade_row
+crates/spikefade/src/report3.rs:3707:25: delete field known from struct RowX expression in trade_row
+crates/spikefade/src/report3.rs:3707:41: delete field money from struct RowX expression in trade_row
+crates/spikefade/src/report3.rs:3707:48: delete field nc_units from struct RowX expression in trade_row
+crates/spikefade/src/report3.rs:3707:70: delete field charges_sell from struct RowX expression in trade_row
+crates/spikefade/src/report3.rs:3707:100: delete field charges_buy from struct RowX expression in trade_row
+crates/spikefade/src/report3.rs:3822:37: delete field day from struct crate::v32::Row32 expression in row32_of
+crates/spikefade/src/report3.rs:3822:49: delete field t_us from struct crate::v32::Row32 expression in row32_of
+crates/spikefade/src/report3.rs:3822:55: delete field known from struct crate::v32::Row32 expression in row32_of
+crates/spikefade/src/report3.rs:3822:71: delete field net from struct crate::v32::Row32 expression in row32_of
+crates/spikefade/src/report3.rs:3822:83: delete field margin from struct crate::v32::Row32 expression in row32_of
+crates/spikefade/src/report3.rs:3822:143: delete field slice from struct crate::v32::Row32 expression in row32_of
+crates/spikefade/src/report3.rs:4321:81: delete field x from struct Sum expression in write3
+crates/spikefade/src/report3.rs:4783:62: delete field hwin from struct Rd expression in hand_sample
+crates/spikefade/src/report3.rs:4783:71: delete field rise from struct Rd expression in hand_sample
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 0, 1, 1, 0, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 0, 1, 1, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 0, 1, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 0, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 1, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:5014:5: replace cap_views33 -> Vec<(usize, usize)> with vec![(1, 0)]
+crates/spikefade/src/report3.rs:5088:5: replace kept18 -> Vec<(String, Sum)> with vec![]
+crates/spikefade/src/report3.rs:5092:75: replace == with != in kept18
+crates/spikefade/src/report3.rs:5152:33: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5253:54: replace > with >= in v32_sections
+crates/spikefade/src/report3.rs:5264:28: replace >= with < in v32_sections
+crates/spikefade/src/report3.rs:5340:52: delete field seg from struct crate::side17::CandSet expression in v32_sections
+crates/spikefade/src/report3.rs:5466:24: replace >= with < in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5527:30: replace match guard sc > cur with true in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5549:327: delete ! in v32_checklist
+crates/spikefade/src/report3.rs:5743:5: replace v34_pick_readings -> String with String::new()
+crates/spikefade/src/report3.rs:5759:70: replace > with == in v34_pick_readings
+crates/spikefade/src/report3.rs:5759:70: replace > with >= in v34_pick_readings
+crates/spikefade/src/stage.rs:135:5: replace held_trip -> Result<Trip, String> with Ok(Default::default())
+crates/spikefade/src/stage.rs:139:24: delete field qty from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:29: delete field units from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:48: delete field sold_value from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:72: delete field e0 from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:85: delete field e1 from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:98: delete field p0 from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:134: delete field limit_in from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:156: delete field sale_known from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:183: delete field sale_blocks from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:216: delete field sale_secs from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:245: delete field sale_one_price_secs from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:287: delete field sale_past_limit from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:321: delete field x from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:160:17: replace > with < in held_trip
+crates/spikefade/src/stage.rs:311:103: replace - with + in anchor_u16
+crates/spikefade/src/stage.rs:318:100: delete field hwin from struct Rd expression in level_rules
+crates/spikefade/src/stage.rs:318:110: delete field rise from struct Rd expression in level_rules
+crates/spikefade/src/stage.rs:329:5: replace price_event3 -> Result<(EvT, EvX), String> with Ok((Default::default(), Default::default()))
+crates/spikefade/src/stage.rs:330:23: delete field mark1 from struct EvX expression in price_event3
+crates/spikefade/src/stage.rs:386:61: replace * with + in price_event3
+crates/spikefade/src/stage.rs:450:30: replace >= with < in price_event3
+crates/spikefade/src/stage.rs:463:32: replace += with *= in price_event3
+crates/spikefade/src/stage.rs:501:27: replace > with < in price_event3

@@ -101,3 +101,18 @@ crates/spikefade/src/stage.rs:139:72: delete field e0 from struct Trip expressio
 crates/spikefade/src/stage.rs:139:85: delete field e1 from struct Trip expression in held_trip
 crates/spikefade/src/stage.rs:139:98: delete field p0 from struct Trip expression in held_trip
 crates/spikefade/src/stage.rs:139:134: delete field limit_in from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:156: delete field sale_known from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:183: delete field sale_blocks from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:216: delete field sale_secs from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:245: delete field sale_one_price_secs from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:139:287: delete field sale_past_limit from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:160:17: replace > with < in held_trip
+crates/spikefade/src/stage.rs:311:103: replace - with + in anchor_u16
+crates/spikefade/src/stage.rs:318:100: delete field hwin from struct Rd expression in level_rules
+crates/spikefade/src/stage.rs:318:110: delete field rise from struct Rd expression in level_rules
+crates/spikefade/src/stage.rs:329:5: replace price_event3 -> Result<(EvT, EvX), String> with Ok((Default::default(), Default::default()))
+crates/spikefade/src/stage.rs:330:23: delete field mark1 from struct EvX expression in price_event3
+crates/spikefade/src/stage.rs:386:61: replace * with + in price_event3
+crates/spikefade/src/stage.rs:450:30: replace >= with < in price_event3
+crates/spikefade/src/stage.rs:463:32: replace += with *= in price_event3
+crates/spikefade/src/stage.rs:501:27: replace > with < in price_event3

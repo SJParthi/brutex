@@ -1,0 +1,35 @@
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 0, 1, 1, 0, 0, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 0, 1, 1, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 0, 1, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 0, 1, 1, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 0, 1, 1, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 0, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 1, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 0, 1, 1, 0, 1)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 0, 0, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 0, 1, 0)
+crates/spikefade/src/report3.rs:4884:5: replace speed_probe -> (u64, u64, u64, u128, u64, u64, u128, u64, u64) with (1, 1, 1, 1, 1, 0, 1, 1, 0)
+crates/spikefade/src/report3.rs:5014:5: replace cap_views33 -> Vec<(usize, usize)> with vec![(1, 0)]
+crates/spikefade/src/report3.rs:5088:5: replace kept18 -> Vec<(String, Sum)> with vec![]
+crates/spikefade/src/report3.rs:5092:75: replace == with != in kept18
+crates/spikefade/src/report3.rs:5152:33: replace || with && in v32_sections
+crates/spikefade/src/report3.rs:5253:54: replace > with >= in v32_sections
+crates/spikefade/src/report3.rs:5264:28: replace >= with < in v32_sections
+crates/spikefade/src/report3.rs:5466:24: replace >= with < in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5527:30: replace match guard sc > cur with true in v32_portfolio_mtm
+crates/spikefade/src/report3.rs:5549:327: delete ! in v32_checklist
+crates/spikefade/src/report3.rs:5743:5: replace v34_pick_readings -> String with String::new()
+crates/spikefade/src/report3.rs:5759:70: replace > with == in v34_pick_readings
+crates/spikefade/src/report3.rs:5759:70: replace > with >= in v34_pick_readings
+crates/spikefade/src/stage.rs:135:5: replace held_trip -> Result<Trip, String> with Ok(Default::default())
+crates/spikefade/src/stage.rs:139:287: delete field sale_past_limit from struct Trip expression in held_trip
+crates/spikefade/src/stage.rs:160:17: replace > with < in held_trip
+crates/spikefade/src/stage.rs:311:103: replace - with + in anchor_u16
+crates/spikefade/src/stage.rs:329:5: replace price_event3 -> Result<(EvT, EvX), String> with Ok((Default::default(), Default::default()))
+crates/spikefade/src/stage.rs:386:61: replace * with + in price_event3
+crates/spikefade/src/stage.rs:450:30: replace >= with < in price_event3
+crates/spikefade/src/stage.rs:463:32: replace += with *= in price_event3
+crates/spikefade/src/stage.rs:501:27: replace > with < in price_event3
