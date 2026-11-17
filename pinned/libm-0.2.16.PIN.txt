@@ -1,0 +1,9 @@
+# fix:determinism, 2026-11-16 17:12:33 IST: the ONE pure-Rust implementation of exp / ln / ln_1p behind --portable-math (DET-2)
+crate       libm
+version     0.2.16 (Cargo.toml: edition 2021, rust-version 1.63, repository https://github.com/rust-lang/compiler-builtins, path_in_vcs libm, git sha1 dfd2203a4d6110820ad7bb65cafe1bf331a03a3d per .cargo_vcs_info.json)
+licence     MIT (Cargo.toml license = "MIT"; LICENSE.txt sha256 3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7: MIT for the whole, contributions also under Apache-2.0)
+source      the LOCAL cargo registry, no download: ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libm-0.2.16, copied with cp -p -R -n
+.crate      ~/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/libm-0.2.16.crate sha256 b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981
+tree        155 files = the .crate's content exactly (tar -xzf of the .crate, diff -r: identical) + .cargo-ok (cargo's unpack marker, {"v":1}, not in the .crate); sha256 of the 155-file manifest (find . -type f ! -name .cargo-ok | LC_ALL=C sort | xargs shasum -a 256) 34a016599c47cadb164b323c9b6d4119f014705f74df3eb789aeeb40c47a228b; every file: libm-0.2.16.SHA256SUMS
+features    used with default-features = false: no "arch" (no arch-specific code: x86 SSE2 / aarch64 instructions for sqrt, fma, rint) and no "unstable-intrinsics": soft floats only; exp / log / log1p are FreeBSD msun algorithms on integer and IEEE-754 binary64 arithmetic (exp's only arch path is x87 for x86 without SSE, not a 64-bit target)
+build.rs    emits cfgs only (arch_enabled / intrinsics_enabled off with default features off; optimizations_enabled; assert_no_panic only when ENSURE_NO_PANIC is set): no network, no generated code

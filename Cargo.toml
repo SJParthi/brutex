@@ -1,0 +1,51 @@
+# spikefade (main 5b507203 workflow step, Sat 14 Nov 2026): SNIPER s25b spike-fade option SELLING from the Top Volume screener,
+# LABELLED DIAGNOSTIC on the 8 staged Tickvault days (2026-11-02 .. 2026-11-11). Segments never mixed (operator 14 Nov 19:09 IST).
+# Members (every reused one a COPY, `cp -p -R -n`, diff -rq identical at copy time; never a link into another lane's tree):
+#   crates/core, crates/costs : scratch/sniper-sell-diag/crates/{core,costs} (Dhan option charges: the s25 selling diagnostic's estimator)
+#   pinned/common-fill-v21    : scratch/sniper-sell-diag/pinned/common-fill-v21 (crate v2.1 = THE STANDARD req70-2s fill law), a path
+#                               dependency, never a member (its SHA256SUMS hold for every source file copied).
+#   crates/spikefade          : the new binary (cube build, screener, events, trade engine, account sweep, reports).
+# v2.1 (15 Nov 2026, checker F-A of check-spikefade-diag-v2.md): this tree = cp -p -R -n of scratch/spikefade-v2; crates/spikefade now
+#   depends on pinned/common-fill-v21-fa1 (a cp -p -R -n of pinned/common-fill-v21 plus change FA1, the opt-in sparse-tape capacity
+#   reading); pinned/common-fill-v21 stays as copied (its SHA256SUMS hold).
+# fix:determinism (16 Nov 2026): this tree = cp -p -R -n of scratch/spikefade-v34-shard; the app's Greeks crate copied in as a member
+#   (crates/greeks, cp -p -R -n of wt/APP/crates/greeks, as v34/shard/tools/make-kit.sh does: no absolute Mac path), then changed
+#   (src/hostmath.rs: exp / ln a host may route); the pure-Rust libm 0.2.16 from the local cargo registry as a path dependency under
+#   pinned/ (excluded from the workspace like every pinned crate; pinned/libm-0.2.16.PIN.txt = its version, licence and sha256).
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/costs", "crates/spikefade", "crates/greeks"]
+exclude = ["pinned"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.97"
+license      = "UNLICENSED"
+publish      = false
+
+# The copied crates opt into these (they are the sell-diag workspace's lint set, unchanged); crates/spikefade sets its own.
+[workspace.lints.rust]
+unsafe_code            = "deny"
+missing_docs           = "warn"
+unreachable_pub        = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all                 = { level = "deny", priority = -1 }
+pedantic            = { level = "warn", priority = -1 }
+unwrap_used         = "deny"
+expect_used         = "deny"
+panic               = "deny"
+indexing_slicing    = "deny"
+float_arithmetic    = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss      = "deny"
+todo                = "deny"
+unimplemented       = "deny"
+dbg_macro           = "deny"
+
+[profile.release]
+opt-level = 3
+debug = 1
+overflow-checks = true
