@@ -1,46 +1,56 @@
 # JOB APP-HEART: cargo-mutants on the app's heart crates (store, pull)
 
 Read this whole file once, then do STEP 0 to STEP 4 in order. Labels: MEASURED = a number from a named
-run; EXACT = a count; ESTIMATE = a forecast. Your first message gives you K and N (this box is shard K of N).
+run; EXACT = a count; ESTIMATE = a forecast. You know K and N from your first message or from READY.txt
+(this box is shard K of N).
 
 ## What
 
 - Repository SJParthi/brutex (public). Code under test: the app commit
   `69aa8ffeb29c7c59a1585b45510c8658df00c7a2`, the tip of `feat/db-fix` on origin (the app's landed head
   since 9 Nov 2026). The box fetches exactly this commit (depth 1) and never a newer one.
-- Crates: `store` and `pull` only (`cargo mutants -p store -p pull`). Each mutant is tested against the
-  tests of its own crate (cargo-mutants' default).
+- Crates: `store` and `pull` only. Each mutant is tested against the tests of its own crate
+  (cargo-mutants' default).
 - This box: shard K of N of the store+pull mutant list, cut by cargo-mutants' own default (slice) sharding.
 - Results: ONLY the new branch `cloud-results/app-heart-mutants-K-of-N` (an orphan branch holding results
   only). This file sits alone on branch `cloud/jobs-app-heart-20261116`.
 - Tools: rustc 1.97.1 (the app's `rust-toolchain.toml`), cargo-mutants 27.1.0 (the version of the
-  16 Nov cloud wave), cargo-nextest 0.9.145 (the app's CI pin). The scripts install all three.
+  16 Nov cloud wave), cargo-nextest 0.9.145 (the app's CI pin). The scripts install all three: Rust from the
+  run user's own toolchain when it gives 1.97.1, else with the pinned rustup-init 1.29.3, sha256 checked
+  before it runs (METHOD 1; never `curl | sh`); the two tools with `cargo install --locked`.
 
 ## Rules
 
-1. Code only. Never fetch market data or anything beyond this repository, the Rust toolchain and the
-   crates the app's `Cargo.lock` names. Never use, ask for or print a signed link, a token, a key or any
-   other secret.
+1. Code only. Never fetch market data or anything beyond this repository, the Rust toolchain from
+   static.rust-lang.org (rustup-init 1.29.3 and Rust 1.97.1) and crates from crates.io (those the app's
+   `Cargo.lock` names and those of the two tools). Never use, ask for or print a signed link, a token, a key
+   or any other secret.
 2. Results only. Push only to `cloud-results/app-heart-mutants-K-of-N`. Never push code, never touch
    another branch, never force-push, never rewrite history. A rejected push stops the box (STEP 4).
-3. Keep your turn busy until FINAL or STOP: an idle box is paused and loses its background work. The
-   only long command is `drive.sh` (STEP 2); call it again at once each time it returns.
+3. Everything runs in the foreground. The only command of the work is `drive.sh` (STEP 2): one call
+   lasts at most about 8.5 minutes, does one step of the work and leaves nothing running behind it.
+   Call it again at once each time it returns, so your turn stays busy until FINAL or STOP (an idle box
+   is paused and loses its work).
 4. On any failure, stop and report (STEP 4). Never retry hoping for green, never edit the app's code or
    these scripts, never add a skip or an exclude beyond STEP 3's rule.
-5. The scripts delete or stop only these, all inside the run user's own folder `~/ah`: the worker's lock
-   folder; cargo-mutants copies a cut worker left in `~/ah/tmp`; the baseline export `~/ah/plain` after
-   its run; test scratch in `~/ah/tmp` untouched for 60 minutes (failing tests leave it behind, and it
-   filled earlier boxes' disks); and, on Linux only, processes of the run user that a cut worker left
-   working inside `~/ah`. Nothing else.
+5. The scripts delete, stop or restore only these, all inside the run user's own folder `~/ah`: the step
+   lock folder; the build output of the two tool installs once both are installed; the pinned rustup-init
+   the setup downloads into `~/ah/tmp`, once it has run; test scratch in
+   `~/ah/tmp` untouched for 10 minutes (failing tests leave it behind, and it filled earlier boxes'
+   disks); on Linux, processes of the run user that a cut step left working inside `~/ah`; and any file
+   of `crates/store` or `crates/pull` in the export `~/ah/work` that differs from the commit (a cut step
+   can leave a mutated file), copied back from the commit. Nothing else.
 6. Use shell, git, awk, Rust and cargo only. No other scripting language (never the six-letter one that
    starts with "Py").
 
 ## STEP 0: the box
 
 Run once: `id -u; nproc; free -m; cat /sys/fs/cgroup/memory.max; df -h ~; git --version;
-curl --version | head -n 1; command -v awk sha256sum`. When `id -u` prints 0, also
-`command -v useradd runuser su getent`. If git, curl, awk or sha256sum is missing, install it with the
-system package manager and say so in NOTES.md. Do not install Rust yourself: the worker does it.
+curl --version | head -n 1; command -v awk sha256sum timeout diff`. When `id -u` prints 0, also
+`command -v useradd runuser su getent`. If one of git, curl, awk, sha256sum, timeout or diff is missing,
+install it with the system package manager and say so in NOTES.md. Do not install Rust yourself: the
+first steps do it (METHOD 1: the run user's own Rust when it gives 1.97.1, else the pinned rustup-init,
+never `curl | sh`).
 
 ## STEP 1: the scripts
 
@@ -51,44 +61,52 @@ awk 'BEGIN { f = ""; w = 0 } /^<!-- FILE [A-Za-z0-9._-]+ -->$/ { f = $3; next } 
 cd bin && sha256sum -c SHA256SUMS
 ```
 
-Every file must print OK; otherwise stop (STEP 4).
+`git rev-parse HEAD` must print the job commit your first message or READY.txt names, and every file
+must print OK; otherwise stop (STEP 4).
 
 ## STEP 2: the loop
 
-Run `bash ~/ahjob/bin/drive.sh K N` (your K and N) with the Bash tool's timeout set to 300000 ms. It
-returns in about 4 minutes (at once on FINAL or STOP) and prints ONE line:
+Run `bash ~/ahjob/bin/drive.sh K N` (your K and N) in the foreground with the Bash tool's timeout set to
+600000 ms. It returns within about 8.5 minutes and prints ONE line:
 
 - `CONTINUE ...`: run the same command again at once, with nothing in between.
 - `FINAL ...`: go to STEP 4.
 - `STOP ...`: go to STEP 3.
 
-If the tool call itself times out, run it again: `drive.sh` is safe to repeat and the worker runs on its
-own. What it does: on the first call it makes the folders and the result repository (a clone of the result
-branch when one exists, see RESUME) and starts the worker `ah-run.sh`, which installs the tools, fetches
-the app commit, lists the mutants, runs the baseline and then the batches. Every call it restarts a dead
-worker, sweeps old test scratch, checks the disk (stop below 4 GiB free) and a stalled batch (nothing
-written for 90 minutes), and commits and pushes progress every 10-14 minutes (always within 15) and
-after every finished batch. The first call takes about 20-30 minutes of setup before batches start (ESTIMATE).
+If a call is cut by the tool's timeout, run it again: the next step cleans up after it. What one call
+does: on the first call it makes the folders and the result repository (a clone of the result branch
+when one exists, see RESUME); every call it sweeps old test scratch, checks the disk (stop below 4 GiB
+free), runs ONE step of the work as the run user (`ah-step.sh`, at most 480 s), then commits and pushes
+the results (so progress reaches the branch every 9 minutes or less) and prints the line. The steps
+go: setup (Rust 1.97.1 as METHOD 1 says, then `cargo install` of cargo-mutants and cargo-nextest, which
+resume across steps), the app commit and an export of it, the list, the baseline, then chunks of mutants.
+The same installs took 4 min 49 s on a root cloud box (MEASURED 16 Nov by a box that ran the first version
+of this job, commit c9aa530e); with the baseline, about 15-45 minutes of steps (ESTIMATE) before the first
+mutant.
 
-When the session's user is root, the work runs as a new ordinary user `mut`: the app's permission tests
-re-run themselves as another user when started by root, and that child cannot enter cargo-mutants'
-private copies (mode 0700), so as root the baseline fails for the setup's reason. As an ordinary user they
-run as on the app's CI and the operator's machine (the app's 17 Oct cloud pass of `pull` did the same).
-The run user's folder is `~mut/ah` when root, else `~/ah`; the result repository is
-`~/ahres-K-of-N` of the session's user.
+When the session's user is root, the work runs as a new ordinary user `mut`. Root reads every file, so
+permission bits do not bind: the app's permission tests re-run themselves as another user when started by
+root, and an earlier cloud pass saw 3 store tests fail as root. As an ordinary user they run as on the
+app's CI and the operator's machine (the app's 17 Oct cloud pass of `pull` did the same). The run user's
+folder is `~mut/ah` when root, else `~/ah`; the result repository is `~/ahres-K-of-N` of the session's
+user. `mut` works in a login shell (`runuser -l`) without the session's proxy variables and has no Rust of
+its own, so its setup takes the pinned rustup-init (METHOD 1); on a Default (limited) cloud network that
+shell reached static.rust-lang.org, crates.io and github.com, while `sh.rustup.rs` is refused (MEASURED 16 Nov,
+commit c9aa530e).
 
 ## STEP 3: STOP
 
 Read the reason on the STOP line (also `<run user folder>/state/STOP.txt`).
 
-- `BASELINE-RED`: the unmutated store and pull suites failed on this box. Read `state/baseline-failed.txt`
-  and, for each failing test, its output in `state/baseline.log`. Only when EVERY failing test fails
-  because it needs market data, the operator's live store or a Mac-only file or path (its own message
-  names such a file, folder or `BRUTEX_*` variable): write their full test names (as nextest prints them
-  after the binary name, e.g. `module::tests::name`), one per line, into `state/SKIPS.txt` (owned by the
-  run user), rename `state/STOP.txt` to `state/STOP.handled-<UTC time>.txt`, and go back to STEP 2: the
-  baseline runs again with those names skipped, and every batch skips them too. Any other failure, or
-  skips that do not make the baseline green: STEP 4.
+- `BASELINE-RED`: an unmutated suite (store or pull) failed on this box. Read
+  `state/baseline-failed-<crate>.txt` and, for each failing test, its output in
+  `state/baseline-<crate>.log`. Only when EVERY failing test fails because it needs market data, the
+  operator's live store or a Mac-only file or path (its own message names such a file, folder or
+  `BRUTEX_*` variable): write their full test names (as nextest prints them after the binary name, e.g.
+  `module::tests::name`), one per line, into `state/SKIPS.txt` (owned by the run user), rename
+  `state/STOP.txt` to `state/STOP.handled-<UTC time>.txt`, and go back to STEP 2: that suite runs again
+  with those names skipped, and every chunk skips them too. Any other failure, or skips that do not make
+  the suite green: STEP 4.
 - Anything else: STEP 4.
 
 If CONTINUE lines keep saying `commit failed (git identity?)`, set the git name and e-mail your session
@@ -98,86 +116,117 @@ uses for its own commits, then keep calling STEP 2.
 
 1. Write `NOTES.md` in `~/ahres-K-of-N/results/app-heart-mutants/shard-K-of-N/` (at most 80 lines):
    the SUMMARY line; the box (cores, RAM, cgroup limit, disk, run user); the versions
-   (`logs/versions-*.txt`); the baseline (passed, failed, skipped, wall: MEASURED, from
-   `logs/baseline-summary-*.txt` and `logs/steps-*.log`); SKIPS (none, or each name with its reason);
-   the batches that ran with `--jobs 1` after a memory kill; every STOP reason; anything unexpected.
+   (`logs/versions-*.txt`); the baseline (per crate: passed, failed, skipped, wall: MEASURED, from
+   `logs/baseline-summary-*` and `logs/steps-*.log`); SKIPS (none, or each name with its reason); every
+   STOP reason; anything unexpected; on a STOP, the last 20 lines of `state/steps.log`.
 2. Run `bash ~/ahjob/bin/drive.sh K N push` (prints `PUSHED ...`; if it says push failed, wait 60 s and
    run it again, at most 5 times).
-3. FINAL MESSAGE, short: the SUMMARY line; COMPLETE, or the STOP reason and the batch it stopped in; the
-   10 files with the most missed mutants (`cut -d: -f1 missed.txt | sort | uniq -c | sort -rn | head`);
-   the result branch and its last commit.
+3. FINAL MESSAGE, short: the SUMMARY line; COMPLETE, or the STOP reason with the last 20 lines of
+   `state/steps.log`; the 10 files with the most missed mutants
+   (`cut -d: -f1 missed.txt | sort | uniq -c | sort -rn | head`); the result branch and its last commit.
 
 ## METHOD
 
-What the worker runs, in the app commit's folder, with `TMPDIR=~/ah/tmp`, `CARGO_TERM_COLOR=never` and the
-dev profile overridden by environment to `CARGO_PROFILE_DEV_OPT_LEVEL=0`, `CARGO_PROFILE_DEV_INCREMENTAL=true`,
-`CARGO_PROFILE_DEV_DEBUG=0`:
+The run user's environment for every cargo command: `TMPDIR=~/ah/tmp`, `CARGO_TERM_COLOR=never`, and the
+dev profile overridden by environment to `CARGO_PROFILE_DEV_OPT_LEVEL=0`,
+`CARGO_PROFILE_DEV_INCREMENTAL=true`, `CARGO_PROFILE_DEV_DEBUG=0`. Every long command runs under
+`timeout --signal=INT` with the step's time left, so a cut command stops cleanly and the next step goes on.
 
-1. Setup: rustup 1.97.1 (`--profile minimal`, components rustfmt, clippy, llvm-tools-preview, target
-   wasm32-unknown-unknown, as `rust-toolchain.toml` lists), `cargo install cargo-mutants --version 27.1.0
-   --locked`, `cargo install cargo-nextest --version 0.9.145 --locked`, then `git fetch --depth 1` of the
-   app commit and a check that HEAD is that commit and the tree is clean. Each install has a 40-minute limit.
-2. List: `cargo mutants --list -p store -p pull --cargo-arg=--locked` (whole list) and the same with
-   `--shard K/N`; the shard must be exactly lines K*c+1 .. (K+1)*c of the whole list (c = ceil(total/N)),
-   hold no repeated name, and equal `SHARD-LIST.txt` already on the result branch, if any.
-3. Baseline, once per box: `cargo nextest run --locked -p store -p pull --no-fail-fast --test-threads=2`
-   in an export of the commit without `.git` (what a cargo-mutants copy looks like), `CARGO_BUILD_JOBS=2`.
-4. Batches of 50 names in shard order. Each batch: one exact anchored regex per name; `cargo mutants
-   --list` with those regexes must print exactly the batch's names; then
+1. Setup: Rust 1.97.1 (`--profile minimal`, components rustfmt, clippy, llvm-tools-preview, target
+   wasm32-unknown-unknown, as `rust-toolchain.toml` lists), from the first source that applies:
+   (a) the run user's own rustup, version 1.26 or newer: `rustup toolchain install 1.97.1 --profile minimal
+   -c rustfmt -c clippy -c llvm-tools-preview -t wasm32-unknown-unknown` (it installs exactly 1.97.1);
+   (b) no rustup at all, but a `rustc` and `cargo` that already print 1.97.1: used as they are (no
+   components; the tests need none); (c) otherwise rustup-init 1.29.3, pinned: the file
+   `https://static.rust-lang.org/rustup/archive/1.29.3/<target>/rustup-init` (target x86_64 or aarch64
+   unknown-linux-gnu; any other platform STOPs), downloaded as a file (never `curl | sh`: a Default cloud
+   network refuses `sh.rustup.rs`, and a pipe hides a failed download), checked against the sha256 pinned in
+   `ah-common.sh` (the sums static.rust-lang.org publishes beside the file) and only then run as
+   `rustup-init -y --profile minimal --default-toolchain 1.97.1`, then (a)'s toolchain install. The source
+   used is written to `logs/versions-*.txt`, and `rustc` in the export must print 1.97.1. Then
+   `cargo install cargo-mutants --version 27.1.0
+   --locked` and `cargo install cargo-nextest --version 0.9.145 --locked`, both with a kept target folder
+   so a cut build resumes; `git fetch --depth 1` of the app commit, a check that HEAD is that commit and
+   the tree is clean; then `~/ah/work`, an export of the commit without `.git` (what a cargo-mutants copy
+   looks like: the app's history tests skip their history checks there, as written for cargo-mutants).
+2. List, in the export: `cargo mutants --list -p store -p pull --cargo-arg=--locked` (whole list) and the
+   same with `--shard K/N`; the shard must be exactly lines K*c+1 .. (K+1)*c of the whole list
+   (c = ceil(total/N)), hold no repeated name, and equal `SHARD-LIST.txt` already on the result branch,
+   if any.
+3. Baseline, once per box, in the export: `cargo nextest run --locked -p <crate> --no-run`, then
+   `cargo nextest run --locked -p <crate> --no-fail-fast`, for store and then pull. Each suite's wall is
+   MEASURED and sets that crate's test timeout: 3 times the wall, at least 60 s, at most what one step
+   leaves after start-up and a rebuild (pull 310 s, store 370 s). A missed mutant runs the whole suite, so
+   if that cap is under 1.5 times the suite's wall the box stops (STEP 4) instead of filing missed
+   mutants as timeouts: the pull suite must take at most about 206 s on the box, the store suite 246 s.
+4. Chunks: the next names of the shard (in order) that have no outcome yet, all of one crate, as many
+   as the step's time left fits at the MEASURED rate (1 to 20); one exact anchored regex per name; then
 
    ```sh
-   cargo mutants -p store -p pull --cargo-arg=--locked --jobs 2 --cap-lints true \
-     --test-tool nextest --cargo-test-arg=--max-fail=1:immediate --cargo-test-arg=--test-threads=2 \
-     --timeout-multiplier 3 --minimum-test-timeout 60 -o <batch folder> --re '^<name>$' ...
+   cargo mutants --in-place --baseline=skip --timeout <crate timeout> -p <crate> --cargo-arg=--locked \
+     --test-tool nextest --cargo-test-arg=--max-fail=1:immediate -o <chunk folder> --re '^<name>$' ...
    ```
 
-   with `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 RAYON_NUM_THREADS=2`. cargo-mutants runs its own baseline
-   in every batch and sets that batch's timeout from it. Exit 0, 2 or 3 is a finished batch; its four
-   outcome lists must hold exactly its names. Exit 4 (baseline failed) or any other stops the box. If the
-   cgroup's out-of-memory kill count rose during a batch, the batch runs again with `--jobs 1`, and so does
-   every later batch on that box.
+   in the export, whose `target` stays warm between steps. Before every chunk, any file of the two
+   crates that differs from the commit is copied back from it. Exit 0, 2 or 3 is a finished chunk and
+   its four outcome lists must hold exactly its names; a chunk cut at the step's end (exit 124) keeps
+   the outcomes it finished (cargo-mutants records a mutant only once its test is done and puts the
+   source back on an interrupt), and its other names go to the next chunk. Every outcome must be one of
+   the chunk's names, and no name may get two outcomes. Any other exit stops the box. A name that is the
+   first of a chunk cut with no outcome three times stops the box.
 
 Changes from the 16 Nov wave (MUT-K: `cargo mutants --workspace --shard K/30 --jobs 2 --cargo-arg=--locked
 -- -- --exact --skip ...`, cargo test, automatic timeout, results on the code commit), and why:
 
 1. `-p store -p pull` instead of `--workspace`: this job's scope.
-2. Batches selected by exact names instead of one run per shard: the shard is still cargo-mutants' own
-   `--shard K/N` slice, but a box cut by the account's usage cap or a paused VM resumes from the result
-   branch without repeating finished batches. The wave's single run could not resume.
-3. cargo-nextest 0.9.145 with `--max-fail=1:immediate` and `--cap-lints true`, as the app's own CI gate 18
-   runs cargo-mutants: the first failing test ends the run (about half the time of cargo test per mutant,
-   ESTIMATE), and the app's `.config/nextest.toml` orders its watchdog tests first so that hangs are caught
-   instead of timing out. nextest runs no doc tests (as gate 18).
-4. Timeouts: multiplier 3 with a 60 s minimum instead of cargo-mutants' default 5 (about 20 minutes a hang
-   on pull, ESTIMATE); gate 18 uses 2 with a 900 s minimum. A timeout is never counted as caught.
+2. Foreground steps of at most 8.5 minutes instead of one long background run per shard: the wave-2
+   boxes must never leave work in a background job and run long commands in the foreground in pieces of
+   at most 9 minutes. So cargo-mutants runs in chunks, `--in-place` in an export without `.git` with a
+   warm `target`, `--baseline=skip` (the box's own baseline of each suite stands for the unmutated tree,
+   and the export is checked against the commit before every chunk), one job (`--in-place` cannot take
+   `--jobs`; one mutant at a time uses the 4 cores for its build and tests). The shard is still
+   cargo-mutants' own `--shard K/N` slice, and a box cut by the account's usage cap or a paused VM
+   resumes from the result branch without repeating finished mutants.
+3. cargo-nextest 0.9.145 with `--max-fail=1:immediate`, as the app's own CI gate 18 runs cargo-mutants:
+   the first failing test ends the run (about half the time of cargo test per mutant, ESTIMATE), and the
+   app's `.config/nextest.toml` orders its watchdog tests first so that hangs are caught instead of
+   timing out. nextest runs no doc tests (as gate 18).
+4. Timeouts: per crate, 3 times its MEASURED suite wall, at least 60 s and at most what one step allows
+   (pull 310 s, store 370 s), instead of cargo-mutants' default 5 times the baseline (about 20 minutes a
+   hang on pull, ESTIMATE); gate 18 uses 2 with a 900 s minimum. A timeout is never counted as caught.
 5. Dev profile: opt-level 0, incremental, no debuginfo (the app's dev profile is opt-level 3 and not
    incremental, too slow to rebuild per mutant; the app's 16-17 Oct cloud passes did the same; outcomes do
    not depend on it, timings do).
-6. `--jobs 2` as the wave, inside gate 18's 4-vCPU shape (2 build jobs, 2 test threads each), falling back
-   to `--jobs 1` after a memory kill (the box has a 13.4 GiB cgroup limit and no swap).
+6. No `--cap-lints`: gate 18 sets it, but in these two crates no rustc lint is above warn except
+   `forbid(unsafe_code)`, which no mutant can trigger, and leaving it off keeps the warm `target` valid.
 7. An ordinary run user when the box is root (STEP 2).
-8. A baseline once per box with nextest, besides cargo-mutants' own baseline in every batch.
-9. Results on an orphan branch (results only) under `results/app-heart-mutants/shard-K-of-N/`.
-10. cargo-mutants pinned with `--version 27.1.0` (the wave installed the latest, which was 27.1.0).
+8. Results on an orphan branch (results only) under `results/app-heart-mutants/shard-K-of-N/`.
+9. cargo-mutants pinned with `--version 27.1.0` (the wave installed the latest, which was 27.1.0).
+10. Rust from the run user's own toolchain or the pinned rustup-init 1.29.3 with its sha256 checked, instead
+    of the `sh.rustup.rs` script piped into `sh`: the wave's boxes worked as root, which had rustup already; this
+    job's run user `mut` has none, and a Default cloud network refuses `sh.rustup.rs` (MEASURED 16 Nov,
+    commit c9aa530e: every root box stopped at setup). rustup-init 1.29.3 is the file that c9aa530e's
+    MEASURED run downloaded as the latest (static.rust-lang.org has served 1.29.3 as the latest since
+    3 Nov 2026: the same sha256 and the same ETag as the archived 1.29.3 file).
 
-Kept: cargo-mutants 27.1.0, rustc 1.97.1, `--cargo-arg=--locked`, `--jobs 2`, copy mode (not
-`--in-place`), cargo-mutants' four outcome lists and outcomes.json, progress commits and NOTES.md.
+Kept: cargo-mutants 27.1.0, rustc 1.97.1, `--cargo-arg=--locked`, each mutant tested against its own
+crate's tests, cargo-mutants' four outcome lists and outcomes.json, progress commits and NOTES.md.
 
 ## RESULT LAYOUT
 
 On branch `cloud-results/app-heart-mutants-K-of-N`, folder `results/app-heart-mutants/shard-K-of-N/`:
 
 - `SUMMARY.txt`: one line, `SUMMARY app-heart shard K/N commit <app commit> cargo-mutants 27.1.0 nextest
-  0.9.145 mutants <shard size> tested <n> caught <c> missed <m> timeout <t> unviable <u> batch_wall_s <s>
+  0.9.145 mutants <shard size> tested <n> caught <c> missed <m> timeout <t> unviable <u> chunk_wall_s <s>
   (MEASURED) boxes <b> status COMPLETE|PARTIAL|STOPPED`.
-- `PROGRESS.txt`: batches done, counts, rate (MEASURED from the batch walls), ETA (ESTIMATE), the running batch.
-- `caught.txt`, `missed.txt`, `timeout.txt`, `unviable.txt`: every finished batch in shard order,
-  cargo-mutants' own lines (`file:line:col: change`).
-- `outcomes.json`: `{"job","shard","n","commit","cargo_mutants","cargo_nextest","batches":[{"batch",
-  "outcomes": <cargo-mutants' outcomes.json of that batch>}]}`.
-- `SHARD-LIST.txt`: the shard's names in order. `batches/b-NNN/`: names.txt, DONE (counts, exit code,
-  start, end, wall), the four lists, outcomes.json, console.log. `current/`: the running batch's partial
-  lists (not counted). `boxes.txt`: one line per box. `logs/`: steps, versions, setup and baseline tails,
+- `PROGRESS.txt`: counts, rate (MEASURED from the chunk walls), ETA (ESTIMATE), the last step.
+- `caught.txt`, `missed.txt`, `timeout.txt`, `unviable.txt`: every finished mutant, chunk by chunk in
+  shard order, cargo-mutants' own lines (`file:line:col: change`).
+- `outcomes.json`: `{"job","shard","n","commit","cargo_mutants","cargo_nextest","chunks":[{"chunk",
+  "outcomes": <cargo-mutants' outcomes.json of that chunk>}]}`.
+- `SHARD-LIST.txt`: the shard's names in order. `chunks/c-NNNN/`: names.txt, STAT (crate, names, outcomes,
+  counts, exit code, test timeout, start, end, wall), the four lists, outcomes.json, console.log (tail).
+  `boxes.txt`: one line per box. `logs/`: steps, versions, setup and baseline tails, baseline summaries,
   STOP, per box. `SKIPS.txt` only after STEP 3. `NOTES.md` from STEP 4.
 
 ## TESTS THAT NEED DATA OR THE LIVE STORE
@@ -185,9 +234,9 @@ On branch `cloud-results/app-heart-mutants-K-of-N`, folder `results/app-heart-mu
 A read of every `.rs` file of `crates/store` and `crates/pull` at the app commit (before this job was
 written): every test that reads market data, the operator's live store or a Mac path through a
 `BRUTEX_*` variable or a fixed path is `#[ignore]`d, with the timing measurements: 62 `#[ignore]`
-attributes. `cargo test` and nextest never run them unless asked (`--ignored`), so they need no skip.
-No other test of the two crates reads such a variable or path. Expected SKIPS: none; the box's baseline
-is the proof (STEP 3 if not). The 62, by file:
+attributes. nextest never runs them unless asked (`--run-ignored`), so they need no skip. No other test
+of the two crates reads such a variable or path. Expected SKIPS: none; the box's baseline is the proof
+(STEP 3 if not). The 62, by file:
 
 - `crates/pull/src/alerts_tests.rs`: `the_operators_older_steps_timed`
 - `crates/pull/src/calendar.rs`: `calendar_of_record_costs`
@@ -231,20 +280,21 @@ is the proof (STEP 3 if not). The 62, by file:
   shards 0-6 pull only, shard 7 pull 1,104 + store 1,073, shards 8-9 store only.
 - Rate: from the app's earlier cloud passes (MEASURED there, on older commits): the pull suite took 62 s to
   build and 203-255 s to test (nextest, 2 threads, opt-level 0); 354 store mutants took 58 min. ESTIMATE
-  per mutant with 2 jobs: pull 1-2 min, store 10-30 s; setup 20-30 min a box; 5-10 min a batch of overhead.
-- Wall per box: pull shards (0-6) about 40-80 h; shard 7 about 25-50 h; store shards (8, 9) about 10-25 h.
-  Boxes stop earlier when the account's usage runs out; they resume (RESUME).
-- `PROGRESS.txt` carries the MEASURED rate and the ETA from the first finished batch on, within about
-  1.5 h of a box's start.
+  per mutant, one at a time, step overheads included: pull 1.5-3 min, store 15-45 s.
+- Wall per box, uncut: pull shards (0-6) about 55-110 h; shard 7 about 35-65 h; store shards (8, 9)
+  about 10-30 h; plus 30-45 minutes of setup and baseline per box. Boxes stop earlier when the
+  account's usage runs out; they resume (RESUME). More boxes for pull (a larger N) shorten this.
+- `PROGRESS.txt` carries the MEASURED rate and the ETA from the first chunk on.
 
 ## RESUME
 
-A box that ends early (usage cap, paused or reclaimed VM, account switch) loses at most its running
-batch. To continue, start a fresh box with the same first message (same K and N). `drive.sh` finds the
-result branch, takes every finished batch from it (`batches/b-NNN/DONE`), checks that its new shard list
-equals the committed `SHARD-LIST.txt`, runs setup and the baseline again on the new box, and continues
-with the first unfinished batch. Never run two boxes for the same K and N at once: the second push is
-rejected and that box stops.
+A box that ends early (usage cap, paused or reclaimed VM, account switch) loses at most the mutant it was
+testing. To continue, start a fresh box with the same first message (same K and N). `drive.sh` finds the
+result branch, takes every finished mutant from it (`chunks/c-NNNN/`), checks that its new shard list
+equals the committed `SHARD-LIST.txt`, runs setup and the baseline again on the new box, and goes on with
+the first name that has no outcome. Never run two boxes for the same K and N at once: the second push is
+rejected and that box stops. A result branch that holds the first version's layout (`batches/`, job commit
+8737b862) is never resumed or written: the box STOPs before it runs or pushes anything.
 
 ## FILES (STEP 1 extracts these into ~/ahjob/bin)
 
@@ -255,6 +305,12 @@ AH_C=69aa8ffeb29c7c59a1585b45510c8658df00c7a2   # the app commit tested (origin 
 AH_RUST=1.97.1                                  # the app's rust-toolchain.toml
 AH_CMV=27.1.0                                   # cargo-mutants (the version of the 16 Nov wave)
 AH_NXV=0.9.145                                  # cargo-nextest (the app's CI pin)
+# rustup-init, pinned: used only when the run user has no rust $AH_RUST of its own (ah-step.sh, setup). The file
+# https://static.rust-lang.org/rustup/archive/$AH_RUSTUP/<target>/rustup-init, checked against these sha256 sums
+# (as published beside it in <...>/rustup-init.sha256) before it runs. Never a download piped into a shell.
+AH_RUSTUP=1.29.3
+AH_RUSTUP_SHA256_X86_64=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55    # x86_64-unknown-linux-gnu, 21347088 bytes
+AH_RUSTUP_SHA256_AARCH64=9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282   # aarch64-unknown-linux-gnu, 20172120 bytes
 AH_B=50                                         # mutants per batch
 AH_REPO=${AH_REPO:-https://github.com/SJParthi/brutex.git}          # code (read only)
 AH_RES_REPO=${AH_RES_REPO:-https://github.com/SJParthi/brutex.git}  # where results are pushed
@@ -281,96 +337,143 @@ ah_lines() { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
 }
 ```
 
-<!-- FILE ah-run.sh -->
+<!-- FILE ah-step.sh -->
 ```sh
 #!/bin/bash
-# ah-run.sh K N: the app-heart worker. It runs as an ordinary (non-root) user, detached; drive.sh starts it.
-# Steps, each skipped when its marker exists in ~/ah/state: setup, list, baseline, then the batches
-# b-000, b-001, ... of AH_B mutants each, in shard order. On any failure it writes STOP.txt and exits 3.
+# ah-step.sh K N BUDGET: ONE foreground step of the app-heart work, run as an ordinary (non-root) user,
+# never longer than BUDGET seconds. Every part resumes where the last step stopped: setup (toolchain,
+# cargo-mutants, cargo-nextest, the app commit, an export of it without .git), the list, the baseline
+# (the unmutated store and pull suites), then chunks of mutants that cargo-mutants runs in place in the
+# export. Exit 0 = continue with another step, 3 = STOP (STOP.txt says why), 10 = every mutant of the
+# shard has its outcome.
 set -u
-K=$1; N=$2
+K=$1; N=$2; BUDGET=$3
 D=$(cd "$(dirname "$0")" && pwd)
 . "$D/ah-common.sh"
-AH=$HOME/ah; S=$AH/state; A=$AH/app
+AH=$HOME/ah; S=$AH/state; A=$AH/app; W=$AH/work
 cd "$HOME" || exit 1   # never work from inside $AH: the leftover check below looks there
-mkdir -p "$S/batches" "$AH/tmp"
+mkdir -p "$S/chunks" "$AH/tmp"
+END=$(( $(date +%s) + BUDGET ))
+left() { echo $(( END - $(date +%s) )); }
 say() { echo "$(ah_now) $*" >> "$S/steps.log"; }
 stop() { say "STOP $*"; echo "$(ah_now) $*" > "$S/STOP.txt"; exit 3; }
 [ -e "$S/STOP.txt" ] && exit 3
+[ -e "$S/ALL.done" ] && exit 10
 
-# One worker at a time: a lock folder holding the holder's pid.
-if ! mkdir "$S/worker.lock" 2>/dev/null; then
-  op=$(cat "$S/worker.lock/pid" 2>/dev/null || echo 0)
-  if [ "$op" != 0 ] && kill -0 "$op" 2>/dev/null; then exit 0; fi
-  rm -rf "$S/worker.lock"
-  mkdir "$S/worker.lock" 2>/dev/null || exit 0
+# One step at a time: a lock folder holding the holder's pid.
+if ! mkdir "$S/step.lock" 2>/dev/null; then
+  op=$(cat "$S/step.lock/pid" 2>/dev/null || echo 0)
+  if [ "$op" != 0 ] && kill -0 "$op" 2>/dev/null; then say "step: step $op still runs"; exit 0; fi
+  rm -rf "$S/step.lock"
+  mkdir "$S/step.lock" 2>/dev/null || exit 0
 fi
-echo $$ > "$S/worker.lock/pid"
-trap 'rm -rf "$S/worker.lock"' EXIT
-echo $$ > "$S/runner.pid"
+echo $$ > "$S/step.lock/pid"
+trap 'rm -rf "$S/step.lock"' EXIT
 
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH" TMPDIR="$AH/tmp" CARGO_TERM_COLOR=never
-unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR RUSTFLAGS RUSTDOCFLAGS RUSTC RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC RUSTDOC RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_JOBS
 # Rebuild time per mutant (the app's own cloud passes of 16-17 Oct did the same; outcomes do not depend on it):
 export CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_PROFILE_DEV_INCREMENTAL=true CARGO_PROFILE_DEV_DEBUG=0
-TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 2400"
 DRY=${AH_DRY:-0}
-say "worker start: pid $$, shard $K/$N, user $(id -un)"
+command -v timeout >/dev/null 2>&1 || stop "setup: no timeout command (coreutils)"
+# run CMD...: the command with SIGINT when the step's time is up (exit 124 then), SIGKILL 60 s later
+run() {
+  local t=$(( $(left) - 20 ))
+  [ "$t" -lt 30 ] && return 124
+  timeout --signal=INT --kill-after=60 "$t" "$@"
+}
 
-# Leftovers of a cut worker (this point is reached only while no other worker holds the lock): on Linux,
-# this user's processes whose working folder or command line lies inside $AH (cargo-mutants, cargo,
-# nextest and test processes in its copies), never anything else; then the leftover copies themselves.
-ah_ours() {
-  [ -d /proc/self ] || return 0
+# Leftovers of a cut step (Linux only, never in a dry run): this user's processes whose working folder or
+# command line lies inside $AH, never anything else.
+if [ "$DRY" != 1 ] && [ -d /proc/self ]; then
+  old=""
   for p in /proc/[0-9]*; do
     [ -O "$p" ] || continue
     q=${p#/proc/}
     [ "$q" = "$$" ] && continue
     c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
     w=$(readlink "$p/cwd" 2>/dev/null)
-    case "$c" in *ah-run.sh*|*drive.sh*|"") continue;; esac
-    case "$w/ $c" in *"$AH/"*) echo "$q";; esac
+    case "$c" in *ah-step.sh*|*drive.sh*|"") continue;; esac
+    case "$w/ $c" in *"$AH/"*) old="$old $q";; esac
   done
-}
-if [ "$DRY" != 1 ]; then
-  old=$(ah_ours | sort -u)
   if [ -n "$old" ]; then
-    say "cleanup: stopping leftover processes inside $AH: $(echo $old)"
+    say "cleanup: stopping leftover processes inside $AH:$old"
     kill $old 2>/dev/null; sleep 10; kill -9 $old 2>/dev/null
   fi
-  for x in "$AH"/tmp/cargo-mutants-*; do
-    [ -e "$x" ] || continue
-    chmod -R u+rwx "$x" 2>/dev/null; rm -rf "$x" && say "cleanup: removed leftover copy ${x##*/}"
-  done
 fi
 
-# 1. SETUP: toolchain, cargo-mutants, cargo-nextest, the app commit.
+# 1. SETUP
+# Rust $AH_RUST comes from the run user's own toolchain when that is enough: a rustup of 1.26 or newer (it
+# installs exactly $AH_RUST below), or, with no rustup at all, a rustc and cargo that already are $AH_RUST.
+# Otherwise from rustup-init $AH_RUSTUP, pinned in ah-common.sh: downloaded as a file from static.rust-lang.org
+# (never piped into a shell), checked against its pinned sha256, and only then run, with --default-toolchain $AH_RUST.
+rustup_ok() {   # a rustup of 1.26 or newer on PATH
+  command -v rustup >/dev/null 2>&1 || return 1
+  rustup --version 2>/dev/null | head -n 1 | awk '{ split($2, v, "."); ok = ($1 == "rustup" && (v[1] + 0 > 1 || (v[1] + 0 == 1 && v[2] + 0 >= 26))) } END { exit !ok }'
+}
 if [ ! -e "$S/setup.done" ]; then
-  say "setup: rust $AH_RUST, cargo-mutants $AH_CMV, cargo-nextest $AH_NXV, app $AH_C"
   if [ "$DRY" != 1 ]; then
-    if ! command -v rustup >/dev/null 2>&1; then
-      curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$AH_RUST" >> "$S/setup.log" 2>&1 || stop "setup: rustup-init failed (setup.log)"
+    if rustup_ok; then
+      [ -s "$S/rust-source.txt" ] || echo "rust: the run user's own rustup ($(command -v rustup), $(rustup --version 2>/dev/null | head -n 1))" > "$S/rust-source.txt"
+    elif ! command -v rustup >/dev/null 2>&1 && [ "$(rustc --version 2>/dev/null | cut -d ' ' -f 1-2)" = "rustc $AH_RUST" ] \
+        && [ "$(cargo --version 2>/dev/null | cut -d ' ' -f 1-2)" = "cargo $AH_RUST" ]; then
+      [ -s "$S/rust-source.txt" ] || echo "rust: the run user's own rust $AH_RUST without rustup ($(command -v rustc), $(command -v cargo))" > "$S/rust-source.txt"
+    else
+      case "$(uname -sm)" in
+        "Linux x86_64") RT=x86_64-unknown-linux-gnu; RS=$AH_RUSTUP_SHA256_X86_64;;
+        "Linux aarch64") RT=aarch64-unknown-linux-gnu; RS=$AH_RUSTUP_SHA256_AARCH64;;
+        *) stop "setup: no rust $AH_RUST for $(id -un) and no pinned rustup-init for $(uname -sm)";;
+      esac
+      RIU=https://static.rust-lang.org/rustup/archive/$AH_RUSTUP/$RT/rustup-init
+      RI=$AH/tmp/rustup-init-$AH_RUSTUP
+      say "setup: no rust $AH_RUST for $(id -un): rustup-init $AH_RUSTUP from $RIU"
+      run curl --proto '=https' --tlsv1.2 --retry 3 -sSfL -o "$RI" "$RIU" >> "$S/setup.log" 2>&1
+      rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "setup: cannot download $RIU (curl rc $rc, setup.log)"
+      got=$(sha256sum "$RI" 2>> "$S/setup.log" | awk '{print $1}')
+      [ "$got" = "$RS" ] || stop "setup: the downloaded rustup-init has sha256 '$got', not the pinned $RS"
+      echo "rust: rustup-init $AH_RUSTUP ($RT, sha256 $RS checked) from $RIU" > "$S/rust-source.txt"
+      chmod u+x "$RI" || stop "setup: cannot make $RI executable"
+      run "$RI" -y --profile minimal --default-toolchain "$AH_RUST" >> "$S/setup.log" 2>&1
+      rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "setup: rustup-init $AH_RUSTUP failed (rc $rc, setup.log)"
+      rm -f "$RI"
+      rustup_ok || stop "setup: rustup-init $AH_RUSTUP ran, but no rustup 1.26 or newer is on PATH ($CARGO_HOME/bin)"
     fi
-    $TO rustup toolchain install "$AH_RUST" --profile minimal -c rustfmt -c clippy -c llvm-tools-preview -t wasm32-unknown-unknown >> "$S/setup.log" 2>&1 || stop "setup: rustup toolchain install $AH_RUST failed (setup.log)"
-    if [ "$(cargo mutants --version 2>/dev/null)" != "cargo-mutants $AH_CMV" ]; then
-      $TO cargo +"$AH_RUST" install cargo-mutants --version "$AH_CMV" --locked --force >> "$S/setup.log" 2>&1 || stop "setup: cargo install cargo-mutants $AH_CMV failed (setup.log)"
+    TC=""; rustup_ok && TC="+$AH_RUST"   # cargo +$AH_RUST only through rustup
+    if [ -n "$TC" ] && [ ! -e "$S/toolchain.done" ]; then
+      run rustup toolchain install "$AH_RUST" --profile minimal -c rustfmt -c clippy -c llvm-tools-preview -t wasm32-unknown-unknown >> "$S/setup.log" 2>&1
+      rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "setup: rustup toolchain install $AH_RUST failed (setup.log)"
+      touch "$S/toolchain.done"
     fi
-    case "$(cargo nextest --version 2>/dev/null)" in
+    if [ "$(cargo ${TC:+"$TC"} mutants --version 2>/dev/null)" != "cargo-mutants $AH_CMV" ]; then
+      say "setup: cargo install cargo-mutants $AH_CMV (resumes across steps)"
+      run cargo ${TC:+"$TC"} install cargo-mutants --version "$AH_CMV" --locked --force --target-dir "$AH/install-target" >> "$S/setup.log" 2>&1
+      rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "setup: cargo install cargo-mutants $AH_CMV failed (setup.log)"
+    fi
+    case "$(cargo ${TC:+"$TC"} nextest --version 2>/dev/null)" in
       "cargo-nextest $AH_NXV"*) ;;
-      *) $TO cargo +"$AH_RUST" install cargo-nextest --version "$AH_NXV" --locked --force >> "$S/setup.log" 2>&1 || stop "setup: cargo install cargo-nextest $AH_NXV failed (setup.log)";;
+      *)
+        say "setup: cargo install cargo-nextest $AH_NXV (resumes across steps)"
+        run cargo ${TC:+"$TC"} install cargo-nextest --version "$AH_NXV" --locked --force --target-dir "$AH/install-target" >> "$S/setup.log" 2>&1
+        rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "setup: cargo install cargo-nextest $AH_NXV failed (setup.log)";;
     esac
+    if [ -e "$AH/install-target" ]; then rm -rf "$AH/install-target"; fi   # the two tools' own build output
   fi
   if [ ! -d "$A/.git" ]; then
     mkdir -p "$A" && git -C "$A" init -q && git -C "$A" remote add origin "$AH_REPO" || stop "setup: git init of the app folder failed"
   fi
   if [ "$(git -C "$A" rev-parse -q --verify HEAD 2>/dev/null)" != "$AH_C" ]; then
-    $TO git -C "$A" fetch -q --depth 1 origin "$AH_C" >> "$S/setup.log" 2>&1 || stop "setup: cannot fetch the app commit $AH_C (setup.log)"
+    run git -C "$A" fetch -q --depth 1 origin "$AH_C" >> "$S/setup.log" 2>&1
+    rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "setup: cannot fetch the app commit $AH_C (setup.log)"
     git -C "$A" checkout -q --detach "$AH_C" >> "$S/setup.log" 2>&1 || stop "setup: cannot check out $AH_C"
   fi
   [ "$(git -C "$A" rev-parse HEAD)" = "$AH_C" ] || stop "setup: the app HEAD is not $AH_C"
   [ -z "$(git -C "$A" status --porcelain)" ] || stop "setup: the app tree is not clean"
-  ( cd "$A" && rustc --version && cargo --version && cargo mutants --version && cargo nextest --version ) > "$S/versions.txt" 2>&1
+  if [ ! -f "$W/Cargo.toml" ]; then   # the export cargo-mutants mutates in place: no .git, as in its copies
+    mkdir -p "$W" && git -C "$A" archive "$AH_C" | tar -x -C "$W" || stop "setup: export of $AH_C failed"
+  fi
+  ( cd "$W" && rustc --version && cargo --version && cargo mutants --version && cargo nextest --version ) > "$S/versions.txt" 2>&1
+  [ -s "$S/rust-source.txt" ] && cat "$S/rust-source.txt" >> "$S/versions.txt"   # where rust came from (setup)
   if [ "$DRY" != 1 ]; then
     grep -q "^rustc $AH_RUST " "$S/versions.txt" || stop "setup: rustc in the app folder is not $AH_RUST (versions.txt)"
     grep -q "^cargo-mutants $AH_CMV\$" "$S/versions.txt" || stop "setup: cargo-mutants is not $AH_CMV (versions.txt)"
@@ -381,12 +484,15 @@ fi
 
 # 2. LIST: the whole store+pull list, then shard K/N (cargo-mutants' own default slice sharding).
 if [ ! -e "$S/list.done" ]; then
-  ( cd "$A" && cargo mutants --list -p store -p pull --cargo-arg=--locked ) > "$S/ALL-LIST.txt" 2> "$S/list.err" || stop "list: cargo mutants --list failed (list.err)"
-  ( cd "$A" && cargo mutants --list -p store -p pull --cargo-arg=--locked --shard "$K/$N" ) > "$S/SHARD-LIST.txt" 2>> "$S/list.err" || stop "list: cargo mutants --list --shard $K/$N failed (list.err)"
+  ( cd "$W" && run cargo mutants --list -p store -p pull --cargo-arg=--locked ) > "$S/ALL-LIST.txt" 2> "$S/list.err"
+  rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "list: cargo mutants --list failed (list.err)"
+  ( cd "$W" && run cargo mutants --list -p store -p pull --cargo-arg=--locked --shard "$K/$N" ) > "$S/SHARD-LIST.txt" 2>> "$S/list.err"
+  rc=$?; [ "$rc" = 124 ] && exit 0; [ "$rc" = 0 ] || stop "list: cargo mutants --list --shard $K/$N failed (list.err)"
   T=$(ah_lines "$S/ALL-LIST.txt"); c=$(( (T + N - 1) / N ))
   sed -n "$((K * c + 1)),$(((K + 1) * c))p" "$S/ALL-LIST.txt" | cmp -s - "$S/SHARD-LIST.txt" || stop "list: shard $K/$N is not lines $((K * c + 1))..$(((K + 1) * c)) of the full list of $T"
   [ -s "$S/SHARD-LIST.txt" ] || stop "list: shard $K/$N is empty"
   [ "$(sort "$S/SHARD-LIST.txt" | uniq -d | wc -l | tr -d ' ')" = 0 ] || stop "list: the shard repeats a name"
+  grep -q -v -E '^crates/(store|pull)/' "$S/SHARD-LIST.txt" && stop "list: a name outside crates/store and crates/pull"
   if [ -e "$S/SHARD-LIST.committed" ]; then
     cmp -s "$S/SHARD-LIST.committed" "$S/SHARD-LIST.txt" || stop "list: SHARD-LIST.txt differs from the one already on the result branch"
   fi
@@ -394,131 +500,175 @@ if [ ! -e "$S/list.done" ]; then
   touch "$S/list.done"
 fi
 
-# 3. BASELINE: the unmutated store and pull suites, once per box, in an export without .git
-#    (what a cargo-mutants copy looks like), with nextest.
+skipargs() {   # the SKIPS.txt names as nextest's own arguments (-- --skip NAME ... --exact), one per line
+  [ -s "$S/SKIPS.txt" ] || return 0
+  echo "--"
+  while IFS= read -r t; do [ -n "$t" ] && printf -- '--skip\n%s\n' "$t"; done < "$S/SKIPS.txt"
+  echo "--exact"
+}
+
+# 3. BASELINE, once per box, in the export: build the store and pull tests, then run each suite whole.
 if [ ! -e "$S/baseline.done" ]; then
-  if [ "$DRY" = 1 ]; then
-    say "baseline: skipped (dry run)"
-  else
-    P=$AH/plain
-    if [ -e "$P" ]; then chmod -R u+rwx "$P" 2>/dev/null; rm -rf "$P"; fi
-    mkdir -p "$P" && git -C "$A" archive "$AH_C" | tar -x -C "$P" || stop "baseline: export of $AH_C failed"
+  for p in store pull; do
+    [ -e "$S/built-$p" ] && continue
+    if [ "$DRY" != 1 ]; then
+      say "baseline: building the $p tests"
+      ( cd "$W" && run cargo nextest run --locked -p "$p" --no-run ) >> "$S/baseline-build.log" 2>&1
+      rc=$?; [ "$rc" = 124 ] && { say "baseline: the $p build goes on in the next step"; exit 0; }
+      [ "$rc" = 0 ] || stop "baseline: the $p tests do not build (baseline-build.log)"
+    fi
+    touch "$S/built-$p"
+  done
+  for p in store pull; do
+    [ -e "$S/suite-$p.s" ] && continue
+    if [ "$DRY" = 1 ]; then echo 30 > "$S/suite-$p.s"; continue; fi
+    [ "$(left)" -ge 420 ] || { say "baseline: the $p suite waits for a fresh step"; exit 0; }
     set --
-    if [ -s "$S/SKIPS.txt" ]; then
-      set -- --
-      while IFS= read -r t; do [ -n "$t" ] && set -- "$@" --skip "$t"; done < "$S/SKIPS.txt"
-      set -- "$@" --exact
+    while IFS= read -r a; do [ -n "$a" ] && set -- "$@" "$a"; done <<EOF
+$(skipargs)
+EOF
+    t0=$(date +%s)
+    ( cd "$W" && run cargo nextest run --locked -p "$p" --no-fail-fast "$@" ) > "$S/baseline-$p.log" 2>&1
+    rc=$?; t1=$(date +%s)
+    grep -E '^ *Summary ' "$S/baseline-$p.log" | tail -n 1 | sed 's/^ *//' > "$S/baseline-summary-$p.txt"
+    say "baseline: $p rc $rc in $((t1 - t0)) s: $(cat "$S/baseline-summary-$p.txt")"
+    [ "$rc" = 124 ] && stop "baseline: the $p suite did not finish within one step ($((t1 - t0)) s)"
+    if [ "$rc" != 0 ]; then
+      grep -E '^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|SIGBUS|ABORT|LEAK-FAIL) ' "$S/baseline-$p.log" | sed 's/^ *//' | sort -u > "$S/baseline-failed-$p.txt"
+      stop "BASELINE-RED: $p, nextest rc $rc; $(ah_lines "$S/baseline-failed-$p.txt") failing lines in baseline-failed-$p.txt (JOB STEP 3)"
     fi
-    t0=$(date +%s); m0=$(awk '$1 == "oom_kill" {print $2}' /sys/fs/cgroup/memory.events 2>/dev/null)
-    ( cd "$P" && CARGO_BUILD_JOBS=2 cargo nextest run --locked -p store -p pull --no-fail-fast --test-threads=2 "$@" ) > "$S/baseline.log" 2>&1
-    rc=$?; t1=$(date +%s); m1=$(awk '$1 == "oom_kill" {print $2}' /sys/fs/cgroup/memory.events 2>/dev/null)
-    grep -E '^ *Summary ' "$S/baseline.log" | tail -n 1 | sed 's/^ *//' > "$S/baseline-summary.txt"
-    say "baseline: rc $rc in $((t1 - t0)) s, oom_kill count ${m0:--} -> ${m1:--}: $(cat "$S/baseline-summary.txt")"
-    chmod -R u+rwx "$P" 2>/dev/null; rm -rf "$P"
-    if [ "$rc" -ne 0 ]; then
-      grep -E '^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|SIGBUS|ABORT|LEAK-FAIL) ' "$S/baseline.log" | sed 's/^ *//' | sort -u > "$S/baseline-failed.txt"
-      stop "BASELINE-RED: nextest rc $rc; $(ah_lines "$S/baseline-failed.txt") failing lines in baseline-failed.txt (JOB STEP 3)"
-    fi
-  fi
+    echo $((t1 - t0)) > "$S/suite-$p.s"
+  done
   touch "$S/baseline.done"
 fi
 
-# 4. BATCHES of AH_B mutants, selected by exact anchored names, each with cargo-mutants' own baseline.
-#    The box's out-of-memory kill counter is read around every batch: a batch during which the kernel
-#    killed a process (a killed rustc would read as unviable, a killed test as caught) is run again
-#    with --jobs 1, and every later batch keeps --jobs 1.
-NM=$(ah_lines "$S/SHARD-LIST.txt"); NB=$(( (NM + AH_B - 1) / AH_B ))
-export CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 RAYON_NUM_THREADS=2
-oomcount() {
-  for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory/memory.oom_control; do
-    if [ -r "$f" ]; then awk '$1 == "oom_kill" {v = $2} END {print v + 0}' "$f"; return; fi
+# 4. CHUNKS: the next names of the shard that have no outcome yet, all of one crate, as many as fit the
+#    step, run in place in the export with that crate's timeout (3 x its MEASURED suite, 60 to 300 s).
+restore() {   # copy back any file of the two crates that differs from the commit (a cut step may leave one)
+  local c l f n=0
+  for c in store pull; do
+    diff -rq "$A/crates/$c" "$W/crates/$c" > "$S/restore.diff" 2>&1
+    while IFS= read -r l; do
+      case "$l" in
+        "Files $A/"*" differ")
+          f=${l#"Files $A/"}; f=${f%% and *}
+          cp "$A/$f" "$W/$f" || return 1
+          n=$((n + 1));;
+        "Only in $A/"*) say "restore: $l"; return 1;;
+        *) ;;   # files the tests wrote into the export do not change the source
+      esac
+    done < "$S/restore.diff"
   done
-  echo -1
+  [ "$n" -gt 0 ] && say "restore: $n mutated file(s) copied back from the commit"
+  return 0
 }
-b=0
-while [ "$b" -lt "$NB" ]; do
-  bb=$(printf '%03d' "$b"); d=$S/batches/b-$bb
-  if [ -f "$d/DONE" ]; then b=$((b + 1)); continue; fi
-  [ -e "$S/STOP.txt" ] && exit 3
-  if [ -e "$d" ]; then mv "$d" "$d.cut-$(date +%s)"; fi
-  mkdir -p "$d"
-  JOBS=2; [ -e "$S/jobs1" ] && JOBS=1
-  o0=$(oomcount)
-  sed -n "$((b * AH_B + 1)),$(((b + 1) * AH_B))p" "$S/SHARD-LIST.txt" > "$d/names.txt"
-  awk -f "$D/ah-esc.awk" "$d/names.txt" > "$d/names.re"
-  set --
-  while IFS= read -r r; do set -- "$@" --re "$r"; done < "$d/names.re"
-  ( cd "$A" && cargo mutants --list -p store -p pull --cargo-arg=--locked "$@" ) > "$d/selected.txt" 2> "$d/list.err" || stop "batch $bb: cargo mutants --list with its regexes failed (list.err)"
-  sort "$d/names.txt" > "$d/names.sorted"; sort "$d/selected.txt" > "$d/selected.sorted"
-  cmp -s "$d/names.sorted" "$d/selected.sorted" || stop "batch $bb: its regexes select $(ah_lines "$d/selected.txt") names, not exactly its $(ah_lines "$d/names.txt")"
-  if [ -s "$S/SKIPS.txt" ]; then
-    set -- "$@" -- --
-    while IFS= read -r t; do [ -n "$t" ] && set -- "$@" --skip "$t"; done < "$S/SKIPS.txt"
-    set -- "$@" --exact
+tmo_of() {   # crate $1, rebuild allowance $2: 3 x the MEASURED suite wall, at least 60 s, at most what one
+             # step leaves after start-up and a rebuild; a timeout under 1.5 x the suite would turn
+             # missed mutants into timeouts, so that stops the box instead
+  local s t cap
+  s=$(cat "$S/suite-$1.s"); cap=$(( BUDGET - 50 - $2 ))
+  t=$(( s * 3 )); [ "$t" -lt 60 ] && t=60; [ "$t" -gt "$cap" ] && t=$cap
+  [ $(( t * 2 )) -ge $(( s * 3 )) ] || stop "the $1 suite takes $s s (MEASURED): a test timeout of $t s, all a 9-minute step allows, is under 1.5 x that"
+  echo "$t"
+}
+avg_of() {   # MEASURED seconds per finished mutant of crate $1 so far (pull 150 and store 40 before any)
+  cat "$S"/chunks/c-[0-9][0-9][0-9][0-9]/STAT 2>/dev/null | awk -v c="$1" -v d="$2" '
+    { for (i = 1; i <= NF; i++) { split($i, a, "="); v[a[1]] = a[2] }
+      if (v["crate"] == c && v["done"] > 0) { n += v["done"]; w += v["wall_s"] } }
+    END { if (n > 0) printf "%d", (w / n) + 1; else print d }'
+}
+for p in store pull; do   # can a whole mutant of each crate of this shard fit one step? (stops if not)
+  grep -q "^crates/$p/" "$S/SHARD-LIST.txt" || continue
+  b=120; [ "$p" = store ] && b=60; [ "$DRY" = 1 ] && b=5
+  tmo_of "$p" "$b" > /dev/null
+done
+while :; do
+  restore || stop "restore: the export lost a file of the commit (restore.diff)"
+  cat "$S"/chunks/c-[0-9][0-9][0-9][0-9]/mutants.out/caught.txt "$S"/chunks/c-[0-9][0-9][0-9][0-9]/mutants.out/missed.txt \
+      "$S"/chunks/c-[0-9][0-9][0-9][0-9]/mutants.out/timeout.txt "$S"/chunks/c-[0-9][0-9][0-9][0-9]/mutants.out/unviable.txt \
+      2>/dev/null | sort -u > "$S/done.sorted"
+  awk -v df="$S/done.sorted" 'FILENAME == df { d[$0] = 1; next } !($0 in d)' "$S/done.sorted" "$S/SHARD-LIST.txt" > "$S/remaining.txt"
+  [ "$(( $(ah_lines "$S/remaining.txt") + $(ah_lines "$S/done.sorted") ))" = "$(ah_lines "$S/SHARD-LIST.txt")" ] || stop "chunks: outcomes and remaining names do not add up to the shard"
+  if [ ! -s "$S/remaining.txt" ]; then
+    touch "$S/ALL.done"; say "all $(ah_lines "$S/SHARD-LIST.txt") mutants of shard $K/$N have an outcome"; exit 10
   fi
+  first=$(head -n 1 "$S/remaining.txt")
+  case "$first" in crates/pull/*) crate=pull; bld=120; d0=150;; crates/store/*) crate=store; bld=60; d0=40;; *) stop "unexpected name: $first";; esac
+  [ "$DRY" = 1 ] && bld=5
+  T=$(tmo_of "$crate" "$bld") || exit 3
+  avg=$(avg_of "$crate" "$d0")
+  [ "$(left)" -ge $((30 + bld + T)) ] || exit 0   # room for one whole mutant: start-up, a rebuild, the test timeout
+  M=$(( ($(left) - 40) / avg )); [ "$M" -lt 1 ] && M=1; [ "$M" -gt 20 ] && M=20
+  cn=$(printf '%04d' $(( $(ls -d "$S"/chunks/c-[0-9][0-9][0-9][0-9] 2>/dev/null | wc -l) + 1 )))
+  C=$S/chunks/c-$cn; mkdir -p "$C"
+  awk -v p="crates/$crate/" -v m="$M" 'index($0, p) == 1 && n < m { print; n++; next } { exit }' "$S/remaining.txt" > "$C/names.txt"
+  M=$(ah_lines "$C/names.txt")
+  awk -f "$D/ah-esc.awk" "$C/names.txt" > "$C/names.re"
+  set --
+  while IFS= read -r r; do set -- "$@" --re "$r"; done < "$C/names.re"
+  if [ -s "$S/SKIPS.txt" ]; then   # cargo-mutants passes what follows its own "--" to cargo nextest run
+    set -- "$@" --
+    while IFS= read -r a; do [ -n "$a" ] && set -- "$@" "$a"; done <<EOF
+$(skipargs)
+EOF
+  fi
+  echo "$cn $(date +%s)" > "$S/current"
+  say "chunk $cn: $M $crate mutants, test timeout $T s, $(left) s left in the step"
   t0=$(date +%s)
-  echo "$bb $t0" > "$S/current"
-  say "batch $bb: start, $(ah_lines "$d/names.txt") mutants, --jobs $JOBS, oom_kill count $o0"
   if [ "$DRY" = 1 ]; then
-    mkdir -p "$d/mutants.out"
-    for f in caught missed timeout unviable; do : > "$d/mutants.out/$f.txt"; done
-    awk -v o="$d/mutants.out" '{ f = (NR % 4 == 1) ? "caught" : (NR % 4 == 2) ? "missed" : (NR % 4 == 3) ? "unviable" : "timeout"; print >> (o "/" f ".txt") }' "$d/names.txt"
-    printf '{"dry_run":true,"total_mutants":%s}\n' "$(ah_lines "$d/names.txt")" > "$d/mutants.out/outcomes.json"
-    echo "dry run: cargo mutants not run" > "$d/console.log"
-    sleep "${AH_DRY_SLEEP:-2}"; rc=2
+    mkdir -p "$C/mutants.out"
+    for f in caught missed timeout unviable; do : > "$C/mutants.out/$f.txt"; done
+    run sleep "${AH_DRY_SLEEP:-1}"; rc=$?; [ "$rc" = 124 ] || rc=2
+    awk -v o="$C/mutants.out" -v h="$( [ "$rc" = 124 ] && echo $((M / 2)) || echo "$M")" 'NR <= h { f = (NR % 4 == 1) ? "caught" : (NR % 4 == 2) ? "missed" : (NR % 4 == 3) ? "unviable" : "timeout"; print >> (o "/" f ".txt") }' "$C/names.txt"
+    printf '{"dry_run":true,"total_mutants":%s}\n' "$M" > "$C/mutants.out/outcomes.json"
+    echo "dry run: cargo mutants not run" > "$C/console.log"
   else
-    ( cd "$A" && cargo mutants -p store -p pull --cargo-arg=--locked --jobs "$JOBS" --cap-lints true \
-        --test-tool nextest --cargo-test-arg=--max-fail=1:immediate --cargo-test-arg=--test-threads=2 \
-        --timeout-multiplier 3 --minimum-test-timeout 60 -o "$d" "$@" ) > "$d/console.log" 2>&1
+    ( cd "$W" && run cargo mutants --in-place --baseline=skip --timeout "$T" -p "$crate" --cargo-arg=--locked \
+        --test-tool nextest --cargo-test-arg=--max-fail=1:immediate -o "$C" "$@" ) > "$C/console.log" 2>&1
     rc=$?
   fi
   t1=$(date +%s)
-  o1=$(oomcount)
-  if [ "$o0" -ge 0 ] && [ "$o1" -gt "$o0" ]; then
-    if [ "$JOBS" = 1 ]; then stop "batch $bb: the kernel killed a process for memory (oom_kill $o0 -> $o1) even with --jobs 1"; fi
-    say "batch $bb: the kernel killed a process for memory (oom_kill $o0 -> $o1): the batch runs again with --jobs 1"
-    touch "$S/jobs1"; mv "$d" "$d.oom-$(date +%s)"; echo "none" > "$S/current"
-    continue
-  fi
-  case $rc in
-    0|2|3) ;;
-    4) stop "batch $bb: cargo-mutants says the unmutated tree fails its tests (exit 4; console.log)";;
-    *) stop "batch $bb: cargo-mutants exit $rc (console.log)";;
-  esac
-  O=$d/mutants.out
+  O=$C/mutants.out; mkdir -p "$O"
   for f in caught missed timeout unviable; do [ -f "$O/$f.txt" ] || : > "$O/$f.txt"; done
-  cat "$O/caught.txt" "$O/missed.txt" "$O/timeout.txt" "$O/unviable.txt" | sort > "$d/got.sorted"
-  cmp -s "$d/names.sorted" "$d/got.sorted" || stop "batch $bb: its four outcome lists do not hold exactly its names"
-  echo "batch=$bb n=$(ah_lines "$d/names.txt") caught=$(ah_lines "$O/caught.txt") missed=$(ah_lines "$O/missed.txt") timeout=$(ah_lines "$O/timeout.txt") unviable=$(ah_lines "$O/unviable.txt") rc=$rc start=$t0 end=$t1 wall_s=$((t1 - t0))" > "$d/DONE"
-  say "batch $bb: $(cat "$d/DONE")"
+  sort "$C/names.txt" > "$C/names.sorted"
+  cat "$O/caught.txt" "$O/missed.txt" "$O/timeout.txt" "$O/unviable.txt" | sort > "$C/got.sorted"
+  [ -z "$(comm -13 "$C/names.sorted" "$C/got.sorted")" ] || stop "chunk $cn: an outcome that is not one of its names"
+  [ -z "$(uniq -d "$C/got.sorted")" ] || stop "chunk $cn: a name with two outcomes"
+  g=$(ah_lines "$C/got.sorted")
+  case $rc in
+    0|2|3) [ "$g" = "$M" ] || stop "chunk $cn: cargo-mutants ended (exit $rc) with $g outcomes for $M names";;
+    124) say "chunk $cn: cut at the step's end after $g of $M";;
+    *) stop "chunk $cn: cargo-mutants exit $rc (console.log)";;
+  esac
+  if [ "$rc" = 124 ] && [ "$g" = 0 ]; then
+    echo "$first" >> "$S/cut-first.txt"
+    [ "$(grep -c -x -F -e "$first" "$S/cut-first.txt")" -ge 3 ] && stop "chunk $cn: this mutant did not finish in 3 whole steps: $first"
+  fi
+  echo "chunk=$cn crate=$crate n=$M done=$g caught=$(ah_lines "$O/caught.txt") missed=$(ah_lines "$O/missed.txt") timeout=$(ah_lines "$O/timeout.txt") unviable=$(ah_lines "$O/unviable.txt") rc=$rc test_timeout_s=$T start=$t0 end=$t1 wall_s=$((t1 - t0))" > "$C/STAT"
+  say "chunk $cn: $(cat "$C/STAT")"
   echo "none" > "$S/current"
-  b=$((b + 1))
 done
-touch "$S/ALL.done"
-say "all $NB batches done"
-exit 0
 ```
 
 <!-- FILE drive.sh -->
 ```sh
 #!/bin/bash
-# drive.sh K N [push]: one turn of an app-heart box, run by the session's own user (root or not).
+# drive.sh K N [push]: one turn of an app-heart box, run IN THE FOREGROUND by the session's own user (root
+# or not); one call lasts at most about 8.5 minutes and leaves nothing running behind it.
 # First call on a box: makes the ordinary user (when the session is root), the folders, and the result
 # repository (a clone of the result branch when it exists: the box then resumes from it).
-# Every call: checks the disk, sweeps old test scratch, starts or restarts the worker (ah-run.sh),
-# commits and pushes progress every 10-14 min (always within 15), waits until about 230 s have passed, and prints
-# ONE status line starting with CONTINUE, FINAL or STOP. "push" only collects, commits and pushes.
+# Every call: sweeps old test scratch, checks the disk, runs ONE step of the work as the ordinary user
+# (ah-step.sh, at most 480 s), then commits and pushes the results and prints ONE status line starting
+# with CONTINUE, FINAL or STOP. "push" only collects, commits and pushes.
 set -u
 K=${1:?K}; N=${2:?N}; MODE=${3:-loop}
 J=$(cd "$(dirname "$0")" && pwd)
 . "$J/ah-common.sh"
-T0=$(date +%s); TURN=${AH_TURN_S:-230}; PUSHEVERY=${AH_PUSH_S:-600}   # the two AH_ variables exist for dry runs only
+BUDGET=${AH_BUDGET_S:-480}   # AH_BUDGET_S exists for dry runs only
 RB=cloud-results/app-heart-mutants-$K-of-$N
 RD=results/app-heart-mutants/shard-$K-of-$N
 RES=$HOME/ahres-$K-of-$N
 MARK=$HOME/.ah-box-$K-of-$N
-LASTPUSH=$HOME/.ah-lastpush-$K-of-$N
-PUSHED=$HOME/.ah-pushed-$K-of-$N
 
 if [ "$(id -u)" = 0 ]; then
   RU=mut
@@ -542,8 +692,8 @@ AH=$RH/ah; S=$AH/state; R=$RES/$RD
 if [ ! -f "$MARK" ]; then
   BOXID=$(date -u +%Y%m%dT%H%M%SZ)
   [ "$(asru 'id -un' 2>/dev/null)" = "$RU" ] || { echo "STOP cannot run commands as $RU"; exit 3; }
-  asru "mkdir -p '$AH/bin' '$S/batches' '$AH/tmp'" || { echo "STOP cannot make $AH"; exit 3; }
-  cp "$J/ah-common.sh" "$J/ah-run.sh" "$J/ah-esc.awk" "$AH/bin/" || { echo "STOP cannot copy the scripts to $AH/bin"; exit 3; }
+  asru "mkdir -p '$AH/bin' '$S/chunks' '$AH/tmp'" || { echo "STOP cannot make $AH"; exit 3; }
+  cp "$J/ah-common.sh" "$J/ah-step.sh" "$J/ah-esc.awk" "$AH/bin/" || { echo "STOP cannot copy the scripts to $AH/bin"; exit 3; }
   if [ ! -d "$RES/.git" ]; then
     git ls-remote --exit-code --heads "$AH_RES_REPO" "$RB" >/dev/null 2>&1
     lr=$?
@@ -555,10 +705,14 @@ if [ ! -f "$MARK" ]; then
       echo "STOP cannot reach the repository to look for $RB (git ls-remote rc $lr)"; exit 3
     fi
   fi
-  if [ -d "$R" ]; then   # resume: the batches already on the branch are not run again
-    for x in "$R"/batches/b-[0-9][0-9][0-9]; do
-      [ -f "$x/DONE" ] || continue
-      mkdir -p "$S/batches/${x##*/}" && cp "$x/DONE" "$S/batches/${x##*/}/DONE"
+  if [ -d "$R" ]; then   # resume: the chunks already on the branch are not run again
+    # the v1 job (8737b862) wrote the same branch and folder with batches/: never mix the two layouts
+    [ -e "$R/batches" ] && { echo "STOP the result branch $RB holds the v1 layout (batches/): another writer; nothing run, nothing pushed"; exit 3; }
+    for x in "$R"/chunks/c-[0-9][0-9][0-9][0-9]; do
+      [ -f "$x/STAT" ] || continue
+      y=$S/chunks/${x##*/}
+      mkdir -p "$y/mutants.out" && cp "$x/STAT" "$x/names.txt" "$y/"
+      for f in caught missed timeout unviable; do cp "$x/$f.txt" "$y/mutants.out/$f.txt"; done
     done
     [ -f "$R/SHARD-LIST.txt" ] && cp "$R/SHARD-LIST.txt" "$S/SHARD-LIST.committed"
     [ -f "$R/SKIPS.txt" ] && cp "$R/SKIPS.txt" "$S/SKIPS.txt"
@@ -575,62 +729,54 @@ fi
 BOXID=$(cat "$MARK")
 
 free_kib() { df -Pk "$AH" | awk 'NR == 2 {print $4}'; }
-sweep() {   # test scratch untouched for 60 min in the worker's private TMPDIR, never a cargo-mutants copy
-  find "$AH/tmp" -mindepth 1 -maxdepth 1 ! -name 'cargo-mutants-*' -mmin +60 -exec chmod -R u+rwx {} + 2>/dev/null
-  find "$AH/tmp" -mindepth 1 -maxdepth 1 ! -name 'cargo-mutants-*' -mmin +60 -exec rm -rf {} + 2>/dev/null
+sweep() {   # test scratch untouched for 10 min in the worker's private TMPDIR (no step runs between steps)
+  find "$AH/tmp" -mindepth 1 -maxdepth 1 -mmin +10 -exec chmod -R u+rwx {} + 2>/dev/null
+  find "$AH/tmp" -mindepth 1 -maxdepth 1 -mmin +10 -exec rm -rf {} + 2>/dev/null
   true
 }
 stopfile() { echo "$(ah_now) $*" > "$S/STOP.txt"; }
 
 collect() {
-  local x bn f first cur cs nm nb db tn tw c m t u rate eta st nbox
-  mkdir -p "$R/batches" "$R/logs" "$R/current"
+  local x cn f p first nm c m t u tn tw rate eta st nbox ck
+  mkdir -p "$R/chunks" "$R/logs"
   for f in SHARD-LIST.txt SKIPS.txt boxes.txt; do [ -f "$S/$f" ] && cp "$S/$f" "$R/$f"; done
-  for f in steps.log versions.txt baseline-summary.txt baseline-failed.txt STOP.txt; do
+  for f in steps.log versions.txt baseline-summary-store.txt baseline-summary-pull.txt baseline-failed-store.txt baseline-failed-pull.txt STOP.txt; do
     [ -f "$S/$f" ] && cp "$S/$f" "$R/logs/${f%.*}-$BOXID.${f##*.}"
   done
-  [ -f "$S/baseline.log" ] && tail -n 400 "$S/baseline.log" > "$R/logs/baseline-$BOXID.log"
+  for p in store pull; do [ -f "$S/baseline-$p.log" ] && tail -n 300 "$S/baseline-$p.log" > "$R/logs/baseline-$p-$BOXID.log"; done
+  [ -f "$S/baseline-build.log" ] && tail -n 60 "$S/baseline-build.log" > "$R/logs/baseline-build-$BOXID.log"
   [ -f "$S/setup.log" ] && tail -n 100 "$S/setup.log" > "$R/logs/setup-$BOXID.log"
-  for x in "$S"/batches/b-[0-9][0-9][0-9]; do
-    [ -f "$x/DONE" ] || continue
-    bn=${x##*/}
-    [ -f "$R/batches/$bn/DONE" ] && continue
-    mkdir -p "$R/batches/$bn"
-    cp "$x/names.txt" "$x/console.log" "$R/batches/$bn/"
-    for f in caught missed timeout unviable; do cp "$x/mutants.out/$f.txt" "$R/batches/$bn/$f.txt"; done
-    [ -f "$x/mutants.out/outcomes.json" ] && cp "$x/mutants.out/outcomes.json" "$R/batches/$bn/outcomes.json"
-    cp "$x/DONE" "$R/batches/$bn/DONE"
+  for x in "$S"/chunks/c-[0-9][0-9][0-9][0-9]; do
+    [ -f "$x/STAT" ] || continue
+    cn=${x##*/}
+    [ -f "$R/chunks/$cn/STAT" ] && continue
+    mkdir -p "$R/chunks/$cn"
+    cp "$x/names.txt" "$R/chunks/$cn/"
+    for f in caught missed timeout unviable; do cp "$x/mutants.out/$f.txt" "$R/chunks/$cn/$f.txt"; done
+    [ -f "$x/mutants.out/outcomes.json" ] && cp "$x/mutants.out/outcomes.json" "$R/chunks/$cn/outcomes.json"
+    [ -f "$x/console.log" ] && tail -n 200 "$x/console.log" > "$R/chunks/$cn/console.log"
+    cp "$x/STAT" "$R/chunks/$cn/STAT"
   done
-  cur=$(awk '{print $1}' "$S/current" 2>/dev/null)
-  if [ -n "$cur" ] && [ "$cur" != none ] && [ -d "$S/batches/b-$cur/mutants.out" ]; then
-    cs=$(awk '{print $2}' "$S/current")
-    echo "batch b-$cur running since $(( ($(date +%s) - cs) / 60 )) min (partial lists, not counted)" > "$R/current/CURRENT.txt"
-    for f in caught missed timeout unviable; do
-      if [ -f "$S/batches/b-$cur/mutants.out/$f.txt" ]; then cp "$S/batches/b-$cur/mutants.out/$f.txt" "$R/current/$f.txt"; else : > "$R/current/$f.txt"; fi
-    done
-  else
-    echo "none" > "$R/current/CURRENT.txt"
-    for f in caught missed timeout unviable; do : > "$R/current/$f.txt"; done
-  fi
   for f in caught missed timeout unviable; do
     : > "$R/$f.txt"
-    for x in "$R"/batches/b-[0-9][0-9][0-9]; do [ -f "$x/$f.txt" ] && cat "$x/$f.txt" >> "$R/$f.txt"; done
+    for x in "$R"/chunks/c-[0-9][0-9][0-9][0-9]; do [ -f "$x/$f.txt" ] && cat "$x/$f.txt" >> "$R/$f.txt"; done
   done
   {
-    printf '{"job":"app-heart","shard":%s,"n":%s,"commit":"%s","cargo_mutants":"%s","cargo_nextest":"%s","batches":[' "$K" "$N" "$AH_C" "$AH_CMV" "$AH_NXV"
+    printf '{"job":"app-heart","shard":%s,"n":%s,"commit":"%s","cargo_mutants":"%s","cargo_nextest":"%s","chunks":[' "$K" "$N" "$AH_C" "$AH_CMV" "$AH_NXV"
     first=1
-    for x in "$R"/batches/b-[0-9][0-9][0-9]; do
+    for x in "$R"/chunks/c-[0-9][0-9][0-9][0-9]; do
       [ -f "$x/outcomes.json" ] || continue
       [ "$first" = 1 ] || printf ','
       first=0
-      printf '{"batch":"%s","outcomes":' "${x##*/}"; cat "$x/outcomes.json"; printf '}'
+      printf '{"chunk":"%s","outcomes":' "${x##*/}"; cat "$x/outcomes.json"; printf '}'
     done
     printf ']}\n'
   } > "$R/outcomes.json"
-  nm=$(ah_lines "$R/SHARD-LIST.txt"); nb=$(( (nm + AH_B - 1) / AH_B ))
-  set -- $(cat "$R"/batches/b-[0-9][0-9][0-9]/DONE 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) { split($i, a, "="); v[a[1]] = a[2] } d++; n += v["n"]; w += v["wall_s"] } END { print d + 0, n + 0, w + 0 }')
-  db=$1; tn=$2; tw=$3
+  nm=$(ah_lines "$R/SHARD-LIST.txt")
   c=$(ah_lines "$R/caught.txt"); m=$(ah_lines "$R/missed.txt"); t=$(ah_lines "$R/timeout.txt"); u=$(ah_lines "$R/unviable.txt")
+  tn=$((c + m + t + u))
+  set -- $(cat "$R"/chunks/c-[0-9][0-9][0-9][0-9]/STAT 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) { split($i, a, "="); v[a[1]] = a[2] } k++; w += v["wall_s"] } END { print k + 0, w + 0 }')
+  ck=$1; tw=$2
   if [ "$tw" -gt 0 ] && [ "$tn" -gt 0 ]; then
     rate=$(awk -v n="$tn" -v w="$tw" 'BEGIN { printf "%.1f", n * 3600 / w }')
     eta=$(awk -v n="$tn" -v w="$tw" -v r="$((nm - tn))" 'BEGIN { printf "%.1f", r * w / n / 3600 }')
@@ -638,16 +784,16 @@ collect() {
   st=PARTIAL; [ -e "$S/ALL.done" ] && st=COMPLETE; [ -e "$S/STOP.txt" ] && st=STOPPED
   nbox=$(ah_lines "$R/boxes.txt")
   {
-    echo "app-heart shard $K/$N: app commit $AH_C, crates store + pull, cargo-mutants $AH_CMV, cargo-nextest $AH_NXV, $AH_B mutants a batch"
+    echo "app-heart shard $K/$N: app commit $AH_C, crates store + pull, cargo-mutants $AH_CMV, cargo-nextest $AH_NXV"
     echo "updated $(ah_now) by box $BOXID; status $st"
-    echo "batches done $db of $nb; mutants done $tn of $nm"
+    echo "mutants with an outcome $tn of $nm, in $ck chunks"
     echo "caught $c, missed $m, timeout $t, unviable $u"
-    echo "rate $rate mutants/h (MEASURED: batch walls so far); remaining $((nm - tn)); ETA $eta h (ESTIMATE from that rate)"
-    echo "current: $(cat "$R/current/CURRENT.txt")"
+    echo "rate $rate mutants/h (MEASURED: chunk walls so far, start-up included); remaining $((nm - tn)); ETA $eta h (ESTIMATE from that rate)"
+    echo "last step: $(tail -n 1 "$S/steps.log" 2>/dev/null)"
     [ -e "$S/STOP.txt" ] && echo "STOP: $(cat "$S/STOP.txt")"
   } > "$R/PROGRESS.txt"
-  echo "SUMMARY app-heart shard $K/$N commit $AH_C cargo-mutants $AH_CMV nextest $AH_NXV mutants $nm tested $tn caught $c missed $m timeout $t unviable $u batch_wall_s $tw (MEASURED) boxes $nbox status $st" > "$R/SUMMARY.txt"
-  STATUS="shard $K/$N batches $db/$nb tested $tn/$nm caught $c missed $m timeout $t unviable $u rate $rate/h eta ${eta}h"
+  echo "SUMMARY app-heart shard $K/$N commit $AH_C cargo-mutants $AH_CMV nextest $AH_NXV mutants $nm tested $tn caught $c missed $m timeout $t unviable $u chunk_wall_s $tw (MEASURED) boxes $nbox status $st" > "$R/SUMMARY.txt"
+  STATUS="shard $K/$N tested $tn/$nm caught $c missed $m timeout $t unviable $u rate $rate/h eta ${eta}h"
 }
 
 push_now() {   # $1 = commit message
@@ -664,8 +810,6 @@ push_now() {   # $1 = commit message
     esac
     PUSHNOTE="push failed: $(echo "$out" | tail -n 1)"; return 1
   fi
-  date +%s > "$LASTPUSH"
-  ls -d "$S"/batches/b-[0-9][0-9][0-9]/DONE 2>/dev/null | wc -l | tr -d ' ' > "$PUSHED"
   PUSHNOTE="pushed $(git -C "$RES" rev-parse --short HEAD)"
   return 0
 }
@@ -687,68 +831,27 @@ fi
 
 # ---- every call ----
 sweep
-if [ "$(free_kib)" -lt "$AH_MINFREE_KIB" ]; then
-  stopfile "disk: less than 4 GiB free on $AH after the sweep"
-fi
+if [ "$(free_kib)" -lt "$AH_MINFREE_KIB" ]; then stopfile "disk: less than 4 GiB free on $AH after the sweep"; fi
 [ -e "$S/STOP.txt" ] && finish STOP
 [ -e "$S/ALL.done" ] && finish FINAL
-
-# stalled batch: nothing written in its mutants.out for 90 min
-cur=$(awk '{print $1}' "$S/current" 2>/dev/null)
-if [ -n "$cur" ] && [ "$cur" != none ] && [ -d "$S/batches/b-$cur" ]; then
-  cs=$(awk '{print $2}' "$S/current")
-  if [ $(( $(date +%s) - cs )) -gt 5400 ] && [ -z "$(find "$S/batches/b-$cur" -type f -mmin -90 2>/dev/null | head -n 1)" ]; then
-    stopfile "batch b-$cur: stalled, nothing written for 90 min"
-    finish STOP
-  fi
-fi
-
-# the worker
-wpid=$(cat "$S/runner.pid" 2>/dev/null || echo 0)
-alive=0
-if [ "$wpid" != 0 ] && kill -0 "$wpid" 2>/dev/null; then
-  if [ -r "/proc/$wpid/cmdline" ]; then
-    tr '\0' ' ' < "/proc/$wpid/cmdline" | grep -q 'ah-run.sh' && alive=1
-  else
-    ps -p "$wpid" -o command= 2>/dev/null | grep -q 'ah-run.sh' && alive=1
-  fi
-fi
-WNOTE="worker $wpid running"
-if [ "$alive" = 0 ]; then
-  echo "$(ah_now) start ${cur:-none}" >> "$S/starts.txt"
-  if [ -n "$cur" ] && [ "$cur" != none ] && [ "$(grep -c " start $cur\$" "$S/starts.txt")" -ge 3 ]; then
-    stopfile "batch b-$cur: the worker died 3 times in it"
-    finish STOP
-  fi
-  SS=""; command -v setsid >/dev/null 2>&1 && SS=setsid
-  # only the worker goes to the background, with every stream redirected, so this call never waits for it
-  asru "cd '$RH' || exit 1; $SS nohup bash '$AH/bin/ah-run.sh' $K $N >> '$S/run.log' 2>&1 < /dev/null &" > /dev/null 2>&1 < /dev/null
-  sleep 5
-  WNOTE="worker (re)started"
-fi
-
-# wait, then commit and push progress (10 min after the last push, and at once after a finished batch), then report
-while [ $(( $(date +%s) - T0 )) -lt "$TURN" ]; do
-  if [ -e "$S/STOP.txt" ] || [ -e "$S/ALL.done" ]; then break; fi
-  sleep 15
-done
-[ -e "$S/STOP.txt" ] && finish STOP
-[ -e "$S/ALL.done" ] && finish FINAL
+t0=$(date +%s)
+asru "bash '$AH/bin/ah-step.sh' $K $N $BUDGET >> '$S/step.out' 2>&1 < /dev/null"
+rc=$?
+dt=$(( $(date +%s) - t0 ))
+[ "$rc" = 3 ] && finish STOP
+[ "$rc" = 10 ] && finish FINAL
+[ "$rc" = 0 ] || echo "$(ah_now) step exit $rc after $dt s" >> "$S/steps.log"
+if [ "$dt" -lt 20 ]; then sleep 60; fi   # a step that had nothing to do (another still held the lock): no busy loop
 collect
-last=$(cat "$LASTPUSH" 2>/dev/null || echo 0)
-pdone=$(cat "$PUSHED" 2>/dev/null || echo 0)
-ndone=$(ls -d "$S"/batches/b-[0-9][0-9][0-9]/DONE 2>/dev/null | wc -l | tr -d ' ')
-if [ $(( $(date +%s) - last )) -ge "$PUSHEVERY" ] || [ "$ndone" -gt "$pdone" ]; then
-  push_now "app-heart $K/$N: progress, $STATUS" || true
-fi
-echo "CONTINUE $STATUS | $WNOTE | $(tail -n 1 "$S/steps.log" 2>/dev/null | cut -c1-160) | ${PUSHNOTE:-no push this turn} | disk $(( $(free_kib) / 1048576 )) GiB free"
+push_now "app-heart $K/$N: progress, $STATUS" || true
+echo "CONTINUE $STATUS | step ${dt}s rc $rc | $(tail -n 1 "$S/steps.log" 2>/dev/null | cut -c1-160) | $PUSHNOTE | disk $(( $(free_kib) / 1048576 )) GiB free"
 exit 0
 ```
 
 <!-- FILE SHA256SUMS -->
 ```text
-c6fb3de3a61185765a1af7a5b3775c7a93dbd30f006afa639a27e02c51a5f8e6  ah-common.sh
+6cc8ce351fcae780c47f797cf1a808fee48bc27edd0d575298dea97da6be5f00  ah-common.sh
 0d9d57c772a0fc4f73cca118b195f50f9c2c8a1dcad60928d4410821b61c3a86  ah-esc.awk
-b2062f861dfe820f1063ff22856ce71e5f30d725476fffe0e2595225b9902ffa  ah-run.sh
-eb427bd39a7401ccdd49ef477995339830838c93e33338039b1a66b4663b11f3  drive.sh
+7e230110534f8efb4f1942ee2ca1b1dbc5e8c583f805d6c4b8474ecc3d077cfe  ah-step.sh
+c5350f485130f7d38be92fd43f42c263e0abd84e559b02900eaa050775338d36  drive.sh
 ```
